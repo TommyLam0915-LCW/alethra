@@ -1,0 +1,107 @@
+# Brand Configuration
+# All brand-related text should be referenced from this file.
+# Do not hardcode brand names in database tables, API paths, or core logic.
+
+brand:
+  name: "Alethra"
+  tagline: "Ideas, tested. Decisions, yours."
+  tagline_zh: "想法接受檢驗，決定仍由你作。"
+
+  product_descriptor:
+    en: "Investment Research Workspace"
+    zh: "AI投資研究工作台"
+
+  description:
+    en: "Transform investment ideas into testable, traceable, and continuously reviewable research."
+    zh: "把投資想法轉化為可測試、可追溯、可持續檢視的研究。"
+
+  disclaimer:
+    short: "Research tool, not investment advice."
+    zh_short: "研究工具，非投資建議。"
+    full: |
+      This is a research tool. All results are for research reference only and do not represent future performance.
+      We do not execute live trades, provide investment advice, or guarantee any returns.
+    zh_full: |
+      本系統是研究工具。所有結果僅供研究參考，不代表未來績效。
+      我們不進行實盤交易、不提供投資建議、不保證任何收益。
+
+  restrictions:
+    - "Do not claim to predict markets or guarantee profits."
+    - "Do not describe historical tests as proof of future returns."
+    - "Do not use phrases like 'master the truth' or 'winning strategy'."
+    - "Do not imply official relationship with any literary works, movies, or rights holders."
+    - "Do not use logos, props, or official visual materials from related works."
+
+  legal_status: |
+    Brand name selected by founder. Trademark, domain, and same-name product verification pending.
+    Cannot be marked as registered or approved for unlimited commercial use.
+
+# UI Text
+ui:
+  landing:
+    hero_title: "你的投資想法，值得被認真檢驗。"
+    hero_title_en: "Your investment ideas deserve to be tested."
+    hero_subtitle: "Alethra 幫你釐清假設、建立測試、保存證據，並追蹤後續結果。不是另一個替你猜股票的AI，而是讓你看清自己的判斷建立在甚麼之上。"
+    hero_subtitle_en: "Alethra helps you clarify assumptions, build tests, preserve evidence, and track results over time. Not another AI that picks stocks for you — but one that shows you what your judgments are built on."
+    hero_description: "Transform your investment ideas into clear, testable, reproducible, and traceable research records."
+    hero_description_zh: "幫助你把投資想法轉化為清楚、可測試、可重現、可追蹤的研究紀錄。"
+
+    cta_primary: "Get Started"
+    cta_primary_zh: "開始使用"
+    cta_secondary: "Learn More"
+    cta_secondary_zh: "了解更多"
+
+    features:
+      - title: "Quantitative Research"
+        title_zh: "量化研究"
+        description: "Turn vague investment ideas into testable quantitative rules. Run historical backtests and review results with limitations."
+        description_zh: "將模糊的投資想法轉化為可測試的量化規則，執行歷史回測，查看結果與限制。"
+
+      - title: "Experiment Records"
+        title_zh: "實驗紀錄"
+        description: "Preserve every version of your changes. Record hypotheses and falsification conditions. Make your research process traceable."
+        description_zh: "保留每次修改的版本，記錄假設與反證條件，讓研究過程可追溯。"
+
+      - title: "Clear Limitations"
+        title_zh: "清楚限制"
+        description: "Show data limitations, calculation assumptions, and uncertainties. Don't hide risks. Don't exaggerate results."
+        description_zh: "展示資料限制、計算假設與不確定性。不隱藏風險，不誇大結果。"
+
+  dashboard:
+    title: "My Experiments"
+    title_zh: "我的實驗"
+    empty_state: "No experiments yet"
+    empty_state_zh: "還沒有任何實驗"
+    create_first: "Create your first experiment"
+    create_first_zh: "建立第一個實驗"
+
+  experiment:
+    create_title: "Create New Experiment"
+    create_title_zh: "建立新實驗"
+    run_backtest: "Run Backtest"
+    run_backtest_zh: "執行回測"
+    running: "Running..."
+    running_zh: "執行中..."
+
+  metrics:
+    total_return: "Total Return"
+    total_return_zh: "累積報酬"
+    final_value: "Final Value"
+    final_value_zh: "最終價值"
+    max_drawdown: "Max Drawdown"
+    max_drawdown_zh: "最大回撤"
+    trade_count: "Trade Count"
+    trade_count_zh: "交易次數"
+
+  auth:
+    login: "Login"
+    login_zh: "登入"
+    register: "Register"
+    register_zh: "註冊"
+    logout: "Logout"
+    logout_zh: "登出"
+
+# Footer
+footer:
+  text: "Alethra — Research tool, not investment advice."
+  text_zh: "Alethra — 研究工具，非投資建議。"
