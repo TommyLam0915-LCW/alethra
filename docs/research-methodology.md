@@ -319,11 +319,11 @@ Phase 1 使用 DEMO-ALPHA、DEMO-BETA、DEMO-BENCHMARK 三個模擬資產：
 
 ---
 
-## 11. 前瞻模擬（Phase 3A）
+## 11. 歷史重播模擬（Phase 3A）
 
 ### 核心原則
 
-策略鎖定後，模擬引擎以逐日釋放快照方式驗證策略在未知數據上的表現。關鍵不變量：**策略規則在後續數據可見之前已固定。**
+策略鎖定後，模擬引擎以逐日釋放快照方式驗證策略在鎖定後數據上的表現。注意：目前使用預先生成的示範數據（demo data）進行歷史重播，並非接入即時市場數據。關鍵不變量：**策略規則在模擬開始前已固定。**
 
 ### 鎖定機制
 
@@ -363,8 +363,8 @@ Phase 1 使用 DEMO-ALPHA、DEMO-BETA、DEMO-BENCHMARK 三個模擬資產：
 | 狀態 | 說明 |
 |------|------|
 | historical_test_complete | 歷史回測完成 |
-| locked_for_simulation | 已鎖定，可進行前瞻模擬 |
-| forward_observation | 前瞻模擬進行中 |
+| locked_for_simulation | 已鎖定，可進行歷史重播模擬 |
+| forward_observation | 歷史重播模擬進行中 |
 | evidence_insufficient | 證據不足 |
 | retired | 已終止（決策歷史保留） |
 
@@ -380,7 +380,7 @@ Phase 1 使用 DEMO-ALPHA、DEMO-BETA、DEMO-BENCHMARK 三個模擬資產：
 
 ### 核心原則
 
-鎖定策略並完成前瞻模擬後，用戶可建立虛擬投資組合記錄研究決策。關鍵不變量：**預期結果必須在 qualifying action 前記錄；覆寫決策與鎖定策略分開追蹤。**
+鎖定策略並完成歷史重播模擬後，用戶可建立虛擬投資組合記錄研究決策。關鍵不變量：**預期結果必須在 qualifying action 前記錄；覆寫決策與鎖定策略分開追蹤。**
 
 ### 行為規則
 

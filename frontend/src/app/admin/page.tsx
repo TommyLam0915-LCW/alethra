@@ -159,7 +159,7 @@ export default function AdminDashboardPage() {
             <FunnelCard label="建立首個實驗" value={dashboard.funnel.first_experiment_created} />
             <FunnelCard label="完成首次回測" value={dashboard.funnel.first_run_completed} />
             <FunnelCard label="策略已鎖定" value={dashboard.funnel.strategy_locked} />
-            <FunnelCard label="啟動前瞻模擬" value={dashboard.funnel.forward_simulation_started} />
+            <FunnelCard label="啟動歷史重播模擬" value={dashboard.funnel.forward_simulation_started} />
             <FunnelCard label="已產生匯出" value={dashboard.funnel.export_generated} />
             <FunnelCard label="支援請求" value={dashboard.funnel.support_request_created} />
           </div>

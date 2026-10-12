@@ -19,7 +19,7 @@ const STATUS_LABELS: Record<string, string> = {
   researching: '研究中',
   historical_test_complete: '歷史測試完成',
   locked_for_simulation: '已鎖定待模擬',
-  forward_observation: '前瞻觀察中',
+  forward_observation: '重播觀察中',
   evidence_insufficient: '證據不足',
   retired: '已退役',
   revoked: '已撤銷',

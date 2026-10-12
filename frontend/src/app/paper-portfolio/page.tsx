@@ -91,9 +91,12 @@ export default function PaperPortfolioListPage() {
         background: '#fff3cd', border: '1px solid #ffc107', borderRadius: '8px',
         padding: '1rem', marginBottom: '1.5rem', fontSize: '0.875rem', color: '#856404',
       }}>
-        <strong>Disclaimer:</strong> Paper trading records simulated execution under stated assumptions.
+        <strong>Disclaimer / 免責聲明：</strong><br />
+        Paper trading records simulated execution under stated assumptions.
         It does not reproduce real-money psychology, full market liquidity, partial fills,
-        exchange outages, market impact, or actual brokerage execution.
+        exchange outages, market impact, or actual brokerage execution.<br />
+        <strong>提醒：</strong>虛擬交易記錄基於既定假設的模擬執行，不構成投資建議。
+        無法重現真實資金心理、完整市場流動性、部分成交、交易所中斷、市場衝擊或實際券商執行。
       </div>
 
       <div style={{
