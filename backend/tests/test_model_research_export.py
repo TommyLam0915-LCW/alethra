@@ -369,3 +369,98 @@ class TestPackageSchemaValidation:
                 assert content["label"] in valid_labels, (
                     f"File {fname} has invalid label: {content['label']}"
                 )
+
+
+class TestUUIDJSONBoundaryRegression:
+    """Regression: JSON string IDs must convert to UUID objects for ORM queries."""
+
+    def _create_experiment_version(self, client, headers):
+        resp = client.post("/api/v1/experiments/", headers=headers, json={
+            "title": "UUID Export Boundary Test",
+            "research_type": "quantitative",
+            "strategy_spec": {
+                "schema_version": "1.0",
+                "template_type": "buy_and_hold",
+                "asset_ids": ["DEMO-ALPHA"],
+                "frequency": "1d",
+                "start_date": "2024-01-02",
+                "end_date": "2024-02-14",
+                "initial_cash": 10000,
+                "signal_parameters": {},
+                "commission_rate": 0.001,
+                "slippage_rate": 0.001,
+                "benchmark_id": "DEMO-BENCHMARK",
+                "currency": "USD",
+            },
+        })
+        assert resp.status_code == 201
+        return resp.json()["current_version_id"]
+
+    def test_model_research_export_converts_json_string_ids_to_uuid_objects(self, client, auth_headers):
+        exp_version_id = self._create_experiment_version(client, auth_headers)
+
+        record = _create_record(client, auth_headers)
+        resp = client.post(
+            f"/api/v1/model-research/{record['id']}/versions",
+            headers=auth_headers,
+            json={
+                "model_type": "rule_based",
+                "model_specification_json": {"rules": []},
+                "linked_experiment_version_ids": [exp_version_id],
+            },
+        )
+        assert resp.status_code == 201
+        version = resp.json()
+
+        export = _create_export(client, auth_headers, record["id"], version["id"])
+        assert export["status"] == "completed"
+
+        pkg = _download_package(client, auth_headers, export["id"])
+        assert "manifest.json" in pkg
+
+    def test_model_research_export_rejects_invalid_uuid_strings_safely(self, client, auth_headers):
+        record = _create_record(client, auth_headers)
+        resp = client.post(
+            f"/api/v1/model-research/{record['id']}/versions",
+            headers=auth_headers,
+            json={
+                "model_type": "rule_based",
+                "model_specification_json": {"rules": []},
+                "linked_experiment_version_ids": ["not-a-valid-uuid"],
+            },
+        )
+        assert resp.status_code == 422
+
+        resp2 = client.post(
+            f"/api/v1/model-research/{record['id']}/versions",
+            headers=auth_headers,
+            json={
+                "model_type": "rule_based",
+                "model_specification_json": {"rules": []},
+                "linked_experiment_version_ids": [""],
+            },
+        )
+        assert resp2.status_code == 422
+
+    def test_model_research_export_handles_duplicate_linked_ids_deterministically(self, client, auth_headers):
+        exp_version_id = self._create_experiment_version(client, auth_headers)
+
+        record = _create_record(client, auth_headers)
+        resp = client.post(
+            f"/api/v1/model-research/{record['id']}/versions",
+            headers=auth_headers,
+            json={
+                "model_type": "rule_based",
+                "model_specification_json": {"rules": []},
+                "linked_experiment_version_ids": [exp_version_id, exp_version_id],
+            },
+        )
+        assert resp.status_code == 201
+        version = resp.json()
+
+        export1 = _create_export(client, auth_headers, record["id"], version["id"])
+        assert export1["status"] == "completed"
+
+        export2 = _create_export(client, auth_headers, record["id"], version["id"])
+        assert export2["status"] == "completed"
+        assert export1["package_checksum"] == export2["package_checksum"]

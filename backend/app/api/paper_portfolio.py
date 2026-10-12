@@ -1,4 +1,4 @@
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from typing import List, Optional
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -169,7 +169,7 @@ def _simulate_fill(
                 pnl = round((exec_price - open_pos.average_entry_price) * open_pos.quantity, 4)
                 open_pos.realized_pnl = pnl
                 open_pos.status = PositionStatus.closed
-                open_pos.closed_at = datetime.utcnow()
+                open_pos.closed_at = datetime.now(timezone.utc).replace(tzinfo=None)
                 open_pos.quantity = 0
             else:
                 open_pos.quantity -= order.quantity
@@ -523,7 +523,7 @@ def pause_portfolio(
         raise HTTPException(status_code=400, detail="Can only pause an active portfolio")
 
     portfolio.status = PortfolioStatus.paused
-    portfolio.updated_at = datetime.utcnow()
+    portfolio.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
     emit_event(
         db,
@@ -547,7 +547,7 @@ def resume_portfolio(
         raise HTTPException(status_code=400, detail="Can only resume a paused portfolio")
 
     portfolio.status = PortfolioStatus.active
-    portfolio.updated_at = datetime.utcnow()
+    portfolio.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
     emit_event(
         db,
@@ -571,8 +571,8 @@ def retire_portfolio(
         raise HTTPException(status_code=400, detail=f"Cannot retire a '{portfolio.status}' portfolio")
 
     portfolio.status = PortfolioStatus.retired
-    portfolio.closed_at = datetime.utcnow()
-    portfolio.updated_at = datetime.utcnow()
+    portfolio.closed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    portfolio.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
     emit_event(
         db,

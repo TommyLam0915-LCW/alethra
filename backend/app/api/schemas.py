@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Optional, List
 from uuid import UUID
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 ALLOWED_TEMPLATES = ("buy_and_hold", "sma_crossover", "price_change_fixed_hold")
@@ -89,8 +89,7 @@ class ExperimentResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class ExperimentVersionResponse(BaseModel):
@@ -106,8 +105,7 @@ class ExperimentVersionResponse(BaseModel):
     config_hash: Optional[str]
     locked_at: Optional[datetime]
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class ResearchRunResponse(BaseModel):
@@ -125,8 +123,7 @@ class ResearchRunResponse(BaseModel):
     started_at: Optional[datetime]
     completed_at: Optional[datetime]
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class ResearchNoteCreate(BaseModel):
@@ -142,8 +139,7 @@ class ResearchNoteResponse(BaseModel):
     content: str
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class AuditEventResponse(BaseModel):
@@ -159,8 +155,7 @@ class AuditEventResponse(BaseModel):
     data_cutoff_at: Optional[str]
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class VersionDiffEntry(BaseModel):
@@ -199,8 +194,7 @@ class SimulationSessionResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class SimulationDecisionResponse(BaseModel):
@@ -218,8 +212,7 @@ class SimulationDecisionResponse(BaseModel):
     warnings: Optional[list]
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class SimulationAdvanceResponse(BaseModel):
@@ -246,8 +239,7 @@ class PaperPortfolioResponse(BaseModel):
     total_realized_pnl: float
     total_unrealized_pnl: float
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class PaperPositionResponse(BaseModel):
@@ -262,8 +254,7 @@ class PaperPositionResponse(BaseModel):
     unrealized_pnl: Optional[float]
     status: str
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class PaperOrderCreate(BaseModel):
@@ -295,8 +286,7 @@ class PaperOrderResponse(BaseModel):
     rationale: Optional[str]
     risk_check_status: str
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class PaperFillResponse(BaseModel):
@@ -312,8 +302,7 @@ class PaperFillResponse(BaseModel):
     net_cash_change: float
     simulated_fill_reason: Optional[str]
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class DecisionRecordCreate(BaseModel):
@@ -353,8 +342,7 @@ class DecisionRecordResponse(BaseModel):
     risk_flags: Optional[dict]
     outcome_status: str
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class OutcomeEvaluationCreate(BaseModel):
@@ -382,8 +370,7 @@ class OutcomeEvaluationResponse(BaseModel):
     user_reflection: Optional[str]
     data_quality_flags: Optional[dict]
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class OverrideRequestCreate(BaseModel):
@@ -509,8 +496,7 @@ class ModelResearchRecordResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class ModelVersionCreate(BaseModel):
@@ -543,8 +529,7 @@ class ModelVersionResponse(BaseModel):
     revocation_reason: Optional[str]
     model_card_id: Optional[UUID]
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class ModelEvaluationCreate(BaseModel):
@@ -577,8 +562,7 @@ class ModelEvaluationResponse(BaseModel):
     methodology_version: Optional[str]
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class PersonalResearchMemoryCreate(BaseModel):
@@ -624,8 +608,7 @@ class PersonalResearchMemoryResponse(BaseModel):
     privacy_scope: str
     general_model_training_opt_in: bool
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class ModelCardCreate(BaseModel):
@@ -677,8 +660,7 @@ class ModelCardResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 # ── Phase 5: Model Research Package Export ──
@@ -721,8 +703,7 @@ class ModelResearchExportResponse(BaseModel):
     created_at: datetime
     completed_at: Optional[datetime]
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class PackageManifest(BaseModel):
@@ -818,8 +799,7 @@ class PilotApplicationResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class PilotEntitlementCreate(BaseModel):
@@ -857,8 +837,7 @@ class PilotEntitlementResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class UsageEventCreate(BaseModel):
@@ -876,8 +855,7 @@ class UsageEventResponse(BaseModel):
     metadata_json: Optional[dict]
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class CostRecordCreate(BaseModel):
@@ -911,8 +889,7 @@ class CostRecordResponse(BaseModel):
     description: Optional[str]
     recorded_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class SupportLogCreate(BaseModel):
@@ -950,8 +927,7 @@ class SupportLogResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class ProductHypothesisCreate(BaseModel):
@@ -979,8 +955,7 @@ class ProductHypothesisResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class PilotFunnelSummary(BaseModel):

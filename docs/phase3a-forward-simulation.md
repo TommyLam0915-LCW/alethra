@@ -1,4 +1,4 @@
-# Phase 3A: Locked Research and Offline Forward Simulation
+# Phase 3A: Locked Research and Offline Historical Replay Simulation
 
 **版本**: 1.0.0
 **引擎版本**: Backtest 1.1.0 / Simulation 1.0.0
@@ -6,9 +6,17 @@
 
 ---
 
+> **方法論說明 (Methodology Clarification)**
+>
+> Phase 3A 的模擬引擎採用**歷史重播 (Historical Replay)** 方式：所有價格數據為預先生成的示範數據（demo data），在模擬開始前已完整存在。引擎以逐日釋放快照（snapshot-release）的方式模擬「逐步觀察」的使用者體驗，但底層數據並非即時或新到達的市場數據。
+>
+> Phase 3A simulation uses **Historical Replay**: all price data is pre-generated demo data that fully exists before the simulation starts. The engine releases snapshots incrementally to simulate a step-by-step observation experience, but the underlying data is not live or newly arriving market data.
+
+---
+
 ## 1. 概述
 
-Phase 3A 實現了 Alethra 的核心方法論原則：**策略必須在後續數據可見之前鎖定。** 鎖定後的策略規格不可修改，模擬引擎以逐日釋放快照（snapshot-release）方式，僅使用鎖定時已存在的數據進行前瞻模擬。
+Phase 3A 實現了 Alethra 的核心方法論原則：**策略必須在後續數據可見之前鎖定。** 鎖定後的策略規格不可修改，模擬引擎以逐日釋放快照（snapshot-release）方式，使用鎖定時已存在的示範數據進行歷史重播模擬。
 
 ### 核心原則
 

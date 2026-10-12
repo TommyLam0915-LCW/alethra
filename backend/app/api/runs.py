@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List
 from uuid import UUID
 import hashlib
@@ -61,7 +61,7 @@ def create_run(
 
     try:
         run.status = RunStatus.running
-        run.started_at = datetime.utcnow()
+        run.started_at = datetime.now(timezone.utc).replace(tzinfo=None)
         db.flush()
 
         result = run_backtest(version.strategy_spec)
@@ -71,7 +71,7 @@ def create_run(
         run.warnings = result.get("warnings", [])
         run.dataset_checksum = result.get("dataset_checksum")
         run.methodology_json = result.get("methodology_summary")
-        run.completed_at = datetime.utcnow()
+        run.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
         emit_event(db,
             entity_type="run", entity_id=run.id,
@@ -99,7 +99,7 @@ def create_run(
     except Exception as e:
         run.status = RunStatus.failed
         run.error_details = str(e)
-        run.completed_at = datetime.utcnow()
+        run.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
         emit_event(db,
             entity_type="run", entity_id=run.id,

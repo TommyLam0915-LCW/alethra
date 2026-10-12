@@ -153,7 +153,7 @@ export default function PilotApplicationPage() {
               <div style={{ fontSize: '18px', fontWeight: 600 }}>{entitlement.export_limit}</div>
             </div>
             <div>
-              <div style={{ fontSize: '12px', color: '#666' }}>前瞻模擬上限</div>
+              <div style={{ fontSize: '12px', color: '#666' }}>歷史重播模擬上限</div>
               <div style={{ fontSize: '18px', fontWeight: 600 }}>{entitlement.forward_simulation_limit}</div>
             </div>
             <div>

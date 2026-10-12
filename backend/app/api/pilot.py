@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -174,7 +174,7 @@ def get_my_entitlement(
     if not entitlement:
         raise HTTPException(status_code=404, detail="No entitlement found")
 
-    if entitlement.expiry_date and entitlement.expiry_date < datetime.utcnow():
+    if entitlement.expiry_date and entitlement.expiry_date < datetime.now(timezone.utc).replace(tzinfo=None):
         raise HTTPException(status_code=403, detail="Pilot access has expired")
 
     if not entitlement.pilot_access:

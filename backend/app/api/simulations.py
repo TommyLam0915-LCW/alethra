@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -200,7 +200,7 @@ def advance_simulation(
                         session.warnings = existing + result.warnings
 
         session.status = SimulationStatus.completed
-        session.updated_at = datetime.utcnow()
+        session.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
         emit_event(
             db,
@@ -226,7 +226,7 @@ def advance_simulation(
 
     if session.status == SimulationStatus.pending:
         session.status = SimulationStatus.active
-        session.started_at = datetime.utcnow()
+        session.started_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
     simulator = _build_simulator(session, version)
     _rebuild_state(session, version, simulator)
@@ -257,7 +257,7 @@ def advance_simulation(
     if result.warnings:
         existing = session.warnings or []
         session.warnings = existing + result.warnings
-    session.updated_at = datetime.utcnow()
+    session.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
     emit_event(
         db,
@@ -301,7 +301,7 @@ def pause_simulation(
         raise HTTPException(status_code=400, detail="Can only pause an active session")
 
     session.status = SimulationStatus.paused
-    session.updated_at = datetime.utcnow()
+    session.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
     emit_event(
         db,
@@ -328,7 +328,7 @@ def resume_simulation(
         raise HTTPException(status_code=400, detail="Can only resume a paused session")
 
     session.status = SimulationStatus.active
-    session.updated_at = datetime.utcnow()
+    session.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
     emit_event(
         db,
@@ -355,7 +355,7 @@ def retire_simulation(
         raise HTTPException(status_code=400, detail=f"Cannot retire a '{session.status}' session")
 
     session.status = SimulationStatus.retired
-    session.updated_at = datetime.utcnow()
+    session.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
     emit_event(
         db,

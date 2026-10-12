@@ -28,6 +28,15 @@ TEST_ENGINE = create_engine(
     connect_args={"check_same_thread": False},
     poolclass=StaticPool,
 )
+
+
+@event.listens_for(TEST_ENGINE, "connect")
+def _set_sqlite_pragma(dbapi_connection, connection_record):
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA foreign_keys=OFF")
+    cursor.close()
+
+
 TestSession = sessionmaker(autocommit=False, autoflush=False, bind=TEST_ENGINE)
 
 

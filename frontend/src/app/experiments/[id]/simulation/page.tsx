@@ -434,8 +434,8 @@ export default function SimulationPage() {
             <strong>方法論狀態：</strong>
             {session.status === 'completed' ? ' historical_test_complete' :
              session.status === 'retired' ? ' retired' :
-             ' forward_observation'}
-            {' '}&mdash; 此模擬僅供研究用途，不構成投資建議。
+             ' historical_replay'}
+            {' '}&mdash; 此模擬使用預先存在的示範數據進行歷史重播，僅供研究用途，不構成投資建議。
             資料截止日：{session.data_cutoff_at}。
           </div>
         </>

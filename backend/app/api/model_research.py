@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -130,7 +130,7 @@ def update_model_research_record(
         else:
             setattr(record, field, value)
 
-    record.updated_at = datetime.utcnow()
+    record.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
     if payload.status:
         emit_event(
@@ -181,9 +181,9 @@ def create_model_version(
         prompt_version=payload.prompt_version,
         input_schema_version=payload.input_schema_version,
         output_schema_version=payload.output_schema_version,
-        linked_experiment_version_ids=payload.linked_experiment_version_ids,
-        linked_dataset_snapshot_ids=payload.linked_dataset_snapshot_ids,
-        linked_simulation_session_ids=payload.linked_simulation_session_ids,
+        linked_experiment_version_ids=[str(v) for v in payload.linked_experiment_version_ids] if payload.linked_experiment_version_ids else None,
+        linked_dataset_snapshot_ids=[str(v) for v in payload.linked_dataset_snapshot_ids] if payload.linked_dataset_snapshot_ids else None,
+        linked_simulation_session_ids=[str(v) for v in payload.linked_simulation_session_ids] if payload.linked_simulation_session_ids else None,
     )
     db.add(version)
     db.flush()
@@ -260,7 +260,7 @@ def lock_model_version(
     if version.revoked_at is not None:
         raise HTTPException(status_code=400, detail="Cannot lock a revoked version")
 
-    version.locked_at = datetime.utcnow()
+    version.locked_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
     emit_event(
         db,
@@ -298,7 +298,7 @@ def revoke_model_version(
     if version.revoked_at is not None:
         raise HTTPException(status_code=400, detail="Version already revoked")
 
-    version.revoked_at = datetime.utcnow()
+    version.revoked_at = datetime.now(timezone.utc).replace(tzinfo=None)
     version.revocation_reason = reason
 
     emit_event(
@@ -415,7 +415,7 @@ def create_personal_memory(
     )
 
     if payload.user_confirmed:
-        memory.user_confirmed_at = datetime.utcnow()
+        memory.user_confirmed_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
     db.add(memory)
     db.flush()
@@ -488,7 +488,7 @@ def confirm_personal_memory(
         raise HTTPException(status_code=404, detail="Memory not found")
 
     if payload.confirmed:
-        memory.user_confirmed_at = datetime.utcnow()
+        memory.user_confirmed_at = datetime.now(timezone.utc).replace(tzinfo=None)
         event_type = "memory_confirmed"
     else:
         memory.active = False
@@ -696,7 +696,7 @@ def update_model_card(
     for field, value in update_data.items():
         setattr(card, field, value)
 
-    card.updated_at = datetime.utcnow()
+    card.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
     db.commit()
     db.refresh(card)

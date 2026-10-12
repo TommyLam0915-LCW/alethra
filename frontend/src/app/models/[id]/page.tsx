@@ -53,7 +53,7 @@ interface ModelCard {
 
 const STATUS_LABELS: Record<string, string> = {
   draft: '草稿', researching: '研究中', historical_test_complete: '歷史測試完成',
-  locked_for_simulation: '已鎖定待模擬', forward_observation: '前瞻觀察中',
+  locked_for_simulation: '已鎖定待模擬', forward_observation: '重播觀察中',
   evidence_insufficient: '證據不足', retired: '已退役', revoked: '已撤銷',
 };
 
@@ -239,7 +239,7 @@ export default function ModelDetailPage() {
               {record.status === 'draft' && <option value="researching">研究中</option>}
               {record.status === 'researching' && <><option value="historical_test_complete">歷史測試完成</option><option value="evidence_insufficient">證據不足</option><option value="retired">退役</option></>}
               {record.status === 'historical_test_complete' && <><option value="locked_for_simulation">鎖定待模擬</option><option value="evidence_insufficient">證據不足</option><option value="retired">退役</option></>}
-              {record.status === 'locked_for_simulation' && <><option value="forward_observation">前瞻觀察</option><option value="evidence_insufficient">證據不足</option><option value="retired">退役</option></>}
+              {record.status === 'locked_for_simulation' && <><option value="forward_observation">重播觀察</option><option value="evidence_insufficient">證據不足</option><option value="retired">退役</option></>}
               {record.status === 'forward_observation' && <><option value="evidence_insufficient">證據不足</option><option value="retired">退役</option></>}
               {record.status === 'evidence_insufficient' && <option value="retired">退役</option>}
             </select>

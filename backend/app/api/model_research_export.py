@@ -1,7 +1,7 @@
 import hashlib
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -91,13 +91,14 @@ def _build_package(
 
     linked_experiment_ids = version.linked_experiment_version_ids or []
     linked_experiment_ids_str = [str(eid) for eid in linked_experiment_ids]
+    linked_experiment_uuids = [uuid.UUID(str(eid)) for eid in linked_experiment_ids]
 
     experiment_versions = []
     strategy_specs = []
-    if linked_experiment_ids_str:
+    if linked_experiment_uuids:
         experiment_versions = (
             db.query(ExperimentVersion)
-            .filter(ExperimentVersion.id.in_(linked_experiment_ids_str))
+            .filter(ExperimentVersion.id.in_(linked_experiment_uuids))
             .all()
         )
         experiment_ids = list(set(ev.experiment_id for ev in experiment_versions))
@@ -114,11 +115,12 @@ def _build_package(
             })
 
     linked_simulation_ids = version.linked_simulation_session_ids or []
+    linked_simulation_uuids = [uuid.UUID(str(sid)) for sid in linked_simulation_ids]
     decisions = []
-    if linked_simulation_ids:
+    if linked_simulation_uuids:
         sim_sessions = (
             db.query(SimulationSession)
-            .filter(SimulationSession.id.in_(linked_simulation_ids))
+            .filter(SimulationSession.id.in_(linked_simulation_uuids))
             .all()
         )
         for session in sim_sessions:
@@ -340,7 +342,7 @@ def _build_package(
         "package_schema_version": PACKAGE_SCHEMA_VERSION,
         "model_research_record_id": str(record.id),
         "model_version_id": str(version.id),
-        "generated_at": datetime.utcnow().isoformat(),
+        "generated_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
         "model_status": record.status.value,
         "evidence_status": evidence_status,
         "engine_version": ENGINE_VERSION,
@@ -573,7 +575,7 @@ def create_export(
             include_private_notes=body.include_private_notes,
             package_json=package,
             package_checksum=checksum,
-            completed_at=datetime.utcnow(),
+            completed_at=datetime.now(timezone.utc).replace(tzinfo=None),
         )
         db.add(export)
         db.flush()
