@@ -1,9 +1,10 @@
 # Phase 2A Verification Report
 
-**Date:** 2026-10-12  
-**Phase:** Phase 2A — Deterministic Mock Research Assistant  
-**Status:** VERIFIED — All defects repaired, ready for commit  
-**Test Results:** 232 tests passed (28 Phase 2A tests + 204 existing tests)
+**Date:** 2026-10-12
+**Phase:** Phase 2A — Deterministic Mock Research Assistant (Backend)
+**Status:** VERIFIED — Initial defects repaired, focused review corrections applied, ready for merge
+**Test Results:** 253 tests passed (49 Phase 2A tests + 204 existing tests)
+**Review Corrections:** 6 gaps addressed, 21 regression tests added
 
 ---
 
@@ -34,7 +35,7 @@ The verification covered:
 
 **Root Cause:** Import chain `app.api.__init__` → `app.api.research_drafts` → `app.lib.mock_research_assistant` → `app.api.schemas` triggered circular initialization.
 
-**Resolution:** 
+**Resolution:**
 - Removed duplicate `ResearchDraftQuestion` class from `mock_research_assistant.py`
 - Implemented lazy import inside `generate_questions()` method to break the cycle
 - Canonical definition remains in `app/api/schemas.py` (line 1118-1122)
@@ -194,6 +195,53 @@ The verification covered:
 
 ---
 
+## Focused Review Corrections (2026-10-12)
+
+Following initial verification, a focused review identified 6 additional gaps. All have been corrected:
+
+### Fix 1: Validate answers values through canonical schema
+**Issue:** `/answers` endpoint accepted field names but did not validate values through canonical Pydantic validators.
+**Resolution:** Answers now validated via `ResearchDraftUpdate` construction; invalid symbols, templates, and ranges rejected with HTTP 400.
+**Tests:** 4 new tests in `TestAnswerValueValidation`
+
+### Fix 2: Protect finalized drafts in /questions endpoint
+**Issue:** `/questions` endpoint could regenerate questions for accepted/rejected drafts.
+**Resolution:** Finalized drafts return existing questions read-only without modification.
+**Tests:** 3 new tests in `TestFinalizedDraftQuestionsProtection`
+
+### Fix 3: Transactional consistency
+**Issue:** Draft changes, revisions, and audit events must commit atomically.
+**Resolution:** All operations follow single-commit pattern: flush → add revision → emit audit → commit. Validation failures prevent any DB changes.
+**Tests:** 4 new tests in `TestTransactionalConsistency` (including failure-injection)
+
+### Fix 4: Validate linked experiment ownership
+**Issue:** Draft creation did not verify that linked experiment belongs to current user.
+**Resolution:** `_validate_experiment_link()` checks `experiment.owner_id == current_user.id`; returns 404/403 appropriately.
+**Tests:** 3 new tests in `TestExperimentOwnershipValidation`
+
+### Fix 5: Correct missing-field detection for zero values
+**Issue:** Zero commission/slippage treated as missing rather than valid explicit choices.
+**Resolution:** `_is_missing()` distinguishes `None`/empty from zero; `validate_draft_completeness()` returns `zero_cost_warnings` separately.
+**Tests:** 6 new tests in `TestMissingFieldDetection`
+
+### Fix 6: Correct completion claims
+**Issue:** Documentation did not clarify Phase 2A is backend-only.
+**Resolution:** Phase 2A labeled as "backend" with note that frontend draft-review UI is pending. Deletion cascade policy documented.
+**Files:** `docs/current-system-status.md`, `docs/pr2-review-corrections-report.md`
+
+### Deletion Cascade Policy
+**Inspected:** `backend/app/models/research_drafts.py` lines 54-55
+**Policy:** `cascade="all, delete-orphan"` on revisions and audit_events
+**Behavior:** Deleting a draft removes all associated revisions and audit events (privacy by design)
+**Documented:** `docs/current-system-status.md` Safety Controls table
+**Test:** `TestDeletionCascade::test_delete_removes_revisions_and_audit_events`
+
+**Total new tests:** 21
+**Total Phase 2A tests:** 49 (28 initial + 21 corrections)
+**Full suite:** 253 passed, 0 failed
+
+---
+
 ## Security Review
 
 ### Confirmed Safeguards
@@ -318,6 +366,6 @@ Test suite passes with 232/232 tests. No regressions detected. Code quality meet
 
 ---
 
-**Report Prepared By:** AI Assistant  
-**Verification Date:** 2026-10-12  
+**Report Prepared By:** AI Assistant
+**Verification Date:** 2026-10-12
 **Verification Method:** Independent code inspection, test execution, and defect repair

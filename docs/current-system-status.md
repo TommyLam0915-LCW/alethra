@@ -28,7 +28,7 @@ or suitability for real-money trading.
 - Model research export package with integrity checks.
 - Pilot-entitlement, cost, support, and hypothesis measurement structures.
 - Production/staging JWT default-secret validation.
-- Deterministic mock research-draft workflow (Phase 2A) — structured draft lifecycle with question generation, answer submission, approval, revision tracking, and audit events. Mock output is a workflow demonstration, not a real AI-quality evaluation.
+- Deterministic mock research-draft workflow (Phase 2A backend) — structured draft lifecycle with question generation, answer submission, approval, revision tracking, and audit events. Mock output is a workflow demonstration, not a real AI-quality evaluation. Frontend draft-review UI not yet built.
 
 ## Not Implemented
 
@@ -63,7 +63,7 @@ Alethra is an **Investment Research Workspace** — not a broker, not an advisor
 | Phase | Description | Status |
 |-------|-------------|--------|
 | Phase 1 | Core backtesting engine, auth, experiments | Complete |
-| Phase 2A | Deterministic mock research-draft workflow | Complete |
+| Phase 2A | Deterministic mock research-draft workflow (backend) | Complete (backend; frontend draft-review UI pending) |
 | Phase 2B | Real AI research assistant | Not started |
 | Phase 3A | Locked research + historical replay simulation | Complete |
 | Phase 3B | Paper portfolio (virtual trading) | Complete |
@@ -81,7 +81,7 @@ Alethra is an **Investment Research Workspace** — not a broker, not an advisor
 | Frontend | Next.js 14, TypeScript, React |
 | Database | PostgreSQL (SQLite for tests) |
 | Auth | JWT (HS256) |
-| Testing | pytest, 232 tests, 86% coverage (2026-10-12) |
+| Testing | pytest, 253 tests, 86% coverage (2026-10-12) |
 
 ---
 
@@ -116,6 +116,7 @@ Alethra is an **Investment Research Workspace** — not a broker, not an advisor
 | Production config validation | Rejects insecure JWT defaults |
 | Bilingual disclaimers | On dashboard, paper portfolio, simulation pages |
 | Admin authorization | Required for admin endpoints |
+| Draft deletion cascade | Deleting a draft removes all revisions and audit events (privacy by design) |
 | No live trading capability | By design |
 | No broker/exchange integration | By design |
 | No payment processing | By design |
@@ -124,14 +125,14 @@ Alethra is an **Investment Research Workspace** — not a broker, not an advisor
 
 ## Test Summary
 
-**Current (2026-10-12 Phase 2A update)**:
+**Current (2026-10-12 Phase 2A review corrections)**:
 
-- **Total tests**: 232
-- **Passed**: 232
+- **Total tests**: 253
+- **Passed**: 253
 - **Failed**: 0
 - **Coverage**: 86% (re-verified 2026-10-12)
 - **Per-file counts** (from `pytest --collect-only -q`):
-  - test_research_drafts.py: 28 *(new Phase 2A)*
+  - test_research_drafts.py: 49 *(Phase 2A backend + review corrections)*
   - test_acceptance_harness.py: 20
   - test_pilot.py: 51
   - test_engine.py: 29

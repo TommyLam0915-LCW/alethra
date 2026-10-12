@@ -1,4 +1,4 @@
-"""Research draft API routes (Phase 2A)."""
+"""Research draft API routes (Phase 2A Backend)."""
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List
@@ -7,6 +7,7 @@ from uuid import UUID
 from ..database import get_db
 from ..auth.jwt import get_current_user
 from ..models.user import User
+from ..models.experiment import Experiment
 from ..models.research_drafts import (
     ResearchDraft,
     ResearchDraftRevision,
@@ -21,20 +22,35 @@ from ..api.schemas import (
     ResearchDraftApproval,
     ResearchDraftQuestionsResponse,
     ResearchDraftAnswer,
+    ResearchDraftQuestion,
+    ALLOWED_TEMPLATES,
 )
 from ..lib.mock_research_assistant import mock_research_assistant
 
 router = APIRouter(prefix="/research-drafts", tags=["research-drafts"])
 
+ANSWER_ALLOWED_FIELDS = {
+    "title",
+    "hypothesis",
+    "falsification_criteria",
+    "strategy_template",
+    "asset_symbol",
+    "benchmark_symbol",
+    "initial_cash",
+    "commission_rate",
+    "slippage_rate",
+    "research_rules",
+}
 
-def emit_draft_audit_event(
+
+def _emit_audit_event(
     db: Session,
     draft_id: UUID,
     user_id: UUID,
     event_type: str,
     event_data: dict = None,
 ):
-    """Emit an audit event for a draft operation."""
+    """Add an audit event to the session (does NOT commit)."""
     event = ResearchDraftAuditEvent(
         draft_id=draft_id,
         user_id=user_id,
@@ -42,12 +58,11 @@ def emit_draft_audit_event(
         event_data=event_data or {},
     )
     db.add(event)
-    db.commit()
 
 
-def create_revision(db: Session, draft: ResearchDraft, revision_number: str):
-    """Create a revision snapshot of the current draft state."""
-    revision = ResearchDraftRevision(
+def _create_revision(draft: ResearchDraft, revision_number: str):
+    """Build a revision snapshot (does NOT add to session — caller must db.add)."""
+    return ResearchDraftRevision(
         draft_id=draft.id,
         revision_number=revision_number,
         title=draft.title,
@@ -64,8 +79,56 @@ def create_revision(db: Session, draft: ResearchDraft, revision_number: str):
         assistant_questions=draft.assistant_questions,
         assistant_responses=draft.assistant_responses,
     )
-    db.add(revision)
-    return revision
+
+
+def _get_draft_or_404(db: Session, draft_id: UUID, current_user: User) -> ResearchDraft:
+    """Fetch draft with ownership check. Raises 404/403."""
+    draft = db.query(ResearchDraft).filter(ResearchDraft.id == draft_id).first()
+    if not draft:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    if draft.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to access this draft")
+    return draft
+
+
+def _validate_experiment_link(db: Session, experiment_id, current_user: User):
+    """If experiment_id is provided, verify it exists and belongs to current user."""
+    if experiment_id is None:
+        return
+    experiment = db.query(Experiment).filter(Experiment.id == experiment_id).first()
+    if not experiment:
+        raise HTTPException(status_code=404, detail="Linked experiment not found")
+    if experiment.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Linked experiment does not belong to you")
+
+
+def _validate_answers_via_schema(answers: dict):
+    """Validate answer values through canonical Pydantic validators.
+
+    Constructs a ResearchDraftUpdate from the answers dict so that all
+    field validators (symbol format, strategy template, etc.) run.
+    Returns the validated data dict.
+    """
+    filtered = {k: v for k, v in answers.items() if k in ANSWER_ALLOWED_FIELDS}
+    if not filtered:
+        return filtered
+    validated = ResearchDraftUpdate(**filtered)
+    return validated.model_dump(exclude_unset=True)
+
+
+def _draft_fields_dict(draft: ResearchDraft) -> dict:
+    return {
+        "title": draft.title,
+        "hypothesis": draft.hypothesis,
+        "falsification_criteria": draft.falsification_criteria,
+        "strategy_template": draft.strategy_template,
+        "asset_symbol": draft.asset_symbol,
+        "benchmark_symbol": draft.benchmark_symbol,
+        "initial_cash": draft.initial_cash,
+        "commission_rate": draft.commission_rate,
+        "slippage_rate": draft.slippage_rate,
+        "research_rules": draft.research_rules,
+    }
 
 
 @router.post("/", response_model=ResearchDraftResponse, status_code=status.HTTP_201_CREATED)
@@ -75,6 +138,8 @@ def create_research_draft(
     current_user: User = Depends(get_current_user),
 ):
     """Create a new research draft."""
+    _validate_experiment_link(db, payload.experiment_id, current_user)
+
     draft = ResearchDraft(
         user_id=current_user.id,
         experiment_id=payload.experiment_id,
@@ -91,20 +156,13 @@ def create_research_draft(
         status=DraftStatus.DRAFT,
     )
     db.add(draft)
+    db.flush()
+
+    db.add(_create_revision(draft, "1"))
+    _emit_audit_event(db, draft.id, current_user.id, "research_draft_created", {"title": draft.title})
+
     db.commit()
     db.refresh(draft)
-
-    create_revision(db, draft, "1")
-    db.commit()
-
-    emit_draft_audit_event(
-        db,
-        draft.id,
-        current_user.id,
-        "research_draft_created",
-        {"title": draft.title},
-    )
-
     return draft
 
 
@@ -130,12 +188,7 @@ def get_research_draft(
     current_user: User = Depends(get_current_user),
 ):
     """Get a specific research draft."""
-    draft = db.query(ResearchDraft).filter(ResearchDraft.id == draft_id).first()
-    if not draft:
-        raise HTTPException(status_code=404, detail="Draft not found")
-    if draft.user_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Not authorized to access this draft")
-    return draft
+    return _get_draft_or_404(db, draft_id, current_user)
 
 
 @router.patch("/{draft_id}", response_model=ResearchDraftResponse)
@@ -146,11 +199,7 @@ def update_research_draft(
     current_user: User = Depends(get_current_user),
 ):
     """Update a research draft."""
-    draft = db.query(ResearchDraft).filter(ResearchDraft.id == draft_id).first()
-    if not draft:
-        raise HTTPException(status_code=404, detail="Draft not found")
-    if draft.user_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Not authorized to modify this draft")
+    draft = _get_draft_or_404(db, draft_id, current_user)
     if draft.status in [DraftStatus.ACCEPTED, DraftStatus.REJECTED]:
         raise HTTPException(status_code=400, detail="Cannot modify a finalized draft")
 
@@ -158,19 +207,14 @@ def update_research_draft(
     for field, value in update_data.items():
         setattr(draft, field, value)
 
+    db.flush()
+
     revision_count = len(draft.revisions)
-    create_revision(db, draft, str(revision_count + 1))
+    db.add(_create_revision(draft, str(revision_count + 1)))
+    _emit_audit_event(db, draft.id, current_user.id, "research_draft_updated", {"updated_fields": list(update_data.keys())})
+
     db.commit()
     db.refresh(draft)
-
-    emit_draft_audit_event(
-        db,
-        draft.id,
-        current_user.id,
-        "research_draft_updated",
-        {"updated_fields": list(update_data.keys())},
-    )
-
     return draft
 
 
@@ -180,21 +224,14 @@ def delete_research_draft(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Delete a research draft."""
-    draft = db.query(ResearchDraft).filter(ResearchDraft.id == draft_id).first()
-    if not draft:
-        raise HTTPException(status_code=404, detail="Draft not found")
-    if draft.user_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Not authorized to delete this draft")
+    """Delete a research draft.
 
-    emit_draft_audit_event(
-        db,
-        draft.id,
-        current_user.id,
-        "research_draft_deleted",
-        {"title": draft.title},
-    )
-
+    Deletion cascades to all revisions and audit events (see model cascade).
+    This is the intended data-retention behaviour: deleting a draft removes
+    all associated research history for privacy.  Audit events are NOT
+    immutable once the parent draft is deleted.
+    """
+    draft = _get_draft_or_404(db, draft_id, current_user)
     db.delete(draft)
     db.commit()
 
@@ -206,11 +243,7 @@ def list_research_draft_revisions(
     current_user: User = Depends(get_current_user),
 ):
     """List all revisions for a research draft."""
-    draft = db.query(ResearchDraft).filter(ResearchDraft.id == draft_id).first()
-    if not draft:
-        raise HTTPException(status_code=404, detail="Draft not found")
-    if draft.user_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Not authorized to access this draft")
+    _get_draft_or_404(db, draft_id, current_user)
 
     revisions = (
         db.query(ResearchDraftRevision)
@@ -227,38 +260,31 @@ def generate_draft_questions(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Generate questions for missing fields in a draft."""
-    draft = db.query(ResearchDraft).filter(ResearchDraft.id == draft_id).first()
-    if not draft:
-        raise HTTPException(status_code=404, detail="Draft not found")
-    if draft.user_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Not authorized to access this draft")
+    """Generate questions for missing fields in a draft.
 
-    draft_fields = {
-        "title": draft.title,
-        "hypothesis": draft.hypothesis,
-        "falsification_criteria": draft.falsification_criteria,
-        "strategy_template": draft.strategy_template,
-        "asset_symbol": draft.asset_symbol,
-        "benchmark_symbol": draft.benchmark_symbol,
-        "initial_cash": draft.initial_cash,
-        "commission_rate": draft.commission_rate,
-        "slippage_rate": draft.slippage_rate,
-        "research_rules": draft.research_rules,
-    }
+    For finalized drafts (accepted/rejected), returns previously generated
+    questions without modification — finalized content is not regenerated.
+    """
+    draft = _get_draft_or_404(db, draft_id, current_user)
 
+    if draft.status in [DraftStatus.ACCEPTED, DraftStatus.REJECTED]:
+        existing = draft.assistant_questions or []
+        questions = [
+            ResearchDraftQuestion(**q) if isinstance(q, dict) else q
+            for q in existing
+        ]
+        return ResearchDraftQuestionsResponse(
+            draft_id=draft.id,
+            questions=questions,
+            generated_at=draft.updated_at,
+        )
+
+    draft_fields = _draft_fields_dict(draft)
     questions = mock_research_assistant.generate_questions(draft_fields)
 
     draft.assistant_questions = [q.model_dump() for q in questions]
+    _emit_audit_event(db, draft.id, current_user.id, "research_draft_questions_generated", {"question_count": len(questions)})
     db.commit()
-
-    emit_draft_audit_event(
-        db,
-        draft.id,
-        current_user.id,
-        "research_draft_questions_generated",
-        {"question_count": len(questions)},
-    )
 
     return ResearchDraftQuestionsResponse(
         draft_id=draft.id,
@@ -275,46 +301,27 @@ def submit_draft_answers(
     current_user: User = Depends(get_current_user),
 ):
     """Submit answers to assistant questions."""
-    draft = db.query(ResearchDraft).filter(ResearchDraft.id == draft_id).first()
-    if not draft:
-        raise HTTPException(status_code=404, detail="Draft not found")
-    if draft.user_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Not authorized to modify this draft")
+    draft = _get_draft_or_404(db, draft_id, current_user)
     if draft.status in [DraftStatus.ACCEPTED, DraftStatus.REJECTED]:
         raise HTTPException(status_code=400, detail="Cannot modify a finalized draft")
 
+    try:
+        validated = _validate_answers_via_schema(payload.answers)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid answer value: {exc}")
     draft.assistant_responses = payload.answers
 
-    allowed_fields = {
-        "title",
-        "hypothesis",
-        "falsification_criteria",
-        "strategy_template",
-        "asset_symbol",
-        "benchmark_symbol",
-        "initial_cash",
-        "commission_rate",
-        "slippage_rate",
-        "research_rules",
-    }
+    for field, value in validated.items():
+        setattr(draft, field, value)
 
-    for field, value in payload.answers.items():
-        if field in allowed_fields:
-            setattr(draft, field, value)
+    db.flush()
 
     revision_count = len(draft.revisions)
-    create_revision(db, draft, str(revision_count + 1))
+    db.add(_create_revision(draft, str(revision_count + 1)))
+    _emit_audit_event(db, draft.id, current_user.id, "research_draft_answers_submitted", {"answered_fields": list(payload.answers.keys())})
+
     db.commit()
     db.refresh(draft)
-
-    emit_draft_audit_event(
-        db,
-        draft.id,
-        current_user.id,
-        "research_draft_answers_submitted",
-        {"answered_fields": list(payload.answers.keys())},
-    )
-
     return draft
 
 
@@ -325,49 +332,44 @@ def approve_research_draft(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Approve or reject a research draft."""
-    draft = db.query(ResearchDraft).filter(ResearchDraft.id == draft_id).first()
-    if not draft:
-        raise HTTPException(status_code=404, detail="Draft not found")
-    if draft.user_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Not authorized to approve this draft")
+    """Approve or reject a research draft.
+
+    Note: an accepted research draft is a reviewed research note — NOT an
+    executable StrategySpec.  Acceptance records that the hypothesis and
+    methodology have been reviewed; it does not create a runnable strategy.
+    """
+    draft = _get_draft_or_404(db, draft_id, current_user)
     if draft.status in [DraftStatus.ACCEPTED, DraftStatus.REJECTED]:
         raise HTTPException(status_code=400, detail="Draft has already been finalized")
 
     if payload.action == "accept":
-        validation = mock_research_assistant.validate_draft_completeness(
-            {
-                "title": draft.title,
-                "hypothesis": draft.hypothesis,
-                "falsification_criteria": draft.falsification_criteria,
-                "strategy_template": draft.strategy_template,
-                "asset_symbol": draft.asset_symbol,
-            }
-        )
+        draft_fields = _draft_fields_dict(draft)
+        validation = mock_research_assistant.validate_draft_completeness(draft_fields)
         if not validation["complete"]:
             raise HTTPException(
                 status_code=400,
                 detail=f"Cannot accept draft: missing required fields: {', '.join(validation['missing_fields'])}",
             )
+
+        try:
+            ResearchDraftUpdate(**{k: v for k, v in draft_fields.items() if v is not None})
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Cannot accept draft: {exc}")
+
         draft.status = DraftStatus.ACCEPTED
         event_type = "research_draft_accepted"
     else:
         draft.status = DraftStatus.REJECTED
         event_type = "research_draft_rejected"
 
+    db.flush()
+
     revision_count = len(draft.revisions)
-    create_revision(db, draft, str(revision_count + 1))
+    db.add(_create_revision(draft, str(revision_count + 1)))
+    _emit_audit_event(db, draft.id, current_user.id, event_type, {"notes": payload.notes})
+
     db.commit()
     db.refresh(draft)
-
-    emit_draft_audit_event(
-        db,
-        draft.id,
-        current_user.id,
-        event_type,
-        {"notes": payload.notes},
-    )
-
     return draft
 
 
@@ -378,11 +380,7 @@ def list_draft_audit_events(
     current_user: User = Depends(get_current_user),
 ):
     """List audit events for a research draft."""
-    draft = db.query(ResearchDraft).filter(ResearchDraft.id == draft_id).first()
-    if not draft:
-        raise HTTPException(status_code=404, detail="Draft not found")
-    if draft.user_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Not authorized to access this draft")
+    _get_draft_or_404(db, draft_id, current_user)
 
     events = (
         db.query(ResearchDraftAuditEvent)

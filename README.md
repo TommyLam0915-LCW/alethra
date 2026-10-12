@@ -201,8 +201,8 @@ cd backend
 pytest tests/ -v
 ```
 
-**Current (2026-10-12 Phase 2A update)**: 232 tests, all passing.
-- 28 個研究草稿測試（Phase 2A 新增，含 5 個 API 路徑回歸測試）
+**Current (2026-10-12 Phase 2A review corrections)**: 253 tests, all passing.
+- 49 個研究草稿測試（Phase 2A 後端 + 21 個審查修正回歸測試）
 - 51 個試點運營與產品驗證測試
 - 29 個引擎測試
 - 29 個 API 測試
@@ -213,7 +213,7 @@ pytest tests/ -v
 - 10 個歷史重播模擬測試
 - 10 個設定測試
 
-**Phase 1–6 baseline (2026-10-12 harness repair)**: 204 tests across the same categories above, excluding the 28 Phase 2A tests.
+**Phase 1–6 baseline (2026-10-12 harness repair)**: 204 tests across the same categories above, excluding the 49 Phase 2A tests.
 
 API-scripted acceptance scenarios (A01–A12) run against a locally running service via `acceptance-test-execution.py`; 12/12 passing as of 2026-10-12. Human browser-based acceptance remains pending.
 
@@ -232,7 +232,7 @@ API-scripted acceptance scenarios (A01–A12) run against a locally running serv
 │   │   │   └── metrics.py     # 績效指標計算
 │   │   ├── data/         # 示範資料
 │   │   └── lib/          # 共用工具（brand, mock research assistant）
-│   └── tests/            # 測試（232 個）
+│   └── tests/            # 測試（253 個）
 ├── frontend/
 │   └── src/
 │       ├── app/          # Next.js 頁面

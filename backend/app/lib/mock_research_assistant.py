@@ -1,6 +1,19 @@
-"""Mock research assistant provider (Phase 2A) — deterministic, no external AI."""
+"""Mock research assistant provider (Phase 2A Backend) — deterministic, no external AI."""
 from typing import Dict, Any, List, Optional
 from datetime import datetime
+
+
+def _is_missing(value) -> bool:
+    """A field is missing when it is None or an empty/whitespace-only string.
+
+    Zero values (``"0"``, ``"0.000"``) are NOT missing — they are explicit
+    choices that happen to be zero.
+    """
+    if value is None:
+        return True
+    if isinstance(value, str) and value.strip() == "":
+        return True
+    return False
 
 
 class MockResearchAssistantProvider:
@@ -25,6 +38,8 @@ class MockResearchAssistantProvider:
         "research_rules": "Do you have any specific research rules or constraints? (JSON object)",
     }
 
+    ZERO_COST_FIELDS = {"commission_rate", "slippage_rate"}
+
     def generate_questions(
         self,
         draft_fields: Dict[str, Any],
@@ -34,13 +49,15 @@ class MockResearchAssistantProvider:
         Generate questions for missing required and optional fields.
         Deterministic: always asks for the same missing fields in the same order.
         Does not invent choices or make decisions for the user.
+
+        Zero values (e.g. commission_rate="0") are treated as present, not missing.
         """
         from ..api.schemas import ResearchDraftQuestion
 
         questions = []
 
         for field, question_text in self.REQUIRED_FIELDS.items():
-            if not draft_fields.get(field):
+            if _is_missing(draft_fields.get(field)):
                 questions.append(
                     ResearchDraftQuestion(
                         field=field,
@@ -50,7 +67,7 @@ class MockResearchAssistantProvider:
                 )
 
         for field, question_text in self.OPTIONAL_FIELDS.items():
-            if not draft_fields.get(field):
+            if _is_missing(draft_fields.get(field)):
                 questions.append(
                     ResearchDraftQuestion(
                         field=field,
@@ -88,16 +105,30 @@ class MockResearchAssistantProvider:
     def validate_draft_completeness(self, draft_fields: Dict[str, Any]) -> Dict[str, Any]:
         """
         Validate that a draft has all required fields.
-        Returns a dict with 'complete' boolean and 'missing_fields' list.
+
+        Zero values are treated as present (not missing).  Returns a dict
+        with ``complete`` boolean, ``missing_fields`` list, and
+        ``zero_cost_warnings`` list for fields that are explicitly zero.
         """
         missing = []
         for field in self.REQUIRED_FIELDS.keys():
-            if not draft_fields.get(field):
+            if _is_missing(draft_fields.get(field)):
                 missing.append(field)
+
+        zero_cost_warnings = []
+        for field in self.ZERO_COST_FIELDS:
+            val = draft_fields.get(field)
+            if not _is_missing(val):
+                try:
+                    if float(val) == 0.0:
+                        zero_cost_warnings.append(field)
+                except (ValueError, TypeError):
+                    pass
 
         return {
             "complete": len(missing) == 0,
             "missing_fields": missing,
+            "zero_cost_warnings": zero_cost_warnings,
         }
 
 
