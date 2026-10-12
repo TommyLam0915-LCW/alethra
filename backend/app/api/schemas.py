@@ -999,3 +999,144 @@ class ProductHypothesisDashboardResponse(BaseModel):
     total: int
     by_status: dict
     disclaimer: str = PILOT_DISCLAIMER
+"""Pydantic schemas for research drafts (Phase 2A)."""
+from datetime import datetime
+from typing import Optional, List, Dict, Any
+from uuid import UUID
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+import re
+
+
+class ResearchDraftBase(BaseModel):
+    """Base schema for research draft."""
+    title: str = Field(..., min_length=1, max_length=500)
+    hypothesis: Optional[str] = None
+    falsification_criteria: Optional[str] = None
+    strategy_template: Optional[str] = Field(None, max_length=100)
+    asset_symbol: Optional[str] = Field(None, max_length=50)
+    benchmark_symbol: Optional[str] = Field(None, max_length=50)
+    initial_cash: Optional[str] = Field(None, max_length=50)
+    commission_rate: Optional[str] = Field(None, max_length=50)
+    slippage_rate: Optional[str] = Field(None, max_length=50)
+    research_rules: Optional[Dict[str, Any]] = None
+
+    @field_validator("asset_symbol", "benchmark_symbol")
+    @classmethod
+    def validate_symbol_format(cls, v):
+        """Validate symbol format - allow legitimate research terminology."""
+        if v is not None:
+            if not re.match(r"^[A-Z0-9\-\.]+$", v):
+                raise ValueError("Symbol must contain only uppercase letters, numbers, hyphens, and dots")
+        return v
+
+    @field_validator("strategy_template")
+    @classmethod
+    def validate_strategy_template(cls, v):
+        """Validate strategy template is one of the allowed templates."""
+        if v is not None:
+            if v not in ALLOWED_TEMPLATES:
+                raise ValueError(f"Strategy template must be one of: {', '.join(ALLOWED_TEMPLATES)}")
+        return v
+
+
+class ResearchDraftCreate(ResearchDraftBase):
+    """Schema for creating a research draft."""
+    experiment_id: Optional[UUID] = None
+
+
+class ResearchDraftUpdate(BaseModel):
+    """Schema for updating a research draft."""
+    title: Optional[str] = Field(None, min_length=1, max_length=500)
+    hypothesis: Optional[str] = None
+    falsification_criteria: Optional[str] = None
+    strategy_template: Optional[str] = Field(None, max_length=100)
+    asset_symbol: Optional[str] = Field(None, max_length=50)
+    benchmark_symbol: Optional[str] = Field(None, max_length=50)
+    initial_cash: Optional[str] = Field(None, max_length=50)
+    commission_rate: Optional[str] = Field(None, max_length=50)
+    slippage_rate: Optional[str] = Field(None, max_length=50)
+    research_rules: Optional[Dict[str, Any]] = None
+
+    @field_validator("asset_symbol", "benchmark_symbol")
+    @classmethod
+    def validate_symbol_format(cls, v):
+        if v is not None:
+            if not re.match(r"^[A-Z0-9\-\.]+$", v):
+                raise ValueError("Symbol must contain only uppercase letters, numbers, hyphens, and dots")
+        return v
+
+    @field_validator("strategy_template")
+    @classmethod
+    def validate_strategy_template(cls, v):
+        if v is not None:
+            if v not in ALLOWED_TEMPLATES:
+                raise ValueError(f"Strategy template must be one of: {', '.join(ALLOWED_TEMPLATES)}")
+        return v
+
+
+class ResearchDraftResponse(ResearchDraftBase):
+    """Schema for research draft response."""
+    id: UUID
+    user_id: UUID
+    experiment_id: Optional[UUID] = None
+    status: str
+    assistant_questions: Optional[List[Dict[str, Any]]] = None
+    assistant_responses: Optional[Dict[str, Any]] = None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ResearchDraftRevisionResponse(BaseModel):
+    """Schema for research draft revision response."""
+    id: UUID
+    draft_id: UUID
+    revision_number: str
+    title: Optional[str] = None
+    hypothesis: Optional[str] = None
+    falsification_criteria: Optional[str] = None
+    strategy_template: Optional[str] = None
+    asset_symbol: Optional[str] = None
+    benchmark_symbol: Optional[str] = None
+    initial_cash: Optional[str] = None
+    commission_rate: Optional[str] = None
+    slippage_rate: Optional[str] = None
+    research_rules: Optional[Dict[str, Any]] = None
+    status: str
+    assistant_questions: Optional[List[Dict[str, Any]]] = None
+    assistant_responses: Optional[Dict[str, Any]] = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ResearchDraftApproval(BaseModel):
+    """Schema for approving a research draft."""
+    action: str = Field(..., pattern="^(accept|reject)$")
+    notes: Optional[str] = None
+
+
+class ResearchDraftQuestion(BaseModel):
+    """Schema for assistant question."""
+    field: str
+    question: str
+    context: Optional[str] = None
+
+
+class ResearchDraftQuestionsResponse(BaseModel):
+    """Schema for assistant questions response."""
+    draft_id: UUID
+    questions: List[ResearchDraftQuestion]
+    generated_at: datetime
+
+
+class ResearchDraftAnswer(BaseModel):
+    """Schema for answering assistant questions."""
+    answers: Dict[str, str]
+
+
+class MockAssistantProviderRequest(BaseModel):
+    """Schema for mock assistant provider request."""
+    draft_fields: Dict[str, Any]
+    context: Optional[Dict[str, Any]] = None

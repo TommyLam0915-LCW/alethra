@@ -11,6 +11,7 @@ from app.api.model_research import memory_router as personal_memory_router
 from app.api.model_research import card_router as model_card_router
 from app.api.model_research_export import router as model_research_export_router
 from app.api.pilot import router as pilot_router
+from app.api.research_drafts import router as research_drafts_router
 
 v1_router = APIRouter(prefix="/v1")
 v1_router.include_router(brand_router)
@@ -24,6 +25,7 @@ v1_router.include_router(personal_memory_router)
 v1_router.include_router(model_card_router)
 v1_router.include_router(model_research_export_router)
 v1_router.include_router(pilot_router)
+v1_router.include_router(research_drafts_router)
 
 api_router = APIRouter()
 api_router.include_router(auth_router)

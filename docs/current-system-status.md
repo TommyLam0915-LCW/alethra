@@ -1,7 +1,7 @@
 # Current System Status
 
 **Date**: 2026-10-12
-**Branch**: chore/system-rehearsal-20261012
+**Branch**: feat/phase2a-research-drafts
 **System**: Alethra Investment Research Workspace
 
 ---
@@ -28,12 +28,13 @@ or suitability for real-money trading.
 - Model research export package with integrity checks.
 - Pilot-entitlement, cost, support, and hypothesis measurement structures.
 - Production/staging JWT default-secret validation.
+- Deterministic mock research-draft workflow (Phase 2A) — structured draft lifecycle with question generation, answer submission, approval, revision tracking, and audit events. Mock output is a workflow demonstration, not a real AI-quality evaluation.
 
 ## Not Implemented
 
-- AI research assistant.
+- Real AI research assistant (Phase 2A uses a deterministic mock provider only; no external AI calls).
 - Personal AI training or model fine-tuning.
-- AI provider abstraction beyond any current mock/config placeholder.
+- AI provider abstraction beyond the current mock provider.
 - Genuine forward observation using newly arriving market data.
 - Live market data.
 - Broker integration.
@@ -62,7 +63,8 @@ Alethra is an **Investment Research Workspace** — not a broker, not an advisor
 | Phase | Description | Status |
 |-------|-------------|--------|
 | Phase 1 | Core backtesting engine, auth, experiments | Complete |
-| Phase 2 | AI Research Assistant | Not scheduled |
+| Phase 2A | Deterministic mock research-draft workflow | Complete |
+| Phase 2B | Real AI research assistant | Not started |
 | Phase 3A | Locked research + historical replay simulation | Complete |
 | Phase 3B | Paper portfolio (virtual trading) | Complete |
 | Phase 4 | Model research record + model cards | Complete |
@@ -79,7 +81,7 @@ Alethra is an **Investment Research Workspace** — not a broker, not an advisor
 | Frontend | Next.js 14, TypeScript, React |
 | Database | PostgreSQL (SQLite for tests) |
 | Auth | JWT (HS256) |
-| Testing | pytest, 204 tests, 86% coverage (2026-10-12) |
+| Testing | pytest, 232 tests, 86% coverage (2026-10-12) |
 
 ---
 
@@ -122,14 +124,15 @@ Alethra is an **Investment Research Workspace** — not a broker, not an advisor
 
 ## Test Summary
 
-**Current (2026-10-12 harness repair update)**:
+**Current (2026-10-12 Phase 2A update)**:
 
-- **Total tests**: 204
-- **Passed**: 204
+- **Total tests**: 232
+- **Passed**: 232
 - **Failed**: 0
 - **Coverage**: 86% (re-verified 2026-10-12)
 - **Per-file counts** (from `pytest --collect-only -q`):
-  - test_acceptance_harness.py: 20 *(new 2026-10-12)*
+  - test_research_drafts.py: 28 *(new Phase 2A)*
+  - test_acceptance_harness.py: 20
   - test_pilot.py: 51
   - test_engine.py: 29
   - test_api.py: 29
@@ -138,6 +141,8 @@ Alethra is an **Investment Research Workspace** — not a broker, not an advisor
   - test_paper_portfolio.py: 12
   - test_simulation.py: 10
   - test_config.py: 10
+
+**Historical (2026-10-12 harness repair update)**: 204 passed, 0 failed.
 
 **Historical (2026-10-12 earlier commit `2850198`)**: 184 passed, 0 failed — 180 from Phase 1–6 baseline plus 4 UUID JSON boundary regression tests.
 
@@ -150,7 +155,7 @@ Alethra is an **Investment Research Workspace** — not a broker, not an advisor
 1. **Demo data only** — No live market data integration
 2. **Historical replay, not live forward observation** — Simulation uses pre-existing demo data
 3. **Single-asset only** — No multi-asset portfolio support
-4. **No AI assistant** — Phase 2 not implemented
+4. **No real AI assistant** — Phase 2A uses a deterministic mock provider only; real AI research assistant (Phase 2B) not implemented
 5. **SQLite for tests** — Production requires PostgreSQL
 6. **No walk-forward optimization** — Not implemented
 7. **Manual acceptance pending** — E2E browser testing not yet performed
@@ -173,7 +178,7 @@ This system is **not production-ready**. It is a research prototype that has bee
 
 1. Complete manual acceptance testing
 2. Replace demo data with live market data provider
-3. Implement AI assistant (Phase 2) with proper safety controls
+3. Implement real AI research assistant (Phase 2B) with proper safety controls
 4. Conduct security audit by qualified reviewer
 5. Implement rate limiting and DDoS protection
 6. Set up monitoring, alerting, and logging infrastructure
