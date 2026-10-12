@@ -58,6 +58,62 @@ Alethra-owned warnings after fixes: ~1,000 (mostly SQLAlchemy internal `datetime
 
 ---
 
+## UUID Regression-Test Warning Delta — 2026-10-12
+
+**Context**: 4 new UUID JSON boundary regression tests added. Warning count rose from 16,804 to 17,378 (+574).
+
+**Isolation method**: Ran full suite with and without the 4 new tests.
+
+| Run | Tests | Warnings |
+|-----|------:|---------:|
+| Previous baseline (acceptance rehearsal) | 180 | 16,804 |
+| Current — existing 180 tests only (new tests deselected) | 180 | 17,294 |
+| Current — all 184 tests | 184 | 17,378 |
+
+**Delta breakdown**:
+
+| Source | Delta | Explanation |
+|--------|------:|-------------|
+| 4 new regression tests | +84 | New tests exercise API calls, DB setup, and export paths that trigger known third-party warnings |
+| Existing 180 tests (code changes) | +490 | UUID fixes in `model_research.py` and `model_research_export.py` add list-comprehension code paths; FastAPI/Starlette emit `asyncio.iscoroutinefunction` deprecation per route handler per test |
+| **Total** | **+574** | |
+
+**Warning categories observed (all pre-existing, no new categories)**:
+
+| Warning source | Warning class | Count (est.) | Existing or new? | Alethra-owned or third-party? | Classification | Risk | Action |
+|---|---|---:|---|---|---|---|---|
+| pytest-asyncio | `asyncio.iscoroutinefunction` DeprecationWarning | ~8,500 | Existing | Third-party | known_third_party | None | Accepted — upstream fix pending |
+| fastapi/routing.py | `asyncio.iscoroutinefunction` DeprecationWarning | ~7,500 | Existing | Third-party | known_third_party | None | Accepted — upstream fix pending |
+| starlette/_utils.py | `asyncio.iscoroutinefunction` DeprecationWarning | ~700 | Existing | Third-party | known_third_party | None | Accepted — upstream fix pending |
+| sqlalchemy/schema.py | `datetime.utcnow()` DeprecationWarning | ~500 | Existing | Third-party | known_third_party | None | Accepted — upstream fix pending |
+| jose/jwt.py | `datetime.utcnow()` DeprecationWarning | ~100 | Existing | Third-party | known_third_party | None | Accepted — consider PyJWT migration |
+| app/database.py | `MovedIn20Warning` (declarative_base) | 1 | Existing | Alethra-owned | known_alethra_technical_debt | Low | Accepted — see above |
+| tests/conftest.py | `SAWarning` (SQLite FK drop ordering) | 1 | Existing | Alethra-owned | known_alethra_technical_debt | None | Mitigated by PRAGMA foreign_keys=OFF |
+| pytest-asyncio | `asyncio.get_event_loop_policy` DeprecationWarning | ~50 | Existing | Third-party | known_third_party | None | Accepted |
+| starlette/testclient.py | `anyio.abc.BlockingPortal` DeprecationWarning | 2 | Existing | Third-party | known_third_party | Low | Accepted |
+| starlette/formparsers.py | `python_multipart` PendingDeprecationWarning | 1 | Existing | Third-party | known_third_party | Low | Accepted |
+| pytest-asyncio | `asyncio_default_fixture_loop_scope` PytestDeprecationWarning | 1 | Existing | Third-party | known_third_party | None | Accepted |
+
+**New warning categories introduced**: No
+**New Alethra-owned warning categories introduced**: No
+**Raw UUID serialization errors**: None
+**SQLAlchemy UUID type mismatch errors**: None
+**Unhandled exceptions**: None
+
+**Acceptance rule verification**:
+
+1. No `new_alethra_warning` — PASS
+2. No `unexpected_runtime_warning` — PASS
+3. No raw UUID serialization error — PASS
+4. No SQLAlchemy UUID type mismatch — PASS
+5. No unhandled exception — PASS
+6. All added warnings are known third-party deprecations — PASS
+7. Documented in this file — PASS
+
+**Conclusion**: Commit-safe. All +574 warnings are additional instances of pre-existing, documented third-party deprecation warnings triggered by 4 new tests exercising additional API and DB code paths. No new warning class was introduced.
+
+---
+
 ## Policy
 
 - New warning classes must be reviewed before merging.

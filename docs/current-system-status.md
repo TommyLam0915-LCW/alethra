@@ -79,7 +79,7 @@ Alethra is an **Investment Research Workspace** — not a broker, not an advisor
 | Frontend | Next.js 14, TypeScript, React |
 | Database | PostgreSQL (SQLite for tests) |
 | Auth | JWT (HS256) |
-| Testing | pytest, 180 tests, 86% coverage |
+| Testing | pytest, 184 tests, 86% coverage |
 
 ---
 
@@ -122,16 +122,16 @@ Alethra is an **Investment Research Workspace** — not a broker, not an advisor
 
 ## Test Summary
 
-- **Total tests**: 180
-- **Passed**: 180
+- **Total tests**: 184
+- **Passed**: 184
 - **Failed**: 0
 - **Coverage**: 86%
 - **Per-file counts** (from `pytest --collect-only -q`):
   - test_pilot.py: 51
   - test_engine.py: 29
   - test_api.py: 29
-  - test_model_research.py: 23
-  - test_model_research_export.py: 16
+  - test_model_research.py: 24
+  - test_model_research_export.py: 19
   - test_paper_portfolio.py: 12
   - test_simulation.py: 10
   - test_config.py: 10

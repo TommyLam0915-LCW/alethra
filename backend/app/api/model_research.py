@@ -181,9 +181,9 @@ def create_model_version(
         prompt_version=payload.prompt_version,
         input_schema_version=payload.input_schema_version,
         output_schema_version=payload.output_schema_version,
-        linked_experiment_version_ids=payload.linked_experiment_version_ids,
-        linked_dataset_snapshot_ids=payload.linked_dataset_snapshot_ids,
-        linked_simulation_session_ids=payload.linked_simulation_session_ids,
+        linked_experiment_version_ids=[str(v) for v in payload.linked_experiment_version_ids] if payload.linked_experiment_version_ids else None,
+        linked_dataset_snapshot_ids=[str(v) for v in payload.linked_dataset_snapshot_ids] if payload.linked_dataset_snapshot_ids else None,
+        linked_simulation_session_ids=[str(v) for v in payload.linked_simulation_session_ids] if payload.linked_simulation_session_ids else None,
     )
     db.add(version)
     db.flush()

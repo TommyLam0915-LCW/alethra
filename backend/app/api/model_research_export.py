@@ -91,13 +91,14 @@ def _build_package(
 
     linked_experiment_ids = version.linked_experiment_version_ids or []
     linked_experiment_ids_str = [str(eid) for eid in linked_experiment_ids]
+    linked_experiment_uuids = [uuid.UUID(str(eid)) for eid in linked_experiment_ids]
 
     experiment_versions = []
     strategy_specs = []
-    if linked_experiment_ids_str:
+    if linked_experiment_uuids:
         experiment_versions = (
             db.query(ExperimentVersion)
-            .filter(ExperimentVersion.id.in_(linked_experiment_ids_str))
+            .filter(ExperimentVersion.id.in_(linked_experiment_uuids))
             .all()
         )
         experiment_ids = list(set(ev.experiment_id for ev in experiment_versions))
@@ -114,11 +115,12 @@ def _build_package(
             })
 
     linked_simulation_ids = version.linked_simulation_session_ids or []
+    linked_simulation_uuids = [uuid.UUID(str(sid)) for sid in linked_simulation_ids]
     decisions = []
-    if linked_simulation_ids:
+    if linked_simulation_uuids:
         sim_sessions = (
             db.query(SimulationSession)
-            .filter(SimulationSession.id.in_(linked_simulation_ids))
+            .filter(SimulationSession.id.in_(linked_simulation_uuids))
             .all()
         )
         for session in sim_sessions:

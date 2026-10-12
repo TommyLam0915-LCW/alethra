@@ -405,3 +405,55 @@ class TestConsentEnforcement:
         })
         assert resp.status_code == 201
         assert resp.json()["privacy_scope"] == "private_only"
+
+
+class TestUUIDJSONBoundaryRegression:
+    """Regression: UUID objects must serialize to JSON strings when stored."""
+
+    def test_model_research_serializes_uuid_references_to_json_strings(self, client, auth_headers):
+        exp_resp = client.post("/api/v1/experiments/", headers=auth_headers, json={
+            "title": "UUID Boundary Test",
+            "research_type": "quantitative",
+            "strategy_spec": {
+                "schema_version": "1.0",
+                "template_type": "buy_and_hold",
+                "asset_ids": ["DEMO-ALPHA"],
+                "frequency": "1d",
+                "start_date": "2024-01-02",
+                "end_date": "2024-02-14",
+                "initial_cash": 10000,
+                "signal_parameters": {},
+                "commission_rate": 0.001,
+                "slippage_rate": 0.001,
+                "benchmark_id": "DEMO-BENCHMARK",
+                "currency": "USD",
+            },
+        })
+        assert exp_resp.status_code == 201
+        experiment_version_id = exp_resp.json()["current_version_id"]
+
+        record = _create_record(client, auth_headers)
+
+        resp = client.post(
+            f"/api/v1/model-research/{record['id']}/versions",
+            headers=auth_headers,
+            json={
+                "model_type": "rule_based",
+                "model_specification_json": {"rules": []},
+                "linked_experiment_version_ids": [experiment_version_id],
+            },
+        )
+        assert resp.status_code == 201, f"UUID serialization failed: {resp.text}"
+
+        version = resp.json()
+        assert version["linked_experiment_version_ids"] is not None
+        assert len(version["linked_experiment_version_ids"]) == 1
+        stored_id = version["linked_experiment_version_ids"][0]
+        assert isinstance(stored_id, str)
+        assert stored_id == experiment_version_id
+
+        get_resp = client.get(
+            f"/api/v1/model-research/{record['id']}",
+            headers=auth_headers,
+        )
+        assert get_resp.status_code == 200
