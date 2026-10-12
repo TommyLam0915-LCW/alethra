@@ -2,7 +2,7 @@ import os
 os.environ["DATABASE_URL"] = "sqlite:///./test.db"
 
 import pytest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from app.auth.jwt import get_password_hash, create_access_token
@@ -233,7 +233,7 @@ class TestPilotEntitlement:
         user_id = str(user.id)
         db.close()
 
-        past_date = (datetime.utcnow() - timedelta(days=1)).strftime("%Y-%m-%d")
+        past_date = (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=1)).strftime("%Y-%m-%d")
         client.post("/api/v1/pilot/entitlements", json={
             "user_id": user_id,
             "expiry_date": past_date,

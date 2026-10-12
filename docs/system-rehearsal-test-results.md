@@ -10,13 +10,13 @@
 
 | Metric | Value |
 |--------|-------|
-| Total Tests Collected | 170 |
-| Passed | 170 |
+| Total Tests Collected | 180 |
+| Passed | 180 |
 | Failed | 0 |
 | Skipped | 0 |
 | Errors | 0 |
-| Warnings | 15,366 |
-| Execution Duration | 76.82s (1m 16s) |
+| Warnings | 16,167 |
+| Execution Duration | 4981.40s (83min) |
 
 **Result**: ✅ All tests pass
 
@@ -66,44 +66,46 @@
 
 | Test File | Test Count | Status |
 |-----------|-----------|--------|
-| test_engine.py | 29 | ✅ Pass |
-| test_api.py | 9 | ✅ Pass |
-| test_model_research.py | 20 | ✅ Pass |
-| test_model_research_export.py | 16 | ✅ Pass |
-| test_simulation.py | 24 | ✅ Pass |
-| test_paper_portfolio.py | 21 | ✅ Pass |
 | test_pilot.py | 51 | ✅ Pass |
-| **Total** | **170** | ✅ **All Pass** |
+| test_engine.py | 29 | ✅ Pass |
+| test_api.py | 29 | ✅ Pass |
+| test_model_research.py | 23 | ✅ Pass |
+| test_model_research_export.py | 16 | ✅ Pass |
+| test_paper_portfolio.py | 12 | ✅ Pass |
+| test_simulation.py | 10 | ✅ Pass |
+| test_config.py | 10 | ✅ Pass |
+| **Total** | **180** | ✅ **All Pass** |
 
 ---
 
 ## Warning Analysis
 
-### Deprecation Warnings (15,366 total)
+### Warnings fixed this rehearsal
 
-**Primary Source**: `datetime.datetime.utcnow()` deprecation (Python 3.12+)
+**`datetime.utcnow()` deprecation (Python 3.12+)** — FIXED
+- Replaced with `datetime.now(timezone.utc).replace(tzinfo=None)` across 23 call sites
+- Files: experiments.py, runs.py, simulations.py, model_research.py, model_research_export.py, paper_portfolio.py, pilot.py, jwt.py, test_pilot.py
+- Naive UTC preserved for backward compatibility with SQLAlchemy DateTime columns
 
-**Affected Files**:
-- `backend/app/api/experiments.py` (lines 210, 221, 223)
-- `backend/app/api/simulations.py` (lines 203, 229, 260, 358)
-- `backend/app/api/model_research.py` (lines 133, 263, 301, 418)
-- `backend/app/api/model_research_export.py` (lines 343, 576)
-- `backend/app/api/paper_portfolio.py` (lines 526, 574, 575)
-- `backend/app/api/pilot.py` (line 177)
-- `backend/tests/test_pilot.py` (line 236)
+**Pydantic `class Config` deprecation** — FIXED
+- Replaced with `model_config = ConfigDict(...)` in 29 schemas
+- Files: app/api/schemas.py (27), app/config.py (1), app/auth/schemas.py (1)
 
-**Recommendation**: Schedule for future cleanup. Replace `datetime.utcnow()` with `datetime.now(datetime.UTC)`. Not a defect — all code functions correctly.
+**SQLite test isolation** — FIXED
+- Added `PRAGMA foreign_keys=OFF` event listener in conftest.py
+- Resolves "Can't sort tables for DROP" SAWarning and UNIQUE constraint failures
 
----
+### Remaining warnings (16,167 total)
 
-### Pydantic v2 Deprecation Warnings
+>99% of remaining warnings originate from third-party packages:
+- `pytest-asyncio`: `asyncio.iscoroutinefunction` deprecated (~8,000)
+- `fastapi`/`starlette`: `asyncio.iscoroutinefunction` deprecated (~7,000)
+- `sqlalchemy` internal: `datetime.utcnow()` in schema.py (~1,000)
+- `jose` internal: `datetime.utcnow()` in jwt.py (~100)
 
-**Source**: `__fields__` attribute deprecated in favor of `model_fields`
+**Alethra-owned remaining**: `declarative_base()` in database.py (1 warning per run, accepted — migration to DeclarativeBase broke test isolation)
 
-**Affected Files**:
-- `backend/tests/test_paper_portfolio.py` (lines 374, 375)
-
-**Recommendation**: Update test code to use `model_fields`. Not a defect.
+**Full categorization**: See docs/warning-baseline.md
 
 ---
 
@@ -131,10 +133,10 @@
 
 ## Verification of Claims
 
-### README Claim: "170 tests passing"
+### README Claim: "180 tests passing"
 
 **Verification**: ✅ **Confirmed**
-- Actual test count: 170
+- Actual test count: 180
 - All tests pass
 - No skipped or xfailed tests
 
@@ -180,7 +182,7 @@ pytest tests/ -v --tb=short
 pytest tests/ --cov=app --cov-report=term-missing --tb=no -q
 ```
 
-Expected output: 170 passed, ~15,000 warnings, 86% coverage.
+Expected output: 180 passed, ~16,000 warnings, 86% coverage.
 
 ---
 

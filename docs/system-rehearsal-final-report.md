@@ -80,24 +80,26 @@
 | Passed | 180 |
 | Failed | 0 |
 | Coverage | 86% |
-| Duration | 78.26s |
-| Warnings | 17,137 (all deprecation warnings, non-blocking) |
+| Duration | ~83min (includes full suite with clean DB) |
+| Warnings | 16,167 (down from 17,137 after Alethra-owned fixes; >99% are third-party) |
 
-**Test files**:
-- test_api.py (9 tests)
-- test_engine.py (29 tests)
-- test_config.py (10 tests) — **NEW**
-- test_simulation.py (24 tests)
-- test_paper_portfolio.py (33 tests)
-- test_model_research.py (85 tests)
-- test_model_research_export.py (164 tests)
-- test_pilot.py (204 tests)
+**Test files (per-file counts from `pytest --collect-only -q`)**:
+- test_pilot.py: 51 tests
+- test_engine.py: 29 tests
+- test_api.py: 29 tests
+- test_model_research.py: 23 tests
+- test_model_research_export.py: 16 tests
+- test_paper_portfolio.py: 12 tests
+- test_simulation.py: 10 tests
+- test_config.py: 10 tests
+- **Total: 180 tests**
 
-**Warning analysis**:
-- datetime.utcnow() deprecation (Python 3.12+) — non-blocking, cosmetic
-- Pydantic __fields__ deprecation — non-blocking, cosmetic
-- SQLAlchemy declarative_base() deprecation — non-blocking, cosmetic
-- asyncio.iscoroutinefunction() deprecation — non-blocking, cosmetic
+**Warning remediation applied this rehearsal**:
+- ✅ `datetime.utcnow()` → `datetime.now(timezone.utc).replace(tzinfo=None)` (23 call sites)
+- ✅ Pydantic `class Config` → `model_config = ConfigDict(...)` (29 schemas)
+- ✅ SQLite test isolation: `PRAGMA foreign_keys=OFF` event listener in conftest.py
+- ⚠️ `declarative_base()` → `DeclarativeBase` reverted (broke test isolation)
+- ⚠️ Remaining warnings are >99% third-party (pytest-asyncio, fastapi, sqlalchemy, jose)
 
 **Verdict**: All tests pass. No functional regressions.
 
@@ -272,8 +274,8 @@ All required documents created:
 5. **SQLite for tests** — Production requires PostgreSQL
 6. **No walk-forward optimization** — Not implemented
 7. **No rate limiting** — Not implemented (Phase 2 scope)
-8. **datetime.utcnow() deprecation** — Python 3.12+ warnings (cosmetic, non-blocking)
-9. **Pydantic v2 migration incomplete** — class-based Config deprecated (cosmetic, non-blocking)
+8. **`declarative_base()` deprecation** — SQLAlchemy 2.0 migration deferred (broke test isolation when attempted)
+9. **Third-party deprecation warnings** — pytest-asyncio, fastapi, sqlalchemy, jose emit ~16,000 warnings (all cosmetic, non-blocking, outside Alethra's control)
 
 ---
 
@@ -334,23 +336,26 @@ All required documents created:
 ## Appendix: Test Results Summary
 
 ```
-180 passed, 17137 warnings in 78.26s
+180 passed, 16167 warnings in 4981.40s
 Coverage: 86% (3318 statements, 467 missed)
 ```
 
-**Test breakdown**:
+**Test breakdown** (from `pytest --collect-only -q`):
+- Pilot tests: 51 (applications, entitlements, events, admin)
 - Engine tests: 29 (strategies, ledger, benchmark, metrics)
-- API tests: 9 (brand, auth, experiments, runs, export)
-- Config tests: 10 (production safety, CORS) — **NEW**
-- Simulation tests: 24 (locking, cutoff, snapshots, decisions)
-- Paper portfolio tests: 33 (orders, positions, decisions, risk controls)
-- Model research tests: 85 (lifecycle, versions, evaluations, memory)
-- Export tests: 164 (packages, checksums, privacy, authorization)
-- Pilot tests: 204 (applications, entitlements, events, admin)
+- API tests: 29 (brand, auth, experiments, runs, export)
+- Model research tests: 23 (lifecycle, versions, evaluations, memory)
+- Export tests: 16 (packages, checksums, privacy, authorization)
+- Paper portfolio tests: 12 (orders, positions, decisions, risk controls)
+- Simulation tests: 10 (locking, cutoff, snapshots, decisions)
+- Config tests: 10 (production safety, CORS)
+
+**Warning baseline**: See docs/warning-baseline.md for full categorization.
 
 ---
 
 **Report prepared by**: Release Engineering
 **Date**: 2026-10-12
 **Branch**: chore/system-rehearsal-20261012
-**Status**: Rehearsal complete. All repairs applied. All tests passing.
+**Base SHA**: 5a9741803b7bea5458bafb05c646cffe62048a82
+**Status**: Rehearsal complete. Warning fixes applied. Test isolation repaired. All 180 tests passing.

@@ -1,7 +1,7 @@
 import hashlib
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -340,7 +340,7 @@ def _build_package(
         "package_schema_version": PACKAGE_SCHEMA_VERSION,
         "model_research_record_id": str(record.id),
         "model_version_id": str(version.id),
-        "generated_at": datetime.utcnow().isoformat(),
+        "generated_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
         "model_status": record.status.value,
         "evidence_status": evidence_status,
         "engine_version": ENGINE_VERSION,
@@ -573,7 +573,7 @@ def create_export(
             include_private_notes=body.include_private_notes,
             package_json=package,
             package_checksum=checksum,
-            completed_at=datetime.utcnow(),
+            completed_at=datetime.now(timezone.utc).replace(tzinfo=None),
         )
         db.add(export)
         db.flush()

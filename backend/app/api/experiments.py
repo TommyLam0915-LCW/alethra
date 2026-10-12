@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -54,7 +54,7 @@ def create_experiment(
         strategy_spec=spec_dict,
         assumptions={},
         config_hash=compute_config_hash(spec_dict),
-        user_approved_at=datetime.utcnow() if experiment_data.strategy_spec.user_approved_at else None,
+        user_approved_at=datetime.now(timezone.utc).replace(tzinfo=None) if experiment_data.strategy_spec.user_approved_at else None,
         created_by=current_user.id
     )
     db.add(version)
@@ -175,7 +175,7 @@ def update_experiment(
             assumptions={},
             change_reason=experiment_data.change_reason,
             config_hash=compute_config_hash(spec_dict),
-            user_approved_at=datetime.utcnow() if experiment_data.strategy_spec.user_approved_at else None,
+            user_approved_at=datetime.now(timezone.utc).replace(tzinfo=None) if experiment_data.strategy_spec.user_approved_at else None,
             created_by=current_user.id
         )
         db.add(new_version)
@@ -207,7 +207,7 @@ def update_experiment(
         ).first()
         if current_version and current_version.locked_at is None:
             from app.engine.backtest import ENGINE_VERSION
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
             current_version.locked_at = now
             current_version.locked_by = current_user.id
             current_version.strategy_config_hash = current_version.config_hash
@@ -218,9 +218,9 @@ def update_experiment(
             entity_type="experiment", entity_id=experiment.id,
             event_type="strategy_locked", actor_id=current_user.id,
             rules_locked=True,
-            payload={"locked_at": datetime.utcnow().isoformat()})
+            payload={"locked_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()})
 
-    experiment.updated_at = datetime.utcnow()
+    experiment.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
     db.commit()
     db.refresh(experiment)
     return experiment
