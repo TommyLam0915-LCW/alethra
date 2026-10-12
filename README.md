@@ -188,15 +188,20 @@ cd backend
 pytest tests/ -v
 ```
 
-Phase 1–6 包含 180 個測試：
-- 51 個試點運營與產品驗證測試（申請、權限、使用事件、成本記錄、支援日誌、假說、管理員儀表板、安全邊界）
-- 29 個引擎測試（3 種策略、交易分類帳、benchmark Model A 對齊、訊號-執行分離、年化指標防護、checksum、指標計算等）
-- 29 個 API 測試（品牌、示範資產、認證、實驗 CRUD、回測執行）
-- 23 個模型研究記錄測試（生命週期、版本、評估、個人記憶）
-- 16 個模型研究匯出測試（套件內容、憑證排除、授權、校驗、隱私）
-- 12 個紙上投資組合測試（訂單、持倉、決策、風險控制）
-- 10 個歷史重播模擬測試（鎖定、截止、快照、決策）
-- 10 個設定測試（生產環境安全、CORS）
+**Current (2026-10-12 harness repair update)**: 204 tests, all passing.
+- 51 個試點運營與產品驗證測試
+- 29 個引擎測試
+- 29 個 API 測試
+- 24 個模型研究記錄測試（含 1 個 UUID JSON boundary 回歸測試）
+- 19 個模型研究匯出測試（含 3 個 UUID JSON boundary 回歸測試）
+- 20 個接受度腳本邏輯回歸測試（2026-10-12 新增）
+- 12 個紙上投資組合測試
+- 10 個歷史重播模擬測試
+- 10 個設定測試
+
+**Phase 1–6 baseline (2026-10-11)**: 180 tests across the same categories above, excluding the 20 harness tests and 4 UUID regression tests added on 2026-10-12.
+
+API-scripted acceptance scenarios (A01–A12) run against a locally running service via `acceptance-test-execution.py`; 12/12 passing as of 2026-10-12. Human browser-based acceptance remains pending.
 
 ## 專案結構
 
@@ -213,7 +218,7 @@ Phase 1–6 包含 180 個測試：
 │   │   │   └── metrics.py     # 績效指標計算
 │   │   ├── data/         # 示範資料
 │   │   └── lib/          # 共用工具（brand）
-│   └── tests/            # 測試（180 個）
+│   └── tests/            # 測試（204 個）
 ├── frontend/
 │   └── src/
 │       ├── app/          # Next.js 頁面

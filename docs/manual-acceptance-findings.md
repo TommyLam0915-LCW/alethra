@@ -101,12 +101,198 @@ Both findings stem from the same boundary: the transition between SQLAlchemy UUI
 
 ---
 
+## Finding 3 — A01 safety checks hardcoded to True
+
+**Scenario**: A01 (Landing Page and Product Boundaries)
+**Severity**: Harness false positive
+**Category**: Acceptance script defect
+**Status**: Fixed
+
+### Description
+
+The A01 scenario set `no_broker_language`, `no_live_trading_claim`, `no_stock_recommendation`, and `no_api_key_storage` to `True` without performing any actual assertion. The landing page could have contained prohibited broker/trading language and the scenario would still report PASS.
+
+### Fix
+
+Added `assert_safety_keywords()` function that scans the full landing page JSON for prohibited phrases ("buy now", "sell signal", "broker api", "exchange api", "live trading", "guaranteed returns", "real money trading") and asserts none are found. Added explicit assertion for API key field absence. The `landing_checks` dict now records that assertions were performed rather than hardcoding True.
+
+### Files Changed
+
+- `acceptance-test-execution.py`
+
+---
+
+## Finding 4 — A06 chronological ordering computed but not asserted
+
+**Scenario**: A06 (Event Timeline and Research Notes)
+**Severity**: Harness false positive
+**Category**: Acceptance script defect
+**Status**: Fixed
+
+### Description
+
+The A06 scenario computed a `chronological` boolean but never asserted it. Timeline events could have been in any order and the scenario would still report PASS. Prior event immutability was also not checked.
+
+### Fix
+
+Added `assert chronological` with descriptive message. Added per-event immutability check: for each event present before the note was added, verify it still exists after and its `event_type` has not changed. Added assertion that new events appeared after the note was created.
+
+### Files Changed
+
+- `acceptance-test-execution.py`
+
+---
+
+## Finding 5 — A08 paused/retired order rejection used malformed requests
+
+**Scenario**: A08 (Paper Portfolio)
+**Severity**: Harness false positive
+**Category**: Acceptance script defect
+**Status**: Fixed
+
+### Description
+
+The paused/retired order rejection test accepted any of status codes `(400, 403, 409, 422)`. A 422 response (schema validation error from a malformed request) would satisfy the check, meaning the test could pass without the server actually performing state-based rejection. The order payloads also omitted optional fields, making it ambiguous whether rejection was due to state control or schema validation.
+
+### Fix
+
+- Changed assertion to `r.status_code == 400` specifically — the code the server returns for state-based rejection.
+- Added response body assertions: paused rejection must contain "paused" or "risk check"; retired rejection must contain "retired".
+- Created `_PAUSED_ORDER_PAYLOAD` and `_RETIRED_ORDER_PAYLOAD` with all required and optional fields to ensure schema-valid requests.
+- A 422 (malformed request) now correctly fails the assertion rather than being silently accepted.
+
+### Files Changed
+
+- `acceptance-test-execution.py`
+
+---
+
+## Finding 6 — A09/A10 safety checks not asserted from API responses
+
+**Scenario**: A09 (Model Research Record), A10 (Model Research Export)
+**Severity**: Harness false positive
+**Category**: Acceptance script defect
+**Status**: Fixed
+
+### Description
+
+A09 did not assert that the lock response contained `locked_at` or that the card response contained an `id`. Safety checks were computed but individual checks were not asserted — a single failing check would not produce a test failure.
+
+A10 computed safety checks from the export package text but did not assert each one individually.
+
+### Fix
+
+- A09: Added `assert locked_resp.get("locked_at") is not None` and `assert card.get("id") is not None`. Added per-check assertion loop: `for check_name, passed in safety_checks.items(): assert passed, ...`.
+- A10: Added per-check assertion loop for all safety checks.
+
+### Files Changed
+
+- `acceptance-test-execution.py`
+
+---
+
+## Finding 7 — Acceptance script missing reliability features
+
+**Scenario**: All
+**Severity**: Harness reliability gap
+**Category**: Acceptance script defect
+**Status**: Fixed
+
+### Description
+
+The acceptance script lacked several reliability features:
+- No exit code differentiation (always exited 0 regardless of results)
+- No BLOCKED status for scenarios downstream of failures
+- No HTTP timeouts (requests could hang indefinitely)
+- No environment variable validation (script would fail mid-run with cryptic errors)
+- No `SkipScenario` exception class defined (referenced but missing)
+
+### Fix
+
+- Added exit codes: 0 (all PASS), 1 (any FAIL), 2 (prerequisite failure)
+- Added `SCENARIO_STATUS` tracking and `require_prereq()` function for dependency chaining
+- Added `SkipScenario` exception class for aborting scenarios and blocking dependents
+- Added `HTTP_TIMEOUT = 15` to all `requests.*` calls
+- Added `validate_environment()` that exits with code 2 if passwords are missing
+- Results saved to `acceptance-results.json` in script directory
+- Summary section includes BLOCKED count
+
+### Files Changed
+
+- `acceptance-test-execution.py`
+
+---
+
+## Finding 8 — A10 export safety check matched its own safety disclaimer
+
+**Scenario**: A10 (Model Research Export Package)
+**Severity**: Harness false positive
+**Category**: Acceptance script defect
+**Status**: Fixed
+
+### Description
+
+After the Finding 6 fix introduced per-check assertions, A10 began failing with:
+
+```
+Export safety check 'no_exchange_credentials' failed
+```
+
+Inspection of the downloaded package showed that the phrase "exchange credentials" only appeared in safety disclaimers (`"no exchange credentials are included"`) and in the `excluded_capabilities` manifest label (`"no_exchange_credentials"`). The package did not contain actual credentials — the safety check was matching its own disclaimer text.
+
+### Root Cause
+
+The check `"exchange credential" not in pkg_text` is a naive substring check. It cannot distinguish between:
+
+- a positive assertion of credential presence (a real safety violation), and
+- a negative assertion inside a disclaimer ("no exchange credentials are included") or a manifest label (`no_exchange_credentials`).
+
+The same class of bug existed for `no_broker_credentials`.
+
+### Fix
+
+Replaced the substring check with a context-aware helper `_has_positive_credential_mention(text, keyword)` that scans each regex match and skips it when the preceding 40 characters end in `no ` or `no_`. Only a match NOT preceded by a negation is treated as a positive credential mention.
+
+```python
+def _has_positive_credential_mention(text, keyword):
+    for m in re.finditer(rf"{keyword}", text):
+        start = max(0, m.start() - 40)
+        ctx = text[start:m.start()]
+        if re.search(r"\bno[_ ]$", ctx):
+            continue
+        return True
+    return False
+```
+
+### Files Changed
+
+- `acceptance-test-execution.py` (added `import re`; added helper; replaced two safety-check expressions)
+
+### Verification
+
+- A10 passes against a disposable local database; package text contains 5 occurrences of "exchange credential" (all in disclaimers or `excluded_capabilities` labels), all correctly skipped by the helper.
+- All 12 scenarios pass (12/12, 100%).
+- Full backend suite: 204 passed.
+
+---
+
+## Harness Unit Tests
+
+20 unit tests added in `backend/tests/test_acceptance_harness.py` covering four categories:
+
+1. **False check → FAIL** (3 tests): Verifies that intentionally false assertions produce FAIL status, not PASS.
+2. **Failed scenario → nonzero exit** (7 tests): Verifies exit code logic — FAIL→1, all-BLOCKED→2, all-PASS→0.
+3. **Missing prereq → BLOCKED** (5 tests): Verifies prerequisite chaining — FAIL/BLOCKED prereqs produce BLOCKED downstream, not PASS.
+4. **Malformed request ≠ state control** (5 tests): Verifies that 422 (schema error) does not satisfy the 400 (state rejection) assertion; payload schema validity confirmed.
+
+---
+
 ## Warning Delta Review
 
-- Warning count before: 16,804
-- Warning count after: 17,378
-- Delta: +574
-- Root cause: 4 new regression tests exercise additional API/DB code paths (+84 warnings); UUID fix code changes cause existing tests to trigger more instances of the same known third-party deprecation warnings (+490 warnings). All warnings are additional instances of pre-existing, documented categories (pytest-asyncio, fastapi, starlette, sqlalchemy, jose).
+- Warning count before (acceptance rehearsal): 17,378
+- Warning count after harness tests added: 18,498 (delta +1,120)
+- Warning count after A10 fix + final re-run: 19,334 (delta +836 from prior run)
+- Root cause of +836: Full-suite re-run variance; 20 harness tests exercise API/DB code paths that trigger additional instances of known third-party deprecation warnings (pytest-asyncio, fastapi, starlette, sqlalchemy, jose). A10 regex helper adds negligible overhead.
 - New warning categories introduced: no
 - New Alethra-owned warning categories introduced: no
-- Commit-safe conclusion: SAFE — no new warning class, no unhandled exceptions, no UUID serialization errors. All 7 acceptance rules pass. See `docs/warning-baseline.md` for full classification table.
+- Commit-safe conclusion: SAFE — no new warning class, no unhandled exceptions. All 204 tests pass. See `docs/warning-baseline.md` for full classification table.

@@ -60,10 +60,10 @@ Build completed successfully.
 | Failed | 0 |
 | Blocked / unverified | 0 |
 | Pass rate | 100.0% |
-| Backend tests | 184 passed, 0 failed, 86% coverage |
-| Warning count | 17378 |
-| Bugs found & fixed | 2 |
-| Tests added | 4 (UUID JSON boundary regression tests) |
+| Backend tests | 204 passed, 0 failed, 86% coverage |
+| Warning count | 19334 |
+| Bugs found & fixed | 2 (application) + 6 (harness false positives) |
+| Tests added | 24 (4 UUID regression + 20 harness unit tests) |
 
 ---
 
@@ -288,10 +288,12 @@ Both bugs share the same root cause: the boundary between JSON storage (strings)
 ## Backend Test Suite
 
 ```
-184 passed, 0 failed (88.59s)
+204 passed, 0 failed (79.73s)
 ```
 
-No regressions from UUID bug fixes. All pre-existing tests continue to pass. Four new UUID JSON boundary regression tests added.
+No regressions from UUID bug fixes or acceptance harness repairs. All pre-existing tests continue to pass. New tests added:
+- 4 UUID JSON boundary regression tests (`TestUUIDJSONBoundaryRegression`)
+- 20 acceptance harness unit tests (`test_acceptance_harness.py`) — verify harness logic correctness (false checks → FAIL, exit codes, prerequisite blocking, state-control vs malformed-request distinction)
 
 ---
 
@@ -302,15 +304,21 @@ No regressions from UUID bug fixes. All pre-existing tests continue to pass. Fou
 3. **Manual scenarios blocked or unverified**: 0
 4. **Evidence references**:
    - `docs/system-rehearsal-manual-acceptance.md` (this document)
-   - `docs/manual-acceptance-findings.md` (bug details)
-   - `/tmp/acceptance-results.json` (machine-readable scenario results)
+   - `docs/manual-acceptance-findings.md` (bug details and harness false-positive repairs)
+   - `acceptance-results.json` (machine-readable scenario results)
    - `acceptance-test-execution.py` (reproducible test script)
-5. **Bugs found and fixed**: 2
-   - UUID serialization in `backend/app/api/model_research.py` (JSON column received UUID objects)
-   - UUID type mismatch in `backend/app/api/model_research_export.py` (string IDs passed to SQLAlchemy UUID column filter)
-6. **Tests added**: 4 — UUID JSON boundary regression tests
-7. **Full test-suite result after fixes**: 184 passed, 0 failed, 86% coverage, 17378 warnings
-8. **Current warning count**: 17378 (all from third-party deprecation warnings — Python 3.16 asyncio, SQLAlchemy 2.0, Pydantic V2, jose JWT utcnow)
+5. **Bugs found and fixed**: 2 application defects + 6 harness false positives
+   - Application: UUID serialization in `backend/app/api/model_research.py`
+   - Application: UUID type mismatch in `backend/app/api/model_research_export.py`
+   - Harness: A01 safety checks hardcoded to True (Finding 3)
+   - Harness: A06 chronological ordering not asserted (Finding 4)
+   - Harness: A08 paused/retired accepted malformed requests (Finding 5)
+   - Harness: A09/A10 safety checks not asserted from responses (Finding 6)
+   - Harness: Missing reliability features — exit codes, BLOCKED, timeouts (Finding 7)
+   - Harness: A10 credential-mention check matched its own safety disclaimer (Finding 8)
+6. **Tests added**: 24 — 4 UUID regression + 20 harness unit tests
+7. **Full test-suite result after fixes**: 204 passed, 0 failed, 86% coverage, 19334 warnings
+8. **Current warning count**: 19334 (all from third-party deprecation warnings — Python 3.16 asyncio, SQLAlchemy 2.0, Pydantic V2, jose JWT utcnow)
 9. **Current status recommendation**: "Research Prototype — Rehearsed Locally, Pending Manual Acceptance" — retained per specification; no Phase 2 features added, no live market data, no broker connections
 10. **Merge recommendation**: Ready for human review and merge
 11. **Next recommended development task**: Complete manual browser-based acceptance testing (human tester through frontend UI) to confirm all 12 scenarios pass end-to-end via the browser, not only via API script

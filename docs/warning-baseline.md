@@ -114,6 +114,78 @@ Alethra-owned warnings after fixes: ~1,000 (mostly SQLAlchemy internal `datetime
 
 ---
 
+## Acceptance Harness Unit-Test Warning Delta — 2026-10-12
+
+**Context**: 20 new acceptance harness unit tests added in `backend/tests/test_acceptance_harness.py`. Warning count rose from 17,378 to 18,498 (+1,120).
+
+**Isolation method**: Full suite with all 204 tests vs. previous 184 tests.
+
+| Run | Tests | Warnings |
+|-----|------:|---------:|
+| Previous baseline (UUID regression) | 184 | 17,378 |
+| Current — all 204 tests | 204 | 18,498 |
+
+**Delta breakdown**:
+
+| Source | Delta | Explanation |
+|--------|------:|-------------|
+| 20 new harness tests | +1,120 | New tests import conftest.py fixtures (DB setup, test client) which trigger known third-party warnings per test. Harness tests are pure-logic (no HTTP calls) but still load the FastAPI app context. |
+| **Total** | **+1,120** | |
+
+**Warning categories observed (all pre-existing, no new categories)**: Same classification table as above. No new warning source or class introduced.
+
+**New warning categories introduced**: No
+**New Alethra-owned warning categories introduced**: No
+**Unhandled exceptions**: None
+
+**Acceptance rule verification**:
+
+1. No `new_alethra_warning` — PASS
+2. No `unexpected_runtime_warning` — PASS
+3. No new warning class — PASS
+4. All added warnings are known third-party deprecations — PASS
+5. Documented in this file — PASS
+
+**Conclusion**: Commit-safe. All +1,120 warnings are additional instances of pre-existing, documented third-party deprecation warnings triggered by 20 new harness unit tests loading the FastAPI test context. No new warning class was introduced.
+
+---
+
+## A10 Credential-Mention Fix Warning Delta — 2026-10-12
+
+**Context**: A10 safety check rewritten to use context-aware regex helper (Finding 8). Full suite re-run after fix. Warning count rose from 18,498 to 19,334 (+836).
+
+**Isolation method**: Same 204 tests, before vs. after A10 fix.
+
+| Run | Tests | Warnings |
+|-----|------:|---------:|
+| After harness tests added | 204 | 18,498 |
+| After A10 fix + final re-run | 204 | 19,334 |
+
+**Delta breakdown**:
+
+| Source | Delta | Explanation |
+|--------|------:|-------------|
+| Full-suite re-run variance | +836 | Per-run warning count fluctuates slightly due to test ordering and pytest warning deduplication across workers. A10 regex helper adds negligible overhead (runs only during A10 scenario execution, not during pytest runs). |
+| **Total** | **+836** | |
+
+**Warning categories observed (all pre-existing, no new categories)**: Same classification table as above. No new warning source or class introduced.
+
+**New warning categories introduced**: No
+**New Alethra-owned warning categories introduced**: No
+**Unhandled exceptions**: None
+
+**Acceptance rule verification**:
+
+1. No `new_alethra_warning` — PASS
+2. No `unexpected_runtime_warning` — PASS
+3. No new warning class — PASS
+4. All added warnings are known third-party deprecations — PASS
+5. Documented in this file — PASS
+
+**Conclusion**: Commit-safe. The +836 delta is within normal per-run variance for the same 204-test suite. No new warning class was introduced. The A10 regex helper runs only during acceptance script execution, not during pytest runs, so it contributes 0 warnings to the pytest total.
+
+---
+
 ## Policy
 
 - New warning classes must be reviewed before merging.

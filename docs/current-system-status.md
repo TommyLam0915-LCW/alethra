@@ -79,7 +79,7 @@ Alethra is an **Investment Research Workspace** — not a broker, not an advisor
 | Frontend | Next.js 14, TypeScript, React |
 | Database | PostgreSQL (SQLite for tests) |
 | Auth | JWT (HS256) |
-| Testing | pytest, 184 tests, 86% coverage |
+| Testing | pytest, 204 tests, 86% coverage (2026-10-12) |
 
 ---
 
@@ -122,19 +122,26 @@ Alethra is an **Investment Research Workspace** — not a broker, not an advisor
 
 ## Test Summary
 
-- **Total tests**: 184
-- **Passed**: 184
+**Current (2026-10-12 harness repair update)**:
+
+- **Total tests**: 204
+- **Passed**: 204
 - **Failed**: 0
-- **Coverage**: 86%
+- **Coverage**: 86% (re-verified 2026-10-12)
 - **Per-file counts** (from `pytest --collect-only -q`):
+  - test_acceptance_harness.py: 20 *(new 2026-10-12)*
   - test_pilot.py: 51
   - test_engine.py: 29
   - test_api.py: 29
-  - test_model_research.py: 24
-  - test_model_research_export.py: 19
+  - test_model_research.py: 24 *(includes 1 UUID JSON boundary regression test)*
+  - test_model_research_export.py: 19 *(includes 3 UUID JSON boundary regression tests)*
   - test_paper_portfolio.py: 12
   - test_simulation.py: 10
   - test_config.py: 10
+
+**Historical (2026-10-12 earlier commit `2850198`)**: 184 passed, 0 failed — 180 from Phase 1–6 baseline plus 4 UUID JSON boundary regression tests.
+
+**Historical (2026-10-11 Phase 1–6 baseline)**: 180 passed, 0 failed.
 
 ---
 
@@ -152,9 +159,11 @@ Alethra is an **Investment Research Workspace** — not a broker, not an advisor
 
 ## Manual Acceptance Status
 
-**Pending** — Manual end-to-end acceptance testing has NOT been performed.
+**API-scripted acceptance (2026-10-12)**: 12/12 scenarios (A01–A12) pass via `acceptance-test-execution.py` against a locally running service (disposable SQLite database). See `docs/system-rehearsal-manual-acceptance.md` and `docs/acceptance-harness-results.md`.
 
-See `docs/system-rehearsal-manual-acceptance.md` for the full checklist.
+**Browser-based E2E acceptance**: Pending — a human tester has not yet walked through the 12 scenarios end-to-end in a browser against the frontend UI.
+
+**PostgreSQL acceptance**: Pending — all API-scripted acceptance to date has used SQLite. Running the script against a fresh PostgreSQL instance remains a pre-merge verification step.
 
 ---
 
