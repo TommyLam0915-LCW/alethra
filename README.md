@@ -42,7 +42,8 @@
 
 ### 後續階段
 
-- Phase 2: AI 澄清助手、策略視覺化改善
+- Phase 2A: ✅ 確定性模擬研究助手（mock research drafts）
+- Phase 2B: AI 澄清助手、策略視覺化改善（未開始）
 - Phase 3A: ✅ 鎖定與歷史重播模擬
 - Phase 3B: ✅ 紙上投資組合
 - Phase 4: ✅ 模型研究記錄與模型卡
@@ -181,6 +182,18 @@ Phase 1 包含 3 個示範資產：
 - `GET /api/v1/pilot/admin/dashboard` — 管理員驗證儀表板（管理員）
 - `GET /api/v1/pilot/admin/hypotheses-dashboard` — 假說儀表板（管理員）
 
+### 研究草稿（`/api/v1/research-drafts/`）— Phase 2A（模擬助手，非 AI）
+- `POST /api/v1/research-drafts/` — 建立研究草稿
+- `GET /api/v1/research-drafts/` — 列出研究草稿
+- `GET /api/v1/research-drafts/{id}` — 草稿詳情
+- `PATCH /api/v1/research-drafts/{id}` — 更新草稿
+- `DELETE /api/v1/research-drafts/{id}` — 刪除草稿
+- `GET /api/v1/research-drafts/{id}/revisions` — 草稿版本歷史
+- `POST /api/v1/research-drafts/{id}/questions` — 產生助手問題（確定性模擬）
+- `POST /api/v1/research-drafts/{id}/answers` — 提交問題答案
+- `POST /api/v1/research-drafts/{id}/approve` — 接受或拒絕草稿
+- `GET /api/v1/research-drafts/{id}/audit-events` — 草稿審計事件
+
 ## 測試
 
 ```bash
@@ -188,18 +201,19 @@ cd backend
 pytest tests/ -v
 ```
 
-**Current (2026-10-12 harness repair update)**: 204 tests, all passing.
+**Current (2026-10-12 Phase 2A review corrections)**: 253 tests, all passing.
+- 49 個研究草稿測試（Phase 2A 後端 + 21 個審查修正回歸測試）
 - 51 個試點運營與產品驗證測試
 - 29 個引擎測試
 - 29 個 API 測試
 - 24 個模型研究記錄測試（含 1 個 UUID JSON boundary 回歸測試）
 - 19 個模型研究匯出測試（含 3 個 UUID JSON boundary 回歸測試）
-- 20 個接受度腳本邏輯回歸測試（2026-10-12 新增）
+- 20 個接受度腳本邏輯回歸測試
 - 12 個紙上投資組合測試
 - 10 個歷史重播模擬測試
 - 10 個設定測試
 
-**Phase 1–6 baseline (2026-10-11)**: 180 tests across the same categories above, excluding the 20 harness tests and 4 UUID regression tests added on 2026-10-12.
+**Phase 1–6 baseline (2026-10-12 harness repair)**: 204 tests across the same categories above, excluding the 49 Phase 2A tests.
 
 API-scripted acceptance scenarios (A01–A12) run against a locally running service via `acceptance-test-execution.py`; 12/12 passing as of 2026-10-12. Human browser-based acceptance remains pending.
 
@@ -217,8 +231,8 @@ API-scripted acceptance scenarios (A01–A12) run against a locally running serv
 │   │   │   ├── strategies.py  # 3 種策略模板
 │   │   │   └── metrics.py     # 績效指標計算
 │   │   ├── data/         # 示範資料
-│   │   └── lib/          # 共用工具（brand）
-│   └── tests/            # 測試（204 個）
+│   │   └── lib/          # 共用工具（brand, mock research assistant）
+│   └── tests/            # 測試（253 個）
 ├── frontend/
 │   └── src/
 │       ├── app/          # Next.js 頁面
@@ -241,4 +255,4 @@ API-scripted acceptance scenarios (A01–A12) run against a locally running serv
 
 ---
 
-**最後更新**: 2026-10-11
+**最後更新**: 2026-10-12

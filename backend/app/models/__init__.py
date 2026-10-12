@@ -57,6 +57,12 @@ from app.models.pilot import (
     ProductHypothesis,
     HypothesisStatus,
 )
+from app.models.research_drafts import (
+    ResearchDraft,
+    DraftStatus,
+    ResearchDraftRevision,
+    ResearchDraftAuditEvent,
+)
 
 __all__ = [
     "User",
@@ -123,4 +129,8 @@ __all__ = [
     "ResolutionStatus",
     "ProductHypothesis",
     "HypothesisStatus",
+    "ResearchDraft",
+    "DraftStatus",
+    "ResearchDraftRevision",
+    "ResearchDraftAuditEvent",
 ]
