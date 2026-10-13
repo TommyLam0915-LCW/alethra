@@ -154,13 +154,13 @@ email-validator==2.1.1
 All tests pass, including 5 new tests for secure field transfer:
 
 **Backend API tests** (not frontend UI tests):
-- `test_draft_must_be_accepted_for_field_transfer` — verifies API rejects non-accepted drafts
-- `test_accepted_draft_can_be_fetched_for_transfer` — verifies API returns accepted draft with all fields via authenticated request
-- `test_zero_values_preserved_in_draft` — verifies API preserves zero commission/slippage (not treated as missing)
-- `test_authentication_required_for_draft_fetch` — verifies API returns 403 for missing credentials
-- `test_owner_only_access_for_field_transfer` — verifies API returns 403 for non-owner access
+- `test_draft_must_be_accepted_for_field_transfer` — creates a draft, asserts its status is `draft`, fetches it via authenticated GET, and asserts HTTP 200 with status `draft` and hypothesis intact. Despite its name, it does not exercise a transfer action or assert a rejection; the accepted-only gate for the transfer flow lives in the frontend (verified by E2E scenario H).
+- `test_accepted_draft_can_be_fetched_for_transfer` — creates a draft, accepts it via the approve endpoint, then asserts an authenticated GET returns status `accepted` with title, hypothesis, initial_cash, commission_rate, and slippage_rate intact
+- `test_zero_values_preserved_in_draft` — creates a draft with commission_rate `0` and slippage_rate `0` and asserts both are returned as `0` (not blanked or defaulted)
+- `test_authentication_required_for_draft_fetch` — asserts GET without an auth header returns 403, and with a valid token returns 200
+- `test_owner_only_access_for_field_transfer` — asserts a second authenticated user fetching another user's draft receives 403, while the owner receives 200
 
-**Note**: These tests verify backend API behavior. Frontend UI behavior (preview panel, confirmation dialog, field population) requires manual browser testing.
+**Note**: These tests verify backend API behavior. Frontend UI behavior (preview panel, confirmation dialog, field population) is verified by the Playwright E2E suite (docs/pr3-playwright-acceptance-report.md).
 
 ### Frontend Build
 ```
@@ -188,7 +188,7 @@ git diff --check: no errors
 
 ✅ No private content in URLs  
 ✅ Authentication required for draft fetch (403 for missing credentials)  
-✅ Draft status validation (must be `accepted`)  
+✅ Draft status gate for transfer (must be `accepted`) — enforced in the frontend transfer flow, verified by E2E scenario H
 ✅ Owner-only access enforced (403 for non-owners)  
 ✅ Explicit user confirmation required  
 ✅ Cancel aborts transfer cleanly  
@@ -206,8 +206,7 @@ Completed:
 5. ✅ **Documentation** — this report
 
 Pending:
-6. ⏳ **Browser acceptance** — manual testing required (scenarios A-N)
-7. ⏳ **Final handoff** — after browser acceptance confirmed
+6. ✅ **Browser acceptance** — completed 2026-10-13 via local Playwright automation (14/14 scenarios pass; see docs/pr3-playwright-acceptance-report.md)
 
 ---
 
@@ -229,4 +228,4 @@ Pending:
 
 ## Status
 
-**Backend and frontend verification complete. Browser acceptance testing pending.**
+**Backend and frontend verification complete. Browser acceptance automated and passing (14/14 via Playwright, 2026-10-13).**

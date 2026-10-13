@@ -14,7 +14,7 @@ Successfully completed all 8 steps of the PR #3 task specification:
 1. ✅ Inspected existing setup
 2. ✅ Diagnosed PostgreSQL authentication issue
 3. ✅ Fixed critical security vulnerability (private content in URLs)
-4. ✅ Completed browser acceptance testing (API verification)
+4. ✅ Verified secure transfer workflow via API tests (browser acceptance completed 2026-10-13 via Playwright — see Browser Acceptance Testing below)
 5. ✅ Added focused regression tests (5 new tests)
 6. ✅ Ran full verification suite (258 tests pass)
 7. ✅ Updated documentation
@@ -81,7 +81,7 @@ Backend connected to wrong instance, causing authentication failures.
 
 Added 5 new tests in `backend/tests/test_research_drafts.py::TestSecureFieldTransfer`:
 
-1. `test_draft_must_be_accepted_for_field_transfer` — verifies draft status validation
+1. `test_draft_must_be_accepted_for_field_transfer` — verifies a draft-status draft is fetchable by its owner with status `draft` intact (does not assert a transfer rejection; the accepted-only gate is frontend-side, verified by E2E scenario H)
 2. `test_accepted_draft_can_be_fetched_for_transfer` — verifies authenticated API fetch with all required fields
 3. `test_zero_values_preserved_in_draft` — verifies zero commission/slippage preserved
 4. `test_authentication_required_for_draft_fetch` — verifies 403 for missing credentials
@@ -146,7 +146,7 @@ No trailing whitespace or blank lines at EOF.
 
 ## Browser Acceptance Testing
 
-**Status**: ⚠️ **PENDING** — Browser automation unavailable in this environment.
+**Status**: ✅ **COMPLETED** (2026-10-13, after this report was first written) — 14/14 scenarios pass via local Playwright automation (Chromium 156, 48.5s). Full per-scenario results: `docs/pr3-playwright-acceptance-report.md`. The original "pending" status below is retained for history.
 
 **What was verified via API tests**:
 - ✅ API endpoints work correctly via test client
@@ -156,18 +156,18 @@ No trailing whitespace or blank lines at EOF.
 - ✅ Zero values preserved
 - ✅ Owner-only access enforced
 
-**What requires manual browser testing**:
-- ⏳ UI rendering and user experience
-- ⏳ Field preview panel display
-- ⏳ Confirmation dialog behavior
-- ⏳ Banner showing applied fields
-- ⏳ Form field population after confirmation
-- ⏳ Cancel behavior
-- ⏳ Complete workflow scenarios A-N
+**What was later verified via Playwright (E2E)**:
+- ✅ UI rendering and workflow (navigation, draft list/detail, mock disclosure)
+- ✅ Questions and answers persistence; invalid input handling
+- ✅ Revision and audit history UI
+- ✅ Accepted drafts read-only; rejected drafts cannot be applied
+- ✅ Selected-field transfer, preview, confirmation, cancellation
+- ✅ URL privacy (draft_id + fields only); zero values preserved in transfer
+- ✅ Cross-user access denied; deletion cancellation
 
 **Browser automation attempt**: In-app browser viewport unavailable (0x0, visibilityState=hidden). Structural inspection via snapshots succeeded, but interactive testing (click, fill, navigate) requires a visible browser surface.
 
-**Recommendation**: Perform manual browser testing after merge to verify UI/UX. Keep PR #3 in Draft status until browser acceptance is confirmed.
+**Recommendation**: Human review of the automated E2E suite and code changes. Keep PR #3 in Draft until the owner separately requests "Mark ready for review".
 
 ---
 
@@ -193,7 +193,7 @@ All constraints from task specification honored:
 
 ## Known Limitations
 
-1. **Browser testing not automated**: API verification complete, but UI/UX requires manual testing
+1. **Browser testing now automated**: Playwright E2E suite covers the draft workflow (14/14 pass); visual regression, performance, and accessibility testing remain out of scope
 2. **HTTPBearer returns 403 for missing auth**: FastAPI default behavior (not 401). Tests updated to match.
 3. **Owner check returns 403 not 404**: Security best practice (prevents information leakage). Tests updated.
 
@@ -245,11 +245,11 @@ PR #3 successfully resolves two critical blockers:
 1. PostgreSQL port conflict preventing local development
 2. Security vulnerability exposing private research content
 
-Backend verification complete. Frontend build verified. Browser acceptance testing pending.
+Backend verification complete. Frontend build verified. Browser acceptance automated and passing (14/14 via Playwright).
 
-**Status**: ⚠️ **READY FOR REVIEW — BROWSER ACCEPTANCE PENDING**
+**Status**: ✅ **READY FOR HUMAN REVIEW** — PR #3 remains in Draft until the owner separately requests "Mark ready for review".
 
-**Next action**: Perform manual browser testing to verify UI/UX, then mark PR #3 as ready for review.
+**Next action**: Human code review of the PR; merge only after owner approval.
 
 ---
 
@@ -278,6 +278,8 @@ class TestSecureFieldTransfer:
 ```
 
 All 5 tests pass.
+
+**Note on test 1**: `test_draft_must_be_accepted_for_field_transfer` is named for its intent, but its assertions only verify that a draft-status draft is fetchable by its owner with status `draft` intact — it does not exercise a transfer action or assert a rejection. The accepted-only gate for the transfer flow is enforced in the frontend and verified by E2E scenario H (Rejection Prevention).
 
 ---
 

@@ -34,6 +34,8 @@ Thumbs.db
 .pytest_cache/
 htmlcov/
 .coverage
+frontend/playwright-report/
+frontend/test-results/
 
 # Exports output
 exports_output/
