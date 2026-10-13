@@ -1,7 +1,7 @@
 'use client';
 
-import { useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { useState, useEffect, useMemo, Suspense } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { brand } from '@/lib/brand';
 
@@ -12,8 +12,9 @@ const TEMPLATES = [
   { value: 'price_change_fixed_hold', label: 'Price Change', labelZh: '跌幅定持' },
 ];
 
-export default function NewExperimentPage() {
+function NewExperimentForm() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [title, setTitle] = useState('');
   const [hypothesis, setHypothesis] = useState('');
   const [templateType, setTemplateType] = useState('buy_and_hold');
@@ -34,6 +35,39 @@ export default function NewExperimentPage() {
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+
+  const prefilledFields = useMemo(() => {
+    const fields: string[] = [];
+    if (searchParams.get('title')) fields.push('標題');
+    if (searchParams.get('hypothesis')) fields.push('研究假設');
+    if (searchParams.get('templateType')) fields.push('策略模板');
+    if (searchParams.get('assetId')) fields.push('研究標的');
+    if (searchParams.get('benchmarkId')) fields.push('基準標的');
+    if (searchParams.get('initialCash')) fields.push('初始資金');
+    if (searchParams.get('commissionRate')) fields.push('手續費率');
+    if (searchParams.get('slippageRate')) fields.push('滑價率');
+    return fields;
+  }, [searchParams]);
+
+  useEffect(() => {
+    const t = searchParams.get('title');
+    const h = searchParams.get('hypothesis');
+    const tpl = searchParams.get('templateType');
+    const asset = searchParams.get('assetId');
+    const bench = searchParams.get('benchmarkId');
+    const cash = searchParams.get('initialCash');
+    const comm = searchParams.get('commissionRate');
+    const slip = searchParams.get('slippageRate');
+
+    if (t) setTitle(t);
+    if (h) setHypothesis(h);
+    if (tpl) setTemplateType(tpl);
+    if (asset) setAssetId(asset);
+    if (bench) setBenchmarkId(bench);
+    if (cash) setInitialCash(cash);
+    if (comm) setCommissionRate(comm);
+    if (slip) setSlippageRate(slip);
+  }, [searchParams]);
 
   const buildSignalParameters = () => {
     if (templateType === 'sma_crossover') {
@@ -95,6 +129,13 @@ export default function NewExperimentPage() {
       <div className="disclaimer">
         <strong>提醒：</strong>本系統使用示範資料進行回測，結果僅供研究參考，不代表真實市場表現。
       </div>
+
+      {prefilledFields.length > 0 && (
+        <div className="alert alert-info" style={{ marginBottom: '20px', fontSize: '13px' }}>
+          <strong>已從研究草稿預填：</strong>{prefilledFields.join('、')}。
+          請確認以下欄位，並補完開始日期、結束日期等執行參數後再建立實驗。
+        </div>
+      )}
 
       {error && <div className="alert alert-warning">{error}</div>}
 
@@ -309,5 +350,13 @@ export default function NewExperimentPage() {
         </form>
       </div>
     </div>
+  );
+}
+
+export default function NewExperimentPage() {
+  return (
+    <Suspense fallback={<div className="container" style={{ paddingTop: '40px' }}>載入中...</div>}>
+      <NewExperimentForm />
+    </Suspense>
   );
 }
