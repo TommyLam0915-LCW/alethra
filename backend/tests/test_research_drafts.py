@@ -1066,3 +1066,161 @@ class TestDeletionCascade:
             f"/api/v1/research-drafts/{draft_id}/audit-events", headers=auth_headers
         )
         assert events_after.status_code == 404
+
+
+class TestSecureFieldTransfer:
+    """Test secure field transfer workflow for PR #3."""
+
+    def test_draft_must_be_accepted_for_field_transfer(self, client, auth_headers):
+        """Test that only accepted drafts can be used for field transfer."""
+        create_resp = client.post(
+            "/api/v1/research-drafts/",
+            json={
+                "title": "Draft Status Test",
+                "hypothesis": "Sensitive hypothesis text",
+                "strategy_template": "sma_crossover",
+                "asset_symbol": "DEMO-ALPHA",
+            },
+            headers=auth_headers,
+        )
+        draft_id = create_resp.json()["id"]
+        assert create_resp.json()["status"] == "draft"
+
+        get_resp = client.get(f"/api/v1/research-drafts/{draft_id}", headers=auth_headers)
+        assert get_resp.status_code == 200
+        assert get_resp.json()["status"] == "draft"
+        assert get_resp.json()["hypothesis"] == "Sensitive hypothesis text"
+
+    def test_accepted_draft_can_be_fetched_for_transfer(self, client, auth_headers):
+        """Test that accepted drafts can be fetched via authenticated API."""
+        create_resp = client.post(
+            "/api/v1/research-drafts/",
+            json={
+                "title": "Accepted Draft",
+                "hypothesis": "Test hypothesis",
+                "falsification_criteria": "Test falsification",
+                "strategy_template": "buy_and_hold",
+                "asset_symbol": "DEMO-ALPHA",
+                "initial_cash": "50000",
+                "commission_rate": "0.001",
+                "slippage_rate": "0.0005",
+            },
+            headers=auth_headers,
+        )
+        draft_id = create_resp.json()["id"]
+
+        approve_resp = client.post(
+            f"/api/v1/research-drafts/{draft_id}/approve",
+            json={"action": "accept", "notes": "Approved"},
+            headers=auth_headers,
+        )
+        assert approve_resp.status_code == 200
+        assert approve_resp.json()["status"] == "accepted"
+
+        get_resp = client.get(f"/api/v1/research-drafts/{draft_id}", headers=auth_headers)
+        assert get_resp.status_code == 200
+        data = get_resp.json()
+        assert data["status"] == "accepted"
+        assert data["title"] == "Accepted Draft"
+        assert data["hypothesis"] == "Test hypothesis"
+        assert data["initial_cash"] == "50000"
+        assert data["commission_rate"] == "0.001"
+        assert data["slippage_rate"] == "0.0005"
+
+    def test_zero_values_preserved_in_draft(self, client, auth_headers):
+        """Test that zero commission and slippage rates are preserved."""
+        create_resp = client.post(
+            "/api/v1/research-drafts/",
+            json={
+                "title": "Zero Values Test",
+                "hypothesis": "Test",
+                "commission_rate": "0",
+                "slippage_rate": "0",
+            },
+            headers=auth_headers,
+        )
+        draft_id = create_resp.json()["id"]
+
+        get_resp = client.get(f"/api/v1/research-drafts/{draft_id}", headers=auth_headers)
+        assert get_resp.status_code == 200
+        data = get_resp.json()
+        assert data["commission_rate"] == "0"
+        assert data["slippage_rate"] == "0"
+
+    def test_authentication_required_for_draft_fetch(self, client):
+        """Test that authentication is required to fetch draft data."""
+        create_resp = client.post(
+            "/api/auth/register",
+            json={
+                "email": "authtest@test.com",
+                "password": "pass1234",
+                "display_name": "Auth Test",
+                "user_type": "individual",
+            },
+        )
+        user_id = create_resp.json()["id"]
+
+        login_resp = client.post(
+            "/api/auth/login",
+            json={"email": "authtest@test.com", "password": "pass1234"},
+        )
+        token = login_resp.json()["access_token"]
+        auth_headers = {"Authorization": f"Bearer {token}"}
+
+        draft_resp = client.post(
+            "/api/v1/research-drafts/",
+            json={"title": "Auth Test Draft", "hypothesis": "Test"},
+            headers=auth_headers,
+        )
+        draft_id = draft_resp.json()["id"]
+
+        unauth_resp = client.get(f"/api/v1/research-drafts/{draft_id}")
+        assert unauth_resp.status_code == 403
+
+        auth_resp = client.get(f"/api/v1/research-drafts/{draft_id}", headers=auth_headers)
+        assert auth_resp.status_code == 200
+
+    def test_owner_only_access_for_field_transfer(self, client):
+        """Test that only the draft owner can fetch it for field transfer."""
+        user1_resp = client.post(
+            "/api/auth/register",
+            json={
+                "email": "owner@test.com",
+                "password": "pass1234",
+                "display_name": "Owner",
+                "user_type": "individual",
+            },
+        )
+        user1_login = client.post(
+            "/api/auth/login",
+            json={"email": "owner@test.com", "password": "pass1234"},
+        )
+        user1_headers = {"Authorization": f"Bearer {user1_login.json()['access_token']}"}
+
+        user2_resp = client.post(
+            "/api/auth/register",
+            json={
+                "email": "other@test.com",
+                "password": "pass1234",
+                "display_name": "Other",
+                "user_type": "individual",
+            },
+        )
+        user2_login = client.post(
+            "/api/auth/login",
+            json={"email": "other@test.com", "password": "pass1234"},
+        )
+        user2_headers = {"Authorization": f"Bearer {user2_login.json()['access_token']}"}
+
+        draft_resp = client.post(
+            "/api/v1/research-drafts/",
+            json={"title": "Owner Draft", "hypothesis": "Private"},
+            headers=user1_headers,
+        )
+        draft_id = draft_resp.json()["id"]
+
+        owner_resp = client.get(f"/api/v1/research-drafts/{draft_id}", headers=user1_headers)
+        assert owner_resp.status_code == 200
+
+        other_resp = client.get(f"/api/v1/research-drafts/{draft_id}", headers=user2_headers)
+        assert other_resp.status_code == 403

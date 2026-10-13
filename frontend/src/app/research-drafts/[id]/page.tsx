@@ -240,24 +240,13 @@ export default function ResearchDraftDetailPage() {
 
   const handleApplySelectedFields = () => {
     if (!draft) return;
-    const params = new URLSearchParams();
-    const FIELD_TO_FORM: Record<string, string> = {
-      title: 'title',
-      hypothesis: 'hypothesis',
-      strategy_template: 'templateType',
-      asset_symbol: 'assetId',
-      benchmark_symbol: 'benchmarkId',
-      initial_cash: 'initialCash',
-      commission_rate: 'commissionRate',
-      slippage_rate: 'slippageRate',
-    };
-    for (const field of Array.from(selectedFields)) {
-      const formField = FIELD_TO_FORM[field];
-      const value = (draft as any)[field];
-      if (formField && value) {
-        params.set(formField, String(value));
-      }
+    if (draft.status !== 'accepted') {
+      setError('只有已接受的草稿才能套用欄位');
+      return;
     }
+    const params = new URLSearchParams();
+    params.set('draft_id', draft.id);
+    params.set('fields', Array.from(selectedFields).join(','));
     router.push(`/experiments/new?${params.toString()}`);
   };
 
