@@ -44,7 +44,7 @@ Coverage includes:
 - Unit tests for all 10 rules (RC-001 – RC-010)
 - API endpoint tests (auth, ownership, no runs, completed run, determinism)
 - `completed_at_available` field tests (null when no run, true when timestamp present, false when missing)
-- RC-004 extended coverage: empty spec, missing commission/slippage, null, negative, boolean, NaN, Inf, string costs (14 tests total)
+- RC-004 extended coverage: empty spec, missing commission/slippage, null, negative, boolean, NaN, Inf, string costs (13 tests total)
 - RC-009 per-component coverage: commission-only zero, slippage-only zero, both zero with partial warnings, missing/invalid costs (12 tests total)
 - Explanation tests (all rules × all statuses)
 
