@@ -63,6 +63,27 @@ interface DiffEntry {
   new_value: any;
 }
 
+interface CheckResult {
+  rule_id: string;
+  rule_version: string;
+  status: string;
+  evidence: Record<string, any>;
+  explanation: string;
+  limitations: string[];
+}
+
+interface MethodReview {
+  rule_set_version: string;
+  experiment_id: string;
+  version_id: string | null;
+  run_id: string | null;
+  run_selection: string;
+  config_hash_match: boolean | null;
+  completed_at_available: boolean | null;
+  generated_at: string;
+  checks: CheckResult[];
+}
+
 const EVENT_LABELS: Record<string, string> = {
   experiment_created: '實驗建立',
   hypothesis_updated: '假設更新',
@@ -98,6 +119,8 @@ export default function ExperimentDetailPage() {
   const [showVersions, setShowVersions] = useState(false);
   const [diffResult, setDiffResult] = useState<{ diffs: DiffEntry[]; version_a_number: number; version_b_number: number } | null>(null);
   const [diffLoading, setDiffLoading] = useState(false);
+  const [methodReview, setMethodReview] = useState<MethodReview | null>(null);
+  const [methodReviewLoading, setMethodReviewLoading] = useState(false);
 
   useEffect(() => {
     const token = localStorage.getItem('token');
@@ -110,18 +133,20 @@ export default function ExperimentDetailPage() {
 
   const loadData = async () => {
     try {
-      const [exp, runsData, versionsData, timelineData, notesData] = await Promise.all([
+      const [exp, runsData, versionsData, timelineData, notesData, reviewData] = await Promise.all([
         api.experiments.get(experimentId),
         api.runs.list(experimentId),
         api.experiments.versions(experimentId),
         api.timeline.get(experimentId),
         api.notes.list(experimentId),
+        api.experiments.methodReview(experimentId).catch(() => null),
       ]);
       setExperiment(exp);
       setRuns(runsData);
       setVersions(versionsData);
       setTimeline(timelineData);
       setNotes(notesData);
+      setMethodReview(reviewData);
     } catch (err) {
       setError('載入失敗');
     } finally {
@@ -191,6 +216,25 @@ export default function ExperimentDetailPage() {
     } catch (err: any) {
       setError(err.message || '匯出失敗');
     }
+  };
+
+  const handleRefreshReview = async () => {
+    setMethodReviewLoading(true);
+    try {
+      const reviewData = await api.experiments.methodReview(experimentId);
+      setMethodReview(reviewData);
+    } catch (err: any) {
+      setError(err.message || '方法審查載入失敗');
+    } finally {
+      setMethodReviewLoading(false);
+    }
+  };
+
+  const STATUS_STYLE: Record<string, { bg: string; color: string; label: string }> = {
+    PASS: { bg: '#d4edda', color: '#155724', label: '通過' },
+    WARNING: { bg: '#fff3cd', color: '#856404', label: '警告' },
+    INSUFFICIENT_INFORMATION: { bg: '#e2e3e5', color: '#383d49', label: '資訊不足' },
+    NOT_APPLICABLE: { bg: '#f8f9fa', color: '#6c757d', label: '不適用' },
   };
 
   if (loading) {
@@ -333,6 +377,95 @@ export default function ExperimentDetailPage() {
 
             <div style={{ marginTop: '16px', padding: '12px', backgroundColor: '#fff3cd', borderRadius: '6px', fontSize: '14px' }}>
               <strong>提醒：</strong>以上結果基於歷史示範資料，不代表未來績效。本系統是研究工具，不構成投資建議。
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Method Review */}
+      <div className="card" style={{ marginBottom: '20px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+          <h2>方法審查</h2>
+          <button
+            onClick={handleRefreshReview}
+            className="btn"
+            style={{ backgroundColor: '#eaeaea', fontSize: '13px' }}
+            disabled={methodReviewLoading}
+          >
+            {methodReviewLoading ? '重新整理中...' : '重新整理'}
+          </button>
+        </div>
+
+        {!methodReview ? (
+          <p style={{ color: '#666', textAlign: 'center', padding: '20px' }}>
+            方法審查暫時無法載入
+          </p>
+        ) : (
+          <div>
+            <div style={{ display: 'flex', gap: '16px', fontSize: '12px', color: '#666', marginBottom: '16px', flexWrap: 'wrap' }}>
+              <span>規則集 v{methodReview.rule_set_version}</span>
+              {methodReview.run_id && (
+                <span>已審查執行: {methodReview.run_id.slice(0, 8)}...</span>
+              )}
+              {methodReview.version_id && (
+                <span>版本: {methodReview.version_id.slice(0, 8)}...</span>
+              )}
+              {!methodReview.run_id && (
+                <span style={{ color: '#856404' }}>尚無已完成的回測執行</span>
+              )}
+              <span>產生於 {new Date(methodReview.generated_at).toLocaleString('zh-Hant')}</span>
+            </div>
+
+            <div style={{ padding: '10px 12px', backgroundColor: '#fffbeb', borderRadius: '6px', fontSize: '12px', color: '#856404', marginBottom: '12px', lineHeight: '1.6' }}>
+              <strong>資料來源說明：</strong>RC-001 及 RC-002 檢查的是實驗目前的文字內容（假說、原始想法、否決條件）。這些欄位可隨時編輯，因此審查的文字可能與回測執行時不同。這並非歷史文字快照。
+            </div>
+
+            {methodReview.completed_at_available === false && (
+              <div style={{ padding: '10px 12px', backgroundColor: '#fff3cd', borderRadius: '6px', fontSize: '12px', color: '#856404', marginBottom: '12px', lineHeight: '1.6' }}>
+                <strong>時間戳提醒：</strong>所選的回測執行缺少完成時間戳記。執行排序依據 ID 而非時間先後，因此「最新」不代表時間上最近。
+              </div>
+            )}
+
+            <div style={{ display: 'grid', gap: '12px' }}>
+              {methodReview.checks.map((check) => {
+                const style = STATUS_STYLE[check.status] || STATUS_STYLE.INSUFFICIENT_INFORMATION;
+                return (
+                  <div key={check.rule_id} style={{
+                    padding: '16px',
+                    backgroundColor: '#fafafa',
+                    borderRadius: '6px',
+                    borderLeft: `4px solid ${style.color}`,
+                  }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                      <span style={{ fontWeight: '600', fontSize: '14px' }}>{check.rule_id}</span>
+                      <span style={{
+                        padding: '2px 10px',
+                        borderRadius: '12px',
+                        fontSize: '12px',
+                        fontWeight: '500',
+                        backgroundColor: style.bg,
+                        color: style.color,
+                      }}>
+                        {style.label}
+                      </span>
+                    </div>
+                    <div style={{ fontSize: '13px', color: '#333', whiteSpace: 'pre-line', lineHeight: '1.6' }}>
+                      {check.explanation}
+                    </div>
+                    {check.limitations.length > 0 && (
+                      <div style={{ marginTop: '8px', fontSize: '12px', color: '#888' }}>
+                        {check.limitations.map((lim, i) => (
+                          <div key={i}>• {lim}</div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+
+            <div style={{ marginTop: '16px', padding: '12px', backgroundColor: '#f0f4f8', borderRadius: '6px', fontSize: '13px', color: '#555' }}>
+              <strong>聲明：</strong>方法審查是確定性的規則檢查，不構成投資建議。PASS 不代表策略可獲利或適合實盤交易。本系統使用示範資料，非即時市場資料。
             </div>
           </div>
         )}

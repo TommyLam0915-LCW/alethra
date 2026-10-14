@@ -23,6 +23,8 @@ from app.api.schemas import (
 )
 from app.engine.backtest import compute_config_hash
 from app.services import emit_event
+from app.method_checks import evaluate_checks, MethodReviewResponse
+from app.method_checks.loader import load_review_data
 
 router = APIRouter(prefix="/experiments", tags=["experiments"])
 
@@ -477,3 +479,37 @@ def export_experiment(
         "disclaimer_short": brand.disclaimer_short,
         "disclaimer_short_zh": brand.disclaimer_short_zh,
     }
+
+
+@router.get("/{experiment_id}/method-review", response_model=MethodReviewResponse)
+def get_method_review(
+    experiment_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Evaluate 10 deterministic method checks for an experiment."""
+    experiment, version, run = load_review_data(db, experiment_id, current_user)
+
+    if not experiment:
+        raise HTTPException(status_code=404, detail="Experiment not found")
+
+    # Extract strategy_spec from version (or use empty dict)
+    strategy_spec = version.strategy_spec if version else {}
+    metrics = run.metrics if run else {}
+
+    checks, config_hash_match = evaluate_checks(experiment, version, run, strategy_spec, metrics)
+
+    completed_at_available = None
+    if run is not None:
+        completed_at_available = getattr(run, "completed_at", None) is not None
+
+    return MethodReviewResponse(
+        rule_set_version="1.0",
+        experiment_id=experiment.id,
+        version_id=version.id if version else None,
+        run_id=run.id if run else None,
+        run_selection="latest_completed_by_completed_at_then_id",
+        config_hash_match=config_hash_match,
+        completed_at_available=completed_at_available,
+        checks=checks,
+    )
