@@ -309,6 +309,31 @@ All 14 browser acceptance scenarios verified by Playwright automation:
 - ✅ No browser access claimed beyond actual capability
 - ✅ No HTTP requests substituted for browser interaction (where UI verification required)
 - ✅ No scenarios marked PASS from source inspection alone
-- ✅ Test credentials sanitized in documentation
+- ✅ No production secrets committed; disposable fixture credentials are present as documented
 - ✅ Disposable test accounts only
 - ✅ No production data used
+
+---
+
+## Addendum (2026-10-13) — E/G/M Test Repair and New Findings
+
+This addendum documents post-run corrections. The per-scenario results above are the historical record of the original run and are preserved unmodified; the notes below supersede them for scenarios E, G, and M.
+
+**Why the historical E/G/M results above are not reliable evidence:**
+- E and M selected fixtures from the existing draft list behind `if` guards and could pass without exercising any behavior when no matching draft existed; their selectors did not match the actual Chinese-language UI.
+- G never performed the acceptance action; it asserted a disjunction (status indicator OR no enabled edit buttons) with English selectors that match nothing in the UI.
+- "Deletion cancellation works" (above) was the only deletion behavior the old M test actually exercised; deletion confirmation was never tested.
+
+**Repairs applied (test code only, `frontend/e2e/research-drafts.spec.ts`):**
+- E, G, M rewritten with test-owned API fixtures (fixture creation failures fail the test), unconditional assertions, and accessible-role/exact-label selectors matching the actual UI. G performs the acceptance action through the UI; M covers both cancellation and confirmation of deletion.
+
+**New product defect found by the repaired M test (owner decision pending):**
+- UI-initiated draft deletion always fails in the browser. `DELETE /api/v1/research-drafts/{id}` returns 204 No Content (backend/app/api/research_drafts.py:221), but the frontend API client parses `response.json()` unconditionally (frontend/src/lib/api.ts:33), which throws on the empty body. The draft is deleted server-side, but the user sees an error ("Failed to execute 'json' on 'Response'") and is never redirected. Product code was not modified pending separate owner approval.
+
+**Post-repair runs (2026-10-13, isolated acceptance stack `alethra-acceptance`):**
+- Focused E/G/M run: E PASS, G PASS, M FAIL (at the confirm-deletion navigation step — the defect above; all cancellation-branch assertions passed before that point).
+- Full suite: 14 total — 13 passed, 1 failed (M). Actual count reported; no scenarios skipped.
+- Full run evidence and code-state identifiers: docs/pr3-eqm-repair-verification.md
+
+**Resolution (2026-10-13, after owner approval):**
+The owner approved a scoped product fix. `frontend/src/lib/api.ts` now returns without JSON parsing for HTTP 204 after status/error validation, and the two 204-backed DELETE wrappers (`researchDrafts.delete`, `personalMemory.deactivate`) are explicitly typed `Promise<void>`. The repaired M test then passes end-to-end in the browser (2.7s on a warm server; a first post-fix run hit the 30s test timeout solely because the dev server was recompiling after the `api.ts` change — backend logs show the full deletion flow completed in that run anyway). Full suite: 18 tests (14 browser acceptance tests + 4 apiFetch regression tests, executed with the Playwright runner) — 18 passed, 39.4s. Frontend production build succeeded. The failed-run evidence above and in docs/pr3-eqm-repair-verification.md is preserved unmodified; full details and post-fix code-state hashes are in the Resolution section of docs/pr3-eqm-repair-verification.md.

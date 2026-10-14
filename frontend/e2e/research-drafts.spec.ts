@@ -27,7 +27,13 @@ async function getAuthToken(email, password) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email, password }),
   });
+  if (!response.ok) {
+    throw new Error(`Fixture login failed for ${email}: ${response.status} ${await response.text()}`);
+  }
   const data = await response.json();
+  if (!data.access_token) {
+    throw new Error(`Fixture login for ${email} returned no access_token`);
+  }
   return data.access_token;
 }
 
@@ -40,7 +46,14 @@ async function createDraft(token, draftData) {
     },
     body: JSON.stringify(draftData),
   });
-  return await response.json();
+  if (!response.ok) {
+    throw new Error(`Fixture draft creation failed: ${response.status} ${await response.text()}`);
+  }
+  const data = await response.json();
+  if (!data.id) {
+    throw new Error('Fixture draft creation returned no draft id');
+  }
+  return data;
 }
 
 async function approveDraft(token, draftId, action = 'accept') {
@@ -123,63 +136,81 @@ test.describe('PR #3 Browser Acceptance - Local Playwright', () => {
     test('should preserve zero commission and slippage', async ({ page }) => {
       const token = await getAuthToken(USER_A.email, USER_A.password);
 
-      // Find the draft with zero values
-      const draftsResponse = await fetch(`${API_BASE}/api/v1/research-drafts/`, {
-        headers: { 'Authorization': `Bearer ${token}` },
+      // Test-owned fixture created via API (documented setup). The UI behavior
+      // under test — zero display on the read-only detail page — is verified in
+      // the browser. Fixture failures propagate and fail the test.
+      const zeroDraft = await createDraft(token, {
+        title: `Zero Values Test Draft ${Date.now()}`,
+        hypothesis: 'Zero commission and slippage must be preserved and displayed.',
+        falsification_criteria: 'Not applicable to this zero-value fixture.',
+        strategy_template: 'buy_and_hold',
+        asset_symbol: 'DEMO-ALPHA',
+        initial_cash: '10000',
+        commission_rate: '0',
+        slippage_rate: '0',
       });
-      const drafts = await draftsResponse.json();
 
-      const zeroDraft = drafts.find(d =>
-        d.commission_rate === '0' && d.slippage_rate === '0'
-      );
+      const persisted = await getDraft(token, zeroDraft.id);
+      expect(persisted.commission_rate).toBe('0');
+      expect(persisted.slippage_rate).toBe('0');
 
-      if (zeroDraft) {
-        await login(page, USER_A.email, USER_A.password);
-        await page.goto(`${FRONTEND_BASE}/research-drafts/${zeroDraft.id}`);
+      await login(page, USER_A.email, USER_A.password);
+      await page.goto(`${FRONTEND_BASE}/research-drafts/${zeroDraft.id}`);
 
-        // Check that zero values are displayed
-        const commissionField = page.locator('input[name="commission_rate"], input[id*="commission"]').first();
-        if (await commissionField.count() > 0) {
-          const commissionValue = await commissionField.inputValue();
-          expect(commissionValue).toBe('0');
-        }
+      // Unconditional assertions: the draft-status detail page renders fields as
+      // a read-only grid (label div followed by value div). Zeros must show as "0".
+      const commissionLabel = page.getByText('手續費率', { exact: true });
+      await expect(commissionLabel).toBeVisible();
+      await expect(commissionLabel.locator('xpath=following-sibling::div[1]')).toHaveText('0');
 
-        const slippageField = page.locator('input[name="slippage_rate"], input[id*="slippage"]').first();
-        if (await slippageField.count() > 0) {
-          const slippageValue = await slippageField.inputValue();
-          expect(slippageValue).toBe('0');
-        }
-      }
+      const slippageLabel = page.getByText('滑價率', { exact: true });
+      await expect(slippageLabel).toBeVisible();
+      await expect(slippageLabel.locator('xpath=following-sibling::div[1]')).toHaveText('0');
     });
   });
 
   test.describe('G. Acceptance and Finalization', () => {
-    test('should show accepted draft as read-only', async ({ page }) => {
+    test('should accept a draft through the UI and finalize it as read-only', async ({ page }) => {
       const token = await getAuthToken(USER_A.email, USER_A.password);
 
-      // Find an accepted draft
-      const draftsResponse = await fetch(`${API_BASE}/api/v1/research-drafts/`, {
-        headers: { 'Authorization': `Bearer ${token}` },
+      // Test-owned fixture in draft status, created via API (documented setup).
+      // The acceptance action itself is performed through the UI below.
+      const draft = await createDraft(token, {
+        title: `Acceptance Test Draft ${Date.now()}`,
+        hypothesis: 'Acceptance must finalize the draft as read-only.',
+        falsification_criteria: 'Not applicable to this acceptance fixture.',
+        strategy_template: 'buy_and_hold',
+        asset_symbol: 'DEMO-ALPHA',
+        initial_cash: '10000',
       });
-      const drafts = await draftsResponse.json();
 
-      const acceptedDraft = drafts.find(d => d.status === 'accepted');
+      const persisted = await getDraft(token, draft.id);
+      expect(persisted.status).toBe('draft');
 
-      if (acceptedDraft) {
-        await login(page, USER_A.email, USER_A.password);
-        await page.goto(`${FRONTEND_BASE}/research-drafts/${acceptedDraft.id}`);
+      await login(page, USER_A.email, USER_A.password);
+      await page.goto(`${FRONTEND_BASE}/research-drafts/${draft.id}`);
 
-        // Check for accepted/finalized indicator
-        const statusIndicator = page.locator('text=/accepted|finalized|read.only|locked/i');
-        const hasStatusIndicator = await statusIndicator.count() > 0;
+      // Pre-acceptance: draft badge, review controls, and edit availability.
+      await expect(page.locator('span').filter({ hasText: /^草稿$/ })).toBeVisible();
+      await expect(page.getByRole('heading', { name: '審閱決定' })).toBeVisible();
+      await expect(page.getByRole('button', { name: '編輯' })).toBeVisible();
 
-        // Check that edit controls are disabled or absent
-        const editButtons = page.locator('button:has-text("edit"), button:has-text("save")').filter({ has: page.locator(':not([disabled])') });
-        const hasEnabledEditButtons = await editButtons.count() > 0;
+      // Perform acceptance through the UI with the disclosure and notes visible.
+      await page.getByRole('button', { name: '接受草稿' }).click();
+      await expect(page.getByText('這不會建立可執行的策略。', { exact: true })).toBeVisible();
+      await page.getByPlaceholder('備註（選填）...').fill('UI acceptance notes');
+      await page.getByRole('button', { name: '確認接受' }).click();
 
-        // Either shows status indicator OR has no enabled edit buttons
-        expect(hasStatusIndicator || !hasEnabledEditButtons).toBeTruthy();
-      }
+      // Post-acceptance: success message and finalized badge.
+      await expect(page.getByText(/草稿已接受/)).toBeVisible();
+      await expect(page.locator('span').filter({ hasText: /^已接受$/ })).toBeVisible();
+
+      // Finalized draft is read-only: no edit controls, no review/questions cards.
+      await expect(page.getByRole('button', { name: '編輯' })).toHaveCount(0);
+      await expect(page.getByRole('button', { name: '儲存' })).toHaveCount(0);
+      await expect(page.getByRole('heading', { name: '研究助手問題' })).toHaveCount(0);
+      await expect(page.getByRole('heading', { name: '審閱決定' })).toHaveCount(0);
+      await expect(page.getByRole('heading', { name: '套用草稿欄位' })).toBeVisible();
     });
   });
 
@@ -218,38 +249,53 @@ test.describe('PR #3 Browser Acceptance - Local Playwright', () => {
   });
 
   test.describe('M. Deletion', () => {
-    test('should cancel deletion and preserve draft', async ({ page }) => {
+    test('should cancel then confirm deletion of a disposable draft', async ({ page }) => {
       const token = await getAuthToken(USER_A.email, USER_A.password);
 
-      // Find a draft that can be deleted
-      const draftsResponse = await fetch(`${API_BASE}/api/v1/research-drafts/`, {
-        headers: { 'Authorization': `Bearer ${token}` },
+      // Test-owned disposable fixture, created via API (documented setup).
+      const title = `Deletion Test Draft ${Date.now()}`;
+      const draft = await createDraft(token, {
+        title,
+        hypothesis: 'Deletion confirmation must guard against accidental removal.',
+        falsification_criteria: 'Not applicable to this deletion fixture.',
+        strategy_template: 'buy_and_hold',
+        asset_symbol: 'DEMO-ALPHA',
+        initial_cash: '10000',
       });
-      const drafts = await draftsResponse.json();
 
-      const deletableDraft = drafts.find(d => d.status === 'draft');
+      const persisted = await getDraft(token, draft.id);
+      expect(persisted.status).toBe('draft');
 
-      if (deletableDraft) {
-        await login(page, USER_A.email, USER_A.password);
-        await page.goto(`${FRONTEND_BASE}/research-drafts/${deletableDraft.id}`);
+      await login(page, USER_A.email, USER_A.password);
+      await page.goto(`${FRONTEND_BASE}/research-drafts/${draft.id}`);
 
-        // Look for delete button
-        const deleteButton = page.locator('button:has-text("delete"), button:has-text("remove")').first();
+      const deleteCard = page.locator('.card').filter({
+        has: page.getByRole('heading', { name: '刪除草稿' }),
+      });
+      await expect(deleteCard.getByText('刪除草稿會一併移除所有修訂記錄與稽核事件。此操作無法復原。')).toBeVisible();
 
-        if (await deleteButton.count() > 0) {
-          await deleteButton.click();
+      // Open confirmation: warning must be shown before any destructive action.
+      await deleteCard.getByRole('button', { name: '刪除此草稿' }).click();
+      await expect(deleteCard.getByText('確定要刪除此草稿嗎？所有修訂與稽核事件將一併刪除。')).toBeVisible();
 
-          // Look for confirmation dialog
-          const cancelButton = page.locator('button:has-text("cancel"), button:has-text("no")').first();
+      // Cancel: draft must remain accessible and listed unchanged.
+      await deleteCard.getByRole('button', { name: '取消' }).click();
+      await expect(deleteCard.getByText('確定要刪除此草稿嗎？所有修訂與稽核事件將一併刪除。')).not.toBeVisible();
+      await expect(deleteCard.getByRole('button', { name: '刪除此草稿' })).toBeVisible();
+      await expect(page.getByRole('heading', { name: title })).toBeVisible();
+      expect(page.url()).toContain(draft.id);
 
-          if (await cancelButton.count() > 0) {
-            await cancelButton.click();
+      // Confirm deletion: redirect to the list, draft gone from list and API.
+      await deleteCard.getByRole('button', { name: '刪除此草稿' }).click();
+      await expect(deleteCard.getByText('確定要刪除此草稿嗎？所有修訂與稽核事件將一併刪除。')).toBeVisible();
+      await deleteCard.getByRole('button', { name: '確認刪除' }).click();
 
-            // Verify draft still exists
-            await expect(page).toHaveURL(/.*research-drafts\/.*/);
-          }
-        }
-      }
+      await page.waitForURL(/\/research-drafts$/);
+      await expect(page.getByRole('heading', { name: '研究草稿' })).toBeVisible();
+      await expect(page.locator(`a:has-text("${title}")`)).toHaveCount(0);
+
+      await page.goto(`${FRONTEND_BASE}/research-drafts/${draft.id}`);
+      await expect(page.getByText('草稿不存在', { exact: true })).toBeVisible();
     });
   });
 
