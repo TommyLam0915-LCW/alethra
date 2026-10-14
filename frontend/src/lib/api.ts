@@ -61,6 +61,7 @@ export const api = {
       apiFetch(`/api/v1/experiments/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
     versions: (id: string) => apiFetch(`/api/v1/experiments/${id}/versions`),
     export: (id: string) => apiFetch(`/api/v1/experiments/${id}/export`),
+    methodReview: (id: string) => apiFetch(`/api/v1/experiments/${id}/method-review`),
   },
   runs: {
     create: (versionId: string) =>
