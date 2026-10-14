@@ -28,7 +28,7 @@ or suitability for real-money trading.
 - Model research export package with integrity checks.
 - Pilot-entitlement, cost, support, and hypothesis measurement structures.
 - Production/staging JWT default-secret validation.
-- Deterministic mock research-draft workflow (Phase 2A backend) — structured draft lifecycle with question generation, answer submission, approval, revision tracking, and audit events. Mock output is a workflow demonstration, not a real AI-quality evaluation. Frontend draft-review UI not yet built.
+- Deterministic mock research-draft workflow (Phase 2A) — structured draft lifecycle with question generation, answer submission, approval, revision tracking, and audit events. Frontend draft-review panel with field application workflow, product limitation disclosures, and deletion cascade warnings. Mock output is a workflow demonstration, not a real AI-quality evaluation.
 
 ## Not Implemented
 
@@ -63,7 +63,7 @@ Alethra is an **Investment Research Workspace** — not a broker, not an advisor
 | Phase | Description | Status |
 |-------|-------------|--------|
 | Phase 1 | Core backtesting engine, auth, experiments | Complete |
-| Phase 2A | Deterministic mock research-draft workflow (backend) | Complete (backend; frontend draft-review UI pending) |
+| Phase 2A | Deterministic mock research-draft workflow (backend + frontend) | Complete |
 | Phase 2B | Real AI research assistant | Not started |
 | Phase 3A | Locked research + historical replay simulation | Complete |
 | Phase 3B | Paper portfolio (virtual trading) | Complete |

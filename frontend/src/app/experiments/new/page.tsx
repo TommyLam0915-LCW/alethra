@@ -1,7 +1,7 @@
 'use client';
 
-import { useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { useState, useEffect, Suspense } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { brand } from '@/lib/brand';
 
@@ -12,8 +12,50 @@ const TEMPLATES = [
   { value: 'price_change_fixed_hold', label: 'Price Change', labelZh: '跌幅定持' },
 ];
 
-export default function NewExperimentPage() {
+interface ResearchDraft {
+  id: string;
+  title: string;
+  hypothesis: string | null;
+  falsification_criteria: string | null;
+  strategy_template: string | null;
+  asset_symbol: string | null;
+  benchmark_symbol: string | null;
+  initial_cash: string | null;
+  commission_rate: string | null;
+  slippage_rate: string | null;
+  research_rules: Record<string, any> | null;
+  status: string;
+  experiment_id: string | null;
+}
+
+const FIELD_LABELS: Record<string, string> = {
+  title: '標題',
+  hypothesis: '研究假設',
+  strategy_template: '策略模板',
+  asset_symbol: '研究標的',
+  benchmark_symbol: '基準標的',
+  initial_cash: '初始資金',
+  commission_rate: '手續費率',
+  slippage_rate: '滑價率',
+};
+
+const DRAFT_TO_FORM: Record<string, string> = {
+  title: 'title',
+  hypothesis: 'hypothesis',
+  strategy_template: 'templateType',
+  asset_symbol: 'assetId',
+  benchmark_symbol: 'benchmarkId',
+  initial_cash: 'initialCash',
+  commission_rate: 'commissionRate',
+  slippage_rate: 'slippageRate',
+};
+
+function NewExperimentForm() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const draftId = searchParams.get('draft_id');
+  const requestedFields = searchParams.get('fields')?.split(',').filter(Boolean) || [];
+
   const [title, setTitle] = useState('');
   const [hypothesis, setHypothesis] = useState('');
   const [templateType, setTemplateType] = useState('buy_and_hold');
@@ -34,6 +76,69 @@ export default function NewExperimentPage() {
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+
+  const [draft, setDraft] = useState<ResearchDraft | null>(null);
+  const [draftLoading, setDraftLoading] = useState(false);
+  const [draftError, setDraftError] = useState('');
+  const [showPreview, setShowPreview] = useState(false);
+  const [appliedFields, setAppliedFields] = useState<string[]>([]);
+
+  useEffect(() => {
+    if (!draftId || requestedFields.length === 0) return;
+
+    setDraftLoading(true);
+    setDraftError('');
+
+    api.researchDrafts.get(draftId)
+      .then((data) => {
+        if (data.status !== 'accepted') {
+          setDraftError('只有已接受的草稿才能套用欄位');
+          setDraftLoading(false);
+          return;
+        }
+        setDraft(data);
+        setShowPreview(true);
+        setDraftLoading(false);
+      })
+      .catch((err: any) => {
+        setDraftError(err.message || '載入草稿失敗');
+        setDraftLoading(false);
+      });
+  }, [draftId, requestedFields.length]);
+
+  const handleApplyFields = () => {
+    if (!draft) return;
+
+    const applied: string[] = [];
+    for (const field of requestedFields) {
+      const value = (draft as any)[field];
+      if (!value) continue;
+
+      const formField = DRAFT_TO_FORM[field];
+      if (!formField) continue;
+
+      switch (formField) {
+        case 'title': setTitle(String(value)); break;
+        case 'hypothesis': setHypothesis(String(value)); break;
+        case 'templateType': setTemplateType(String(value)); break;
+        case 'assetId': setAssetId(String(value)); break;
+        case 'benchmarkId': setBenchmarkId(String(value)); break;
+        case 'initialCash': setInitialCash(String(value)); break;
+        case 'commissionRate': setCommissionRate(String(value)); break;
+        case 'slippageRate': setSlippageRate(String(value)); break;
+      }
+      applied.push(FIELD_LABELS[field] || field);
+    }
+
+    setAppliedFields(applied);
+    setShowPreview(false);
+  };
+
+  const handleCancelPreview = () => {
+    setShowPreview(false);
+    setDraft(null);
+    router.push('/research-drafts');
+  };
 
   const buildSignalParameters = () => {
     if (templateType === 'sma_crossover') {
@@ -95,6 +200,58 @@ export default function NewExperimentPage() {
       <div className="disclaimer">
         <strong>提醒：</strong>本系統使用示範資料進行回測，結果僅供研究參考，不代表真實市場表現。
       </div>
+
+      {draftLoading && (
+        <div className="alert alert-info" style={{ marginBottom: '20px', fontSize: '13px' }}>
+          載入研究草稿...
+        </div>
+      )}
+
+      {draftError && (
+        <div className="alert alert-warning" style={{ marginBottom: '20px', fontSize: '13px' }}>
+          {draftError}
+        </div>
+      )}
+
+      {showPreview && draft && (
+        <div className="card" style={{ marginBottom: '20px', backgroundColor: '#f8f9fa', border: '2px solid #0070f3' }}>
+          <h2 style={{ marginBottom: '16px', fontSize: '18px' }}>預覽草稿欄位</h2>
+          <p style={{ fontSize: '13px', color: '#666', marginBottom: '16px' }}>
+            以下欄位將從草稿套用到表單。請確認後點擊「確認套用」，或點擊「取消」返回。
+          </p>
+          <div style={{ display: 'grid', gap: '12px', marginBottom: '16px' }}>
+            {requestedFields.map((field) => {
+              const value = (draft as any)[field];
+              if (!value) return null;
+              return (
+                <div key={field} style={{ display: 'flex', gap: '12px', padding: '8px 0', borderBottom: '1px solid #e0e0e0' }}>
+                  <div style={{ width: '120px', fontWeight: '500', fontSize: '14px', color: '#555', flexShrink: 0 }}>
+                    {FIELD_LABELS[field] || field}
+                  </div>
+                  <div style={{ fontSize: '14px', color: '#333', flex: 1 }}>
+                    <strong>{String(value)}</strong>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <button className="btn btn-primary" onClick={handleApplyFields}>
+              確認套用 {requestedFields.length} 個欄位
+            </button>
+            <button className="btn btn-secondary" onClick={handleCancelPreview}>
+              取消
+            </button>
+          </div>
+        </div>
+      )}
+
+      {appliedFields.length > 0 && (
+        <div className="alert alert-info" style={{ marginBottom: '20px', fontSize: '13px' }}>
+          <strong>已從研究草稿套用：</strong>{appliedFields.join('、')}。
+          請確認以下欄位，並補完開始日期、結束日期等執行參數後再建立實驗。
+        </div>
+      )}
 
       {error && <div className="alert alert-warning">{error}</div>}
 
@@ -309,5 +466,13 @@ export default function NewExperimentPage() {
         </form>
       </div>
     </div>
+  );
+}
+
+export default function NewExperimentPage() {
+  return (
+    <Suspense fallback={<div className="container" style={{ paddingTop: '40px' }}>載入中...</div>}>
+      <NewExperimentForm />
+    </Suspense>
   );
 }

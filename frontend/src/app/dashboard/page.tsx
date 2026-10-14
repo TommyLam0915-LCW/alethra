@@ -60,6 +60,9 @@ export default function DashboardPage() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '30px' }}>
         <h1>{brand.ui.dashboard.titleZh}</h1>
         <div style={{ display: 'flex', gap: '12px' }}>
+          <Link href="/research-drafts" className="btn btn-secondary">
+            研究草稿
+          </Link>
           <Link href="/models" className="btn btn-secondary">
             模型研究
           </Link>

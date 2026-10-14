@@ -30,6 +30,11 @@ export async function apiFetch(endpoint: string, options: RequestInit = {}) {
     throw new Error(error.detail || 'Request failed');
   }
 
+  // 204 No Content carries no body; response.json() would throw on it.
+  if (response.status === 204) {
+    return null;
+  }
+
   return response.json();
 }
 
@@ -153,8 +158,9 @@ export const api = {
       apiFetch('/api/v1/personal-memory', { method: 'POST', body: JSON.stringify(data) }),
     confirm: (id: string, confirmed: boolean) =>
       apiFetch(`/api/v1/personal-memory/${id}/confirm`, { method: 'POST', body: JSON.stringify({ confirmed }) }),
-    deactivate: (id: string) =>
-      apiFetch(`/api/v1/personal-memory/${id}`, { method: 'DELETE' }),
+    deactivate: async (id: string): Promise<void> => {
+      await apiFetch(`/api/v1/personal-memory/${id}`, { method: 'DELETE' });
+    },
     setTrainingOptIn: (id: string, optIn: boolean) =>
       apiFetch(`/api/v1/personal-memory/${id}/training-opt-in?opt_in=${optIn}`, { method: 'PUT' }),
   },
@@ -164,6 +170,27 @@ export const api = {
       apiFetch('/api/v1/model-cards', { method: 'POST', body: JSON.stringify(data) }),
     update: (id: string, data: any) =>
       apiFetch(`/api/v1/model-cards/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  },
+  researchDrafts: {
+    list: () => apiFetch('/api/v1/research-drafts/'),
+    get: (id: string) => apiFetch(`/api/v1/research-drafts/${id}`),
+    create: (data: any) =>
+      apiFetch('/api/v1/research-drafts/', { method: 'POST', body: JSON.stringify(data) }),
+    update: (id: string, data: any) =>
+      apiFetch(`/api/v1/research-drafts/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+    delete: async (id: string): Promise<void> => {
+      await apiFetch(`/api/v1/research-drafts/${id}`, { method: 'DELETE' });
+    },
+    generateQuestions: (id: string) =>
+      apiFetch(`/api/v1/research-drafts/${id}/questions`, { method: 'POST' }),
+    submitAnswers: (id: string, answers: Record<string, string>) =>
+      apiFetch(`/api/v1/research-drafts/${id}/answers`, { method: 'POST', body: JSON.stringify({ answers }) }),
+    approve: (id: string, action: 'accept' | 'reject', notes?: string) =>
+      apiFetch(`/api/v1/research-drafts/${id}/approve`, { method: 'POST', body: JSON.stringify({ action, notes }) }),
+    revisions: (id: string) =>
+      apiFetch(`/api/v1/research-drafts/${id}/revisions`),
+    auditEvents: (id: string) =>
+      apiFetch(`/api/v1/research-drafts/${id}/audit-events`),
   },
   pilot: {
     submitApplication: (data: any) =>
