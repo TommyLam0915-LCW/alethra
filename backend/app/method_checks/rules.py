@@ -101,20 +101,57 @@ def check_rc003_date_range(strategy_spec: Dict[str, Any], metrics: Dict[str, Any
         return "INSUFFICIENT_INFORMATION", evidence
 
 
+def _is_valid_cost(value: Any) -> bool:
+    """Check if a cost value is a valid non-negative finite number.
+
+    Rejects: None, booleans, strings, negative, non-finite (NaN/inf).
+    Accepts: int or float that is >= 0 and finite.
+    Canonical numeric strings are NOT accepted — callers must pre-convert.
+    """
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return False
+    if not isinstance(value, (int, float)):
+        return False
+    import math
+    if math.isnan(value) or math.isinf(value):
+        return False
+    if value < 0:
+        return False
+    return True
+
+
 def check_rc004_transaction_costs(strategy_spec: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
     """RC-004: Transaction Cost Disclosure.
 
-    Check if commission_rate or slippage_rate > 0.
+    Check if commission_rate or slippage_rate are present and valid.
+    - Missing or invalid: INSUFFICIENT_INFORMATION
+    - Both valid zero: WARNING
+    - At least one valid positive: PASS (configuration disclosure only)
     """
-    commission_rate = strategy_spec.get("commission_rate", 0.0)
-    slippage_rate = strategy_spec.get("slippage_rate", 0.0)
+    commission_present = "commission_rate" in strategy_spec
+    slippage_present = "slippage_rate" in strategy_spec
+
+    commission_rate = strategy_spec.get("commission_rate")
+    slippage_rate = strategy_spec.get("slippage_rate")
 
     evidence = {
         "commission_rate": commission_rate,
         "slippage_rate": slippage_rate,
+        "commission_present": commission_present,
+        "slippage_present": slippage_present,
     }
 
-    if not isinstance(commission_rate, (int, float)) or not isinstance(slippage_rate, (int, float)):
+    if not commission_present or not slippage_present:
+        evidence["reason"] = "Cost field(s) missing from strategy_spec"
+        return "INSUFFICIENT_INFORMATION", evidence
+
+    commission_valid = _is_valid_cost(commission_rate)
+    slippage_valid = _is_valid_cost(slippage_rate)
+
+    if not commission_valid or not slippage_valid:
+        evidence["reason"] = "Cost value(s) invalid (negative, non-finite, boolean, or non-numeric)"
         return "INSUFFICIENT_INFORMATION", evidence
 
     if commission_rate == 0.0 and slippage_rate == 0.0:
@@ -221,13 +258,26 @@ def check_rc008_engine_version(run: Any) -> Tuple[str, Dict[str, Any]]:
     return "INSUFFICIENT_INFORMATION", evidence
 
 
-def check_rc009_zero_cost_warnings(strategy_spec: Dict[str, Any], run: Any) -> Tuple[str, Dict[str, Any]]:
-    """RC-009: Zero-Cost Warning Consistency.
+COMMISSION_ZERO_WARNING = "Zero commission selected — real trading incurs costs."
+SLIPPAGE_ZERO_WARNING = "Zero slippage selected — real execution incurs slippage."
 
-    If both costs are 0, warnings must contain specific strings.
+
+def check_rc009_zero_cost_warnings(strategy_spec: Dict[str, Any], run: Any) -> Tuple[str, Dict[str, Any]]:
+    """RC-009: Zero-Cost Warning Consistency (per-component).
+
+    For a completed run with valid cost data:
+    - commission=0 requires the exact commission warning
+    - slippage=0 requires the exact slippage warning
+    - both zero require both warnings
+    - both positive require neither (PASS)
+    - missing/invalid costs → INSUFFICIENT_INFORMATION
+    - no completed run → NOT_APPLICABLE
     """
-    commission_rate = strategy_spec.get("commission_rate", 0.0)
-    slippage_rate = strategy_spec.get("slippage_rate", 0.0)
+    commission_present = "commission_rate" in strategy_spec
+    slippage_present = "slippage_rate" in strategy_spec
+
+    commission_rate = strategy_spec.get("commission_rate")
+    slippage_rate = strategy_spec.get("slippage_rate")
 
     evidence = {
         "commission_rate": commission_rate,
@@ -237,8 +287,13 @@ def check_rc009_zero_cost_warnings(strategy_spec: Dict[str, Any], run: Any) -> T
     if not run or getattr(run, "status", None) != "completed":
         return "NOT_APPLICABLE", evidence
 
-    if commission_rate != 0.0 or slippage_rate != 0.0:
-        return "PASS", evidence
+    if not commission_present or not slippage_present:
+        evidence["reason"] = "Cost field(s) missing from strategy_spec"
+        return "INSUFFICIENT_INFORMATION", evidence
+
+    if not _is_valid_cost(commission_rate) or not _is_valid_cost(slippage_rate):
+        evidence["reason"] = "Cost value(s) invalid"
+        return "INSUFFICIENT_INFORMATION", evidence
 
     warnings = getattr(run, "warnings", None) or []
     if not isinstance(warnings, list):
@@ -246,18 +301,29 @@ def check_rc009_zero_cost_warnings(strategy_spec: Dict[str, Any], run: Any) -> T
 
     evidence["warnings"] = warnings
 
-    required_warnings = [
-        "Zero commission selected — real trading incurs costs.",
-        "Zero slippage selected — real execution incurs slippage.",
-    ]
+    required = []
+    missing = []
 
-    has_all = all(rw in warnings for rw in required_warnings)
+    if commission_rate == 0.0:
+        required.append(COMMISSION_ZERO_WARNING)
+        if COMMISSION_ZERO_WARNING not in warnings:
+            missing.append(COMMISSION_ZERO_WARNING)
 
-    if has_all:
+    if slippage_rate == 0.0:
+        required.append(SLIPPAGE_ZERO_WARNING)
+        if SLIPPAGE_ZERO_WARNING not in warnings:
+            missing.append(SLIPPAGE_ZERO_WARNING)
+
+    evidence["required_warnings"] = required
+    evidence["missing_warnings"] = missing
+
+    if not required:
         return "PASS", evidence
 
-    evidence["warning"] = "Zero costs but warnings missing"
-    return "WARNING", evidence
+    if missing:
+        return "WARNING", evidence
+
+    return "PASS", evidence
 
 
 def check_rc010_config_hash(version: Any, run: Any) -> Tuple[str, Optional[bool], Dict[str, Any]]:

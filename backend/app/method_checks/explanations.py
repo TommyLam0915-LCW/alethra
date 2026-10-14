@@ -66,14 +66,14 @@ def _explain_rc003(status: str, evidence: Dict[str, Any]) -> str:
     if status == "PASS":
         return (
             f"A. Observation: Date range {start} to {end} covers {trading_days} trading days.\n"
-            "B. Interpretation: Sufficient data for annualized metrics.\n"
-            "C. Limitation: Trading day count does not guarantee data quality."
+            "B. Interpretation: At or above the engine's 252-day threshold; annualized metrics are computed under the current engine rule.\n"
+            "C. Limitation: The 252-day threshold does not establish statistical validity, data quality, or predictive performance."
         )
     elif status == "WARNING":
         return (
             f"A. Observation: Date range {start} to {end} covers only {trading_days} trading days (< 252).\n"
-            "B. Interpretation: Annualized metrics may be unreliable.\n"
-            "C. Limitation: 252-day threshold reflects engine behavior, not statistical validity."
+            "B. Interpretation: Below the engine's 252-day threshold; annualized metrics are not provided under that rule.\n"
+            "C. Limitation: The 252-day threshold does not establish statistical validity, data quality, or predictive performance."
         )
     return (
         "A. Observation: Date range or trading days data is missing or invalid.\n"
@@ -83,19 +83,25 @@ def _explain_rc003(status: str, evidence: Dict[str, Any]) -> str:
 
 
 def _explain_rc004(status: str, evidence: Dict[str, Any]) -> str:
-    commission = evidence.get("commission_rate", 0.0)
-    slippage = evidence.get("slippage_rate", 0.0)
+    commission = evidence.get("commission_rate")
+    slippage = evidence.get("slippage_rate")
 
     if status == "PASS":
         return (
             f"A. Observation: Transaction costs configured (commission: {commission}, slippage: {slippage}).\n"
-            "B. Interpretation: Strategy accounts for trading costs.\n"
-            "C. Limitation: This check verifies configuration, not actual cost application."
+            "B. Interpretation: Cost configuration is present.\n"
+            "C. Limitation: This verifies configuration values only, not that costs were applied in execution, are realistic, or are complete."
+        )
+    elif status == "WARNING":
+        return (
+            f"A. Observation: Both commission ({commission}) and slippage ({slippage}) are zero.\n"
+            "B. Interpretation: Strategy does not account for trading costs. Real trading incurs costs.\n"
+            "C. Limitation: This check only verifies configuration values."
         )
     return (
-        f"A. Observation: Both commission ({commission}) and slippage ({slippage}) are zero.\n"
-        "B. Interpretation: Strategy does not account for trading costs. Real trading incurs costs.\n"
-        "C. Limitation: This check only verifies configuration values."
+        "A. Observation: Transaction cost data is missing or invalid.\n"
+        "B. Interpretation: Cannot evaluate cost configuration.\n"
+        "C. Limitation: This check requires both commission_rate and slippage_rate to be present as valid non-negative finite numbers."
     )
 
 
@@ -190,26 +196,35 @@ def _explain_rc008(status: str, evidence: Dict[str, Any]) -> str:
 
 
 def _explain_rc009(status: str, evidence: Dict[str, Any]) -> str:
-    commission = evidence.get("commission_rate", 0.0)
-    slippage = evidence.get("slippage_rate", 0.0)
+    commission = evidence.get("commission_rate")
+    slippage = evidence.get("slippage_rate")
+    required = evidence.get("required_warnings", [])
+    missing = evidence.get("missing_warnings", [])
 
     if status == "PASS":
-        if commission == 0.0 and slippage == 0.0:
+        if required:
             return (
-                "A. Observation: Zero costs configured and warnings are present.\n"
-                "B. Interpretation: Zero-cost disclosure is consistent.\n"
-                "C. Limitation: This checks warning presence, not user comprehension."
+                f"A. Observation: Zero-cost components (commission: {commission}, slippage: {slippage}) have matching warnings.\n"
+                "B. Interpretation: Zero-cost disclosure is consistent with configuration.\n"
+                "C. Limitation: This checks warning presence only, not that warnings are adequate, understood, or that trading costs were actually applied."
             )
         return (
-            "A. Observation: Transaction costs are configured.\n"
-            "B. Interpretation: Zero-cost warning not applicable.\n"
-            "C. Limitation: This check only applies when both costs are zero."
+            f"A. Observation: Transaction costs are positive (commission: {commission}, slippage: {slippage}).\n"
+            "B. Interpretation: Zero-cost warnings are not required.\n"
+            "C. Limitation: This check only applies to zero-cost components."
         )
     elif status == "WARNING":
+        missing_desc = "; ".join(missing) if missing else "unknown"
         return (
-            "A. Observation: Zero costs configured but required warnings are missing.\n"
-            "B. Interpretation: Engine inconsistency detected.\n"
+            f"A. Observation: Zero-cost components configured (commission: {commission}, slippage: {slippage}) but required warnings missing: {missing_desc}.\n"
+            "B. Interpretation: Engine warning inconsistency detected.\n"
             "C. Limitation: This indicates a potential issue with warning generation."
+        )
+    elif status == "INSUFFICIENT_INFORMATION":
+        return (
+            "A. Observation: Transaction cost data is missing or invalid.\n"
+            "B. Interpretation: Cannot evaluate zero-cost warning consistency.\n"
+            "C. Limitation: This check requires valid cost configuration and a completed run."
         )
     return (
         "A. Observation: Run is not completed.\n"

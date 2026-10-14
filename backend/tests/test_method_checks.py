@@ -126,10 +126,65 @@ class TestRC004TransactionCosts:
         status, evidence = check_rc004_transaction_costs(spec)
         assert status == "PASS"
 
+    def test_pass_both_positive(self):
+        spec = {"commission_rate": 0.001, "slippage_rate": 0.001}
+        status, evidence = check_rc004_transaction_costs(spec)
+        assert status == "PASS"
+
     def test_warning_both_zero(self):
         spec = {"commission_rate": 0.0, "slippage_rate": 0.0}
         status, evidence = check_rc004_transaction_costs(spec)
         assert status == "WARNING"
+
+    def test_insufficient_empty_strategy_spec(self):
+        spec = {}
+        status, evidence = check_rc004_transaction_costs(spec)
+        assert status == "INSUFFICIENT_INFORMATION"
+        assert evidence["commission_present"] is False
+        assert evidence["slippage_present"] is False
+
+    def test_insufficient_missing_commission(self):
+        spec = {"slippage_rate": 0.001}
+        status, evidence = check_rc004_transaction_costs(spec)
+        assert status == "INSUFFICIENT_INFORMATION"
+        assert evidence["commission_present"] is False
+
+    def test_insufficient_missing_slippage(self):
+        spec = {"commission_rate": 0.001}
+        status, evidence = check_rc004_transaction_costs(spec)
+        assert status == "INSUFFICIENT_INFORMATION"
+        assert evidence["slippage_present"] is False
+
+    def test_insufficient_null_commission(self):
+        spec = {"commission_rate": None, "slippage_rate": 0.001}
+        status, evidence = check_rc004_transaction_costs(spec)
+        assert status == "INSUFFICIENT_INFORMATION"
+
+    def test_insufficient_negative_commission(self):
+        spec = {"commission_rate": -0.001, "slippage_rate": 0.001}
+        status, evidence = check_rc004_transaction_costs(spec)
+        assert status == "INSUFFICIENT_INFORMATION"
+
+    def test_insufficient_boolean_commission(self):
+        spec = {"commission_rate": True, "slippage_rate": 0.001}
+        status, evidence = check_rc004_transaction_costs(spec)
+        assert status == "INSUFFICIENT_INFORMATION"
+
+    def test_insufficient_nan_commission(self):
+        import math
+        spec = {"commission_rate": float("nan"), "slippage_rate": 0.001}
+        status, evidence = check_rc004_transaction_costs(spec)
+        assert status == "INSUFFICIENT_INFORMATION"
+
+    def test_insufficient_inf_slippage(self):
+        spec = {"commission_rate": 0.001, "slippage_rate": float("inf")}
+        status, evidence = check_rc004_transaction_costs(spec)
+        assert status == "INSUFFICIENT_INFORMATION"
+
+    def test_insufficient_string_cost(self):
+        spec = {"commission_rate": "0.001", "slippage_rate": 0.001}
+        status, evidence = check_rc004_transaction_costs(spec)
+        assert status == "INSUFFICIENT_INFORMATION"
 
 
 class TestRC005TradeCount:
@@ -237,13 +292,45 @@ class TestRC008EngineVersion:
 
 
 class TestRC009ZeroCostWarnings:
-    def test_pass_costs_nonzero(self):
+    def test_pass_both_positive(self):
         spec = {"commission_rate": 0.001, "slippage_rate": 0.001}
         run = ResearchRun(status=RunStatus.completed, warnings=[])
         status, evidence = check_rc009_zero_cost_warnings(spec, run)
         assert status == "PASS"
+        assert evidence["required_warnings"] == []
 
-    def test_pass_zero_costs_with_warnings(self):
+    def test_pass_commission_zero_with_warning(self):
+        spec = {"commission_rate": 0.0, "slippage_rate": 0.001}
+        warnings = ["Zero commission selected — real trading incurs costs."]
+        run = ResearchRun(status=RunStatus.completed, warnings=warnings)
+        status, evidence = check_rc009_zero_cost_warnings(spec, run)
+        assert status == "PASS"
+        assert len(evidence["required_warnings"]) == 1
+        assert evidence["missing_warnings"] == []
+
+    def test_warning_commission_zero_missing_warning(self):
+        spec = {"commission_rate": 0.0, "slippage_rate": 0.001}
+        run = ResearchRun(status=RunStatus.completed, warnings=[])
+        status, evidence = check_rc009_zero_cost_warnings(spec, run)
+        assert status == "WARNING"
+        assert len(evidence["missing_warnings"]) == 1
+
+    def test_pass_slippage_zero_with_warning(self):
+        spec = {"commission_rate": 0.001, "slippage_rate": 0.0}
+        warnings = ["Zero slippage selected — real execution incurs slippage."]
+        run = ResearchRun(status=RunStatus.completed, warnings=warnings)
+        status, evidence = check_rc009_zero_cost_warnings(spec, run)
+        assert status == "PASS"
+        assert len(evidence["required_warnings"]) == 1
+
+    def test_warning_slippage_zero_missing_warning(self):
+        spec = {"commission_rate": 0.001, "slippage_rate": 0.0}
+        run = ResearchRun(status=RunStatus.completed, warnings=[])
+        status, evidence = check_rc009_zero_cost_warnings(spec, run)
+        assert status == "WARNING"
+        assert len(evidence["missing_warnings"]) == 1
+
+    def test_pass_both_zero_all_warnings(self):
         spec = {"commission_rate": 0.0, "slippage_rate": 0.0}
         warnings = [
             "Zero commission selected — real trading incurs costs.",
@@ -252,18 +339,47 @@ class TestRC009ZeroCostWarnings:
         run = ResearchRun(status=RunStatus.completed, warnings=warnings)
         status, evidence = check_rc009_zero_cost_warnings(spec, run)
         assert status == "PASS"
+        assert len(evidence["required_warnings"]) == 2
+        assert evidence["missing_warnings"] == []
 
-    def test_warning_zero_costs_missing_warnings(self):
+    def test_warning_both_zero_one_warning_missing(self):
+        spec = {"commission_rate": 0.0, "slippage_rate": 0.0}
+        warnings = ["Zero commission selected — real trading incurs costs."]
+        run = ResearchRun(status=RunStatus.completed, warnings=warnings)
+        status, evidence = check_rc009_zero_cost_warnings(spec, run)
+        assert status == "WARNING"
+        assert len(evidence["required_warnings"]) == 2
+        assert len(evidence["missing_warnings"]) == 1
+
+    def test_warning_both_zero_no_warnings(self):
         spec = {"commission_rate": 0.0, "slippage_rate": 0.0}
         run = ResearchRun(status=RunStatus.completed, warnings=[])
         status, evidence = check_rc009_zero_cost_warnings(spec, run)
         assert status == "WARNING"
+        assert len(evidence["missing_warnings"]) == 2
 
     def test_not_applicable_not_completed(self):
         spec = {"commission_rate": 0.0, "slippage_rate": 0.0}
         run = ResearchRun(status=RunStatus.pending, warnings=[])
         status, evidence = check_rc009_zero_cost_warnings(spec, run)
         assert status == "NOT_APPLICABLE"
+
+    def test_not_applicable_no_run(self):
+        spec = {"commission_rate": 0.0, "slippage_rate": 0.0}
+        status, evidence = check_rc009_zero_cost_warnings(spec, None)
+        assert status == "NOT_APPLICABLE"
+
+    def test_insufficient_missing_costs(self):
+        spec = {}
+        run = ResearchRun(status=RunStatus.completed, warnings=[])
+        status, evidence = check_rc009_zero_cost_warnings(spec, run)
+        assert status == "INSUFFICIENT_INFORMATION"
+
+    def test_insufficient_invalid_costs(self):
+        spec = {"commission_rate": None, "slippage_rate": 0.001}
+        run = ResearchRun(status=RunStatus.completed, warnings=[])
+        status, evidence = check_rc009_zero_cost_warnings(spec, run)
+        assert status == "INSUFFICIENT_INFORMATION"
 
 
 class TestRC010ConfigHash:

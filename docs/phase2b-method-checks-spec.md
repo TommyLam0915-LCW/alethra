@@ -116,13 +116,17 @@ All checks are computed from existing data. No LLM, no external AI, no market da
 #### RC-003: Date Range Validity
 - **Input:** `strategy_spec.start_date`, `end_date` (required strings); `metrics.trading_days`
 - **Logic:** Parse dates with `datetime.fromisoformat()`; verify end > start; check trading_days >= 252
-- **PASS:** valid range
-- **WARNING:** < 252 trading days (annualized metrics unavailable)
+- **PASS:** valid range, at or above the engine's 252-day threshold; annualized metrics are computed under the current engine rule
+- **WARNING:** below the engine's 252-day threshold; annualized metrics are not provided under that rule
+- **Note:** The 252-day threshold does not establish statistical validity, data quality, or predictive performance
 - **Category:** A (evaluation)
 
 #### RC-004: Transaction Cost Disclosure
-- **Input:** `commission_rate`, `slippage_rate` (float, default 0.0)
-- **Logic:** Both == 0.0 → WARNING; at least one > 0 → PASS
+- **Input:** `commission_rate`, `slippage_rate` (float, optional)
+- **Logic:** Check key presence first, then validity via `_is_valid_cost()` (rejects None, bool, string, negative, NaN, Inf)
+- **INSUFFICIENT_INFORMATION:** Either key missing or either value invalid
+- **WARNING:** Both values valid and zero
+- **PASS:** Both cost keys present; both values valid and non-negative; at least one strictly positive
 - **Category:** A (evaluation)
 
 #### RC-005: Trade Count Available
@@ -150,10 +154,11 @@ All checks are computed from existing data. No LLM, no external AI, no market da
 
 #### RC-009: Zero-Cost Warning Consistency
 - **Input:** `commission_rate`, `slippage_rate`, `ResearchRun.warnings` (JSONB list)
-- **Logic:** If both costs == 0.0, warnings must contain exact strings "Zero commission selected — real trading incurs costs." and "Zero slippage selected — real execution incurs slippage."
-- **PASS:** costs > 0 OR both warnings present
-- **WARNING:** costs == 0 but warnings absent (engine inconsistency)
-- **NOT_APPLICABLE:** run not completed
+- **Logic:** Per-component check: commission==0 requires exact warning "Zero commission selected — real trading incurs costs."; slippage==0 requires exact warning "Zero slippage selected — real execution incurs slippage." Each component is checked independently.
+- **INSUFFICIENT_INFORMATION:** Cost key missing or value invalid
+- **NOT_APPLICABLE:** Run not completed
+- **WARNING:** Any zero-cost component lacks its corresponding warning (engine inconsistency)
+- **PASS:** All required per-component zero-cost warnings are present, or neither component requires a zero-cost warning
 - **Category:** A (evaluation)
 
 #### RC-010: Config Hash Integrity
@@ -219,17 +224,23 @@ GET /api/v1/experiments/{experiment_id}/method-review
 
 ### 4.3 Run Selection
 
+Run-first selection across ALL versions of the experiment:
+
 ```python
+version_ids = [v.id for v in db.query(ExperimentVersion.id).filter(
+    ExperimentVersion.experiment_id == experiment_id,
+).all()]
+
 run = db.query(ResearchRun).filter(
-    ResearchRun.experiment_version_id == version.id,
-    ResearchRun.status == RunStatus.completed
+    ResearchRun.experiment_version_id.in_(version_ids),
+    ResearchRun.status == RunStatus.completed,
 ).order_by(
     ResearchRun.completed_at.desc().nullslast(),
     ResearchRun.id.desc()
 ).first()
 ```
 
-If no completed run exists, `run = None` and run-dependent checks return INSUFFICIENT_INFORMATION.
+The version is then loaded from the selected run's `experiment_version_id`. If no completed run exists, `run = None` and `version = None`; run-dependent checks return INSUFFICIENT_INFORMATION or NOT_APPLICABLE.
 
 ---
 
