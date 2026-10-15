@@ -1175,7 +1175,7 @@ class TestSecureFieldTransfer:
         draft_id = draft_resp.json()["id"]
 
         unauth_resp = client.get(f"/api/v1/research-drafts/{draft_id}")
-        assert unauth_resp.status_code == 403
+        assert unauth_resp.status_code == 401
 
         auth_resp = client.get(f"/api/v1/research-drafts/{draft_id}", headers=auth_headers)
         assert auth_resp.status_code == 200

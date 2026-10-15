@@ -124,6 +124,22 @@ class TestCompleteUserJourney:
         assert training_resp.status_code == 201
         training_job = training_resp.json()
         job_id = training_job["id"]
+        assert training_job["status"] == "pending"
+
+        # Execute the job (simulating worker)
+        from app.database import SessionLocal
+        from app.services.training import run_parameter_sweep
+        import uuid
+        db = SessionLocal()
+        try:
+            run_parameter_sweep(db, uuid.UUID(job_id))
+            db.commit()
+        finally:
+            db.close()
+
+        # Fetch the completed job
+        get_completed_job = client.get(f"/api/v1/training/jobs/{job_id}", headers=auth_headers)
+        training_job = get_completed_job.json()
         assert training_job["status"] == "completed"
         assert training_job["results"] is not None
         assert len(training_job["results"]) > 0

@@ -59,15 +59,30 @@ export default function DashboardPage() {
     <div className="container" style={{ paddingTop: '40px', paddingBottom: '40px' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '30px' }}>
         <h1>{brand.ui.dashboard.titleZh}</h1>
-        <div style={{ display: 'flex', gap: '12px' }}>
+        <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
           <Link href="/research-drafts" className="btn btn-secondary">
             研究草稿
           </Link>
           <Link href="/models" className="btn btn-secondary">
             模型研究
           </Link>
+          <Link href="/training" className="btn btn-secondary">
+            訓練任務
+          </Link>
+          <Link href="/inference" className="btn btn-secondary">
+            推論執行
+          </Link>
+          <Link href="/execution" className="btn btn-secondary">
+            執行意向
+          </Link>
+          <Link href="/market-data" className="btn btn-secondary">
+            市場數據
+          </Link>
           <Link href="/api-keys" className="btn btn-secondary">
             API 金鑰
+          </Link>
+          <Link href="/subscription" className="btn btn-secondary">
+            訂閱方案
           </Link>
           <Link href="/experiments/new" className="btn btn-primary">
             建立實驗

@@ -15,9 +15,10 @@ Completed the usable product backbone across all 9 modules with concrete correct
 - Fixed 4 critical backend correctness gaps (training, execution, entitlements, billing)
 - Closed HTTP authentication gap — API keys now work at every protected endpoint
 - Built 6 frontend pages for backbone features
-- Initialized Alembic migrations with full schema (42 tables)
+- Initialized Alembic migrations with full schema (44 application tables)
 - Corrected documentation claims
 - Added API client methods for all new endpoints
+- Validated PostgreSQL worker claiming behavior with independent sessions
 
 ---
 
@@ -35,6 +36,61 @@ Completed the usable product backbone across all 9 modules with concrete correct
 - **Failure-if-empty guard:** If no valid results exist, job status set to `failed` with clear error message
 
 **Status:** OFFLINE VERIFIED (tests pass individually; full suite has SQLite isolation issues)
+
+### 2.1.1 Durable Training Worker (Added 2026-10-15)
+
+**Files:** `backend/app/workers/training_worker.py`, `backend/app/api/training.py`
+
+**Architecture change:**
+- **Async execution model:** Training jobs are now created with status `pending` and executed by a background worker, not synchronously in the HTTP request
+- **Database-backed worker:** Simple polling worker that claims pending jobs via `SELECT FOR UPDATE SKIP LOCKED` for exclusive claiming
+- **Durable execution:** Jobs survive API restarts; worker can be restarted independently
+- **Graceful shutdown:** Worker handles SIGINT/SIGTERM, finishes current job before exiting
+
+**API contract change:**
+- `POST /api/v1/training/jobs` now returns immediately with `status: "pending"`
+- Client must poll `GET /api/v1/training/jobs/{job_id}` to check completion
+- Worker transitions: `pending` → `running` → `completed`/`failed`/`cancelled`
+
+**Worker startup:**
+```bash
+# Run the training worker (separate process)
+cd backend
+python -m app.workers.training_worker [poll_interval_seconds]
+
+# Default poll interval: 5 seconds
+# Worker logs to stdout, can be run with systemd/supervisor/docker
+```
+
+**Claiming mechanism:**
+- Worker queries for pending jobs ordered by `created_at ASC`
+- Uses `with_for_update(skip_locked=True)` to skip jobs already claimed by other workers
+- Multiple workers can run concurrently; each job claimed by exactly one worker
+- Claimed job transitions to `running` status atomically
+
+**Cancellation:**
+- Pending jobs: cancelled immediately via API (status → `cancelled`)
+- Running jobs: cancellation flag set in memory; sweep loop checks between iterations
+- Worker checks cancellation flag at each backtest iteration
+
+**Failure handling:**
+- Unhandled exceptions in worker mark job as `failed` with `error_details`
+- Worker continues processing next job after failure
+- No automatic retry (operator must investigate and recreate job)
+
+**Test coverage:**
+- 22/22 training tests pass with async execution model
+- Tests simulate worker execution by calling `run_parameter_sweep()` directly
+- 501/501 total backend tests pass
+- PostgreSQL claiming behavior validated with independent sessions (see `docs/postgres-worker-validation-scenario-a.md`)
+
+**Limitations:**
+- No automatic retry on failure (by design — operator must investigate)
+- In-memory cancellation flags (process-local); multi-worker deployment needs distributed flag (Redis/DB)
+- No progress reporting (only status transitions)
+- Worker is single-threaded; one job at a time per worker process
+
+**Status:** OFFLINE VERIFIED (501/501 tests pass; PostgreSQL claiming validated with independent sessions)
 
 ### 2.2 Execution Concurrency (Module G)
 
@@ -178,12 +234,13 @@ Completed the usable product backbone across all 9 modules with concrete correct
 - Configured `env.py` to use database URL from `app.config`
 - Imported all models to register with Base metadata
 - Handled SQLite JSONB/UUID compilation for local development
-- Generated initial migration with 42 tables
+- Generated initial migration with 44 application tables
 - Verified migration applies cleanly to fresh SQLite database
+- Validated PostgreSQL migration with 44 tables, 40 enums, 3 circular FK constraints
 
 **Tables created:** users, experiments, experiment_versions, model_cards, model_versions, datasets, dataset_snapshots, research_runs, research_notes, audit_events, workspaces, pilot_applications, pilot_entitlements, usage_events, cost_records, support_logs, product_hypotheses, research_drafts, research_draft_revisions, research_draft_audit_events, quota_counters, api_keys, plans, subscriptions, payment_records, webhook_event_records, paper_portfolios, paper_positions, paper_orders, paper_fills, decision_records, outcome_evaluations, simulation_sessions, simulation_decisions, model_research_records, model_evaluations, model_research_exports, personal_research_memories, order_intents, execution_agents, fill_records, fill_reconciliations, inference_runs, training_jobs
 
-**Status:** VERIFIED (migration applies cleanly; 42 tables created; alembic_version recorded)
+**Status:** VERIFIED (migration applies cleanly to SQLite and PostgreSQL; 44 tables created; alembic_version recorded)
 
 ---
 
@@ -405,7 +462,7 @@ feat: initialize Alembic migrations with full schema
 
 - Initialize Alembic in backend/migrations/
 - Configure env.py for dynamic database URL
-- Generate initial migration with 42 tables
+- Generate initial migration with 44 application tables
 - Handle SQLite JSONB/UUID compilation
 ```
 

@@ -55,21 +55,44 @@ def _create_experiment(client, headers, template_type="sma_crossover", signal_pa
     return resp.json()
 
 
+def _create_and_execute_job(client, headers, experiment_id, parameter_grid):
+    """Create a training job and execute it synchronously (simulating the worker).
+
+    Returns the completed job data.
+    """
+    resp = client.post("/api/v1/training/jobs", headers=headers, json={
+        "experiment_id": experiment_id,
+        "parameter_grid": parameter_grid,
+    })
+    assert resp.status_code == 201
+    job_data = resp.json()
+    job_id = job_data["id"]
+
+    # Execute the job synchronously (simulating what the worker would do)
+    from app.database import SessionLocal
+    db = SessionLocal()
+    try:
+        run_parameter_sweep(db, uuid.UUID(job_id))
+        db.commit()
+    finally:
+        db.close()
+
+    # Fetch the updated job
+    resp = client.get(f"/api/v1/training/jobs/{job_id}", headers=headers)
+    assert resp.status_code == 200
+    return resp.json()
+
+
 class TestParameterSweep:
     """Parameter sweep runs multiple backtests."""
 
     def test_sweep_runs_multiple_combinations(self, client, auth_headers):
         exp = _create_experiment(client, auth_headers)
 
-        resp = client.post("/api/v1/training/jobs", headers=auth_headers, json={
-            "experiment_id": exp["id"],
-            "parameter_grid": {
-                "short_window": [3, 5],
-                "long_window": [15, 20],
-            },
+        data = _create_and_execute_job(client, auth_headers, exp["id"], {
+            "short_window": [3, 5],
+            "long_window": [15, 20],
         })
-        assert resp.status_code == 201
-        data = resp.json()
         assert data["status"] == "completed"
         assert data["results"] is not None
         # 2 x 2 = 4 combinations
@@ -78,14 +101,10 @@ class TestParameterSweep:
     def test_each_result_has_metrics(self, client, auth_headers):
         exp = _create_experiment(client, auth_headers)
 
-        resp = client.post("/api/v1/training/jobs", headers=auth_headers, json={
-            "experiment_id": exp["id"],
-            "parameter_grid": {
-                "short_window": [3, 5],
-                "long_window": [15, 20],
-            },
+        data = _create_and_execute_job(client, auth_headers, exp["id"], {
+            "short_window": [3, 5],
+            "long_window": [15, 20],
         })
-        data = resp.json()
         for result in data["results"]:
             assert "params" in result
             assert "metrics" in result
@@ -99,14 +118,10 @@ class TestResultsRanking:
     def test_results_ranked_by_total_return(self, client, auth_headers):
         exp = _create_experiment(client, auth_headers)
 
-        resp = client.post("/api/v1/training/jobs", headers=auth_headers, json={
-            "experiment_id": exp["id"],
-            "parameter_grid": {
-                "short_window": [3, 5, 10],
-                "long_window": [15, 20],
-            },
+        data = _create_and_execute_job(client, auth_headers, exp["id"], {
+            "short_window": [3, 5, 10],
+            "long_window": [15, 20],
         })
-        data = resp.json()
         results = data["results"]
 
         # Check ranks are assigned 1..N
@@ -129,14 +144,10 @@ class TestBestParams:
     def test_best_params_identified(self, client, auth_headers):
         exp = _create_experiment(client, auth_headers)
 
-        resp = client.post("/api/v1/training/jobs", headers=auth_headers, json={
-            "experiment_id": exp["id"],
-            "parameter_grid": {
-                "short_window": [3, 5, 10],
-                "long_window": [15, 20],
-            },
+        data = _create_and_execute_job(client, auth_headers, exp["id"], {
+            "short_window": [3, 5, 10],
+            "long_window": [15, 20],
         })
-        data = resp.json()
         assert data["best_params"] is not None
         assert "short_window" in data["best_params"]
         assert "long_window" in data["best_params"]
@@ -150,6 +161,7 @@ class TestJobLifecycle:
     """Job lifecycle: pending -> running -> completed."""
 
     def test_job_completes_synchronously(self, client, auth_headers):
+        """Test that job creation returns pending status (async contract)."""
         exp = _create_experiment(client, auth_headers)
 
         resp = client.post("/api/v1/training/jobs", headers=auth_headers, json={
@@ -157,10 +169,25 @@ class TestJobLifecycle:
             "parameter_grid": {"short_window": [5], "long_window": [20]},
         })
         data = resp.json()
-        # Job is executed synchronously, so it should be completed already
-        assert data["status"] == "completed"
-        assert data["completed_at"] is not None
+        # Job is created asynchronously, so it should be pending
+        assert data["status"] == "pending"
+        assert data["completed_at"] is None
         assert data["created_at"] is not None
+
+        # Now execute it (simulating worker)
+        from app.database import SessionLocal
+        db = SessionLocal()
+        try:
+            run_parameter_sweep(db, uuid.UUID(data["id"]))
+            db.commit()
+        finally:
+            db.close()
+
+        # Fetch the updated job
+        get_resp = client.get(f"/api/v1/training/jobs/{data['id']}", headers=auth_headers)
+        updated_data = get_resp.json()
+        assert updated_data["status"] == "completed"
+        assert updated_data["completed_at"] is not None
 
     def test_get_job_result(self, client, auth_headers):
         exp = _create_experiment(client, auth_headers)
@@ -216,17 +243,21 @@ class TestInvalidParameters:
     def test_cancel_pending_job(self, client, auth_headers):
         exp = _create_experiment(client, auth_headers)
 
-        # Create a job — but it completes synchronously, so we need to test
-        # cancellation on a completed job (should fail)
+        # Create a job — it will be pending (async execution)
         create_resp = client.post("/api/v1/training/jobs", headers=auth_headers, json={
             "experiment_id": exp["id"],
             "parameter_grid": {"short_window": [5], "long_window": [20]},
         })
-        job_id = create_resp.json()["id"]
+        job_data = create_resp.json()
+        job_id = job_data["id"]
+        assert job_data["status"] == "pending"
 
-        # Job is already completed, cancellation should be rejected
+        # Cancel the pending job
         cancel_resp = client.post(f"/api/v1/training/jobs/{job_id}/cancel", headers=auth_headers)
-        assert cancel_resp.status_code == 400
+        assert cancel_resp.status_code == 200
+        cancelled_data = cancel_resp.json()
+        assert cancelled_data["status"] == "cancelled"
+        assert cancelled_data["cancelled_at"] is not None
 
 
 class TestTrainingUserIsolation:
@@ -307,11 +338,26 @@ class TestGridSizeLimit:
                     "extra_param": list(range(10, 20)),    # 10 values → 1000 combos
                 },
             })
-        # Should succeed (201) — 1000 is exactly at the limit
-        assert resp.status_code == 201
-        data = resp.json()
-        assert data["status"] == "completed"
-        assert len(data["results"]) == 1000
+            # Should succeed (201) — 1000 is exactly at the limit
+            assert resp.status_code == 201
+            data = resp.json()
+            job_id = data["id"]
+            assert data["status"] == "pending"
+
+            # Execute the job (simulating worker)
+            from app.database import SessionLocal
+            db = SessionLocal()
+            try:
+                run_parameter_sweep(db, uuid.UUID(job_id))
+                db.commit()
+            finally:
+                db.close()
+
+            # Fetch the completed job
+            get_resp = client.get(f"/api/v1/training/jobs/{job_id}", headers=auth_headers)
+            completed_data = get_resp.json()
+            assert completed_data["status"] == "completed"
+            assert len(completed_data["results"]) == 1000
 
 
 class TestStrategySnapshot:
@@ -391,14 +437,29 @@ class TestFailedBacktestFiltering:
             },
         })
         data = resp.json()
-        assert data["status"] == "completed"
+        job_id = data["id"]
+        assert data["status"] == "pending"
+
+        # Execute the job (simulating worker)
+        from app.database import SessionLocal
+        db = SessionLocal()
+        try:
+            run_parameter_sweep(db, uuid.UUID(job_id))
+            db.commit()
+        finally:
+            db.close()
+
+        # Fetch the completed job
+        get_resp = client.get(f"/api/v1/training/jobs/{job_id}", headers=auth_headers)
+        completed_data = get_resp.json()
+        assert completed_data["status"] == "completed"
 
         # Only successful backtests should appear in ranked results
-        for result in data["results"]:
+        for result in completed_data["results"]:
             assert result["backtest_status"] == "completed"
 
         # Should have exactly 2 ranked results (not 4)
-        assert len(data["results"]) == 2
+        assert len(completed_data["results"]) == 2
 
     @patch("app.services.training.run_backtest")
     def test_all_failed_backtests_set_status_to_failed(self, mock_backtest, client, auth_headers):
@@ -418,9 +479,24 @@ class TestFailedBacktestFiltering:
             },
         })
         data = resp.json()
-        assert data["status"] == "failed"
-        assert data["error_details"] is not None
-        assert "no valid" in data["error_details"].lower() or "failed" in data["error_details"].lower()
+        job_id = data["id"]
+        assert data["status"] == "pending"
+
+        # Execute the job (simulating worker)
+        from app.database import SessionLocal
+        db = SessionLocal()
+        try:
+            run_parameter_sweep(db, uuid.UUID(job_id))
+            db.commit()
+        finally:
+            db.close()
+
+        # Fetch the failed job
+        get_resp = client.get(f"/api/v1/training/jobs/{job_id}", headers=auth_headers)
+        completed_data = get_resp.json()
+        assert completed_data["status"] == "failed"
+        assert completed_data["error_details"] is not None
+        assert "no valid" in completed_data["error_details"].lower() or "failed" in completed_data["error_details"].lower()
 
     @patch("app.services.training.run_backtest")
     def test_failed_job_still_stores_raw_results(self, mock_backtest, client, auth_headers):
@@ -437,11 +513,26 @@ class TestFailedBacktestFiltering:
             "parameter_grid": {"short_window": [3], "long_window": [15]},
         })
         data = resp.json()
-        assert data["status"] == "failed"
+        job_id = data["id"]
+        assert data["status"] == "pending"
+
+        # Execute the job (simulating worker)
+        from app.database import SessionLocal
+        db = SessionLocal()
+        try:
+            run_parameter_sweep(db, uuid.UUID(job_id))
+            db.commit()
+        finally:
+            db.close()
+
+        # Fetch the failed job
+        get_resp = client.get(f"/api/v1/training/jobs/{job_id}", headers=auth_headers)
+        completed_data = get_resp.json()
+        assert completed_data["status"] == "failed"
         # Raw results should still be present for diagnostics
-        assert data["results"] is not None
-        assert len(data["results"]) == 1
-        assert data["results"][0]["backtest_status"] == "error"
+        assert completed_data["results"] is not None
+        assert len(completed_data["results"]) == 1
+        assert completed_data["results"][0]["backtest_status"] == "error"
 
 
 class TestRunningStateCancel:
@@ -451,12 +542,6 @@ class TestRunningStateCancel:
     def test_cancel_running_job_via_flag(self, mock_backtest, client, auth_headers):
         """The sweep loop should stop early when the cancellation flag is set."""
         def backtest_side_effect(strategy_spec):
-            # Set cancellation flag on first call to simulate user cancelling
-            # while the sweep is running.
-            if not _cancellation_flags:
-                # We need to find the job_id — peek at the flag dict after
-                # the first call by looking at what keys might appear.
-                pass
             return {
                 "run_status": "completed",
                 "metrics": {"total_return_pct": 1.0, "max_drawdown_pct": 0.5},
@@ -467,7 +552,7 @@ class TestRunningStateCancel:
 
         exp = _create_experiment(client, auth_headers)
 
-        # Create the job — it completes synchronously (4 combos, fast)
+        # Create the job — it will be pending (async execution)
         resp = client.post("/api/v1/training/jobs", headers=auth_headers, json={
             "experiment_id": exp["id"],
             "parameter_grid": {
@@ -476,31 +561,16 @@ class TestRunningStateCancel:
             },
         })
         job_id = resp.json()["id"]
+        assert resp.json()["status"] == "pending"
 
-        # Job should be completed (it ran too fast to cancel)
-        assert resp.json()["status"] == "completed"
-
-        # Now verify the cancellation mechanism works at the service level:
-        # set the flag for this job_id and run a new sweep manually.
-        # First create another job but don't run the sweep yet.
+        # Verify the cancellation mechanism works at the service level:
+        # set the flag for this job_id and verify cancel_running_job sets it.
         from app.services.training import _cancellation_flags as flags
         flags.clear()
 
-        # Set cancellation flag before running sweep — simulates a concurrent cancel
-        flags[uuid.UUID(job_id)] = True
-
-        # Create a fresh pending job to test cancellation directly
-        resp2 = client.post("/api/v1/training/jobs", headers=auth_headers, json={
-            "experiment_id": exp["id"],
-            "parameter_grid": {"short_window": [3, 5], "long_window": [15, 20]},
-        })
-        job2_id = resp2.json()["id"]
-
-        # The sweep already ran synchronously. Instead, verify the mechanism
-        # by calling cancel_running_job and checking it sets the flag.
-        flags.clear()
-        cancel_running_job(uuid.UUID(job2_id))
-        assert flags.get(uuid.UUID(job2_id)) is True
+        # Call cancel_running_job and check it sets the flag
+        cancel_running_job(uuid.UUID(job_id))
+        assert flags.get(uuid.UUID(job_id)) is True
         flags.clear()
 
     def test_sweep_stops_when_cancelled(self, client, auth_headers):

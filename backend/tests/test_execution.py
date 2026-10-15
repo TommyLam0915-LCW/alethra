@@ -39,7 +39,8 @@ from app.services.execution import (
     reconcile_order,
     get_fill_records,
 )
-from app.services.kill_switch import kill_switch
+from app.models.kill_switch import KillSwitchScope
+from app.services.kill_switch import activate_kill_switch, deactivate_kill_switch
 
 
 # ── Helpers ──
@@ -374,10 +375,18 @@ class TestIdempotencyKey:
 
 class TestKillSwitch:
     def setup_method(self):
-        kill_switch.deactivate()
+        db = TestSession()
+        try:
+            deactivate_kill_switch(db, KillSwitchScope.execution)
+        finally:
+            db.close()
 
     def teardown_method(self):
-        kill_switch.deactivate()
+        db = TestSession()
+        try:
+            deactivate_kill_switch(db, KillSwitchScope.execution)
+        finally:
+            db.close()
 
     def test_kill_switch_blocks_submit(self, client, auth_headers):
         portfolio_id = _create_portfolio_via_api(client, auth_headers)
@@ -391,8 +400,9 @@ class TestKillSwitch:
             json={"authorization_token": token},
         )
 
-        kill_switch.activate("Emergency halt")
+        db = TestSession()
         try:
+            activate_kill_switch(db, KillSwitchScope.execution, "test", "Emergency halt")
             resp = client.post(
                 f"/api/v1/execution/intents/{intent_id}/submit",
                 headers=auth_headers,
@@ -400,7 +410,8 @@ class TestKillSwitch:
             assert resp.status_code == 503
             assert "kill switch" in resp.json()["detail"].lower()
         finally:
-            kill_switch.deactivate()
+            deactivate_kill_switch(db, KillSwitchScope.execution)
+            db.close()
 
     def test_kill_switch_deactivate_allows_submit(self, client, auth_headers):
         portfolio_id = _create_portfolio_via_api(client, auth_headers)
@@ -414,8 +425,12 @@ class TestKillSwitch:
             json={"authorization_token": token},
         )
 
-        kill_switch.activate("Test")
-        kill_switch.deactivate()
+        db = TestSession()
+        try:
+            activate_kill_switch(db, KillSwitchScope.execution, "test", "Test")
+            deactivate_kill_switch(db, KillSwitchScope.execution)
+        finally:
+            db.close()
 
         resp = client.post(
             f"/api/v1/execution/intents/{intent_id}/submit",
