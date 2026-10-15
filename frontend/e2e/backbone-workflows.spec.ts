@@ -515,4 +515,92 @@ test.describe('Backbone Workflow Acceptance', () => {
       await expect(page.locator('h1').filter({ hasText: /我的實驗|My Experiments/i })).toBeVisible();
     });
   });
+
+  test.describe('H. Product Alignment', () => {
+    test('H1. Dashboard shows brand tagline and research-focused layout', async ({ page }) => {
+      await loginViaBrowser(page);
+      await page.goto(`${FRONTEND_URL}/dashboard`);
+
+      // Brand tagline present
+      await expect(page.locator('text=你的投資想法，值得被認真檢驗')).toBeVisible({ timeout: 10000 });
+
+      // Primary research actions visible
+      await expect(page.locator('a[href="/experiments/new"], button:has-text("建立實驗")').first()).toBeVisible();
+
+      // Infrastructure buttons moved to secondary section
+      const secondarySection = page.locator('text=其他功能');
+      await expect(secondarySection).toBeVisible();
+    });
+
+    test('H2. Dashboard shows honest disclaimers and guidance', async ({ page }) => {
+      await loginViaBrowser(page);
+      await page.goto(`${FRONTEND_URL}/dashboard`);
+
+      // Disclaimer is always visible
+      await expect(page.locator('text=本系統是研究工具')).toBeVisible({ timeout: 10000 });
+
+      // Check if empty state is shown (no experiments)
+      const emptyStateVisible = await page.locator('text=還沒有任何實驗').isVisible().catch(() => false);
+      
+      if (emptyStateVisible) {
+        // Empty state should show honest guidance
+        const bodyText = await page.locator('body').textContent();
+        expect(bodyText).toMatch(/證據不足|不需要修改|暫停|修改|停止/);
+      }
+    });
+
+    test('H3. Experiment detail shows workflow continuity section', async ({ page, request }) => {
+      await loginViaBrowser(page);
+
+      // Create an experiment via API
+      const createResp = await request.post(`${BACKEND_URL}/api/experiments`, {
+        headers: { Authorization: `Bearer ${authToken}` },
+        data: {
+          title: 'Alignment Test Experiment',
+          hypothesis: 'Test hypothesis for alignment verification',
+          falsification_criteria: 'Test criteria',
+        },
+      });
+
+      if (createResp.ok()) {
+        const exp = await createResp.json();
+        await page.goto(`${FRONTEND_URL}/experiments/${exp.id}`);
+        await page.waitForTimeout(2000);
+
+        // Workflow continuity section present
+        await expect(page.locator('text=研究紀錄')).toBeVisible({ timeout: 10000 });
+
+        // Timeline toggle present
+        await expect(page.locator('button:has-text("查看時間線")')).toBeVisible();
+
+        // Simulation link present
+        await expect(page.locator('a:has-text("前進模擬")')).toBeVisible();
+      }
+    });
+
+    test('H4. Experiment detail shows improved backtest empty state', async ({ page, request }) => {
+      await loginViaBrowser(page);
+
+      // Create a fresh experiment (no backtest runs)
+      const createResp = await request.post(`${BACKEND_URL}/api/experiments`, {
+        headers: { Authorization: `Bearer ${authToken}` },
+        data: {
+          title: 'Empty Backtest Test',
+          hypothesis: 'Test hypothesis',
+          falsification_criteria: 'Test criteria',
+        },
+      });
+
+      if (createResp.ok()) {
+        const exp = await createResp.json();
+        await page.goto(`${FRONTEND_URL}/experiments/${exp.id}`);
+        await page.waitForTimeout(2000);
+
+        // Improved empty state messaging
+        await expect(page.locator('text=尚未執行回測')).toBeVisible({ timeout: 10000 });
+        const bodyText = await page.locator('body').textContent();
+        expect(bodyText).toMatch(/示範資料|研究參考/);
+      }
+    });
+  });
 });
