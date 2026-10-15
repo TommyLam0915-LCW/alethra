@@ -24,6 +24,19 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Install Playwright browsers
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+
       - name: Start acceptance stack
         run: docker compose -f docker-compose.acceptance.yml up --build -d
 
@@ -61,19 +74,6 @@ jobs:
           curl -sf -X POST http://localhost:8001/api/auth/register \
             -H "Content-Type: application/json" \
             -d '{"email":"user_b_test@example.com","password":"TestPassword456!@#","display_name":"User B","user_type":"individual"}'
-
-      - name: Set up Node 20
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install frontend dependencies
-        working-directory: frontend
-        run: npm ci
-
-      - name: Install Playwright browsers
-        working-directory: frontend
-        run: npx playwright install --with-deps chromium
 
       - name: Run browser tests
         working-directory: frontend

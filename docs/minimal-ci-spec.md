@@ -318,6 +318,19 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Install Playwright browsers
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+
       - name: Start acceptance stack
         run: docker compose -f docker-compose.acceptance.yml up --build -d
 
@@ -356,19 +369,6 @@ jobs:
             -H "Content-Type: application/json" \
             -d '{"email":"user_b_test@example.com","password":"TestPassword456!@#","display_name":"User B","user_type":"individual"}'
 
-      - name: Set up Node 20
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install frontend dependencies
-        working-directory: frontend
-        run: npm ci
-
-      - name: Install Playwright browsers
-        working-directory: frontend
-        run: npx playwright install --with-deps chromium
-
       - name: Run browser tests
         working-directory: frontend
         run: npx playwright test
@@ -390,16 +390,18 @@ jobs:
 
 | Step | Purpose | Failure Mode |
 |------|---------|--------------|
-| Checkout | Get source for Docker build context | Git error (transient) |
+| Checkout | Get source for Docker build context and host dependency installation | Git error (transient) |
+| `npm ci` | Install frontend dependencies including `@playwright/test` on host (before Compose to avoid permission conflicts) | Lockfile mismatch, network error |
+| `playwright install --with-deps` | Download Chromium binary + OS libraries on host | Network error, unsupported platform |
 | `docker compose up --build -d` | Build images from Dockerfiles, start all 3 services, create PostgreSQL volume | Docker build failure (dependency or code error) |
 | Wait for backend | Poll `GET /health` up to 60s | Backend crash (DB not ready, import error, migration failure) |
 | Wait for frontend | Poll `GET /` up to 60s | Next.js dev server crash (compile error, missing dependency) |
 | Bootstrap test users | Register USER_A and USER_B via API | Registration endpoint failure (schema change, validation error) |
-| `npm ci` | Install frontend dependencies including `@playwright/test` | Lockfile mismatch, network error |
-| `playwright install --with-deps` | Download Chromium binary + OS libraries | Network error, unsupported platform |
 | `playwright test` | Run all 27 tests (api-fetch + method-review + research-drafts) | Test failure, timeout, flaky assertion |
 | Upload artifacts | Preserve HTML report and failure screenshots | N/A (runs on `always()`) |
 | `docker compose down -v` | Remove containers and PostgreSQL volume | N/A (runs on `always()`) |
+
+**Ordering rationale:** Host dependency installation (`npm ci`, `playwright install`) must occur before Docker Compose startup. The Compose bind mount `./frontend:/app` creates root-owned `node_modules` directories inside the container. If the host `npm ci` runs after Compose startup, it encounters permission errors when trying to modify the root-owned directories. Installing dependencies on the host first avoids this conflict. The container uses its own dependencies (from the Dockerfile's `npm install`, preserved by anonymous volumes), independent of the host's `node_modules`.
 
 ### 4.5 Isolation and Security
 
