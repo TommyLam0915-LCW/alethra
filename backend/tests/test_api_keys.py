@@ -7,10 +7,16 @@ from datetime import datetime, timedelta
 from uuid import uuid4
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from tests.conftest import TestSession
-from app.auth.api_keys import authenticate_api_key, generate_api_key
+from app.auth.api_keys import (
+    authenticate_api_key,
+    authenticate_api_key_with_scopes,
+    check_api_key_scope,
+    generate_api_key,
+)
 from app.auth.rate_limit import RateLimiter, rate_limit_dependency
 from app.models.api_key import ApiKey
 from app.models.user import User
@@ -307,3 +313,91 @@ class TestRateLimiter:
             assert r3.status_code == 429
             assert r3.headers["X-RateLimit-Remaining"] == "0"
             assert "Retry-After" in r3.headers
+
+
+# ---------------------------------------------------------------------------
+# API key scope enforcement
+# ---------------------------------------------------------------------------
+
+class TestAuthenticateWithScopes:
+    def test_returns_user_and_scopes(self):
+        db = TestSession()
+        try:
+            user = _make_user(db, f"scope1-{uuid4().hex[:8]}@test.io")
+            _, raw_key = generate_api_key(db, user.id, "k", scopes=["read", "write"])
+            result = authenticate_api_key_with_scopes(db, raw_key)
+            assert result is not None
+            returned_user, scopes = result
+            assert returned_user.id == user.id
+            assert scopes == ["read", "write"]
+        finally:
+            db.rollback()
+            db.close()
+
+    def test_invalid_key_returns_none(self):
+        db = TestSession()
+        try:
+            result = authenticate_api_key_with_scopes(db, "alk_invalid")
+            assert result is None
+        finally:
+            db.rollback()
+            db.close()
+
+    def test_empty_scopes_list(self):
+        db = TestSession()
+        try:
+            user = _make_user(db, f"scope2-{uuid4().hex[:8]}@test.io")
+            _, raw_key = generate_api_key(db, user.id, "k", scopes=[])
+            result = authenticate_api_key_with_scopes(db, raw_key)
+            assert result is not None
+            _, scopes = result
+            assert scopes == []
+        finally:
+            db.rollback()
+            db.close()
+
+
+class TestCheckApiKeyScope:
+    def _make_request_with_scopes(self, scopes):
+        """Create a fake request-like object with api_key_scopes set."""
+        from types import SimpleNamespace
+        return SimpleNamespace(state=SimpleNamespace(api_key_scopes=scopes))
+
+    def test_jwt_auth_passes_through(self):
+        """When api_key_scopes is None (JWT auth), scope check is a no-op."""
+        request = self._make_request_with_scopes(None)
+        dep = check_api_key_scope("write")
+        result = dep(request)
+        assert result is request
+
+    def test_api_key_with_required_scope_passes(self):
+        request = self._make_request_with_scopes(["read", "write"])
+        dep = check_api_key_scope("write")
+        result = dep(request)
+        assert result is request
+
+    def test_api_key_without_required_scope_raises(self):
+        request = self._make_request_with_scopes(["read"])
+        dep = check_api_key_scope("write")
+        with pytest.raises(HTTPException) as exc_info:
+            dep(request)
+        assert exc_info.value.status_code == 403
+        detail = exc_info.value.detail
+        assert detail["error"] == "insufficient_scope"
+        assert detail["required_scope"] == "write"
+
+    def test_api_key_with_empty_scopes_raises(self):
+        request = self._make_request_with_scopes([])
+        dep = check_api_key_scope("read")
+        with pytest.raises(HTTPException) as exc_info:
+            dep(request)
+        assert exc_info.value.status_code == 403
+
+    def test_api_key_no_scopes_attribute_raises(self):
+        """When state has no api_key_scopes attribute at all, deny access."""
+        from types import SimpleNamespace
+        request = SimpleNamespace(state=SimpleNamespace())
+        dep = check_api_key_scope("read")
+        with pytest.raises(HTTPException) as exc_info:
+            dep(request)
+        assert exc_info.value.status_code == 403

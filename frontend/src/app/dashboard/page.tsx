@@ -66,6 +66,9 @@ export default function DashboardPage() {
           <Link href="/models" className="btn btn-secondary">
             模型研究
           </Link>
+          <Link href="/api-keys" className="btn btn-secondary">
+            API 金鑰
+          </Link>
           <Link href="/experiments/new" className="btn btn-primary">
             建立實驗
           </Link>

@@ -3,7 +3,7 @@ import copy
 import itertools
 import uuid
 from datetime import datetime
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 
 from sqlalchemy.orm import Session
 
@@ -11,6 +11,15 @@ from app.models.training import TrainingJob, TrainingJobStatus
 from app.models.experiment import Experiment
 from app.models.experiment_version import ExperimentVersion
 from app.engine.backtest import run_backtest
+
+
+# Maximum number of grid combinations allowed per training job.
+MAX_GRID_SIZE = 1000
+
+# In-memory cancellation flags, checked by the sweep loop between iterations.
+# The cancel endpoint sets a flag here; the sweep loop reads it.
+# This avoids relying on DB session visibility across threads.
+_cancellation_flags: Dict[uuid.UUID, bool] = {}
 
 
 def _expand_grid(parameter_grid: Dict[str, List[Any]]) -> List[Dict[str, Any]]:
@@ -48,16 +57,30 @@ def _validate_grid(parameter_grid: Dict[str, List[Any]]) -> List[str]:
     return errors
 
 
-def run_parameter_sweep(db: Session, job_id: uuid.UUID) -> TrainingJob:
+def run_parameter_sweep(
+    db: Session,
+    job_id: uuid.UUID,
+    combinations: Optional[List[Dict[str, Any]]] = None,
+) -> TrainingJob:
     """Execute a grid search over the backtest engine.
 
-    For each combination in parameter_grid:
-      1. Build a strategy_spec from the experiment's scope + combo parameters
+    For each combination in the parameter grid:
+      1. Build a strategy_spec by overlaying combo parameters onto the
+         captured strategy_spec_snapshot
       2. Run backtest
       3. Collect metrics
 
-    Rank results by total_return_pct (primary), max_drawdown_pct (secondary, lower is better).
-    Store results in TrainingJob.results, set best_params.
+    The strategy_spec_snapshot is read from the TrainingJob record (set at
+    job-creation time) so that changes to the experiment after the job was
+    created do not affect the sweep.
+
+    Rank results by total_return_pct (primary), max_drawdown_pct (secondary,
+    lower is better).  Only backtests with run_status == 'completed' are
+    included in the ranking.
+
+    NOTE: This function currently runs synchronously inside the HTTP request
+    handler.  It should be moved to a background worker (e.g. Celery / ARQ)
+    before deployment to production.
     """
     job = db.query(TrainingJob).filter(TrainingJob.id == job_id).first()
     if not job:
@@ -71,37 +94,40 @@ def run_parameter_sweep(db: Session, job_id: uuid.UUID) -> TrainingJob:
     db.flush()
 
     try:
-        experiment = db.query(Experiment).filter(Experiment.id == job.experiment_id).first()
-        if not experiment:
-            raise ValueError(f"Experiment {job.experiment_id} not found")
-
-        # Get the base strategy spec from experiment's current version or scope
-        base_strategy_spec = {}
-        if experiment.current_version_id:
-            current_version = db.query(ExperimentVersion).filter(
-                ExperimentVersion.id == experiment.current_version_id
-            ).first()
-            if current_version:
-                base_strategy_spec = current_version.strategy_spec or {}
-
+        # Use the strategy_spec snapshot captured at job-creation time.
+        base_strategy_spec = job.strategy_spec_snapshot
         if not base_strategy_spec:
-            scope = experiment.scope or {}
-            base_strategy_spec = scope.get("strategy_spec", {})
+            raise ValueError(
+                "Training job has no strategy_spec_snapshot; "
+                "cannot execute parameter sweep"
+            )
 
-        if not base_strategy_spec:
-            raise ValueError("Experiment has no strategy_spec in current version or scope")
-
-        # Validate grid
-        grid_errors = _validate_grid(job.parameter_grid)
-        if grid_errors:
-            raise ValueError(f"Invalid parameter grid: {'; '.join(grid_errors)}")
-
-        # Expand the grid
-        combinations = _expand_grid(job.parameter_grid)
+        # Fall back to expanding the grid here if pre-expanded combinations
+        # were not supplied by the caller.
+        if combinations is None:
+            grid_errors = _validate_grid(job.parameter_grid)
+            if grid_errors:
+                raise ValueError(f"Invalid parameter grid: {'; '.join(grid_errors)}")
+            combinations = _expand_grid(job.parameter_grid)
+            if len(combinations) > MAX_GRID_SIZE:
+                raise ValueError(
+                    f"Parameter grid produces {len(combinations)} combinations, "
+                    f"which exceeds the maximum of {MAX_GRID_SIZE}"
+                )
 
         results: List[Dict[str, Any]] = []
 
         for combo in combinations:
+            # ── Check cancellation flag between iterations ──────────
+            if _cancellation_flags.get(job_id):
+                job.status = TrainingJobStatus.cancelled
+                job.cancelled_at = datetime.utcnow()
+                job.completed_at = datetime.utcnow()
+                job.error_details = "Job cancelled by user"
+                _cancellation_flags.pop(job_id, None)
+                db.flush()
+                return job
+
             # Build strategy_spec by overlaying combo parameters onto base
             strategy_spec = copy.deepcopy(base_strategy_spec)
 
@@ -124,6 +150,22 @@ def run_parameter_sweep(db: Session, job_id: uuid.UUID) -> TrainingJob:
             }
             results.append(result_entry)
 
+        # ── Filter to only successful backtests before ranking ──────
+        successful_results = [
+            r for r in results if r.get("backtest_status") == "completed"
+        ]
+
+        if not successful_results:
+            job.status = TrainingJobStatus.failed
+            job.error_details = (
+                "No valid backtest results: all parameter combinations "
+                "failed or produced errors"
+            )
+            job.results = results  # keep raw results for diagnostics
+            job.completed_at = datetime.utcnow()
+            db.flush()
+            return job
+
         # Rank results: primary=total_return_pct (desc), secondary=max_drawdown_pct (asc)
         def sort_key(entry):
             m = entry.get("metrics", {})
@@ -131,7 +173,7 @@ def run_parameter_sweep(db: Session, job_id: uuid.UUID) -> TrainingJob:
             max_dd = m.get("max_drawdown_pct", 0) or 0
             return (-total_return, max_dd)
 
-        ranked = sorted(results, key=sort_key)
+        ranked = sorted(successful_results, key=sort_key)
         for rank, entry in enumerate(ranked, 1):
             entry["rank"] = rank
 
@@ -150,3 +192,13 @@ def run_parameter_sweep(db: Session, job_id: uuid.UUID) -> TrainingJob:
     job.completed_at = datetime.utcnow()
     db.flush()
     return job
+
+
+def cancel_running_job(job_id: uuid.UUID) -> None:
+    """Request cancellation of a running training job.
+
+    Sets an in-memory flag that the sweep loop checks between iterations.
+    The actual status transition to 'cancelled' happens inside the sweep
+    loop when it detects the flag.
+    """
+    _cancellation_flags[job_id] = True

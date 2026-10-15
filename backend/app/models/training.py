@@ -23,10 +23,12 @@ class TrainingJob(Base):
     experiment_id = Column(UUID(as_uuid=True), ForeignKey("experiments.id"), nullable=False)
     status = Column(SAEnum(TrainingJobStatus), default=TrainingJobStatus.pending, nullable=False)
     parameter_grid = Column(JSONB, nullable=False)
+    strategy_spec_snapshot = Column(JSONB, nullable=True)
     results = Column(JSONB, nullable=True)
     best_params = Column(JSONB, nullable=True)
     error_details = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     completed_at = Column(DateTime, nullable=True)
+    cancelled_at = Column(DateTime, nullable=True)
 
     experiment = relationship("Experiment")

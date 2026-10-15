@@ -1,18 +1,26 @@
 """Module F: Training pipeline API router."""
+import copy
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models.user import User
 from app.models.experiment import Experiment
+from app.models.experiment_version import ExperimentVersion
 from app.models.training import TrainingJob, TrainingJobStatus
 from app.auth.jwt import get_current_user
-from app.services.training import run_parameter_sweep, _validate_grid
+from app.services.training import (
+    run_parameter_sweep,
+    cancel_running_job,
+    _validate_grid,
+    _expand_grid,
+    MAX_GRID_SIZE,
+)
 
 router = APIRouter(prefix="/training", tags=["training"])
 
@@ -41,14 +49,42 @@ class TrainingJobResponse(BaseModel):
     experiment_id: UUID
     status: str
     parameter_grid: dict
+    strategy_spec_snapshot: Optional[dict]
     results: Optional[List[dict]]
     best_params: Optional[dict]
     error_details: Optional[str]
     created_at: datetime
     completed_at: Optional[datetime]
+    cancelled_at: Optional[datetime]
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
+
+
+# ── Helpers ────────────────────────────────────────────────────────────
+
+
+def _resolve_strategy_spec(db: Session, experiment: Experiment) -> Dict[str, Any]:
+    """Resolve the strategy_spec for an experiment.
+
+    Looks at the experiment's current version first, then falls back to the
+    scope field.  Raises ValueError if no strategy_spec can be found.
+    """
+    base_strategy_spec: Dict[str, Any] = {}
+    if experiment.current_version_id:
+        current_version = db.query(ExperimentVersion).filter(
+            ExperimentVersion.id == experiment.current_version_id
+        ).first()
+        if current_version:
+            base_strategy_spec = current_version.strategy_spec or {}
+
+    if not base_strategy_spec:
+        scope = experiment.scope or {}
+        base_strategy_spec = scope.get("strategy_spec", {})
+
+    if not base_strategy_spec:
+        raise ValueError("Experiment has no strategy_spec in current version or scope")
+
+    return base_strategy_spec
 
 
 # ── Routes ─────────────────────────────────────────────────────────────
@@ -60,7 +96,13 @@ def create_training_job(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Create and execute a training job (parameter sweep)."""
+    """Create and execute a training job (parameter sweep).
+
+    NOTE: The sweep currently runs synchronously inside this request handler.
+    It should be moved to a background worker (e.g. Celery / ARQ) before
+    production deployment.  Until then, long-running sweeps will block the
+    HTTP response.
+    """
     experiment = db.query(Experiment).filter(
         Experiment.id == payload.experiment_id,
         Experiment.owner_id == current_user.id,
@@ -68,17 +110,36 @@ def create_training_job(
     if not experiment:
         raise HTTPException(status_code=404, detail="Experiment not found")
 
+    # Resolve strategy_spec at creation time (immutable snapshot)
+    try:
+        base_strategy_spec = _resolve_strategy_spec(db, experiment)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    # Expand grid and enforce size cap
+    combinations = _expand_grid(payload.parameter_grid)
+    if len(combinations) > MAX_GRID_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Parameter grid produces {len(combinations)} combinations, "
+                f"which exceeds the maximum of {MAX_GRID_SIZE}"
+            ),
+        )
+
     job = TrainingJob(
         user_id=current_user.id,
         experiment_id=payload.experiment_id,
         parameter_grid=payload.parameter_grid,
+        strategy_spec_snapshot=copy.deepcopy(base_strategy_spec),
         status=TrainingJobStatus.pending,
     )
     db.add(job)
     db.flush()
 
     # Execute the sweep synchronously
-    run_parameter_sweep(db, job.id)
+    # TODO: move to a background worker (Celery / ARQ / etc.)
+    run_parameter_sweep(db, job.id, combinations=combinations)
 
     db.commit()
     db.refresh(job)
@@ -120,7 +181,12 @@ def cancel_training_job(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Cancel a pending training job."""
+    """Cancel a pending or running training job.
+
+    - Pending jobs are cancelled immediately (status -> cancelled).
+    - Running jobs have a cancellation flag set; the sweep loop will detect
+      it between iterations and transition the status to cancelled.
+    """
     job = db.query(TrainingJob).filter(
         TrainingJob.id == job_id,
         TrainingJob.user_id == current_user.id,
@@ -128,14 +194,27 @@ def cancel_training_job(
     if not job:
         raise HTTPException(status_code=404, detail="Training job not found")
 
-    if job.status != TrainingJobStatus.pending:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Cannot cancel job with status '{job.status.value}'. Only pending jobs can be cancelled.",
-        )
+    if job.status == TrainingJobStatus.pending:
+        job.status = TrainingJobStatus.cancelled
+        job.cancelled_at = datetime.utcnow()
+        job.completed_at = datetime.utcnow()
+        db.commit()
+        db.refresh(job)
+        return job
 
-    job.status = TrainingJobStatus.cancelled
-    job.completed_at = datetime.utcnow()
-    db.commit()
-    db.refresh(job)
-    return job
+    if job.status == TrainingJobStatus.running:
+        # Set cancellation flag — the sweep loop checks this between
+        # iterations and will transition the status to cancelled.
+        cancel_running_job(job.id)
+        job.cancelled_at = datetime.utcnow()
+        db.commit()
+        db.refresh(job)
+        return job
+
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            f"Cannot cancel job with status '{job.status.value}'. "
+            "Only pending or running jobs can be cancelled."
+        ),
+    )

@@ -3,7 +3,7 @@ from typing import Optional
 from uuid import UUID
 import bcrypt
 from jose import JWTError, jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from app.config import get_settings
@@ -37,6 +37,7 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
 
 
 def get_current_user(
+    request: Request,
     credentials: HTTPAuthorizationCredentials = Depends(security),
     db: Session = Depends(get_db)
 ) -> User:
@@ -45,21 +46,29 @@ def get_current_user(
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
-    try:
-        payload = jwt.decode(credentials.credentials, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm])
-        user_id: str = payload.get("sub")
-        if user_id is None:
-            raise credentials_exception
-        user_uuid = UUID(user_id)
-    except (JWTError, ValueError):
-        raise credentials_exception
 
-    user = db.query(User).filter(User.id == user_uuid).first()
-    if user is None:
-        raise credentials_exception
-    if not user.is_active:
-        raise HTTPException(status_code=400, detail="Inactive user")
-    return user
+    token = credentials.credentials
+
+    try:
+        payload = jwt.decode(token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm])
+        user_id: str = payload.get("sub")
+        if user_id is not None:
+            user_uuid = UUID(user_id)
+            user = db.query(User).filter(User.id == user_uuid).first()
+            if user and user.is_active:
+                request.state.api_key_scopes = None
+                return user
+    except (JWTError, ValueError):
+        pass
+
+    from app.auth.api_keys import authenticate_api_key_with_scopes
+    result = authenticate_api_key_with_scopes(db, token)
+    if result is not None:
+        user, scopes = result
+        request.state.api_key_scopes = scopes
+        return user
+
+    raise credentials_exception
 
 
 def require_admin(current_user: User = Depends(get_current_user)) -> User:

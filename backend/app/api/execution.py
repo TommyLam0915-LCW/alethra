@@ -14,10 +14,12 @@ from app.services.execution import (
     submit_intent,
     cancel_intent,
     reconcile_order,
+    get_fill_records,
 )
 from app.models.execution import (
     OrderIntent,
     FillReconciliation,
+    FillRecord,
     IntentStatus,
 )
 
@@ -32,6 +34,12 @@ class OrderIntentCreate(BaseModel):
     quantity: int = Field(..., gt=0)
     order_type: str = Field(default="MARKET", pattern="^(MARKET|LIMIT)$")
     limit_price: Optional[float] = None
+    idempotency_key: Optional[str] = Field(
+        default=None,
+        max_length=64,
+        description="Client-supplied key to prevent duplicate order creation. "
+                    "If a request with the same key already exists, the existing intent is returned.",
+    )
 
 
 class OrderIntentResponse(BaseModel):
@@ -53,6 +61,9 @@ class OrderIntentResponse(BaseModel):
     updated_at: datetime
     rejection_reason: Optional[str]
     broker_ref: Optional[str]
+    idempotency_key: Optional[str]
+    fill_source: Optional[str]
+    broker_confirmed_at: Optional[datetime]
 
 
 class AuthorizeRequest(BaseModel):
@@ -68,6 +79,19 @@ class ReconcileResponse(BaseModel):
     filled_quantity: int
     discrepancy: bool
     reconciled_at: datetime
+
+
+class FillRecordResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    order_intent_id: uuid.UUID
+    quantity: int
+    price: Optional[float]
+    fill_source: str
+    broker_ref: Optional[str]
+    broker_confirmed_at: Optional[datetime]
+    created_at: datetime
 
 
 # ── Router ──
@@ -98,6 +122,7 @@ def api_create_intent(
         quantity=payload.quantity,
         order_type=payload.order_type,
         limit_price=payload.limit_price,
+        idempotency_key=payload.idempotency_key,
     )
     return intent
 
@@ -110,6 +135,9 @@ def api_authorize_intent(
     current_user: User = Depends(get_current_user),
 ):
     intent = _get_intent_or_404(db, intent_id)
+    # Ownership check at route level for consistency with other routes
+    if intent.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized")
     if intent.authorization_token != payload.authorization_token:
         raise HTTPException(status_code=403, detail="Invalid authorization token")
     return authorize_intent(db, intent_id=intent_id, user_id=current_user.id)
@@ -121,10 +149,7 @@ def api_submit_intent(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    intent = _get_intent_or_404(db, intent_id)
-    if intent.user_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Not authorized")
-    return submit_intent(db, intent_id=intent_id)
+    return submit_intent(db, intent_id=intent_id, user_id=current_user.id)
 
 
 @router.post("/intents/{intent_id}/cancel", response_model=OrderIntentResponse)
@@ -175,3 +200,18 @@ def api_reconcile_intent(
     if intent.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not authorized")
     return reconcile_order(db, intent_id=intent_id)
+
+
+@router.get(
+    "/intents/{intent_id}/fills",
+    response_model=List[FillRecordResponse],
+)
+def api_list_fill_records(
+    intent_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    intent = _get_intent_or_404(db, intent_id)
+    if intent.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    return get_fill_records(db, intent_id=intent_id)

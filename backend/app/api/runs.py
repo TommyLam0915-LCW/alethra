@@ -15,6 +15,7 @@ from app.api.schemas import ResearchRunResponse, VersionDiffResponse, VersionDif
 from app.engine.backtest import run_backtest, ENGINE_VERSION
 from app.providers import get_data_provider
 from app.auth.entitlements import require_entitlement, consume_quota
+from app.auth.api_keys import check_api_key_scope
 from app.services import emit_event
 
 router = APIRouter(tags=["runs"])
@@ -24,7 +25,8 @@ router = APIRouter(tags=["runs"])
 def create_run(
     version_id: UUID,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_entitlement(quota_type="research_run"))
+    current_user: User = Depends(require_entitlement(quota_type="research_run")),
+    _scope_check=Depends(check_api_key_scope("write")),
 ):
     version = db.query(ExperimentVersion).filter(
         ExperimentVersion.id == version_id

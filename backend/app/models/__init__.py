@@ -73,7 +73,9 @@ from app.models.execution import (
     IntentSide,
     IntentOrderType,
     IntentStatus,
+    FillSource,
     ExecutionAgent,
+    FillRecord,
     FillReconciliation,
 )
 
@@ -161,6 +163,8 @@ __all__ = [
     "IntentSide",
     "IntentOrderType",
     "IntentStatus",
+    "FillSource",
     "ExecutionAgent",
+    "FillRecord",
     "FillReconciliation",
 ]

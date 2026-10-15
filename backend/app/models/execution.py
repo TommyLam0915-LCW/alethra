@@ -24,7 +24,13 @@ class IntentStatus(str, enum.Enum):
     filled = "filled"
     cancelled = "cancelled"
     rejected = "rejected"
-    uncertain = "uncertain"
+    uncertain = "uncertain"  # Used for ambiguous broker submissions (a.k.a. "unknown")
+
+
+class FillSource(str, enum.Enum):
+    """Distinguishes simulated fills from broker-confirmed fills."""
+    simulated = "simulated"
+    broker = "broker"
 
 
 class OrderIntent(Base):
@@ -47,7 +53,16 @@ class OrderIntent(Base):
     rejection_reason = Column(Text, nullable=True)
     broker_ref = Column(String(255), nullable=True)
 
+    # Idempotency: client-supplied key to prevent duplicate submissions.
+    # If a request arrives with a duplicate idempotency_key, the existing intent is returned.
+    idempotency_key = Column(String(64), unique=True, nullable=True, index=True)
+
+    # Fill tracking: distinguishes simulated fills from broker-confirmed fills
+    fill_source = Column(SAEnum(FillSource), nullable=True)
+    broker_confirmed_at = Column(DateTime, nullable=True)
+
     fill_reconciliations = relationship("FillReconciliation", back_populates="order_intent")
+    fill_records = relationship("FillRecord", back_populates="order_intent", cascade="all, delete-orphan")
 
 
 class ExecutionAgent(Base):
@@ -59,6 +74,26 @@ class ExecutionAgent(Base):
     config_encrypted = Column(JSONB, nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class FillRecord(Base):
+    """Tracks individual fills for an order intent.
+
+    Each fill record represents a discrete execution event (partial or full).
+    Reconciliation compares the sum of fill records against the expected quantity.
+    """
+    __tablename__ = "fill_records"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    order_intent_id = Column(UUID(as_uuid=True), ForeignKey("order_intents.id"), nullable=False)
+    quantity = Column(Integer, nullable=False)
+    price = Column(Float, nullable=True)
+    fill_source = Column(SAEnum(FillSource), nullable=False, default=FillSource.simulated)
+    broker_ref = Column(String(255), nullable=True)
+    broker_confirmed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    order_intent = relationship("OrderIntent", back_populates="fill_records")
 
 
 class FillReconciliation(Base):

@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import List
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Request, Header
 from sqlalchemy.orm import Session
@@ -114,13 +114,16 @@ def create_payment_intent(
 @router.post("/webhooks/payment")
 async def handle_payment_webhook(
     request: Request,
-    x_webhook_signature: Optional[str] = Header(None),
+    x_webhook_signature: str = Header(...),
     db: Session = Depends(get_db),
 ):
+    if not x_webhook_signature:
+        raise HTTPException(status_code=400, detail="Missing webhook signature")
+
     payload = (await request.body()).decode()
     adapter = get_payment_adapter()
 
-    if x_webhook_signature and not adapter.verify_webhook_signature(payload, x_webhook_signature):
+    if not adapter.verify_webhook_signature(payload, x_webhook_signature):
         raise HTTPException(status_code=400, detail="Invalid signature")
 
     event = adapter.parse_webhook_event(payload)

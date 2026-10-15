@@ -5,6 +5,7 @@ import hmac
 from uuid import uuid4
 
 from app.models.billing import Plan, Subscription, PaymentRecord, WebhookEventRecord, SubscriptionStatus
+from app.models.pilot import PilotEntitlement
 from app.models.user import User
 from app.services.billing import (
     create_subscription,
@@ -107,6 +108,51 @@ class TestBillingService:
         activated = activate_subscription(db, sub.id, "pi_test_123")
         assert activated.status == SubscriptionStatus.active
 
+    def test_activate_subscription_creates_entitlement(self, db, user, plan):
+        """Activating a subscription must atomically create/update PilotEntitlement."""
+        sub = create_subscription(db, user.id, plan.id)
+        activate_subscription(db, sub.id, "pi_test_456")
+
+        ent = db.query(PilotEntitlement).filter(
+            PilotEntitlement.user_id == user.id,
+        ).first()
+        assert ent is not None, "PilotEntitlement should be created on activation"
+        assert ent.pilot_access is True
+        # plan fixture: monthly_price=999 → "starter" tier
+        assert ent.research_run_limit == 50
+        assert ent.ai_usage_limit == 20
+        assert ent.export_limit == 10
+        assert ent.forward_simulation_limit == 10
+
+    def test_activate_subscription_updates_existing_entitlement(self, db, user, plan):
+        """Re-activating must update limits rather than creating a duplicate row."""
+        # Pre-create an entitlement with different limits
+        old_ent = PilotEntitlement(
+            user_id=user.id,
+            pilot_access=False,
+            research_run_limit=1,
+            ai_usage_limit=1,
+            export_limit=1,
+            forward_simulation_limit=1,
+        )
+        db.add(old_ent)
+        db.commit()
+
+        sub = create_subscription(db, user.id, plan.id)
+        activate_subscription(db, sub.id, "pi_test_789")
+
+        # Should still be exactly one entitlement for this user
+        count = db.query(PilotEntitlement).filter(
+            PilotEntitlement.user_id == user.id,
+        ).count()
+        assert count == 1
+
+        ent = db.query(PilotEntitlement).filter(
+            PilotEntitlement.user_id == user.id,
+        ).first()
+        assert ent.pilot_access is True
+        assert ent.research_run_limit == 50  # starter tier from plan price
+
     def test_cancel_subscription(self, db, user, plan):
         sub = create_subscription(db, user.id, plan.id)
         cancelled = cancel_subscription(db, sub.id)
@@ -166,3 +212,68 @@ class TestCorrelationId:
     def test_unique_ids(self):
         ids = {generate_correlation_id() for _ in range(100)}
         assert len(ids) == 100
+
+
+class TestWebhookSignature:
+    """Webhook endpoint must reject unsigned or tampered payloads."""
+
+    def _build_payload(self):
+        return json.dumps({
+            "id": f"evt_{uuid4().hex[:12]}",
+            "type": "payment.completed",
+            "data": {"amount": 100},
+        })
+
+    def _sign(self, payload: str, secret: str = "test-webhook-secret") -> str:
+        return hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
+
+    def test_missing_signature_returns_422(self, client):
+        """Omitting X-Webhook-Signature entirely → 422 (required header)."""
+        resp = client.post(
+            "/api/v1/webhooks/payment",
+            content=self._build_payload(),
+            headers={"Content-Type": "application/json"},
+        )
+        assert resp.status_code == 422
+
+    def test_empty_signature_returns_400(self, client):
+        """Sending an empty signature value → 400."""
+        resp = client.post(
+            "/api/v1/webhooks/payment",
+            content=self._build_payload(),
+            headers={
+                "Content-Type": "application/json",
+                "X-Webhook-Signature": "",
+            },
+        )
+        assert resp.status_code == 400
+        assert "signature" in resp.json()["detail"].lower()
+
+    def test_invalid_signature_returns_400(self, client):
+        """Wrong signature → 400."""
+        payload = self._build_payload()
+        resp = client.post(
+            "/api/v1/webhooks/payment",
+            content=payload,
+            headers={
+                "Content-Type": "application/json",
+                "X-Webhook-Signature": "deadbeef",
+            },
+        )
+        assert resp.status_code == 400
+
+    def test_valid_signature_accepted(self, client):
+        """Correctly signed payload → 200."""
+        payload = self._build_payload()
+        sig = self._sign(payload)
+        resp = client.post(
+            "/api/v1/webhooks/payment",
+            content=payload,
+            headers={
+                "Content-Type": "application/json",
+                "X-Webhook-Signature": sig,
+            },
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["received"] is True

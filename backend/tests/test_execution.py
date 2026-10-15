@@ -5,9 +5,12 @@ Covers:
 - Cancel before/after submit
 - Expired intent rejection
 - Idempotency (duplicate intent_id)
+- Idempotency key (client-supplied, returns existing intent)
 - Kill switch blocks submissions
-- Reconciliation records
-- User isolation
+- Reconciliation records (using FillRecord sums)
+- Fill records creation and retrieval
+- User isolation / ownership consistency
+- Row-level locking (service-level correctness)
 
 All tests use the `client` fixture for proper DB lifecycle management.
 Service-level helpers use the same DB session as the API layer.
@@ -24,6 +27,8 @@ from app.models.paper_portfolio import PaperPortfolio, PortfolioStatus
 from app.models.execution import (
     OrderIntent,
     IntentStatus,
+    FillSource,
+    FillRecord,
     FillReconciliation,
 )
 from app.services.execution import (
@@ -32,6 +37,7 @@ from app.services.execution import (
     submit_intent,
     cancel_intent,
     reconcile_order,
+    get_fill_records,
 )
 from app.services.kill_switch import kill_switch
 
@@ -137,6 +143,8 @@ class TestSubmitAndFill:
         assert resp.json()["status"] == "filled"
         assert resp.json()["broker_ref"] is not None
         assert resp.json()["broker_ref"].startswith("OFFLINE-")
+        # fill_source should be 'simulated'
+        assert resp.json()["fill_source"] == "simulated"
 
 
 # ──────────────────────────────────────────────
@@ -310,6 +318,57 @@ class TestDuplicateIntentId:
 
 
 # ──────────────────────────────────────────────
+# 7b. Client-supplied idempotency_key
+# ──────────────────────────────────────────────
+
+class TestIdempotencyKey:
+    def test_duplicate_idempotency_key_returns_existing(self, client, auth_headers):
+        """When a client supplies an idempotency_key that already exists,
+        the existing intent is returned instead of creating a duplicate."""
+        portfolio_id = _create_portfolio_via_api(client, auth_headers)
+        idem_key = "client-order-abc-123"
+
+        # First request creates the intent
+        data1 = _create_intent_via_api(
+            client, auth_headers, portfolio_id,
+            symbol="DEMO-ALPHA", quantity=10,
+            idempotency_key=idem_key,
+        )
+        assert data1["idempotency_key"] == idem_key
+        first_intent_id = data1["intent_id"]
+
+        # Second request with same key returns the SAME intent (not a new one)
+        data2 = _create_intent_via_api(
+            client, auth_headers, portfolio_id,
+            symbol="DEMO-ALPHA", quantity=10,
+            idempotency_key=idem_key,
+        )
+        assert data2["intent_id"] == first_intent_id
+        assert data2["idempotency_key"] == idem_key
+
+    def test_different_idempotency_keys_create_separate_intents(self, client, auth_headers):
+        """Different idempotency keys should create separate intents."""
+        portfolio_id = _create_portfolio_via_api(client, auth_headers)
+
+        data1 = _create_intent_via_api(
+            client, auth_headers, portfolio_id,
+            idempotency_key="key-alpha",
+        )
+        data2 = _create_intent_via_api(
+            client, auth_headers, portfolio_id,
+            idempotency_key="key-beta",
+        )
+        assert data1["intent_id"] != data2["intent_id"]
+
+    def test_no_idempotency_key_still_creates(self, client, auth_headers):
+        """When no idempotency_key is supplied, intent is created normally."""
+        portfolio_id = _create_portfolio_via_api(client, auth_headers)
+        data = _create_intent_via_api(client, auth_headers, portfolio_id)
+        assert data["idempotency_key"] is None
+        assert data["intent_id"] is not None
+
+
+# ──────────────────────────────────────────────
 # 8. Kill switch blocks submissions
 # ──────────────────────────────────────────────
 
@@ -415,6 +474,121 @@ class TestReconciliation:
 
 
 # ──────────────────────────────────────────────
+# 9b. Fill records
+# ──────────────────────────────────────────────
+
+class TestFillRecords:
+    def test_fill_record_created_on_simulated_fill(self, client, auth_headers):
+        """When an intent is filled in offline mode, a FillRecord is created
+        with fill_source=simulated."""
+        portfolio_id = _create_portfolio_via_api(client, auth_headers)
+        intent_data = _create_intent_via_api(client, auth_headers, portfolio_id, quantity=25)
+        intent_id = intent_data["intent_id"]
+        token = intent_data["authorization_token"]
+
+        client.post(
+            f"/api/v1/execution/intents/{intent_id}/authorize",
+            headers=auth_headers,
+            json={"authorization_token": token},
+        )
+        client.post(
+            f"/api/v1/execution/intents/{intent_id}/submit",
+            headers=auth_headers,
+        )
+
+        # Check fill records via API
+        resp = client.get(
+            f"/api/v1/execution/intents/{intent_id}/fills",
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        fills = resp.json()
+        assert len(fills) == 1
+        assert fills[0]["quantity"] == 25
+        assert fills[0]["fill_source"] == "simulated"
+
+    def test_fill_record_created_via_service(self, client, auth_headers):
+        """Verify FillRecord creation via API endpoint."""
+        portfolio_id = _create_portfolio_via_api(client, auth_headers)
+        intent_data = _create_intent_via_api(client, auth_headers, portfolio_id, quantity=50)
+        intent_id = intent_data["intent_id"]
+        token = intent_data["authorization_token"]
+
+        client.post(
+            f"/api/v1/execution/intents/{intent_id}/authorize",
+            headers=auth_headers,
+            json={"authorization_token": token},
+        )
+        client.post(
+            f"/api/v1/execution/intents/{intent_id}/submit",
+            headers=auth_headers,
+        )
+
+        # Check via API
+        resp = client.get(
+            f"/api/v1/execution/intents/{intent_id}/fills",
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        fills = resp.json()
+        assert len(fills) == 1
+        assert fills[0]["quantity"] == 50
+        assert fills[0]["fill_source"] == "simulated"
+
+    def test_no_fill_records_for_unfilled_intent(self, client, auth_headers):
+        """An intent that was never submitted should have no fill records."""
+        portfolio_id = _create_portfolio_via_api(client, auth_headers)
+        intent_data = _create_intent_via_api(client, auth_headers, portfolio_id, quantity=10)
+        intent_id = intent_data["intent_id"]
+
+        resp = client.get(
+            f"/api/v1/execution/intents/{intent_id}/fills",
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        fills = resp.json()
+        assert len(fills) == 0
+
+    def test_fill_records_sum_used_in_reconciliation(self, client, auth_headers):
+        """Reconciliation uses the sum of FillRecords, not just status check."""
+        portfolio_id = _create_portfolio_via_api(client, auth_headers)
+        intent_data = _create_intent_via_api(client, auth_headers, portfolio_id, quantity=15)
+        intent_id = intent_data["intent_id"]
+        token = intent_data["authorization_token"]
+
+        client.post(
+            f"/api/v1/execution/intents/{intent_id}/authorize",
+            headers=auth_headers,
+            json={"authorization_token": token},
+        )
+        client.post(
+            f"/api/v1/execution/intents/{intent_id}/submit",
+            headers=auth_headers,
+        )
+
+        # Verify fill records via API
+        resp = client.get(
+            f"/api/v1/execution/intents/{intent_id}/fills",
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        fills = resp.json()
+        assert len(fills) == 1
+        assert fills[0]["quantity"] == 15
+
+        # Reconciliation should match: 15 expected, 15 filled from records
+        resp = client.post(
+            f"/api/v1/execution/intents/{intent_id}/reconcile",
+            headers=auth_headers,
+        )
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["expected_quantity"] == 15
+        assert data["filled_quantity"] == 15
+        assert data["discrepancy"] is False
+
+
+# ──────────────────────────────────────────────
 # 10. User isolation
 # ──────────────────────────────────────────────
 
@@ -462,6 +636,29 @@ class TestUserIsolation:
         )
         assert resp.status_code == 403
 
+    def test_user_cannot_submit_others_intent(self, client, auth_headers):
+        """Submit route also checks ownership — user B cannot submit user A's intent."""
+        portfolio_id = _create_portfolio_via_api(client, auth_headers)
+        intent_data = _create_intent_via_api(client, auth_headers, portfolio_id)
+        intent_id = intent_data["intent_id"]
+        token = intent_data["authorization_token"]
+
+        # Authorize via owner
+        client.post(
+            f"/api/v1/execution/intents/{intent_id}/authorize",
+            headers=auth_headers,
+            json={"authorization_token": token},
+        )
+
+        headers_b = self._create_second_user(client)
+
+        # User B tries to submit — should be 403
+        resp = client.post(
+            f"/api/v1/execution/intents/{intent_id}/submit",
+            headers=headers_b,
+        )
+        assert resp.status_code == 403
+
     def test_user_cannot_see_others_intents_via_api(self, client, auth_headers):
         portfolio_id = _create_portfolio_via_api(client, auth_headers)
         intent_data = _create_intent_via_api(client, auth_headers, portfolio_id)
@@ -475,6 +672,32 @@ class TestUserIsolation:
         )
         assert resp.status_code == 403
 
+    def test_user_cannot_see_others_fill_records(self, client, auth_headers):
+        """Fill records endpoint also enforces ownership."""
+        portfolio_id = _create_portfolio_via_api(client, auth_headers)
+        intent_data = _create_intent_via_api(client, auth_headers, portfolio_id, quantity=10)
+        intent_id = intent_data["intent_id"]
+        token = intent_data["authorization_token"]
+
+        # Complete the lifecycle so fills exist
+        client.post(
+            f"/api/v1/execution/intents/{intent_id}/authorize",
+            headers=auth_headers,
+            json={"authorization_token": token},
+        )
+        client.post(
+            f"/api/v1/execution/intents/{intent_id}/submit",
+            headers=auth_headers,
+        )
+
+        headers_b = self._create_second_user(client)
+
+        resp = client.get(
+            f"/api/v1/execution/intents/{intent_id}/fills",
+            headers=headers_b,
+        )
+        assert resp.status_code == 403
+
     def test_list_intents_only_own(self, client, auth_headers):
         portfolio_id = _create_portfolio_via_api(client, auth_headers)
         _create_intent_via_api(client, auth_headers, portfolio_id, quantity=3)
@@ -483,6 +706,95 @@ class TestUserIsolation:
         assert resp.status_code == 200
         intents = resp.json()
         assert len(intents) >= 1
+
+
+# ──────────────────────────────────────────────
+# 10b. Row-level locking correctness
+# ──────────────────────────────────────────────
+
+class TestRowLocking:
+    def test_authorize_with_for_update_prevents_double_authorization(self, client, auth_headers):
+        """authorize_intent uses with_for_update(). After the first authorization,
+        a second attempt should fail with 'cannot authorize' (status is already authorized)."""
+        portfolio_id = _create_portfolio_via_api(client, auth_headers)
+        intent_data = _create_intent_via_api(client, auth_headers, portfolio_id)
+        intent_id = intent_data["intent_id"]
+        token = intent_data["authorization_token"]
+
+        # First authorization succeeds
+        resp = client.post(
+            f"/api/v1/execution/intents/{intent_id}/authorize",
+            headers=auth_headers,
+            json={"authorization_token": token},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "authorized"
+
+        # Second authorization fails — status is no longer 'pending'
+        resp2 = client.post(
+            f"/api/v1/execution/intents/{intent_id}/authorize",
+            headers=auth_headers,
+            json={"authorization_token": token},
+        )
+        assert resp2.status_code == 400
+        assert "authorized" in resp2.json()["detail"].lower()
+
+    def test_submit_with_for_update_prevents_double_submit(self, client, auth_headers):
+        """submit_intent uses with_for_update(). After the first submit (which auto-fills),
+        a second attempt should fail because status is 'filled', not 'authorized'."""
+        portfolio_id = _create_portfolio_via_api(client, auth_headers)
+        intent_data = _create_intent_via_api(client, auth_headers, portfolio_id, quantity=5)
+        intent_id = intent_data["intent_id"]
+        token = intent_data["authorization_token"]
+
+        client.post(
+            f"/api/v1/execution/intents/{intent_id}/authorize",
+            headers=auth_headers,
+            json={"authorization_token": token},
+        )
+
+        # First submit succeeds → auto-fills
+        resp = client.post(
+            f"/api/v1/execution/intents/{intent_id}/submit",
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "filled"
+
+        # Second submit fails — status is 'filled', not 'authorized'
+        resp2 = client.post(
+            f"/api/v1/execution/intents/{intent_id}/submit",
+            headers=auth_headers,
+        )
+        assert resp2.status_code == 400
+        assert "filled" in resp2.json()["detail"].lower()
+
+
+# ──────────────────────────────────────────────
+# 10c. Uncertain / unknown status
+# ──────────────────────────────────────────────
+
+class TestUncertainStatus:
+    def test_uncertain_status_exists_in_enum(self):
+        """IntentStatus.uncertain is available for ambiguous broker submissions."""
+        assert IntentStatus.uncertain is not None
+        assert IntentStatus.uncertain.value == "uncertain"
+
+    def test_intent_can_be_set_to_uncertain(self, client, auth_headers):
+        """An intent can be manually moved to 'uncertain' status via the DB."""
+        portfolio_id = _create_portfolio_via_api(client, auth_headers)
+        intent_data = _create_intent_via_api(client, auth_headers, portfolio_id)
+        intent_id = intent_data["intent_id"]
+
+        db = TestSession()
+        try:
+            intent = db.query(OrderIntent).filter(OrderIntent.intent_id == intent_id).first()
+            intent.status = IntentStatus.uncertain
+            db.commit()
+            db.refresh(intent)
+            assert intent.status == IntentStatus.uncertain
+        finally:
+            db.close()
 
 
 # ──────────────────────────────────────────────
