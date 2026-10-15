@@ -78,6 +78,8 @@ from app.models.execution import (
     FillRecord,
     FillReconciliation,
 )
+from app.models.kill_switch import KillSwitch, KillSwitchScope
+from app.models.rate_limit import RateLimitCounter
 
 __all__ = [
     "User",
@@ -167,4 +169,7 @@ __all__ = [
     "ExecutionAgent",
     "FillRecord",
     "FillReconciliation",
+    "KillSwitch",
+    "KillSwitchScope",
+    "RateLimitCounter",
 ]
