@@ -323,19 +323,37 @@ To add browser tests to CI in the future:
 
 ---
 
-## 7B. Local Verification Status
+## 7B. Verification Status
+
+### Local Verification (Pre-CI)
 
 **Backend tests:**
 - Local execution on Python 3.14: 324 passed in 2824s (47 min) — anomalously slow, likely environment-specific.
 - Command correctness verified: `pytest` runs successfully, all tests pass.
-- GitHub Actions runner execution: **NOT YET VERIFIED.** Python 3.12 on `ubuntu-latest` may perform differently.
 
 **Frontend build:**
 - Local execution on Node 26: build succeeded, all pages generated.
 - Command correctness verified: `npm ci` and `npm run build` complete without errors.
-- GitHub Actions runner execution: **NOT YET VERIFIED.** Node 20 on `ubuntu-latest` may behave differently.
 
-**Important:** Local pass confirms command correctness and dependency resolution, but does not prove GitHub Actions execution will succeed. Version-specific behavior, runner performance, and network conditions on GitHub may differ. First CI run should be monitored.
+### GitHub Runner Verification (PR #5)
+
+**Backend tests — VERIFIED:**
+- Run: https://github.com/TommyLam0915-LCW/alethra/actions/runs/38685825749
+- Tested commit: `7d0f3f868a7ffc38f61827ec12304e1fba1d571f`
+- Runtime: Python 3.12 on `ubuntu-latest`
+- Result: 324 passed, 2468 warnings in 141.20s (pytest-reported duration)
+- Total job duration: 2m49s
+- Conclusion: success
+
+**Frontend build — VERIFIED:**
+- Run: https://github.com/TommyLam0915-LCW/alethra/actions/runs/38685825531
+- Tested commit: `7d0f3f868a7ffc38f61827ec12304e1fba1d571f`
+- Runtime: Node 20.20.2, npm 10.8.2 on `ubuntu-latest`
+- Build step duration: 11s
+- Total job duration: 27s
+- Conclusion: success
+
+**Note:** The cause of the 47-minute local backend run on Python 3.14 remains unconfirmed. GitHub runner execution on Python 3.12 completed in 2m49s, consistent with historical baselines.
 
 ---
 
