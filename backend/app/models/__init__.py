@@ -63,6 +63,19 @@ from app.models.research_drafts import (
     ResearchDraftRevision,
     ResearchDraftAuditEvent,
 )
+from app.models.quota import QuotaCounter
+from app.models.billing import Plan, Subscription, PaymentRecord, WebhookEventRecord, SubscriptionStatus
+from app.models.api_key import ApiKey
+from app.models.inference import InferenceRun, InferenceRunStatus
+from app.models.training import TrainingJob, TrainingJobStatus
+from app.models.execution import (
+    OrderIntent,
+    IntentSide,
+    IntentOrderType,
+    IntentStatus,
+    ExecutionAgent,
+    FillReconciliation,
+)
 
 __all__ = [
     "User",
@@ -133,4 +146,21 @@ __all__ = [
     "DraftStatus",
     "ResearchDraftRevision",
     "ResearchDraftAuditEvent",
+    "QuotaCounter",
+    "InferenceRun",
+    "InferenceRunStatus",
+    "TrainingJob",
+    "TrainingJobStatus",
+    "ApiKey",
+    "Plan",
+    "Subscription",
+    "PaymentRecord",
+    "WebhookEventRecord",
+    "SubscriptionStatus",
+    "OrderIntent",
+    "IntentSide",
+    "IntentOrderType",
+    "IntentStatus",
+    "ExecutionAgent",
+    "FillReconciliation",
 ]

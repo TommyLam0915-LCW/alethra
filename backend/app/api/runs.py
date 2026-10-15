@@ -13,6 +13,8 @@ from app.models.research_run import ResearchRun, RunStatus
 from app.auth.jwt import get_current_user
 from app.api.schemas import ResearchRunResponse, VersionDiffResponse, VersionDiffEntry
 from app.engine.backtest import run_backtest, ENGINE_VERSION
+from app.providers import get_data_provider
+from app.auth.entitlements import require_entitlement, consume_quota
 from app.services import emit_event
 
 router = APIRouter(tags=["runs"])
@@ -22,7 +24,7 @@ router = APIRouter(tags=["runs"])
 def create_run(
     version_id: UUID,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_entitlement(quota_type="research_run"))
 ):
     version = db.query(ExperimentVersion).filter(
         ExperimentVersion.id == version_id
@@ -64,7 +66,8 @@ def create_run(
         run.started_at = datetime.now(timezone.utc).replace(tzinfo=None)
         db.flush()
 
-        result = run_backtest(version.strategy_spec)
+        data_provider = get_data_provider()
+        result = run_backtest(version.strategy_spec, data_provider=data_provider)
 
         run.status = RunStatus.completed
         run.metrics = result["metrics"]
@@ -72,6 +75,8 @@ def create_run(
         run.dataset_checksum = result.get("dataset_checksum")
         run.methodology_json = result.get("methodology_summary")
         run.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+
+        consume_quota(db, current_user.id, "research_run")
 
         emit_event(db,
             entity_type="run", entity_id=run.id,
