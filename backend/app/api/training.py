@@ -14,6 +14,8 @@ from app.models.experiment import Experiment
 from app.models.experiment_version import ExperimentVersion
 from app.models.training import TrainingJob, TrainingJobStatus
 from app.auth.jwt import get_current_user
+from app.auth.safety import safety_control
+from app.models.kill_switch import KillSwitchScope
 from app.services.training import (
     run_parameter_sweep,
     cancel_running_job,
@@ -95,13 +97,17 @@ def create_training_job(
     payload: TrainingJobCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    _: None = Depends(safety_control(KillSwitchScope.training, "training")),
 ):
-    """Create and execute a training job (parameter sweep).
+    """Create a training job (parameter sweep).
 
-    NOTE: The sweep currently runs synchronously inside this request handler.
-    It should be moved to a background worker (e.g. Celery / ARQ) before
-    production deployment.  Until then, long-running sweeps will block the
-    HTTP response.
+    The job is created with status 'pending' and will be executed by a
+    background worker. The API returns immediately with the job details.
+    Use GET /training/jobs/{job_id} to poll for completion.
+    
+    Safety controls:
+    - Kill switch: Blocks new training jobs if training/global switch is active
+    - Rate limit: 10 training jobs per hour per user/API key
     """
     experiment = db.query(Experiment).filter(
         Experiment.id == payload.experiment_id,
@@ -135,12 +141,6 @@ def create_training_job(
         status=TrainingJobStatus.pending,
     )
     db.add(job)
-    db.flush()
-
-    # Execute the sweep synchronously
-    # TODO: move to a background worker (Celery / ARQ / etc.)
-    run_parameter_sweep(db, job.id, combinations=combinations)
-
     db.commit()
     db.refresh(job)
     return job

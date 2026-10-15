@@ -11,6 +11,8 @@ from app.database import get_db
 from app.models.user import User
 from app.models.inference import InferenceRun, InferenceRunStatus
 from app.auth.jwt import get_current_user
+from app.auth.safety import safety_control
+from app.models.kill_switch import KillSwitchScope
 from app.services.inference import run_inference
 
 router = APIRouter(prefix="/inference", tags=["inference"])
@@ -53,8 +55,14 @@ def create_inference_run(
     payload: InferenceRunCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    _: None = Depends(safety_control(KillSwitchScope.inference, "inference")),
 ):
-    """Create and execute an inference run."""
+    """Create and execute an inference run.
+    
+    Safety controls:
+    - Kill switch: Blocks new inference runs if inference/global switch is active
+    - Rate limit: 100 inference runs per hour per user/API key
+    """
     input_spec_dict = payload.input_spec.model_dump()
     run = run_inference(db, payload.model_version_id, current_user.id, input_spec_dict)
     db.commit()

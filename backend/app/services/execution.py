@@ -16,7 +16,9 @@ from app.models.execution import (
     FillRecord,
     FillReconciliation,
 )
+from app.models.kill_switch import KillSwitchScope
 from app.models.paper_portfolio import PaperPortfolio
+from app.services.kill_switch import is_kill_switch_active
 
 
 INTENT_TTL_MINUTES = 5
@@ -109,16 +111,8 @@ def submit_intent(
 ) -> OrderIntent:
     """Submit an authorized intent. Uses row-level locking to prevent
     concurrent read-check-write races.
-
-    NOTE: The kill-switch is currently process-local (threading.Lock).
-    For multi-worker deployments (e.g. gunicorn with multiple workers or
-    multiple pods), this must be replaced with a distributed lock/flag
-    (e.g. Redis SETNX or a database row) so that all workers see the
-    same kill-switch state.
     """
-    from app.services.kill_switch import kill_switch
-
-    if kill_switch.is_active():
+    if is_kill_switch_active(db, KillSwitchScope.execution):
         raise HTTPException(status_code=503, detail="Execution halted: kill switch is active")
 
     # Row-level lock: with_for_update() prevents concurrent status transitions

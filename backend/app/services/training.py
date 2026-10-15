@@ -86,12 +86,13 @@ def run_parameter_sweep(
     if not job:
         raise ValueError(f"Training job {job_id} not found")
 
-    if job.status != TrainingJobStatus.pending:
-        raise ValueError(f"Training job must be pending, got {job.status}")
+    if job.status not in (TrainingJobStatus.pending, TrainingJobStatus.running):
+        raise ValueError(f"Training job must be pending or running, got {job.status}")
 
-    # Transition to running
-    job.status = TrainingJobStatus.running
-    db.flush()
+    # Transition to running (if not already running — worker may have claimed it)
+    if job.status == TrainingJobStatus.pending:
+        job.status = TrainingJobStatus.running
+        db.flush()
 
     try:
         # Use the strategy_spec snapshot captured at job-creation time.

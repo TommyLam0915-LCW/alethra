@@ -8,6 +8,8 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.user import User
 from app.auth.jwt import get_current_user
+from app.auth.safety import safety_control
+from app.models.kill_switch import KillSwitchScope
 from app.services.execution import (
     create_order_intent,
     authorize_intent,
@@ -148,7 +150,17 @@ def api_submit_intent(
     intent_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    _: None = Depends(safety_control(KillSwitchScope.execution, "execution")),
 ):
+    """Submit an order intent to the broker.
+    
+    Safety controls:
+    - Kill switch: Blocks new submissions if execution/global switch is active
+    - Rate limit: 50 execution intents per hour per user/API key
+    
+    Note: Kill switch blocks NEW submissions only. Already-submitted orders
+    are not cancelled by the kill switch.
+    """
     return submit_intent(db, intent_id=intent_id, user_id=current_user.id)
 
 
