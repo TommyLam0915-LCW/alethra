@@ -22,9 +22,41 @@ def compute_config_hash(strategy_spec: Dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
+def _provider_bars_to_dataframe(bars: List[Any]) -> pd.DataFrame:
+    if not bars:
+        return pd.DataFrame(columns=["date", "open", "high", "low", "close"])
+    rows = []
+    for bar in bars:
+        rows.append({
+            "date": datetime.strptime(bar.date, "%Y-%m-%d"),
+            "open": bar.open,
+            "high": bar.high,
+            "low": bar.low,
+            "close": bar.close,
+        })
+    df = pd.DataFrame(rows)
+    df = df.sort_values("date").reset_index(drop=True)
+    return df
+
+
+def _fetch_ohlcv_via_provider(
+    provider: Any,
+    asset_ids: List[str],
+    start_date: str,
+    end_date: str,
+) -> Dict[str, pd.DataFrame]:
+    result = {}
+    for asset_id in asset_ids:
+        bars = provider.get_bars(asset_id, start_date, end_date)
+        if bars:
+            result[asset_id] = _provider_bars_to_dataframe(bars)
+    return result
+
+
 def run_backtest(
     strategy_spec: Dict[str, Any],
     engine_version: str = ENGINE_VERSION,
+    data_provider: Any = None,
 ) -> Dict[str, Any]:
     errors = []
     warnings = []
@@ -62,17 +94,29 @@ def run_backtest(
     slippage_rate = strategy_spec.get("slippage_rate", 0.0)
 
     all_asset_ids = list(set(asset_ids + ([strategy_spec["benchmark_id"]] if strategy_spec.get("benchmark_id") else [])))
-    ohlcv_data = get_demo_ohlcv(all_asset_ids, start_date, end_date)
+
+    if data_provider is not None:
+        ohlcv_data = _fetch_ohlcv_via_provider(data_provider, all_asset_ids, start_date, end_date)
+        dataset_checksum = data_provider.compute_checksum(all_asset_ids, start_date, end_date)
+        provider_name = data_provider.provider_name
+        feed_mode = data_provider.feed_mode
+    else:
+        ohlcv_data = get_demo_ohlcv(all_asset_ids, start_date, end_date)
+        dataset_checksum = compute_dataset_checksum(all_asset_ids, start_date, end_date)
+        provider_name = "Demo (Synthetic)"
+        feed_mode = "offline"
 
     for aid in asset_ids:
         if aid not in ohlcv_data or ohlcv_data[aid].empty:
             errors.append(f"No data available for {aid} in range {start_date} to {end_date}")
             return _error_result(errors)
 
-    dataset_checksum = compute_dataset_checksum(all_asset_ids, start_date, end_date)
     config_hash = compute_config_hash(strategy_spec)
 
-    warnings.append("Demo data only — not live market data.")
+    if feed_mode == "offline":
+        warnings.append(f"Data source: {provider_name} — not live market data.")
+    else:
+        warnings.append(f"Data source: {provider_name} ({feed_mode}).")
     warnings.append("Historical simulation for research purposes only.")
     if commission_rate == 0:
         warnings.append("Zero commission selected — real trading incurs costs.")
@@ -215,6 +259,8 @@ def run_backtest(
         "dataset_checksum": dataset_checksum,
         "engine_version": engine_version,
         "config_hash": config_hash,
+        "data_provider": provider_name,
+        "feed_mode": feed_mode,
         "start_date": start_date,
         "end_date": end_date,
         "initial_cash": initial_cash,
@@ -329,6 +375,8 @@ def _error_result(errors: List[str]) -> Dict[str, Any]:
         "dataset_checksum": None,
         "engine_version": ENGINE_VERSION,
         "config_hash": None,
+        "data_provider": None,
+        "feed_mode": None,
         "start_date": None,
         "end_date": None,
         "initial_cash": 0,

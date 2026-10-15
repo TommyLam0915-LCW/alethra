@@ -420,7 +420,7 @@ class TestMethodReviewAPI:
     def test_unauthenticated(self, client):
         exp_id = uuid4()
         response = client.get(f"/api/v1/experiments/{exp_id}/method-review")
-        assert response.status_code == 403
+        assert response.status_code == 401
 
     def test_nonexistent_experiment(self, client, auth_headers):
         exp_id = uuid4()

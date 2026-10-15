@@ -55,7 +55,13 @@ def setup_db():
     db_mod.engine = TEST_ENGINE
     Base.metadata.create_all(bind=TEST_ENGINE)
     yield
-    Base.metadata.drop_all(bind=TEST_ENGINE)
+    # Use raw SQL to reliably drop tables even when FK cycles prevent
+    # Base.metadata.drop_all from sorting them correctly in SQLite.
+    with TEST_ENGINE.connect() as conn:
+        conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
+        for table in reversed(Base.metadata.sorted_tables):
+            conn.exec_driver_sql(f'DROP TABLE IF EXISTS "{table.name}"')
+        conn.commit()
     db_mod.engine = _orig_engine
 
 

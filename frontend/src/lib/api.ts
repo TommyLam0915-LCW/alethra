@@ -247,4 +247,57 @@ export const api = {
     getAdminDashboard: () => apiFetch('/api/v1/pilot/admin/dashboard'),
     getHypothesesDashboard: () => apiFetch('/api/v1/pilot/admin/hypotheses-dashboard'),
   },
+  apiKeys: {
+    list: () => apiFetch('/api/v1/api-keys'),
+    create: (data: { name: string; scopes?: string[] }) =>
+      apiFetch('/api/v1/api-keys', { method: 'POST', body: JSON.stringify(data) }),
+    revoke: (id: string) =>
+      apiFetch(`/api/v1/api-keys/${id}`, { method: 'DELETE' }),
+  },
+  marketData: {
+    status: () => apiFetch('/api/v1/market-data/status'),
+    bars: (symbol: string, startDate?: string, endDate?: string) => {
+      const qs = new URLSearchParams();
+      if (startDate) qs.set('start_date', startDate);
+      if (endDate) qs.set('end_date', endDate);
+      const q = qs.toString();
+      return apiFetch(`/api/v1/market-data/bars/${symbol}${q ? `?${q}` : ''}`);
+    },
+    latest: (symbol: string) => apiFetch(`/api/v1/market-data/latest/${symbol}`),
+  },
+  execution: {
+    listIntents: () => apiFetch('/api/v1/execution/intents'),
+    getIntent: (intentId: string) => apiFetch(`/api/v1/execution/intents/${intentId}`),
+    createIntent: (data: { portfolio_id: string; symbol: string; side: string; quantity: number; order_type?: string; limit_price?: number; idempotency_key?: string }) =>
+      apiFetch('/api/v1/execution/intents', { method: 'POST', body: JSON.stringify(data) }),
+    authorize: (intentId: string, authorizationToken: string) =>
+      apiFetch(`/api/v1/execution/intents/${intentId}/authorize`, { method: 'POST', body: JSON.stringify({ authorization_token: authorizationToken }) }),
+    submit: (intentId: string) =>
+      apiFetch(`/api/v1/execution/intents/${intentId}/submit`, { method: 'POST' }),
+    cancel: (intentId: string) =>
+      apiFetch(`/api/v1/execution/intents/${intentId}/cancel`, { method: 'POST' }),
+    reconcile: (intentId: string) =>
+      apiFetch(`/api/v1/execution/intents/${intentId}/reconcile`, { method: 'POST' }),
+  },
+  inference: {
+    listRuns: () => apiFetch('/api/v1/inference/runs'),
+    getRun: (runId: string) => apiFetch(`/api/v1/inference/runs/${runId}`),
+    createRun: (data: { model_version_id: string; input_spec: any }) =>
+      apiFetch('/api/v1/inference/runs', { method: 'POST', body: JSON.stringify(data) }),
+  },
+  training: {
+    listJobs: () => apiFetch('/api/v1/training/jobs'),
+    getJob: (jobId: string) => apiFetch(`/api/v1/training/jobs/${jobId}`),
+    createJob: (data: { experiment_id: string; parameter_grid: Record<string, any[]> }) =>
+      apiFetch('/api/v1/training/jobs', { method: 'POST', body: JSON.stringify(data) }),
+    cancel: (jobId: string) =>
+      apiFetch(`/api/v1/training/jobs/${jobId}/cancel`, { method: 'POST' }),
+  },
+  billing: {
+    listPlans: () => apiFetch('/api/v1/billing/plans'),
+    getMySubscription: () => apiFetch('/api/v1/billing/subscriptions/me'),
+    createPaymentIntent: (data: { subscription_id: string }) =>
+      apiFetch('/api/v1/billing/payments/create-intent', { method: 'POST', body: JSON.stringify(data) }),
+    getOperationalStatus: () => apiFetch('/api/v1/billing/operational-status'),
+  },
 };

@@ -302,9 +302,47 @@ export default function ExperimentDetailPage() {
         </div>
       )}
 
+      {experiment.current_version_id && versions.length > 0 && (
+        <div className="card" style={{ marginBottom: '20px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+            <h3 style={{ margin: 0 }}>目前策略版本</h3>
+            <button
+              onClick={() => setShowVersions(!showVersions)}
+              className="btn"
+              style={{ backgroundColor: '#eaeaea', fontSize: '13px' }}
+            >
+              {showVersions ? '隱藏版本歷史' : `查看所有版本 (${versions.length})`}
+            </button>
+          </div>
+          <p style={{ color: '#666', fontSize: '14px', margin: 0 }}>
+            版本 {versions.find(v => v.id === experiment.current_version_id)?.version_number || versions.length}
+            {versions.find(v => v.id === experiment.current_version_id)?.change_reason && (
+              <> · 變更原因：{versions.find(v => v.id === experiment.current_version_id)?.change_reason}</>
+            )}
+          </p>
+          {showVersions && (
+            <div style={{ marginTop: '16px', borderTop: '1px solid #eaeaea', paddingTop: '16px' }}>
+              {versions.map((v, i) => (
+                <div key={v.id} style={{ padding: '12px', backgroundColor: '#fafafa', borderRadius: '6px', marginBottom: '8px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <div>
+                      <strong>版本 {v.version_number}</strong>
+                      {v.change_reason && <span style={{ marginLeft: '8px', color: '#666' }}>· {v.change_reason}</span>}
+                    </div>
+                    <span style={{ fontSize: '12px', color: '#999' }}>
+                      {new Date(v.created_at).toLocaleDateString('zh-Hant')}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       <div className="card" style={{ marginBottom: '20px' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-          <h2>回測結果</h2>
+          <h2 style={{ margin: 0 }}>回測結果</h2>
           <button
             onClick={handleRunBacktest}
             className="btn btn-primary"
@@ -315,9 +353,15 @@ export default function ExperimentDetailPage() {
         </div>
 
         {!latestRun ? (
-          <p style={{ color: '#666', textAlign: 'center', padding: '40px' }}>
-            尚未執行回測，點擊上方按鈕開始
-          </p>
+          <div style={{ textAlign: 'center', padding: '40px' }}>
+            <p style={{ color: '#666', marginBottom: '12px' }}>
+              尚未執行回測
+            </p>
+            <p style={{ color: '#888', fontSize: '14px' }}>
+              點擊上方按鈕開始測試你的策略假設。<br />
+              回測使用歷史示範資料，結果僅供研究參考。
+            </p>
+          </div>
         ) : (
           <div>
             {latestRun.warnings && latestRun.warnings.length > 0 && (
@@ -378,6 +422,54 @@ export default function ExperimentDetailPage() {
             <div style={{ marginTop: '16px', padding: '12px', backgroundColor: '#fff3cd', borderRadius: '6px', fontSize: '14px' }}>
               <strong>提醒：</strong>以上結果基於歷史示範資料，不代表未來績效。本系統是研究工具，不構成投資建議。
             </div>
+          </div>
+        )}
+      </div>
+
+      {/* Workflow Continuity */}
+      <div className="card" style={{ marginBottom: '20px' }}>
+        <h3 style={{ marginBottom: '16px' }}>研究紀錄</h3>
+        <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap' }}>
+          <button
+            onClick={() => setShowTimeline(!showTimeline)}
+            className="btn"
+            style={{ backgroundColor: '#eaeaea', fontSize: '13px' }}
+          >
+            {showTimeline ? '隱藏時間線' : `查看時間線 (${timeline.length} 事件)`}
+          </button>
+          <Link href={`/experiments/${experimentId}/simulation`} className="btn" style={{ backgroundColor: '#eaeaea', fontSize: '13px', textDecoration: 'none' }}>
+            前進模擬 →
+          </Link>
+        </div>
+
+        {showTimeline && timeline.length > 0 && (
+          <div style={{ marginTop: '16px', borderTop: '1px solid #eaeaea', paddingTop: '16px' }}>
+            {timeline.slice(0, 10).map((event) => (
+              <div key={event.id} style={{ padding: '10px', backgroundColor: '#fafafa', borderRadius: '6px', marginBottom: '8px', fontSize: '13px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div>
+                    <strong>{EVENT_LABELS[event.event_type] || event.event_type}</strong>
+                    {event.payload_json?.summary && (
+                      <span style={{ marginLeft: '8px', color: '#666' }}>· {event.payload_json.summary}</span>
+                    )}
+                  </div>
+                  <span style={{ color: '#999', fontSize: '12px' }}>
+                    {new Date(event.created_at).toLocaleString('zh-Hant')}
+                  </span>
+                </div>
+              </div>
+            ))}
+            {timeline.length > 10 && (
+              <p style={{ color: '#888', fontSize: '12px', textAlign: 'center', marginTop: '12px' }}>
+                顯示最近 10 筆事件，共 {timeline.length} 筆
+              </p>
+            )}
+          </div>
+        )}
+
+        {showTimeline && timeline.length === 0 && (
+          <div style={{ marginTop: '16px', textAlign: 'center', padding: '20px' }}>
+            <p style={{ color: '#888', fontSize: '14px' }}>尚無時間線事件</p>
           </div>
         )}
       </div>
