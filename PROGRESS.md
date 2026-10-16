@@ -1,5 +1,34 @@
 # Alethra Agent Progress
 
+Last updated: 2026-10-17T01:45+08:00
+Branch: auto/market-data-quality
+Commits: dbf0452, 1b60b53, b2e7478, 4e5d24c, 6abf41f
+Status: Pushed. NOT merged.
+Base: main at dc04d95
+
+## Session record: Market data storage layer (2026-10-17 00:30–01:45 HKT)
+
+### Market data storage — IMPLEMENTED / OFFLINE VERIFIED
+- **MarketDataBar model**: persists OHLCV bars with instrument_id, bar_timestamp, provider_id, OHLCV fields, adjustment metadata
+- **MarketDataMetadata model**: tracks data quality (data_nature, adjustment_status, timezone, currency), provenance (provider_note, provider_note_zh), staleness (first_bar_date, last_bar_date, total_bars), health (last_success_at, last_error_at, consecutive_errors, health_status)
+- **MarketDataStorage service**: upsert logic for bars (insert or update based on instrument+timestamp+provider), automatic metadata updates, error tracking with health degradation (3+ errors → degraded), stale instrument detection
+- **Migration a1b2c3d4e5f6**: creates market_data_bars and market_data_metadata tables with unique constraints and indexes
+- **API integration**: /instruments/{id}/bars endpoint now persists fetched bars to storage, records errors on provider failure
+- **9 focused tests**: store_bars creates records, updates metadata, upsert logic, get_bars with filters, get_metadata, mark_error, get_stale_instruments, empty bars handling, date range expansion
+- Completes P1 requirement: "adapter -> storage -> research/backtest" pipeline (previously in-memory only)
+
+### Verification
+- Storage tests: 9/9 passed
+- Full backend suite: 787/787 passed (pre-storage baseline; post-storage isolated run needed due to pre-existing test isolation issues)
+- No credentials in diff, git diff --check clean
+
+### Blocked on (unchanged)
+- LSEG credentials for live market data
+- IBKR TWS/Gateway for execution
+- Stripe credentials for live payments
+
+## Previous session records
+
 Last updated: 2026-10-17T00:30+08:00
 Branch: auto/market-data-quality
 Commits: dbf0452, 1b60b53, b2e7478, 4e5d24c
