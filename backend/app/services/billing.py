@@ -162,7 +162,6 @@ def _activate_subscription_tx(db: Session, sub: Subscription) -> Subscription:
             setattr(entitlement, key, value)
 
     db.flush()
-    db.commit()
     return sub
 
 
@@ -293,6 +292,8 @@ def _apply_webhook_event(db: Session, event_type: str, payload: Dict[str, Any]) 
     if event_type in _ACTIVATION_EVENT_TYPES:
         sub = _resolve_subscription(db, data)
         if sub is None:
+            return
+        if sub.status == SubscriptionStatus.cancelled:
             return
         _activate_subscription_tx(db, sub)
         amount = data.get("amount") if data.get("amount") is not None else data.get("amount_paid")
