@@ -128,8 +128,8 @@ async def handle_payment_webhook(
 
     event = adapter.parse_webhook_event(payload)
 
+    # process_webhook commits the event record and its state change atomically.
     is_duplicate = not process_webhook(db, event.id, event.event_type, event.data)
-    db.commit()
 
     return {
         "received": True,
