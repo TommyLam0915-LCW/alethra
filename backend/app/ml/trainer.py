@@ -46,6 +46,7 @@ def train_model(
     model_type: str = "logistic_regression",
     train_ratio: float = 0.7,
     val_ratio: float = 0.15,
+    user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Train a model on OHLCV bar data.
 
@@ -131,6 +132,7 @@ def train_model(
         metadata={
             "instrument_id": instrument_id,
             "model_type": model_type,
+            "user_id": user_id,
             "trained_at": utcnow().isoformat(),
             "n_train": len(train_idx),
             "n_val": len(val_idx),
@@ -217,10 +219,11 @@ def _save_artifact(
     return model_dir
 
 
-def load_model(model_id: str) -> Tuple[Any, Any, Dict[str, Any], List[str]]:
+def load_model(model_id: str, user_id: Optional[str] = None) -> Tuple[Any, Any, Dict[str, Any], List[str]]:
     """Load a saved model artifact.
 
     Returns: (model, scaler, metadata, feature_names)
+    Raises: PermissionError if user_id is provided and doesn't match model owner
     """
     import joblib
 
@@ -234,14 +237,17 @@ def load_model(model_id: str) -> Tuple[Any, Any, Dict[str, Any], List[str]]:
     with open(os.path.join(model_dir, "metadata.json")) as f:
         metadata = json.load(f)
 
+    if user_id is not None and metadata.get("user_id") != user_id:
+        raise PermissionError(f"Model {model_id} is not owned by user {user_id}")
+
     with open(os.path.join(model_dir, "feature_names.json")) as f:
         feature_names = json.load(f)
 
     return model, scaler, metadata, feature_names
 
 
-def list_models() -> List[Dict[str, Any]]:
-    """List all saved model artifacts."""
+def list_models(user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """List all saved model artifacts, optionally filtered by user_id."""
     if not os.path.isdir(ARTIFACTS_DIR):
         return []
 
@@ -253,7 +259,8 @@ def list_models() -> List[Dict[str, Any]]:
             with open(meta_path) as f:
                 metadata = json.load(f)
             metadata["model_id"] = model_id
-            models.append(metadata)
+            if user_id is None or metadata.get("user_id") == user_id:
+                models.append(metadata)
 
     models.sort(key=lambda m: m.get("trained_at", ""), reverse=True)
     return models

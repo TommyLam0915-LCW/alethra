@@ -79,8 +79,8 @@ def start_ml_training(
 def list_trained_models(
     current_user: User = Depends(get_current_user),
 ):
-    """List all trained model artifacts."""
-    models = list_models()
+    """List all trained model artifacts owned by the current user."""
+    models = list_models(user_id=str(current_user.id))
     return {
         "models": models,
         "total": len(models),
@@ -94,9 +94,11 @@ def get_model_detail(
 ):
     """Get detail for a specific trained model."""
     try:
-        _, _, metadata, feature_names = load_model(model_id)
+        _, _, metadata, feature_names = load_model(model_id, user_id=str(current_user.id))
     except FileNotFoundError:
         raise HTTPException(404, f"Model not found: {model_id}")
+    except PermissionError:
+        raise HTTPException(403, f"You do not have access to model {model_id}")
 
     return {
         "model_id": model_id,
@@ -118,9 +120,11 @@ def run_prediction(
     Fetches recent data for the instrument and generates signals.
     """
     try:
-        _, _, metadata, _ = load_model(model_id)
+        _, _, metadata, _ = load_model(model_id, user_id=str(current_user.id))
     except FileNotFoundError:
         raise HTTPException(404, f"Model not found: {model_id}")
+    except PermissionError:
+        raise HTTPException(403, f"You do not have access to model {model_id}")
 
     pred_instrument = instrument_id or metadata.get("instrument_id")
     if not pred_instrument:

@@ -104,6 +104,7 @@ def execute_ml_training(
             bars=bar_dicts,
             instrument_id=instrument_id,
             model_type=model_type,
+            user_id=str(job.user_id),
         )
 
         job.results = result

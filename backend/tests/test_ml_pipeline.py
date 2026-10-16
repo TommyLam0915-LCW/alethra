@@ -346,3 +346,99 @@ class TestMLAPIEndpoints:
             headers=self._headers(auth_token),
         )
         assert resp.status_code == 404
+
+
+class TestModelOwnership:
+    """Model ownership and user isolation tests."""
+
+    @pytest.fixture
+    def client(self):
+        from app.main import app
+        return TestClient(app)
+
+    @pytest.fixture
+    def user1_token(self, client):
+        client.post("/api/auth/register", json={
+            "email": "user1@example.com",
+            "password": "testpassword123",
+            "display_name": "User 1",
+        })
+        resp = client.post("/api/auth/login", json={
+            "email": "user1@example.com",
+            "password": "testpassword123",
+        })
+        return resp.json()["access_token"]
+
+    @pytest.fixture
+    def user2_token(self, client):
+        client.post("/api/auth/register", json={
+            "email": "user2@example.com",
+            "password": "testpassword123",
+            "display_name": "User 2",
+        })
+        resp = client.post("/api/auth/login", json={
+            "email": "user2@example.com",
+            "password": "testpassword123",
+        })
+        return resp.json()["access_token"]
+
+    def _headers(self, token):
+        return {"Authorization": f"Bearer {token}"}
+
+    def test_user_cannot_list_others_models(self, client, user1_token, user2_token):
+        """User A's models should not appear in User B's list."""
+        resp1 = client.post(
+            "/api/v1/ml/train?instrument_id=US:AAPL&model_type=baseline",
+            headers=self._headers(user1_token),
+        )
+        assert resp1.status_code == 200
+        model_id = resp1.json()["model_id"]
+
+        resp2 = client.get("/api/v1/ml/models", headers=self._headers(user2_token))
+        assert resp2.status_code == 200
+        models = resp2.json()["models"]
+        model_ids = [m["model_id"] for m in models]
+        assert model_id not in model_ids
+
+    def test_user_cannot_access_others_model_detail(self, client, user1_token, user2_token):
+        """User B should not be able to get details of User A's model."""
+        resp1 = client.post(
+            "/api/v1/ml/train?instrument_id=US:AAPL&model_type=baseline",
+            headers=self._headers(user1_token),
+        )
+        model_id = resp1.json()["model_id"]
+
+        resp2 = client.get(f"/api/v1/ml/models/{model_id}", headers=self._headers(user2_token))
+        assert resp2.status_code == 403
+
+    def test_user_cannot_predict_with_others_model(self, client, user1_token, user2_token):
+        """User B should not be able to use User A's model for prediction."""
+        resp1 = client.post(
+            "/api/v1/ml/train?instrument_id=US:AAPL&model_type=baseline",
+            headers=self._headers(user1_token),
+        )
+        model_id = resp1.json()["model_id"]
+
+        resp2 = client.post(
+            f"/api/v1/ml/models/{model_id}/predict",
+            headers=self._headers(user2_token),
+        )
+        assert resp2.status_code == 403
+
+    def test_user_can_access_own_model(self, client, user1_token):
+        """User A should be able to access their own model."""
+        resp = client.post(
+            "/api/v1/ml/train?instrument_id=US:AAPL&model_type=baseline",
+            headers=self._headers(user1_token),
+        )
+        model_id = resp.json()["model_id"]
+
+        resp_detail = client.get(f"/api/v1/ml/models/{model_id}", headers=self._headers(user1_token))
+        assert resp_detail.status_code == 200
+        assert resp_detail.json()["model_id"] == model_id
+
+        resp_predict = client.post(
+            f"/api/v1/ml/models/{model_id}/predict",
+            headers=self._headers(user1_token),
+        )
+        assert resp_predict.status_code == 200
