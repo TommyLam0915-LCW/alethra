@@ -1,6 +1,6 @@
 # Alethra Agent Progress
 
-Last updated: 2026-10-17T09:30+08:00
+Last updated: 2026-10-17T10:30+08:00
 Branch: auto/stored-data-backtest-integration
 Draft PR: https://github.com/TommyLam0915-LCW/alethra/pull/18
 Commits: cca606e, b9cb85f
@@ -51,6 +51,18 @@ Reviewed all three feature branches and fixed critical/high issues:
 - Replaced bare `except Exception: pass` with specific ProgrammingError/DataError handling
 - Data integrity failures now raise instead of silently passing
 - Fixed UUID validation to use uuid.UUID() parsing instead of length-only check
+
+### Nested worktree reviews + fixes
+Reviewed two additional feature branches in nested worktrees:
+
+**auto/billing-webhook-application** (2ecff6a) — 763 tests pass:
+- Removed premature `db.commit()` in `_activate_subscription_tx` that broke atomic transaction contract
+- Added guard preventing activation events from resurrecting cancelled subscriptions
+
+**auto/execution-recovery-reconcile** (d767de3) — 783 tests pass:
+- Added broker_ref validation: fill reports must match the intent's stored broker_ref
+- Added overfill protection: reject fills that would exceed order quantity
+- Simplified total_filled calculation using pre-validated values
 
 ---
 
