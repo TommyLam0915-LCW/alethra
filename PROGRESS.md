@@ -1,10 +1,37 @@
 # Alethra Agent Progress
 
-Last updated: 2026-10-17T06:15+08:00
+Last updated: 2026-10-17T06:45+08:00
 Branch: auto/stored-data-backtest-integration
 Draft PR: https://github.com/TommyLam0915-LCW/alethra/pull/18
-Commits: 757e4ab, 937f62b, a277899, 47b48d2, 433f79d, 0fe7ddf
+Commits: 757e4ab, 937f62b, a277899, 47b48d2, 433f79d, 0fe7ddf, 04c6327, e470b11
 Status: Pushed. NOT merged. Base: auto/market-data-quality (PR #13)
+
+## Session record: Two-phase quota reserve/settle/release (2026-10-17 06:30–06:45 HKT)
+
+### Two-phase quota flow — IMPLEMENTED / TESTED (e470b11)
+Replaces immediate consumption with a two-phase protocol for operations that may fail after starting:
+- **QuotaReservation model**: tracks in-flight quota reservations (status: reserved/settled/released)
+- **reserve_quota()**: atomically checks availability (used + reserved) and creates reservation; raises 429 if insufficient
+- **settle_reservation()**: increments used counter and marks reservation settled on success
+- **release_reservation()**: marks reservation released on failure (quota not consumed)
+- **check_quota_available()**: now accounts for active reservations to prevent double-spending
+- **runs.py**: updated to use reserve/settle/release pattern with try/except
+- **Migration**: adds quota_reservations table with indexes
+- **28 new tests**: covering reserve, settle, release, tracking, integration, isolation
+
+Benefits:
+- Quota not consumed when operations fail (backtests, ML training)
+- Prevents double-spending by accounting for in-flight operations
+- Audit trail of all quota operations (reserved, settled, released)
+- Backward compatible: legacy consume_quota() still available for simple operations
+
+### Verification
+- 28 new tests for two-phase flow
+- 26 existing entitlement tests still pass
+- 54 total quota-related tests pass
+- All changes pushed to auto/stored-data-backtest-integration
+
+---
 
 ## Session record: Stored market data → backtest + ML + refresh + review (2026-10-17 04:30–06:15 HKT)
 
