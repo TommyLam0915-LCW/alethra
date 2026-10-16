@@ -276,25 +276,43 @@ export default function ExecutionPage() {
     }
 
     if (intent.status === 'filled') {
-      const isBrokerConfirmed = intent.fill_source === 'broker' && intent.broker_confirmed_at;
+      let fillLabel: string;
+      let fillColor: { bg: string; text: string };
+      let refLabel: string;
+
+      if (intent.fill_source === 'simulated') {
+        fillLabel = '模擬成交（離線）';
+        fillColor = { bg: '#fff3cd', text: '#856404' };
+        refLabel = intent.broker_ref || '—';
+      } else if (intent.fill_source === 'broker' && intent.broker_confirmed_at) {
+        fillLabel = '券商確認成交';
+        fillColor = { bg: '#d4edda', text: '#155724' };
+        refLabel = intent.broker_ref || '—';
+      } else if (intent.fill_source === 'broker') {
+        fillLabel = '券商來源（待確認）';
+        fillColor = { bg: '#ffe0b2', text: '#e65100' };
+        refLabel = intent.broker_ref || '待券商確認';
+      } else {
+        fillLabel = '來源不明';
+        fillColor = { bg: '#e2e3e5', text: '#383d41' };
+        refLabel = intent.broker_ref || '無法取得參考編號';
+      }
+
       return (
-        <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
-          <span
-            style={{
-              fontSize: '12px',
-              padding: '2px 10px',
-              borderRadius: '10px',
-              backgroundColor: isBrokerConfirmed ? '#d4edda' : '#fff3cd',
-              color: isBrokerConfirmed ? '#155724' : '#856404',
-            }}
-          >
-            {isBrokerConfirmed ? '券商確認成交' : '模擬成交（離線）'}
+        <div style={{ display: 'flex', gap: '12px', alignItems: 'center', flexWrap: 'wrap' }}>
+          <span style={{
+            padding: '3px 10px',
+            borderRadius: '12px',
+            fontSize: '12px',
+            fontWeight: 500,
+            backgroundColor: fillColor.bg,
+            color: fillColor.text,
+          }}>
+            {fillLabel}
           </span>
-          {intent.broker_ref && (
-            <span style={{ fontSize: '12px', color: '#666' }}>
-              {isBrokerConfirmed ? '券商參考號' : '模擬參考號'}: <code style={{ fontSize: '12px' }}>{intent.broker_ref}</code>
-            </span>
-          )}
+          <span style={{ fontSize: '12px', color: '#666' }}>
+            參考編號：{refLabel}
+          </span>
           <button
             className="btn btn-secondary"
             onClick={() => handleReconcile(intent.intent_id)}
