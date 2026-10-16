@@ -329,26 +329,63 @@ def enforce_quota(
 ) -> bool:
     """Check and increment quota atomically.
 
-    Returns True if allowed, False if quota exceeded.
-    Raises HTTPException if quota exceeded.
+    Uses SELECT FOR UPDATE to prevent concurrent requests from exceeding
+    the quota limit (TOCTOU race). Returns True if allowed.
+    Raises HTTPException(429) if quota exceeded.
     """
     from fastapi import HTTPException
+    from app.models.quota import QuotaCounter
 
-    quota_status = check_quota(db, user_id, quota_type, period)
+    entitlement = db.query(PilotEntitlement).filter(
+        PilotEntitlement.user_id == user_id,
+    ).first()
 
-    if not quota_status["allowed"]:
+    if entitlement is None:
+        limit = FREE_PLAN_ENTITLEMENT.get(quota_type, 0)
+    else:
+        limit = getattr(entitlement, quota_type, None)
+        if limit is None:
+            counter = db.query(QuotaCounter).filter(
+                QuotaCounter.user_id == user_id,
+                QuotaCounter.quota_type == quota_type,
+                QuotaCounter.period == period,
+            ).first()
+            if counter is None:
+                counter = QuotaCounter(user_id=user_id, quota_type=quota_type, period=period, used=1)
+                db.add(counter)
+            else:
+                counter.used += 1
+            db.flush()
+            db.commit()
+            return True
+
+    counter = db.query(QuotaCounter).filter(
+        QuotaCounter.user_id == user_id,
+        QuotaCounter.quota_type == quota_type,
+        QuotaCounter.period == period,
+    ).with_for_update().first()
+
+    used = counter.used if counter else 0
+
+    if used >= limit:
         raise HTTPException(
             status_code=429,
             detail={
                 "error": "quota_exceeded",
                 "quota_type": quota_type,
-                "used": quota_status["used"],
-                "limit": quota_status["limit"],
+                "used": used,
+                "limit": limit,
             },
         )
 
-    # Increment usage
-    increment_quota(db, user_id, quota_type, 1, period)
+    if counter is None:
+        counter = QuotaCounter(user_id=user_id, quota_type=quota_type, period=period, used=1)
+        db.add(counter)
+    else:
+        counter.used += 1
+
+    db.flush()
+    db.commit()
     return True
 
 
