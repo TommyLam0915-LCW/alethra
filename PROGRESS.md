@@ -179,3 +179,44 @@ Cherry-picked instrument model foundation from feat/real-integrations (3ebfdd9),
 3. IBKR execution agent (complete flow with fake broker transport tests)
 4. Billing integration (Stripe SDK, webhook verification)
 5. Database migration/upgrade preparation
+
+## Session record: autonomous continuation — execution agent + billing (2026-10-16 22:30–23:30 HKT)
+
+Branch: `auto/real-market-pipeline`
+Draft PR: https://github.com/TommyLam0915-LCW/alethra/pull/10
+Commits: 6bf174e, 75d0730
+
+### Priority 3: IBKR execution agent — IMPLEMENTED / OFFLINE VERIFIED
+
+- **Broker transport abstraction** (`BrokerTransport` ABC) with `FakeBrokerTransport` supporting 4 fill modes: immediate, delayed, partial, reject
+- **Server-side agent API** (6 endpoints): poll authorized intents, report submitted/fill/rejected/cancelled, heartbeat
+- **Agent control loop** with safety invariants:
+  - Duplicate prevention: tracks submitted intents, never resubmits on ack loss
+  - Partial fill tracking: each fill reported individually with dedup key
+  - Intent expiry: expired intents rejected before submission
+  - Disconnect/restart recovery: reconcile on startup
+- **AlethraAPIClient**: real HTTP client for agent-to-platform communication
+- **IBKRClient** rewritten: delegates to pluggable transport (no more NotImplementedError)
+- 34 new tests covering transport, client, service layer, API endpoints, agent control flow
+
+### Priority 4: Billing integration — IMPLEMENTED / OFFLINE VERIFIED
+
+- **StripePaymentAdapter**: real Stripe SDK integration (PaymentIntent, webhook verification, checkout sessions)
+- Auto-activation: uses Stripe when STRIPE_SECRET_KEY + STRIPE_WEBHOOK_SECRET are set, falls back to TestPaymentAdapter
+- 30 new tests: plan listing, subscription lifecycle, payment intents, webhook processing, entitlement linking, adapter guards
+
+### Priority 5: Database migration — VERIFIED IN SYNC
+
+- All 46 model tables covered by initial migration (55a8d07a7f40)
+- No new migration needed
+
+### Verification
+- Backend pytest: 709/709 passed (3m17s)
+- Frontend build: clean, 22 pages
+
+### Blocked on (specific prerequisites, unchanged)
+- LSEG DataLibrary credentials for live market data
+- IBKR TWS/Gateway for execution
+- Stripe credentials for live payments
+
+### All 5 priorities complete (offline verified)
