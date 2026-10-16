@@ -1,6 +1,6 @@
 # Alethra Agent Progress
 
-Last updated: 2026-10-17T10:30+08:00
+Last updated: 2026-10-17T11:00+08:00
 Branch: auto/stored-data-backtest-integration
 Draft PR: https://github.com/TommyLam0915-LCW/alethra/pull/18
 Commits: cca606e, b9cb85f
@@ -55,14 +55,20 @@ Reviewed all three feature branches and fixed critical/high issues:
 ### Nested worktree reviews + fixes
 Reviewed two additional feature branches in nested worktrees:
 
-**auto/billing-webhook-application** (2ecff6a) — 763 tests pass:
+**auto/billing-webhook-application** (abcfac2) — 763 tests pass:
 - Removed premature `db.commit()` in `_activate_subscription_tx` that broke atomic transaction contract
 - Added guard preventing activation events from resurrecting cancelled subscriptions
+- Added payment_intent_id idempotency to prevent duplicate payment records
 
 **auto/execution-recovery-reconcile** (d767de3) — 783 tests pass:
 - Added broker_ref validation: fill reports must match the intent's stored broker_ref
 - Added overfill protection: reject fills that would exceed order quantity
 - Simplified total_filled calculation using pre-validated values
+
+**auto/deployment-prep** (1f988f3) — additional hardening:
+- Fixed Redis password leak in healthcheck (use REDISCLI_AUTH instead of -a flag)
+- backup.sh: source .env for variable expansion, verify non-empty output
+- up.sh: strip surrounding quotes from .env values in secret validation
 
 ---
 
