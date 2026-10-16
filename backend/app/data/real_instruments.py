@@ -1,7 +1,15 @@
-"""Real market instrument definitions for US and HK markets.
+"""Sample instrument catalogue for US and HK markets.
 
-These are the instruments Alethra supports for real market data and trading.
-Demo provider uses these to demonstrate multi-market support.
+WARNING: This is a SAMPLE catalogue for development and demonstration.
+These instruments are NOT a verified production security master.
+
+- US instruments have board_lot=1 (market convention, verified).
+- HK instruments have UNKNOWN board lot — each HK stock has a different
+  board lot (e.g., HSBC=400, AIA=200, Tencent=100). Values must be
+  resolved against an authoritative source (exchange or broker) before
+  these instruments are execution-ready.
+
+Provider symbol mappings are illustrative and unverified.
 """
 
 from app.providers.instruments import (

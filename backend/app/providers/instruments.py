@@ -53,6 +53,42 @@ class AssetType(str, enum.Enum):
     # Future: WARRANT, RIGHT, BOND, etc.
 
 
+class LotSizeSource(str, enum.Enum):
+    """Source of board lot size information."""
+    UNKNOWN = "unknown"
+    MARKET_CONVENTION = "market_convention"
+    EXCHANGE_OFFICIAL = "exchange_official"
+    BROKER_CONTRACT = "broker_contract"
+    MANUAL = "manual"
+
+
+@dataclass(frozen=True)
+class LotSizeInfo:
+    """Board lot size for a specific instrument.
+
+    Board lot is per-instrument, not per-market. HK stocks have varying
+    board lots (e.g., HSBC=400, AIA=200, Tencent=100). US stocks trade
+    in single shares (board_lot=1).
+
+    Attributes:
+        board_lot: Board lot size, or None if unknown/unresolved.
+        source: How this value was determined.
+        verified: Whether the value has been confirmed against an
+                  authoritative source (exchange or broker).
+    """
+    board_lot: Optional[int]
+    source: LotSizeSource = LotSizeSource.UNKNOWN
+    verified: bool = False
+
+    @property
+    def is_known(self) -> bool:
+        return self.board_lot is not None
+
+    @property
+    def is_execution_ready(self) -> bool:
+        return self.is_known and self.verified
+
+
 @dataclass(frozen=True)
 class TradingSession:
     """Trading session for a market.
@@ -80,7 +116,6 @@ class MarketStructure:
         timezone: Market timezone (IANA format)
         sessions: Trading sessions
         holidays: Market holidays (non-trading days)
-        lot_size: Default lot size (1 for US, variable for HK)
     """
     market: Market
     exchange: Exchange
@@ -88,7 +123,6 @@ class MarketStructure:
     timezone: str
     sessions: List[TradingSession]
     holidays: Set[date] = field(default_factory=set)
-    lot_size: int = 1
     
     def is_trading_day(self, d: date) -> bool:
         """Check if a date is a trading day."""
@@ -133,7 +167,6 @@ US_MARKET_STRUCTURE = MarketStructure(
         ),
     ],
     holidays=set(),  # To be populated with actual US market holidays
-    lot_size=1,
 )
 
 # HK market structure (HKEX)
@@ -169,7 +202,6 @@ HK_MARKET_STRUCTURE = MarketStructure(
         ),
     ],
     holidays=set(),  # To be populated with actual HK market holidays
-    lot_size=100,  # HK stocks typically trade in board lots of 100 shares
 )
 
 
@@ -188,7 +220,8 @@ class Instrument:
         exchange: Primary exchange
         currency: Trading currency (derived from market)
         timezone: Market timezone (derived from market)
-        lot_size: Default lot size (derived from market)
+        lot_size_info: Board lot size with source and verification status.
+                       Unknown or unverified lot info blocks execution submission.
     """
     market: Market
     symbol: str
@@ -197,17 +230,26 @@ class Instrument:
     exchange: Exchange
     currency: Currency
     timezone: str
-    lot_size: int
-    
+    lot_size_info: LotSizeInfo
+
     @property
     def instrument_id(self) -> str:
         """Stable internal identifier: MARKET:SYMBOL."""
         return f"{self.market.value}:{self.symbol}"
-    
+
+    @property
+    def is_execution_ready(self) -> bool:
+        """Whether this instrument has verified execution-critical metadata."""
+        return self.lot_size_info.is_execution_ready
+
     @classmethod
     def create_us(cls, symbol: str, name: str, asset_type: AssetType, 
                   exchange: Exchange = Exchange.NYSE) -> "Instrument":
-        """Create a US instrument."""
+        """Create a US instrument.
+
+        US stocks and ETFs trade in single shares (board_lot=1).
+        This is a well-established market convention.
+        """
         return cls(
             market=Market.US,
             symbol=symbol.upper(),
@@ -216,16 +258,36 @@ class Instrument:
             exchange=exchange,
             currency=Currency.USD,
             timezone=US_MARKET_STRUCTURE.timezone,
-            lot_size=US_MARKET_STRUCTURE.lot_size,
+            lot_size_info=LotSizeInfo(
+                board_lot=1,
+                source=LotSizeSource.MARKET_CONVENTION,
+                verified=True,
+            ),
         )
     
     @classmethod
     def create_hk(cls, symbol: str, name: str, asset_type: AssetType,
-                  exchange: Exchange = Exchange.HKEX) -> "Instrument":
+                  exchange: Exchange = Exchange.HKEX,
+                  board_lot: Optional[int] = None) -> "Instrument":
         """Create an HK instrument.
         
         HK symbols are typically 4-digit codes (e.g., "0700" for Tencent).
+        Board lot is per-instrument and varies (e.g., HSBC=400, AIA=200, Tencent=100).
+        If board_lot is not provided, lot_size_info is marked as unknown and
+        the instrument will not be execution-ready until resolved.
         """
+        if board_lot is not None:
+            lot_info = LotSizeInfo(
+                board_lot=board_lot,
+                source=LotSizeSource.MARKET_CONVENTION,
+                verified=False,
+            )
+        else:
+            lot_info = LotSizeInfo(
+                board_lot=None,
+                source=LotSizeSource.UNKNOWN,
+                verified=False,
+            )
         return cls(
             market=Market.HK,
             symbol=symbol.zfill(4),  # Pad to 4 digits
@@ -234,7 +296,7 @@ class Instrument:
             exchange=exchange,
             currency=Currency.HKD,
             timezone=HK_MARKET_STRUCTURE.timezone,
-            lot_size=HK_MARKET_STRUCTURE.lot_size,
+            lot_size_info=lot_info,
         )
 
 

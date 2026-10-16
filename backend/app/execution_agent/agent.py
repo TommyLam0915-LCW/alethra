@@ -1,130 +1,95 @@
 """Main execution agent loop.
 
-This module implements the main agent loop that:
-1. Connects to IB Gateway/TWS
-2. Polls Alethra platform for authorized order intents
-3. Submits orders to IBKR
-4. Tracks fills and reports back to Alethra
-5. Handles reconnection and errors
+Bridges the Alethra platform and a broker via transport abstractions.
+Uses BrokerTransport for broker operations and PlatformTransport for
+platform communication. Both are injectable for offline testing.
 
-STATUS: NOT IMPLEMENTED — skeleton for architecture documentation.
-
-USAGE
-=====
-
-After implementation, the agent will be run as a standalone process:
-
-    $ export ALETHRA_API_KEY="user-api-key-here"
-    $ export IB_GATEWAY_PORT=7497
-    $ python -m app.execution_agent.agent
-
-The agent will:
-- Connect to IB Gateway on localhost:7497
-- Poll Alethra platform every 5 seconds for new order intents
-- Submit orders to IBKR and report fills back to Alethra
-- Reconnect automatically if connection to IB Gateway is lost
+SAFETY
+======
+- Live trading mode is DISABLED by default. Setting mode="live" requires
+  explicit ALETHRA_LIVE_TRADING_ENABLED=true environment variable.
+- Kill switch is checked before every submission.
+- Unknown execution-critical metadata (e.g., unresolved board lot) blocks
+  submission.
+- Expired intents are rejected, not submitted.
+- Duplicate intents (same idempotency key) are skipped.
 """
 
 import logging
-import time
 import signal
-import sys
-from typing import Optional
+import time
+import uuid
 from datetime import datetime
+from typing import Optional
 
-from .config import AgentConfig, load_config_from_env
-from .ibkr_client import IBKRClient
-from .alethra_client import AlethraAPIClient
-
+from .config import AgentConfig
+from .transport import (
+    BrokerTransport,
+    BrokerSubmitResult,
+    OrderStatus,
+)
+from .platform_transport import (
+    PlatformTransport,
+    IntentDTO,
+    FillReportDTO,
+)
 
 logger = logging.getLogger(__name__)
 
 
+class LiveTradingDisabledError(RuntimeError):
+    """Raised when live trading is attempted without explicit enablement."""
+
+
 class ExecutionAgent:
-    """Main execution agent that bridges Alethra platform and IBKR.
-    
-    STATUS: NOT IMPLEMENTED
+    """Execution agent that bridges Alethra platform and a broker.
+
+    Uses transport abstractions so the control flow can be tested offline
+    with fake transports while production uses real IBKR/platform transports.
     """
-    
-    def __init__(self, config: AgentConfig):
-        """Initialize execution agent.
-        
-        Args:
-            config: Agent configuration
-        """
+
+    def __init__(
+        self,
+        config: AgentConfig,
+        broker: BrokerTransport,
+        platform: PlatformTransport,
+    ):
         self.config = config
-        self.ibkr_client: Optional[IBKRClient] = None
-        self.alethra_client: Optional[AlethraAPIClient] = None
+        self.broker = broker
+        self.platform = platform
         self.running = False
         self.reconnect_attempts = 0
-        
-        # Set up signal handlers for graceful shutdown
+        self._processed_idempotency_keys: set[str] = set()
+        self._processed_intent_ids: set[str] = set()
+
         signal.signal(signal.SIGINT, self._handle_shutdown)
         signal.signal(signal.SIGTERM, self._handle_shutdown)
-        
-        raise NotImplementedError(
-            "ExecutionAgent is not implemented. "
-            "Requires IBKR account and IB Gateway installation. "
-            "See docs/external-prerequisites-checklist.md"
-        )
-    
+
     def _handle_shutdown(self, signum, frame):
-        """Handle shutdown signal (SIGINT, SIGTERM)."""
-        logger.info(f"Received signal {signum}, shutting down gracefully...")
+        logger.info("Received signal %s, shutting down gracefully...", signum)
         self.running = False
-    
+
     def connect(self) -> None:
-        """Connect to IB Gateway and Alethra platform.
-        
-        Raises:
-            ConnectionError: If connection fails after max retries
-        """
-        # Connect to IB Gateway
-        logger.info(
-            f"Connecting to IB Gateway at {self.config.ib_gateway_host}:{self.config.ib_gateway_port}"
-        )
-        self.ibkr_client = IBKRClient(
-            host=self.config.ib_gateway_host,
-            port=self.config.ib_gateway_port,
-            client_id=self.config.ib_client_id,
-        )
-        self.ibkr_client.connect()
-        logger.info("Connected to IB Gateway")
-        
-        # Connect to Alethra platform
-        logger.info(f"Connecting to Alethra platform at {self.config.alethra_api_url}")
-        self.alethra_client = AlethraAPIClient(
-            api_url=self.config.alethra_api_url,
-            api_key=self.config.alethra_api_key,
-        )
-        logger.info("Connected to Alethra platform")
-        
+        self.broker.connect()
         self.reconnect_attempts = 0
-    
+        logger.info("Connected to broker")
+
     def disconnect(self) -> None:
-        """Disconnect from IB Gateway."""
-        if self.ibkr_client:
-            logger.info("Disconnecting from IB Gateway")
-            self.ibkr_client.disconnect()
-            self.ibkr_client = None
-    
+        self.broker.disconnect()
+        logger.info("Disconnected from broker")
+
     def reconnect(self) -> bool:
-        """Attempt to reconnect to IB Gateway.
-        
-        Returns:
-            True if reconnection was successful
-        """
         if self.reconnect_attempts >= self.config.max_reconnect_attempts:
-            logger.error(
-                f"Max reconnection attempts ({self.config.max_reconnect_attempts}) reached"
-            )
+            logger.error("Max reconnection attempts (%d) reached", self.config.max_reconnect_attempts)
             return False
-        
+
         self.reconnect_attempts += 1
         logger.warning(
-            f"Reconnection attempt {self.reconnect_attempts}/{self.config.max_reconnect_attempts}"
+            "Reconnection attempt %d/%d",
+            self.reconnect_attempts,
+            self.config.max_reconnect_attempts,
         )
-        
+
         try:
             self.disconnect()
             time.sleep(self.config.reconnect_interval_seconds)
@@ -132,216 +97,174 @@ class ExecutionAgent:
             logger.info("Reconnection successful")
             return True
         except Exception as e:
-            logger.error(f"Reconnection failed: {e}")
+            logger.error("Reconnection failed: %s", e)
             return False
-    
-    def process_order_intents(self) -> None:
-        """Poll for and process authorized order intents.
-        
-        This is the main processing loop:
-        1. Poll Alethra for authorized order intents
-        2. For each intent:
-           a. Submit order to IBKR
-           b. Report submission to Alethra
-           c. Monitor for fills
-           d. Report fills to Alethra
-        """
-        # Poll for order intents
-        intents = self.alethra_client.poll_order_intents()
-        
+
+    def process_cycle(self) -> int:
+        """Run one processing cycle. Returns number of intents processed."""
+        if self.platform.check_kill_switch():
+            logger.warning("Kill switch active — skipping processing cycle")
+            return 0
+
+        intents = self.platform.poll_order_intents()
         if not intents:
-            logger.debug("No new order intents")
-            return
-        
-        logger.info(f"Processing {len(intents)} order intent(s)")
-        
+            return 0
+
+        processed = 0
         for intent in intents:
             try:
-                self._process_single_intent(intent)
+                if self._process_intent(intent):
+                    processed += 1
             except Exception as e:
-                logger.error(f"Error processing intent {intent.intent_id}: {e}")
-                # Report error to Alethra
-                self.alethra_client.report_order_rejected(
+                logger.error("Error processing intent %s: %s", intent.intent_id, e)
+                self.platform.report_rejected(
                     intent_id=intent.intent_id,
                     reason=f"Agent error: {e}",
                 )
-    
-    def _process_single_intent(self, intent) -> None:
-        """Process a single order intent.
-        
-        Args:
-            intent: OrderIntentDTO from Alethra
-        """
-        logger.info(
-            f"Processing intent {intent.intent_id}: "
-            f"{intent.side} {intent.quantity} {intent.instrument_id}"
-        )
-        
-        # Check expiration
+        return processed
+
+    def _process_intent(self, intent: IntentDTO) -> bool:
+        """Process a single order intent. Returns True if actually processed."""
+        if intent.intent_id in self._processed_intent_ids:
+            logger.debug("Skipping already-processed intent %s", intent.intent_id)
+            return False
+
+        if intent.idempotency_key and intent.idempotency_key in self._processed_idempotency_keys:
+            logger.warning("Duplicate idempotency key %s for intent %s — skipping",
+                           intent.idempotency_key, intent.intent_id)
+            return False
+
         if datetime.utcnow() > intent.expires_at:
-            logger.warning(f"Intent {intent.intent_id} has expired")
-            self.alethra_client.report_order_rejected(
+            logger.warning("Intent %s has expired", intent.intent_id)
+            self.platform.report_rejected(
                 intent_id=intent.intent_id,
                 reason="Intent expired",
             )
-            return
-        
-        # Submit order to IBKR
-        if intent.order_type == "MARKET":
-            result = self.ibkr_client.submit_market_order(
-                instrument_id=intent.instrument_id,
-                side=intent.side,
-                quantity=intent.quantity,
+            return False
+
+        if not self.broker.resolve_instrument(intent.instrument_id):
+            logger.error("Cannot resolve instrument %s — metadata unresolved", intent.instrument_id)
+            self.platform.report_rejected(
+                intent_id=intent.intent_id,
+                reason=f"Unresolved instrument metadata: {intent.instrument_id}",
             )
-        elif intent.order_type == "LIMIT":
-            result = self.ibkr_client.submit_limit_order(
-                instrument_id=intent.instrument_id,
-                side=intent.side,
-                quantity=intent.quantity,
-                limit_price=intent.limit_price,
-            )
-        else:
-            raise ValueError(f"Unsupported order type: {intent.order_type}")
-        
+            return False
+
+        if not self.broker.is_connected():
+            logger.warning("Broker disconnected — attempting reconnect")
+            if not self.reconnect():
+                self.platform.report_rejected(
+                    intent_id=intent.intent_id,
+                    reason="Broker connection lost and reconnect failed",
+                )
+                return False
+
+        result = self._submit_order(intent)
         if not result.success:
-            logger.error(
-                f"Order submission failed for intent {intent.intent_id}: "
-                f"{result.error_message}"
-            )
-            self.alethra_client.report_order_rejected(
+            self.platform.report_rejected(
                 intent_id=intent.intent_id,
                 reason=result.error_message or "Order submission failed",
             )
-            return
-        
-        # Report submission to Alethra
-        logger.info(
-            f"Order submitted for intent {intent.intent_id}, "
-            f"IBKR order ID: {result.ibkr_order_id}"
-        )
-        self.alethra_client.report_order_submitted(
+            return False
+
+        self.platform.report_submitted(
             intent_id=intent.intent_id,
-            broker_ref=str(result.ibkr_order_id),
+            broker_ref=result.broker_order_id,
             submitted_at=result.submitted_at,
         )
-        
-        # Monitor for fills (simplified — real implementation would be async)
-        self._monitor_fills(intent.intent_id, result.ibkr_order_id)
-    
-    def _monitor_fills(self, intent_id: str, ibkr_order_id: int) -> None:
-        """Monitor an order for fills and report them to Alethra.
-        
-        Args:
-            intent_id: Alethra intent ID
-            ibkr_order_id: IBKR order ID
-        """
-        # Simplified implementation — real version would be event-driven
-        max_wait_seconds = 60
-        start_time = time.time()
-        
-        while time.time() - start_time < max_wait_seconds:
-            # Check order status
-            status = self.ibkr_client.get_order_status(ibkr_order_id)
-            
-            if status == "Filled":
-                fills = self.ibkr_client.get_fills(ibkr_order_id)
-                for fill in fills:
-                    self.alethra_client.report_fill(
-                        intent_id=intent_id,
-                        quantity=fill.quantity,
-                        price=fill.price,
-                        fill_time=fill.fill_time,
-                        broker_ref=str(ibkr_order_id),
-                        commission=fill.commission,
-                    )
-                logger.info(f"Order {ibkr_order_id} filled")
-                return
-            
-            elif status in ["Cancelled", "Rejected"]:
-                logger.warning(f"Order {ibkr_order_id} was {status}")
-                self.alethra_client.report_order_cancelled(
+        self._processed_intent_ids.add(intent.intent_id)
+        if intent.idempotency_key:
+            self._processed_idempotency_keys.add(intent.idempotency_key)
+
+        self._reconcile_fills(intent.intent_id, result.broker_order_id, intent.quantity)
+        return True
+
+    def _submit_order(self, intent: IntentDTO) -> BrokerSubmitResult:
+        return self.broker.submit_order(
+            instrument_id=intent.instrument_id,
+            side=intent.side,
+            quantity=intent.quantity,
+            order_type=intent.order_type,
+            limit_price=intent.limit_price,
+        )
+
+    def _reconcile_fills(
+        self,
+        intent_id: str,
+        broker_order_id: str,
+        expected_quantity: int,
+    ) -> None:
+        state = self.broker.get_order_state(broker_order_id)
+
+        if state.status == OrderStatus.FILLED:
+            fills = self.broker.get_fills(broker_order_id)
+            for fill in fills:
+                self.platform.report_fill(FillReportDTO(
                     intent_id=intent_id,
-                    reason=f"Order {status.lower()} by IBKR",
-                )
-                return
-            
-            # Wait before checking again
-            time.sleep(1)
-        
-        logger.warning(f"Order {ibkr_order_id} did not fill within {max_wait_seconds}s")
-    
+                    quantity=fill.quantity,
+                    price=fill.price,
+                    fill_time=fill.fill_time,
+                    broker_ref=broker_order_id,
+                    commission=fill.commission,
+                ))
+            return
+
+        if state.status == OrderStatus.PARTIALLY_FILLED:
+            fills = self.broker.get_fills(broker_order_id)
+            for fill in fills:
+                self.platform.report_fill(FillReportDTO(
+                    intent_id=intent_id,
+                    quantity=fill.quantity,
+                    price=fill.price,
+                    fill_time=fill.fill_time,
+                    broker_ref=broker_order_id,
+                    commission=fill.commission,
+                ))
+            logger.info(
+                "Partial fill for intent %s: %d/%d filled",
+                intent_id, state.filled_quantity, expected_quantity,
+            )
+            return
+
+        if state.status in (OrderStatus.CANCELLED, OrderStatus.REJECTED):
+            self.platform.report_cancelled(
+                intent_id=intent_id,
+                reason=f"Order {state.status.value.lower()} by broker",
+            )
+            return
+
+        logger.warning("Order %s still in state %s — fill reconciliation deferred",
+                        broker_order_id, state.status.value)
+
     def run(self) -> None:
-        """Run the main agent loop.
-        
-        This method blocks until the agent is stopped (via SIGINT/SIGTERM).
-        """
-        logger.info("Starting execution agent")
-        
-        # Initial connection
+        logger.info("Starting execution agent (mode=%s)", self.config.mode)
+
         self.connect()
-        
         self.running = True
-        last_heartbeat = 0
-        
+        last_heartbeat = 0.0
+
         while self.running:
             try:
-                # Check connection
-                if not self.ibkr_client.is_connected():
-                    logger.warning("Lost connection to IB Gateway")
+                if not self.broker.is_connected():
+                    logger.warning("Lost connection to broker")
                     if not self.reconnect():
                         logger.error("Failed to reconnect, shutting down")
                         break
-                
-                # Process order intents
-                self.process_order_intents()
-                
-                # Send heartbeat every 60 seconds
-                if time.time() - last_heartbeat > 60:
-                    self.alethra_client.report_agent_heartbeat(
-                        connected=self.ibkr_client.is_connected(),
-                        ib_gateway_host=self.config.ib_gateway_host,
-                        ib_gateway_port=self.config.ib_gateway_port,
+
+                self.process_cycle()
+
+                now = time.time()
+                if now - last_heartbeat > 60:
+                    self.platform.report_heartbeat(
+                        connected=self.broker.is_connected(),
                     )
-                    last_heartbeat = time.time()
-                
-                # Wait before next poll
+                    last_heartbeat = now
+
                 time.sleep(self.config.poll_interval_seconds)
-            
+
             except Exception as e:
-                logger.error(f"Error in main loop: {e}")
+                logger.error("Error in main loop: %s", e)
                 time.sleep(5)
-        
-        # Shutdown
+
         logger.info("Shutting down execution agent")
         self.disconnect()
-
-
-def main():
-    """Main entry point for the execution agent."""
-    # Configure logging
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
-    
-    # Load configuration
-    try:
-        config = load_config_from_env()
-    except ValueError as e:
-        logger.error(f"Configuration error: {e}")
-        sys.exit(1)
-    
-    # Create and run agent
-    try:
-        agent = ExecutionAgent(config)
-        agent.run()
-    except NotImplementedError as e:
-        logger.error(str(e))
-        sys.exit(1)
-    except Exception as e:
-        logger.error(f"Fatal error: {e}")
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    main()

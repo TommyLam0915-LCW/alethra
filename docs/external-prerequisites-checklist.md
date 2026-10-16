@@ -40,10 +40,6 @@ This document lists all external dependencies required to complete the six real 
   - Real-Time US Equities (NYSE/NASDAQ)
   - Real-Time HK Equities (HKEX)
   - Historical data access
-- **Estimated Cost**:
-  - US real-time: ~$50-200/month depending on scope
-  - HK real-time: ~$30-100/month
-  - Historical: varies by depth and duration
 - **Decision Needed**: Confirm US + HK scope; no derivatives
 
 #### 1.4 Entitlement Verification
@@ -522,14 +518,6 @@ This document lists all external dependencies required to complete the six real 
 - **Week 3**: Cloud deployment setup and staging environment
 - **Week 4**: Production deployment and live testing
 - **Week 5**: Legacy database migration (if applicable)
-
-### Cost Estimates
-
-- **LSEG data subscription**: ~$80-300/month (US + HK equities)
-- **Stripe fees**: 2.9% + $0.30 per transaction (standard pricing)
-- **Cloud hosting**: ~$100-500/month (depending on provider and scale)
-- **Domain registration**: ~$10-20/year
-- **IBKR**: No additional cost (user's existing account)
 
 ---
 

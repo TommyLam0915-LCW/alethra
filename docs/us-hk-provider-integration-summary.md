@@ -179,7 +179,6 @@ The following items are **BLOCKED** on external prerequisites:
 
 ### 1. LSEG Market Data Integration
 - **BLOCKED on**: LSEG Developer account and API credentials
-- **Estimated cost**: $80-300/month for US + HK real-time data
 - **Action required**: Register at https://developers.lseg.com
 - **See**: `docs/external-prerequisites-checklist.md`
 
@@ -318,18 +317,6 @@ The following items are **BLOCKED** on external prerequisites:
 1. Production deployment
 2. Live testing with real data
 3. Legacy database migration (if applicable)
-
----
-
-## Cost Estimates
-
-- **LSEG data subscription**: $80-300/month (US + HK equities)
-- **Stripe fees**: 2.9% + $0.30 per transaction
-- **Cloud hosting**: $100-500/month (depending on provider and scale)
-- **Domain registration**: $10-20/year
-- **IBKR**: No additional cost (user's existing account)
-
-**Total estimated monthly cost**: $200-800/month (depending on scale and provider choices)
 
 ---
 

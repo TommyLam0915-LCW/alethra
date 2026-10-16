@@ -17,33 +17,43 @@ this execution agent on their local machine:
     └─────────────────────────────────────────┘
 
 The agent:
-1. Connects to local IB Gateway/TWS via `ib_insync` library
+1. Connects to local IB Gateway/TWS via broker transport
 2. Polls Alethra platform for authorized order intents
-3. Submits orders to IBKR
+3. Submits orders to broker
 4. Reports fills back to Alethra platform
 5. Handles reconnection, errors, and partial fills
 
-SECURITY
-========
+TRANSPORT ABSTRACTION
+=====================
 
-- Agent authenticates to Alethra platform via API key (user-specific)
-- Agent does NOT store IBKR account credentials
-- Agent connects to IB Gateway on localhost only (no remote connections)
-- All communication with Alethra platform is HTTPS
+The agent uses two transport protocols:
+- BrokerTransport: broker operations (connect, submit, cancel, fills)
+- PlatformTransport: platform API operations (poll intents, report fills)
+
+Fake implementations exist for offline testing:
+- FakeBrokerTransport: configurable behavior (fills, rejections, disconnects)
+- FakePlatformTransport: tracks all interactions for assertions
+
+Production implementations (BLOCKED on external prerequisites):
+- IBKRTransport: wraps ib_insync → IB Gateway (BLOCKED on IBKR account)
+- HTTPPlatformTransport: HTTPS → Alethra API (BLOCKED on deployment)
+
+SAFETY
+======
+
+- Live trading mode DISABLED by default. Requires ALETHRA_LIVE_TRADING_ENABLED=true.
+- Kill switch checked before every processing cycle.
+- Unknown execution-critical metadata blocks submission.
+- Expired intents are rejected.
+- Duplicate intents (same idempotency key) are skipped.
 
 STATUS
 ======
 
-**NOT IMPLEMENTED** — BLOCKED on user IBKR account and IB Gateway installation.
-
-This module defines the architecture and interfaces. Implementation requires:
-1. User creates IBKR paper trading account
-2. User installs IB Gateway or TWS
-3. User enables API access in IB Gateway settings
-4. User provides IB Gateway port to agent configuration
-
-See docs/external-prerequisites-checklist.md for full details.
+Agent control flow: IMPLEMENTED — OFFLINE VERIFIED (via fake transports)
+Real IBKR transport: BLOCKED on IBKR account and IB Gateway installation
+Real platform transport: BLOCKED on Alethra platform deployment
 """
 
-# Status marker for external dependency tracking
-IMPLEMENTATION_STATUS = "NOT IMPLEMENTED — BLOCKED on IBKR account setup"
+IMPLEMENTATION_STATUS = "IMPLEMENTED — OFFLINE VERIFIED (fake transports)"
+BLOCKED_ON = "IBKR account + IB Gateway (real broker transport)"

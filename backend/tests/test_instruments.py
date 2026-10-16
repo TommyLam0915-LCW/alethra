@@ -9,6 +9,8 @@ from app.providers.instruments import (
     TradingSession,
     MarketStructure,
     ProviderSymbolMapping,
+    LotSizeInfo,
+    LotSizeSource,
     US_MARKET_STRUCTURE,
     HK_MARKET_STRUCTURE,
     get_market_structure,
@@ -26,7 +28,10 @@ class TestInstrumentCreation:
         assert instrument.exchange == Exchange.NYSE
         assert instrument.currency == Currency.USD
         assert instrument.timezone == "America/New_York"
-        assert instrument.lot_size == 1
+        assert instrument.lot_size_info.board_lot == 1
+        assert instrument.lot_size_info.source == LotSizeSource.MARKET_CONVENTION
+        assert instrument.lot_size_info.verified is True
+        assert instrument.is_execution_ready is True
 
     def test_create_us_instrument_uppercases_symbol(self):
         instrument = Instrument.create_us("aapl", "Apple Inc.", AssetType.STOCK)
@@ -47,7 +52,10 @@ class TestInstrumentCreation:
         assert instrument.exchange == Exchange.HKEX
         assert instrument.currency == Currency.HKD
         assert instrument.timezone == "Asia/Hong_Kong"
-        assert instrument.lot_size == 100
+        assert instrument.lot_size_info.board_lot is None
+        assert instrument.lot_size_info.source == LotSizeSource.UNKNOWN
+        assert instrument.lot_size_info.verified is False
+        assert instrument.is_execution_ready is False
 
     def test_create_hk_instrument_pads_symbol(self):
         instrument1 = Instrument.create_hk("1", "Test Stock 1", AssetType.STOCK)
@@ -58,6 +66,43 @@ class TestInstrumentCreation:
 
         instrument3 = Instrument.create_hk("9988", "Alibaba", AssetType.STOCK)
         assert instrument3.symbol == "9988"  # Already 4 digits
+
+    def test_create_hk_instrument_with_board_lot(self):
+        instrument = Instrument.create_hk(
+            "0005", "HSBC Holdings", AssetType.STOCK, board_lot=400
+        )
+        assert instrument.lot_size_info.board_lot == 400
+        assert instrument.lot_size_info.source == LotSizeSource.MARKET_CONVENTION
+        assert instrument.lot_size_info.verified is False
+        assert instrument.is_execution_ready is False
+
+    def test_create_hk_instrument_without_board_lot_is_unknown(self):
+        instrument = Instrument.create_hk("0700", "Tencent", AssetType.STOCK)
+        assert instrument.lot_size_info.board_lot is None
+        assert instrument.lot_size_info.is_known is False
+        assert instrument.is_execution_ready is False
+
+
+class TestLotSizeInfo:
+    def test_known_and_verified_is_execution_ready(self):
+        info = LotSizeInfo(board_lot=100, source=LotSizeSource.EXCHANGE_OFFICIAL, verified=True)
+        assert info.is_known is True
+        assert info.is_execution_ready is True
+
+    def test_known_but_unverified_not_execution_ready(self):
+        info = LotSizeInfo(board_lot=100, source=LotSizeSource.MARKET_CONVENTION, verified=False)
+        assert info.is_known is True
+        assert info.is_execution_ready is False
+
+    def test_unknown_board_lot_not_execution_ready(self):
+        info = LotSizeInfo(board_lot=None, source=LotSizeSource.UNKNOWN, verified=False)
+        assert info.is_known is False
+        assert info.is_execution_ready is False
+
+    def test_lot_size_info_is_frozen(self):
+        info = LotSizeInfo(board_lot=1, source=LotSizeSource.MARKET_CONVENTION, verified=True)
+        with pytest.raises(Exception):  # FrozenInstanceError
+            info.board_lot = 100
 
 
 class TestInstrumentID:
@@ -94,7 +139,6 @@ class TestMarketStructure:
         assert structure.market == Market.US
         assert structure.currency == Currency.USD
         assert structure.timezone == "America/New_York"
-        assert structure.lot_size == 1
         assert len(structure.sessions) == 3
 
     def test_us_market_sessions(self):
@@ -115,7 +159,6 @@ class TestMarketStructure:
         assert structure.market == Market.HK
         assert structure.currency == Currency.HKD
         assert structure.timezone == "Asia/Hong_Kong"
-        assert structure.lot_size == 100
         assert len(structure.sessions) == 4
 
     def test_hk_market_sessions(self):
@@ -151,7 +194,6 @@ class TestMarketStructure:
             timezone="America/New_York",
             sessions=[TradingSession("Regular", time(9, 30), time(16, 0))],
             holidays={holiday},
-            lot_size=1,
         )
         assert structure.is_trading_day(holiday) is False
 
@@ -210,4 +252,4 @@ class TestInstrumentImmutability:
 
     def test_market_structure_is_frozen(self):
         with pytest.raises(Exception):  # FrozenInstanceError
-            US_MARKET_STRUCTURE.lot_size = 100
+            US_MARKET_STRUCTURE.timezone = "UTC"

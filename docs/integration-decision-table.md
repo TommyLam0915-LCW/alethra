@@ -57,7 +57,7 @@
 
 **Recommendation:**
 - **Provider:** Polygon.io
-- **Tier:** Developer plan ($29/month) or Business plan ($99/month)
+- **Tier:** Developer plan or Business plan (verify current pricing at polygon.io)
 - **Rationale:**
   - Real-time and historical US equities data
   - WebSocket streaming for live updates
@@ -80,7 +80,7 @@
 **Owner decision needed:**
 - Confirm Polygon.io or specify alternative
 - Confirm account creation and API key provisioning
-- Confirm cost approval ($29-$99/month)
+- Confirm cost approval
 
 ---
 
@@ -203,13 +203,13 @@
 **Assumptions:**
 - Founder will create accounts on chosen platforms
 - Free tiers sufficient for initial development
-- Paid tiers needed for production ($20-50/month total)
+- Paid tiers needed for production (verify current pricing)
 - Long-running workers required for market data WebSocket and training
 
 **Owner decision needed:**
 - Confirm Vercel + Railway/Render or specify alternative
 - Confirm account creation
-- Confirm cost approval ($20-50/month for production)
+- Confirm cost approval (verify current pricing)
 
 ---
 
@@ -268,7 +268,7 @@
 1. **Polygon.io:**
    - Account created
    - API key provisioned (Developer or Business plan)
-   - Cost approval ($29-$99/month)
+   - Cost approval (verify current pricing at polygon.io)
 
 2. **Alpaca Markets:**
    - Account created (paper trading)
@@ -283,9 +283,7 @@
 4. **Deployment platforms:**
    - Vercel account created
    - Railway or Render account created
-   - Cost approval ($20-50/month)
-
-**Total estimated monthly cost:** $78-$248/month (depending on choices)
+   - Cost approval (verify current pricing)
 
 ---
 
