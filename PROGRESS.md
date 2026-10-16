@@ -25,8 +25,8 @@ Added event timestamp validation to detect and warn about stale webhook events (
 - Gracefully handles missing/invalid timestamps (no rejection, just warning)
 - 16 webhook tests pass, 810 total tests pass in billing-webhook worktree
 
-### Verification
-- Main repo: 850 tests pass
+### Verification (2026-10-17 12:45 HKT)
+- Main repo: **850 tests passed** (3m40s) — confirmed stable
 - Billing-stripe worktree: 850 tests pass (41 billing-specific)
 - Deploy worktree: 810 tests pass (6 health-specific)
 - Legacy worktree: 850 tests pass (46 db-upgrade-specific)
