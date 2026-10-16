@@ -1,10 +1,39 @@
 # Alethra Agent Progress
 
-Last updated: 2026-10-17T07:00+08:00
+Last updated: 2026-10-17T08:30+08:00
 Branch: auto/stored-data-backtest-integration
 Draft PR: https://github.com/TommyLam0915-LCW/alethra/pull/18
-Commits: 757e4ab, 937f62b, a277899, 47b48d2, 433f79d, 0fe7ddf, 04c6327, e470b11, 21dd963, 24b10ee
+Commits: cca606e, b9cb85f
 Status: Pushed. NOT merged. Base: auto/market-data-quality (PR #13)
+
+## Session record: Security fixes + code quality (2026-10-17 07:30–08:30 HKT)
+
+### Security fixes — HIGH (cca606e)
+Path traversal and ownership check ordering in ML model loading:
+- **_safe_model_dir()**: validates model_id, rejects path separators/`..`, verifies resolved path stays within ARTIFACTS_DIR via `os.path.realpath()`
+- **load_model()**: reads metadata.json and checks ownership BEFORE calling `joblib.load()`, preventing unauthorized deserialization
+- **API endpoints**: all 3 model endpoints (`/models/{id}`, `/models/{id}/predict`, `/models/{id}/latest`) now catch `ValueError` and return 400
+- **save_model()**: uses `_safe_model_dir()` for path validation
+- **list_models()**: uses `_safe_model_dir()` with try/except to skip invalid entries
+
+### Bug fixes — MEDIUM (cca606e)
+- **get_stale_instruments()**: now includes rows where `last_success_at IS NULL` (never-updated instruments are the most stale)
+- Removed unused `desc` import from market_data_storage.py
+- Removed redundant `import os` in provider_registry.py
+
+### Code quality improvements (b9cb85f)
+- Replaced `type('Bar', (), {...})()` dynamic class creation with `types.SimpleNamespace` in ML training storage integration
+- Moved `logging` import to module level, added proper `logger = logging.getLogger(__name__)`
+- Fixed return type hint from lowercase `tuple` to `Tuple` from typing module
+
+### Test results
+- Full suite: **850 passed** (main repo)
+- Billing worktree: **815 passed**
+- Deploy worktree: **810 passed**
+- Legacy DB worktree: **850 passed**
+- Integration tests: **369 passed** across market-data→storage→backtest, ML→inference, billing→subscription, execution→fill dedup
+
+---
 
 ## Session record: Two-phase quota reserve/settle/release (2026-10-17 06:30–07:00 HKT)
 
