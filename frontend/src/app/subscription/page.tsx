@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { api } from '@/lib/api';
+import { api, ApiError } from '@/lib/api';
 import { brand } from '@/lib/brand';
 
 interface Plan {
@@ -26,10 +26,10 @@ interface Subscription {
 interface Entitlement {
   id: string;
   pilot_access: boolean;
-  research_run_limit: number;
-  ai_usage_limit: number;
-  export_limit: number;
-  forward_simulation_limit: number;
+  research_run_limit: number | null;
+  ai_usage_limit: number | null;
+  export_limit: number | null;
+  forward_simulation_limit: number | null;
   expiry_date: string | null;
   support_tier: string;
 }
@@ -50,6 +50,8 @@ export default function SubscriptionPage() {
   const [opStatus, setOpStatus] = useState<OperationalStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [subscriptionError, setSubscriptionError] = useState('');
+  const [entitlementError, setEntitlementError] = useState('');
 
   useEffect(() => {
     const token = localStorage.getItem('token');
@@ -62,21 +64,36 @@ export default function SubscriptionPage() {
 
   const loadData = async () => {
     try {
-      const [plansRes, subRes, opStatusRes] = await Promise.all([
+      setLoading(true);
+      setError('');
+      setSubscriptionError('');
+      setEntitlementError('');
+
+      const [plansRes, opStatusRes] = await Promise.all([
         api.billing.listPlans(),
-        api.billing.getMySubscription().catch(() => ({ subscription: null })),
         api.billing.getOperationalStatus().catch(() => null),
       ]);
       setPlans(plansRes.plans || []);
-      setSubscription(subRes.subscription || null);
       setOpStatus(opStatusRes);
 
-      // Load entitlement (for free plan limits or subscription context)
+      try {
+        const subRes = await api.billing.getMySubscription();
+        setSubscription(subRes.subscription || null);
+      } catch (err: any) {
+        setSubscription(null);
+        setSubscriptionError(err.message || '無法載入訂閱資訊');
+      }
+
       try {
         const ent = await api.pilot.getMyEntitlement();
         setEntitlement(ent);
-      } catch {
-        // No entitlement granted yet
+      } catch (err: any) {
+        if (err instanceof ApiError && err.status === 404) {
+          setEntitlement(null);
+        } else {
+          setEntitlement(null);
+          setEntitlementError(err.message || '無法載入配額資訊');
+        }
       }
     } catch (err: any) {
       console.error('Failed to load subscription data:', err);
@@ -161,7 +178,7 @@ export default function SubscriptionPage() {
         <h1>訂閱方案</h1>
         <div style={{ display: 'flex', gap: '12px' }}>
           <Link href="/dashboard" className="btn btn-secondary">
-            返回實驗
+            返回我的實驗
           </Link>
           <button onClick={handleLogout} className="btn btn-secondary">
             {brand.ui.auth.logoutZh}
@@ -250,6 +267,19 @@ export default function SubscriptionPage() {
           {/* Current Subscription */}
           <div className="card" style={{ padding: '20px' }}>
             <h3 style={{ marginBottom: '16px' }}>目前方案</h3>
+            {subscriptionError && (
+              <div style={{
+                backgroundColor: '#f8d7da',
+                border: '1px solid #f5c6cb',
+                borderRadius: '6px',
+                padding: '10px 14px',
+                marginBottom: '12px',
+                color: '#721c24',
+                fontSize: '14px',
+              }}>
+                {subscriptionError}
+              </div>
+            )}
             {subscription ? (
               <div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '16px' }}>
@@ -281,7 +311,7 @@ export default function SubscriptionPage() {
                   )}
                 </div>
               </div>
-            ) : (
+            ) : !subscriptionError ? (
               <div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '16px' }}>
                   <span style={{ fontSize: '18px', fontWeight: 600 }}>免費方案</span>
@@ -299,10 +329,10 @@ export default function SubscriptionPage() {
                   <div style={{ fontSize: '14px' }}>
                     <p style={{ color: '#666', marginBottom: '8px' }}>你目前的配額上限：</p>
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '8px' }}>
-                      <div>研究執行次數上限：{entitlement.research_run_limit}</div>
-                      <div>AI 使用次數上限：{entitlement.ai_usage_limit}</div>
-                      <div>匯出次數上限：{entitlement.export_limit}</div>
-                      <div>正向模擬上限：{entitlement.forward_simulation_limit}</div>
+                      <div>研究執行次數上限：{entitlement.research_run_limit == null ? '無上限' : entitlement.research_run_limit <= 0 ? '無配額' : entitlement.research_run_limit}</div>
+                      <div>AI 使用次數上限：{entitlement.ai_usage_limit == null ? '無上限' : entitlement.ai_usage_limit <= 0 ? '無配額' : entitlement.ai_usage_limit}</div>
+                      <div>匯出次數上限：{entitlement.export_limit == null ? '無上限' : entitlement.export_limit <= 0 ? '無配額' : entitlement.export_limit}</div>
+                      <div>正向模擬上限：{entitlement.forward_simulation_limit == null ? '無上限' : entitlement.forward_simulation_limit <= 0 ? '無配額' : entitlement.forward_simulation_limit}</div>
                     </div>
                     {entitlement.expiry_date && (
                       <p style={{ color: '#999', marginTop: '8px', fontSize: '13px' }}>
@@ -313,11 +343,11 @@ export default function SubscriptionPage() {
                 )}
                 {!entitlement && (
                   <p style={{ color: '#999', fontSize: '14px' }}>
-                    基礎免費方案 — 可建立實驗並執行研究。如需更多功能，請聯絡我們的團隊。
+                    基礎免費方案 — 可建立實驗並執行研究。你可以先從一個實驗開始，記錄假設並執行回測。
                   </p>
                 )}
               </div>
-            )}
+            ) : null}
           </div>
 
           {/* Entitlements / Quota Usage */}
@@ -344,8 +374,8 @@ export default function SubscriptionPage() {
                     fontSize: '14px',
                   }}>
                     <span>{item.label}</span>
-                    <span style={{ fontWeight: 600, color: item.limit <= 0 ? '#dc3545' : '#333' }}>
-                      {item.limit <= 0 ? '無上限' : item.limit}
+                    <span style={{ fontWeight: 600, color: item.limit != null && item.limit <= 0 ? '#dc3545' : '#333' }}>
+                      {item.limit == null ? '無上限' : item.limit <= 0 ? '無配額（無法使用）' : item.limit}
                     </span>
                   </div>
                 ))}
@@ -353,6 +383,21 @@ export default function SubscriptionPage() {
               <p style={{ color: '#999', fontSize: '12px', marginTop: '12px' }}>
                 支援層級：{entitlement.support_tier || '基礎'}
               </p>
+            </div>
+          )}
+          {entitlementError && !entitlement && (
+            <div className="card" style={{ padding: '20px' }}>
+              <h3 style={{ marginBottom: '12px' }}>功能配額</h3>
+              <div style={{
+                backgroundColor: '#f8d7da',
+                border: '1px solid #f5c6cb',
+                borderRadius: '6px',
+                padding: '10px 14px',
+                color: '#721c24',
+                fontSize: '14px',
+              }}>
+                {entitlementError}
+              </div>
             </div>
           )}
 

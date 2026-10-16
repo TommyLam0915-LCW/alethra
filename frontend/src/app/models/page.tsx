@@ -88,7 +88,7 @@ export default function ModelResearchListPage() {
           <button onClick={() => setShowCreate(!showCreate)} className="btn btn-primary">
             {showCreate ? '取消' : '建立模型'}
           </button>
-          <Link href="/dashboard" className="btn btn-secondary">返回控制台</Link>
+          <Link href="/dashboard" className="btn btn-secondary">返回我的實驗</Link>
         </div>
       </div>
 

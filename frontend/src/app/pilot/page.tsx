@@ -126,7 +126,7 @@ export default function PilotApplicationPage() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '30px' }}>
         <h1>Pilot 試點計劃</h1>
         <Link href="/dashboard" className="btn btn-secondary">
-          返回主控台
+          返回我的實驗
         </Link>
       </div>
 

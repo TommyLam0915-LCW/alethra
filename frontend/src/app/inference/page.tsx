@@ -119,7 +119,7 @@ export default function InferencePage() {
         <h1>推論紀錄</h1>
         <div style={{ display: 'flex', gap: '12px' }}>
           <Link href="/dashboard" className="btn btn-secondary">
-            返回儀表板
+            返回我的實驗
           </Link>
           <button onClick={() => setShowForm(!showForm)} className="btn btn-primary">
             {showForm ? '隱藏表單' : '建立推論任務'}

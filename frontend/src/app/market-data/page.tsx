@@ -100,7 +100,7 @@ export default function MarketDataPage() {
         <h1>市場資料</h1>
         <div style={{ display: 'flex', gap: '12px' }}>
           <Link href="/dashboard" className="btn btn-secondary">
-            返回控制台
+            返回我的實驗
           </Link>
           <button onClick={handleLogout} className="btn btn-secondary">
             {brand.ui.auth.logoutZh}
