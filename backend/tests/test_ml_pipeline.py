@@ -526,3 +526,119 @@ class TestModelOwnership:
         for bad_id in invalid_ids:
             resp = client.get(f"/api/v1/ml/models/{bad_id}", headers=self._headers(user1_token))
             assert resp.status_code == 404
+
+
+class TestMLTrainingExperimentLink:
+    """ML training jobs must not fabricate experiment IDs.
+
+    training_jobs.experiment_id is a real FK to experiments.id. The old
+    behavior (random UUID when no experiment was given) would violate that
+    FK on PostgreSQL and produce orphan job rows everywhere else.
+    """
+
+    @pytest.fixture
+    def client(self):
+        from app.main import app
+        return TestClient(app)
+
+    @pytest.fixture
+    def auth_token(self, client):
+        client.post("/api/auth/register", json={
+            "email": "ml-experiment@example.com",
+            "password": "testpassword123",
+            "display_name": "ML Experiment User",
+        })
+        resp = client.post("/api/auth/login", json={
+            "email": "ml-experiment@example.com",
+            "password": "testpassword123",
+        })
+        return resp.json()["access_token"]
+
+    def _headers(self, token):
+        return {"Authorization": f"Bearer {token}"}
+
+    def test_train_without_experiment_id_succeeds(self, client, auth_token):
+        """No experiment_id → job created without an experiment reference."""
+        resp = client.post(
+            "/api/v1/ml/train?instrument_id=US:AAPL&model_type=baseline&start_date=2024-01-02&end_date=2024-12-31",
+            headers=self._headers(auth_token),
+        )
+        assert resp.status_code == 200
+        job_id = resp.json()["job_id"]
+
+        jobs_resp = client.get("/api/v1/training/jobs", headers=self._headers(auth_token))
+        assert jobs_resp.status_code == 200
+        job = next(j for j in jobs_resp.json() if j["id"] == job_id)
+        assert job["experiment_id"] is None
+
+    def _create_experiment(self, client, auth_token):
+        resp = client.post(
+            "/api/v1/experiments/",
+            headers=self._headers(auth_token),
+            json={
+                "title": "ML link experiment",
+                "hypothesis": "test",
+                "research_type": "quantitative",
+                "strategy_spec": {
+                    "schema_version": "1.0",
+                    "template_type": "buy_and_hold",
+                    "asset_ids": ["DEMO-ALPHA"],
+                    "frequency": "1d",
+                    "start_date": "2024-01-02",
+                    "end_date": "2024-02-14",
+                    "initial_cash": 10000,
+                    "signal_parameters": {},
+                    "commission_rate": 0.001,
+                    "slippage_rate": 0.001,
+                    "benchmark_id": "DEMO-BENCHMARK",
+                    "currency": "USD",
+                },
+            },
+        )
+        assert resp.status_code in (200, 201), resp.text
+        return resp.json()["id"]
+
+    def test_train_with_owned_experiment_links_job(self, client, auth_token):
+        experiment_id = self._create_experiment(client, auth_token)
+        resp = client.post(
+            f"/api/v1/ml/train?instrument_id=US:AAPL&model_type=baseline&start_date=2024-01-02&end_date=2024-12-31&experiment_id={experiment_id}",
+            headers=self._headers(auth_token),
+        )
+        assert resp.status_code == 200
+        job_id = resp.json()["job_id"]
+
+        jobs_resp = client.get("/api/v1/training/jobs", headers=self._headers(auth_token))
+        job = next(j for j in jobs_resp.json() if j["id"] == job_id)
+        assert job["experiment_id"] == experiment_id
+
+    def test_train_with_unknown_experiment_rejected(self, client, auth_token):
+        resp = client.post(
+            "/api/v1/ml/train?instrument_id=US:AAPL&model_type=baseline&start_date=2024-01-02&end_date=2024-12-31&experiment_id=00000000-0000-0000-0000-000000000001",
+            headers=self._headers(auth_token),
+        )
+        assert resp.status_code == 404
+
+    def test_train_with_another_users_experiment_rejected(self, client, auth_token):
+        client.post("/api/auth/register", json={
+            "email": "ml-experiment-other@example.com",
+            "password": "testpassword123",
+            "display_name": "Other",
+        })
+        other_token = client.post("/api/auth/login", json={
+            "email": "ml-experiment-other@example.com",
+            "password": "testpassword123",
+        }).json()["access_token"]
+        experiment_id = self._create_experiment(client, other_token)
+
+        resp = client.post(
+            f"/api/v1/ml/train?instrument_id=US:AAPL&model_type=baseline&start_date=2024-01-02&end_date=2024-12-31&experiment_id={experiment_id}",
+            headers=self._headers(auth_token),
+        )
+        assert resp.status_code == 404
+
+    def test_train_with_malformed_experiment_id_rejected(self, client, auth_token):
+        resp = client.post(
+            "/api/v1/ml/train?instrument_id=US:AAPL&model_type=baseline&start_date=2024-01-02&end_date=2024-12-31&experiment_id=not-a-uuid",
+            headers=self._headers(auth_token),
+        )
+        assert resp.status_code == 400
