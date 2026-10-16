@@ -1,10 +1,27 @@
 # Alethra Agent Progress
 
-Last updated: 2026-10-17T13:15+08:00
+Last updated: 2026-10-17T14:10+08:00
 Branch: auto/stored-data-backtest-integration
 Draft PR: https://github.com/TommyLam0915-LCW/alethra/pull/18
 Commits: cca606e, b9cb85f
 Status: Pushed. NOT merged. Base: auto/market-data-quality (PR #13)
+
+## Session record: Drift audit (2026-10-17 14:00–14:10 HKT)
+
+### All 8 worktrees audited for uncommitted modifications
+7 of 8 clean. One finding:
+
+**/private/tmp/alethra-pr12-fix (auto/ml-provenance-ui @ 1308d90, pushed) — STALE uncommitted state, LEFT UNTOUCHED:**
+- 7 modified files = the "ML experiment-link validation + job durability" work whose committed twin (ec91b5f) is already pushed on `auto/ml-experiment-durability` (PR #14). Leftover from the 2026-10-16 ~22:20 commit race between concurrent sessions (documented above); file mtimes 16h old — no session has touched it since.
+- Untracked: migration 3f9c2d81b7a4 copy, verify logs, verify-token.txt (local dev JWT for a throwaway test user — never committed, /tmp-ephemeral), verify-exp.txt, node_modules.
+- Canonical carrier for this work is PR #14. Do not resume from these uncommitted copies; do not delete the worktree without owner say-so.
+
+### Session verification
+- Backend suite: 850 passed (3m43s)
+- Engine regression tests: 18/18 pass
+- PR state: unchanged — #11, #12, #16 still green (3/3 checks), nothing merged
+
+---
 
 ## Session record: Task-selection engine regression tests (2026-10-17 13:00–13:15 HKT)
 
