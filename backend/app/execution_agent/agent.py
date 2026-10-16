@@ -42,7 +42,7 @@ from app.lib.timeutil import utcnow
 logger = logging.getLogger(__name__)
 
 # Clock-skew tolerance when matching broker orders to an intent's creation time.
-_SUBMISSION_MATCH_SKEW_SECONDS = 5
+_SUBMISSION_MATCH_SKEW_SECONDS = 60
 
 
 class ExecutionAgent:
@@ -411,18 +411,26 @@ class ExecutionAgent:
             for fill in fills:
                 fill_key = f"{broker_order_id}:{fill.fill_time.isoformat()}:{fill.quantity}"
                 if fill_key not in self._reported_fills:
-                    try:
-                        self.alethra_client.report_fill(FillReport(
-                            intent_id=intent_id,
-                            quantity=fill.quantity,
-                            price=fill.price,
-                            fill_time=fill.fill_time,
-                            broker_ref=broker_order_id,
-                            commission=fill.commission,
-                        ))
-                        self._reported_fills.add(fill_key)
-                    except Exception as e:
-                        logger.error(f"Failed to report fill: {e}")
+                    retries = 0
+                    while retries < 3:
+                        try:
+                            self.alethra_client.report_fill(FillReport(
+                                intent_id=intent_id,
+                                quantity=fill.quantity,
+                                price=fill.price,
+                                fill_time=fill.fill_time,
+                                broker_ref=broker_order_id,
+                                commission=fill.commission,
+                            ))
+                            self._reported_fills.add(fill_key)
+                            break
+                        except Exception as e:
+                            retries += 1
+                            if retries >= 3:
+                                logger.error(f"Failed to report fill after 3 attempts: {e}")
+                                self._reported_fills.add(fill_key)
+                            else:
+                                time.sleep(1)
 
             if status_enum in (BrokerOrderStatus.FILLED,):
                 logger.info(f"Order {broker_order_id} fully filled")
