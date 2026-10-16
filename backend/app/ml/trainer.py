@@ -24,6 +24,20 @@ from app.lib.timeutil import utcnow
 ARTIFACTS_DIR = os.path.join(os.path.dirname(__file__), "artifacts")
 
 
+def _safe_model_dir(model_id: str) -> str:
+    """Resolve model_id to a directory path within ARTIFACTS_DIR.
+
+    Raises ValueError if model_id attempts path traversal.
+    """
+    if os.sep in model_id or "/" in model_id or ".." in model_id:
+        raise ValueError(f"Invalid model ID: {model_id}")
+    model_dir = os.path.realpath(os.path.join(ARTIFACTS_DIR, model_id))
+    artifacts_real = os.path.realpath(ARTIFACTS_DIR)
+    if not model_dir.startswith(artifacts_real + os.sep) and model_dir != artifacts_real:
+        raise ValueError(f"Invalid model ID: {model_id}")
+    return model_dir
+
+
 def temporal_split(
     n: int,
     train_ratio: float = 0.7,
@@ -204,7 +218,7 @@ def _save_artifact(
     import joblib
 
     os.makedirs(ARTIFACTS_DIR, exist_ok=True)
-    model_dir = os.path.join(ARTIFACTS_DIR, model_id)
+    model_dir = _safe_model_dir(model_id)
     os.makedirs(model_dir, exist_ok=True)
 
     joblib.dump(model, os.path.join(model_dir, "model.joblib"))
@@ -227,18 +241,18 @@ def load_model(model_id: str, user_id: Optional[str] = None) -> Tuple[Any, Any, 
     """
     import joblib
 
-    model_dir = os.path.join(ARTIFACTS_DIR, model_id)
+    model_dir = _safe_model_dir(model_id)
     if not os.path.isdir(model_dir):
         raise FileNotFoundError(f"Model artifact not found: {model_id}")
-
-    model = joblib.load(os.path.join(model_dir, "model.joblib"))
-    scaler = joblib.load(os.path.join(model_dir, "scaler.joblib"))
 
     with open(os.path.join(model_dir, "metadata.json")) as f:
         metadata = json.load(f)
 
     if user_id is not None and metadata.get("user_id") != user_id:
         raise PermissionError(f"Model {model_id} is not owned by user {user_id}")
+
+    model = joblib.load(os.path.join(model_dir, "model.joblib"))
+    scaler = joblib.load(os.path.join(model_dir, "scaler.joblib"))
 
     with open(os.path.join(model_dir, "feature_names.json")) as f:
         feature_names = json.load(f)
@@ -253,7 +267,10 @@ def list_models(user_id: Optional[str] = None) -> List[Dict[str, Any]]:
 
     models = []
     for model_id in os.listdir(ARTIFACTS_DIR):
-        model_dir = os.path.join(ARTIFACTS_DIR, model_id)
+        try:
+            model_dir = _safe_model_dir(model_id)
+        except ValueError:
+            continue
         meta_path = os.path.join(model_dir, "metadata.json")
         if os.path.isfile(meta_path):
             with open(meta_path) as f:

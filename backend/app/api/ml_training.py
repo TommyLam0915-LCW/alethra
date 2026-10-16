@@ -126,6 +126,8 @@ def get_model_detail(
     """Get detail for a specific trained model."""
     try:
         _, _, metadata, feature_names = load_model(model_id, user_id=str(current_user.id))
+    except ValueError:
+        raise HTTPException(400, f"Invalid model ID: {model_id}")
     except FileNotFoundError:
         raise HTTPException(404, f"Model not found: {model_id}")
     except PermissionError:
@@ -152,6 +154,8 @@ def run_prediction(
     """
     try:
         _, _, metadata, _ = load_model(model_id, user_id=str(current_user.id))
+    except ValueError:
+        raise HTTPException(400, f"Invalid model ID: {model_id}")
     except FileNotFoundError:
         raise HTTPException(404, f"Model not found: {model_id}")
     except PermissionError:
@@ -198,6 +202,8 @@ def run_latest_prediction(
     """Get the latest prediction from a trained model."""
     try:
         _, _, metadata, _ = load_model(model_id)
+    except ValueError:
+        raise HTTPException(400, f"Invalid model ID: {model_id}")
     except FileNotFoundError:
         raise HTTPException(404, f"Model not found: {model_id}")
 

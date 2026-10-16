@@ -9,7 +9,7 @@ import logging
 from datetime import datetime, date, timedelta
 from typing import List, Optional, Dict, Any
 from sqlalchemy.orm import Session
-from sqlalchemy import and_, desc
+from sqlalchemy import and_, or_
 
 from app.models.market_data import MarketDataBar, MarketDataMetadata
 from app.providers.data_provider import OHLCVBar
@@ -243,7 +243,10 @@ class MarketDataStorage:
         cutoff = utcnow() - timedelta(days=max_age_days)
 
         query = self.db.query(MarketDataMetadata).filter(
-            MarketDataMetadata.last_success_at < cutoff
+            or_(
+                MarketDataMetadata.last_success_at == None,  # noqa: E711
+                MarketDataMetadata.last_success_at < cutoff,
+            )
         )
 
         if provider_id:
