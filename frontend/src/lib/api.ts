@@ -1,5 +1,12 @@
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
+export class ApiError extends Error {
+  constructor(message: string, public status: number) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
+
 export async function apiFetch(endpoint: string, options: RequestInit = {}) {
   const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
 
@@ -27,7 +34,7 @@ export async function apiFetch(endpoint: string, options: RequestInit = {}) {
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({ detail: 'Request failed' }));
-    throw new Error(error.detail || 'Request failed');
+    throw new ApiError(error.detail || 'Request failed', response.status);
   }
 
   // 204 No Content carries no body; response.json() would throw on it.
@@ -294,10 +301,10 @@ export const api = {
       apiFetch(`/api/v1/training/jobs/${jobId}/cancel`, { method: 'POST' }),
   },
   billing: {
-    listPlans: () => apiFetch('/api/v1/billing/plans'),
-    getMySubscription: () => apiFetch('/api/v1/billing/subscriptions/me'),
+    listPlans: () => apiFetch('/api/v1/plans'),
+    getMySubscription: () => apiFetch('/api/v1/subscriptions/me'),
     createPaymentIntent: (data: { subscription_id: string }) =>
-      apiFetch('/api/v1/billing/payments/create-intent', { method: 'POST', body: JSON.stringify(data) }),
-    getOperationalStatus: () => apiFetch('/api/v1/billing/operational-status'),
+      apiFetch('/api/v1/payments/create-intent', { method: 'POST', body: JSON.stringify(data) }),
+    getOperationalStatus: () => apiFetch('/api/v1/operational-status'),
   },
 };

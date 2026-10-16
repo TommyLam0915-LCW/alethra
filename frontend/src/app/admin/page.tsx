@@ -108,7 +108,7 @@ export default function AdminDashboardPage() {
       <div className="container" style={{ paddingTop: '40px' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
           <h1>管理員儀表板</h1>
-          <Link href="/dashboard" className="btn btn-secondary">返回主控台</Link>
+          <Link href="/dashboard" className="btn btn-secondary">返回我的實驗</Link>
         </div>
         <div style={{ padding: '20px', backgroundColor: '#f8d7da', color: '#721c24', borderRadius: '8px' }}>
           {error.includes('403') || error.includes('Admin')
@@ -124,7 +124,7 @@ export default function AdminDashboardPage() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
         <h1>管理員驗證儀表板</h1>
         <div style={{ display: 'flex', gap: '12px' }}>
-          <Link href="/dashboard" className="btn btn-secondary">返回主控台</Link>
+          <Link href="/dashboard" className="btn btn-secondary">返回我的實驗</Link>
         </div>
       </div>
 

@@ -18,10 +18,10 @@ interface Portfolio {
 }
 
 const STATUS_LABELS: Record<string, { label: string; color: string; bg: string }> = {
-  active: { label: 'Active', color: '#155724', bg: '#d4edda' },
-  paused: { label: 'Paused', color: '#856404', bg: '#fff3cd' },
-  retired: { label: 'Retired', color: '#666', bg: '#f5f5f5' },
-  completed: { label: 'Completed', color: '#0c5460', bg: '#d1ecf1' },
+  active: { label: '進行中', color: '#155724', bg: '#d4edda' },
+  paused: { label: '已暫停', color: '#856404', bg: '#fff3cd' },
+  retired: { label: '已退休', color: '#666', bg: '#f5f5f5' },
+  completed: { label: '已完成', color: '#0c5460', bg: '#d1ecf1' },
 };
 
 export default function PaperPortfolioListPage() {
@@ -46,7 +46,7 @@ export default function PaperPortfolioListPage() {
       const data = await api.paperPortfolio.list();
       setPortfolios(data);
     } catch (err: any) {
-      setError(err.message || 'Failed to load portfolios');
+      setError(err.message || '載入投資組合失敗');
     } finally {
       setLoading(false);
     }
@@ -55,7 +55,7 @@ export default function PaperPortfolioListPage() {
   const handleCreate = async () => {
     const cash = parseFloat(cashInput);
     if (isNaN(cash) || cash <= 0) {
-      setError('Please enter a valid amount');
+      setError('請輸入有效金額');
       return;
     }
     setCreating(true);
@@ -64,37 +64,36 @@ export default function PaperPortfolioListPage() {
       const p = await api.paperPortfolio.create({ initial_virtual_cash: cash });
       router.push(`/paper-portfolio/${p.id}`);
     } catch (err: any) {
-      setError(err.message || 'Failed to create portfolio');
+      setError(err.message || '建立組合失敗');
     } finally {
       setCreating(false);
     }
   };
 
   if (loading) {
-    return <div style={{ padding: '2rem', textAlign: 'center' }}>Loading...</div>;
+    return <div style={{ padding: '2rem', textAlign: 'center' }}>載入中...</div>;
   }
 
   return (
     <div style={{ maxWidth: '900px', margin: '0 auto', padding: '2rem' }}>
       <div style={{ marginBottom: '2rem' }}>
         <Link href="/dashboard" style={{ color: '#0066cc', textDecoration: 'none' }}>
-          &larr; Back to Dashboard
+          &larr; 返回我的實驗
         </Link>
       </div>
 
-      <h1 style={{ fontSize: '1.8rem', marginBottom: '0.5rem' }}>Paper Portfolio</h1>
+      <h1 style={{ fontSize: '1.8rem', marginBottom: '0.5rem' }}>模擬投資組合</h1>
       <p style={{ color: '#666', marginBottom: '1.5rem' }}>
-        Virtual portfolio for research and behavior tracking. Not a trading game.
+        用於研究與行為記錄的虛擬組合，並非交易遊戲。
       </p>
 
       <div style={{
         background: '#fff3cd', border: '1px solid #ffc107', borderRadius: '8px',
         padding: '1rem', marginBottom: '1.5rem', fontSize: '0.875rem', color: '#856404',
       }}>
-        <strong>Disclaimer / 免責聲明：</strong><br />
-        Paper trading records simulated execution under stated assumptions.
-        It does not reproduce real-money psychology, full market liquidity, partial fills,
-        exchange outages, market impact, or actual brokerage execution.<br />
+        <strong>免責聲明：</strong><br />
+        模擬交易記錄基於既定假設的模擬執行，不構成投資建議。
+        無法重現真實資金心理、完整市場流動性、部分成交、交易所中斷、市場衝擊或實際券商執行。<br />
         <strong>提醒：</strong>虛擬交易記錄基於既定假設的模擬執行，不構成投資建議。
         無法重現真實資金心理、完整市場流動性、部分成交、交易所中斷、市場衝擊或實際券商執行。
       </div>
@@ -102,11 +101,11 @@ export default function PaperPortfolioListPage() {
       <div style={{
         background: '#f8f9fa', borderRadius: '8px', padding: '1.5rem', marginBottom: '2rem',
       }}>
-        <h2 style={{ fontSize: '1.2rem', marginBottom: '1rem' }}>Create New Portfolio</h2>
+        <h2 style={{ fontSize: '1.2rem', marginBottom: '1rem' }}>建立新組合</h2>
         <div style={{ display: 'flex', gap: '1rem', alignItems: 'end' }}>
           <div style={{ flex: 1 }}>
             <label style={{ display: 'block', marginBottom: '0.5rem', fontSize: '0.875rem' }}>
-              Initial Virtual Cash (USD)
+              初始虛擬資金 (USD)
             </label>
             <input
               type="number"
@@ -127,7 +126,7 @@ export default function PaperPortfolioListPage() {
               opacity: creating ? 0.6 : 1,
             }}
           >
-            {creating ? 'Creating...' : 'Create'}
+            {creating ? '建立中...' : '建立'}
           </button>
         </div>
         {error && (
@@ -137,11 +136,11 @@ export default function PaperPortfolioListPage() {
         )}
       </div>
 
-      <h2 style={{ fontSize: '1.2rem', marginBottom: '1rem' }}>Your Portfolios</h2>
+      <h2 style={{ fontSize: '1.2rem', marginBottom: '1rem' }}>你的組合</h2>
 
       {portfolios.length === 0 ? (
         <div style={{ textAlign: 'center', padding: '2rem', color: '#666' }}>
-          No portfolios yet. Create one above.
+          尚無組合，請在上方建立一個。
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
@@ -170,14 +169,14 @@ export default function PaperPortfolioListPage() {
                         {statusStyle.label}
                       </span>
                       <span style={{ fontSize: '0.75rem', color: '#999' }}>
-                        {new Date(p.created_at).toLocaleDateString()}
+                        {new Date(p.created_at).toLocaleDateString('zh-Hant')}
                       </span>
                     </div>
                     <div style={{ fontSize: '1.1rem', fontWeight: 600 }}>
                       {p.currency} {p.current_virtual_cash.toLocaleString(undefined, { minimumFractionDigits: 2 })}
                     </div>
                     <div style={{ fontSize: '0.875rem', color: '#666', marginTop: '0.25rem' }}>
-                      Initial: {p.currency} {p.initial_virtual_cash.toLocaleString()}
+                      初始：{p.currency} {p.initial_virtual_cash.toLocaleString()}
                     </div>
                   </div>
                   <div style={{ textAlign: 'right' }}>
@@ -188,7 +187,7 @@ export default function PaperPortfolioListPage() {
                       {pnl >= 0 ? '+' : ''}{pnlPct.toFixed(2)}%
                     </div>
                     <div style={{ fontSize: '0.875rem', color: '#666' }}>
-                      P&L: {pnl >= 0 ? '+' : ''}{pnl.toFixed(2)}
+                      損益：{pnl >= 0 ? '+' : ''}{pnl.toFixed(2)}
                     </div>
                   </div>
                 </div>

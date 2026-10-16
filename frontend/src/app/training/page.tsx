@@ -136,7 +136,7 @@ export default function TrainingPage() {
         <h1>訓練 / 最佳化任務</h1>
         <div style={{ display: 'flex', gap: '12px' }}>
           <Link href="/dashboard" className="btn btn-secondary">
-            返回儀表板
+            返回我的實驗
           </Link>
           <button onClick={() => setShowForm(!showForm)} className="btn btn-primary">
             {showForm ? '隱藏表單' : '建立訓練任務'}
@@ -228,8 +228,14 @@ export default function TrainingPage() {
                         <span style={{ fontFamily: 'monospace' }}>{truncateId(job.id)}</span>
                       </div>
                       <div>
-                        <span style={{ color: '#666' }}>實驗 ID：</span>
-                        <span style={{ fontFamily: 'monospace' }}>{truncateId(job.experiment_id)}</span>
+                        <span style={{ color: '#666' }}>實驗：</span>
+                        <Link
+                          href={`/experiments/${job.experiment_id}`}
+                          style={{ fontFamily: 'monospace', color: '#0070f3', textDecoration: 'none' }}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          {truncateId(job.experiment_id)}
+                        </Link>
                       </div>
                     </div>
                     <div style={{ display: 'flex', gap: '24px', fontSize: '13px', color: '#666' }}>

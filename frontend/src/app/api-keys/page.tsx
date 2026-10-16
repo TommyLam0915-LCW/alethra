@@ -139,7 +139,7 @@ export default function ApiKeysPage() {
         <h1>API 金鑰</h1>
         <div style={{ display: 'flex', gap: '12px' }}>
           <Link href="/dashboard" className="btn btn-secondary">
-            返回主控台
+            返回我的實驗
           </Link>
           <button onClick={handleLogout} className="btn btn-secondary">
             登出
