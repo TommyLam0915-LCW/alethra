@@ -1,13 +1,13 @@
 # Alethra Agent Progress
 
-Last updated: 2026-10-16T18:30+08:00
+Last updated: 2026-10-16T19:00+08:00
 Branch: auto/config-safety-and-improvements
 Draft PR: https://github.com/TommyLam0915-LCW/alethra/pull/11
-Commits: 6891274, 5e12b97
-Status: Pushed, awaiting CI + owner review. NOT merged.
+Commits: 6891274, 5e12b97, 214ccec, 20cc74e
+Status: Pushed, CI running. NOT merged.
 Base: main at df95381 (PR #10 merged)
 
-## This session: config safety + LSEG OAuth2 + deprecation fix
+## This session: config safety + LSEG OAuth2 + deprecation fix + ML wiring
 
 ### Production config hardening — IMPLEMENTED / VERIFIED
 - CORS wildcard (*) rejected in production/staging
@@ -33,11 +33,15 @@ Base: main at df95381 (PR #10 merged)
 ### Provider registry LSEG auto-registration — IMPLEMENTED / VERIFIED
 - LSEG provider auto-initializes when LSEG_API_KEY or LSEG_CLIENT_ID+SECRET present
 - Lazy init avoids import errors when credentials missing
-- Falls back to clear error if DATA_PROVIDER=lseg but no credentials
+
+### ML training frontend wiring — IMPLEMENTED / VERIFIED
+- Added api.ml client methods (train, listModels, getModel, predict, predictLatest)
+- Connects frontend to orphaned /api/v1/ml/* endpoints from PR #10
 
 ### Minor fixes
 - Removed misleading 'NOT IMPLEMENTED' from execution agent config docstring
 - Removed dead bar_dicts code in ml_training service
+- Updated external-prerequisites-checklist.md to reflect actual implementation state
 
 ### Verification
 - Backend pytest: 739/739 passed (3m17s)
