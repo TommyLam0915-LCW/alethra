@@ -28,6 +28,17 @@ interface Bar {
   volume: number | null;
 }
 
+interface DataQuality {
+  data_nature: string;
+  adjustment: string;
+  timezone: string | null;
+  note: string | null;
+  latest_bar_date: string | null;
+  bar_age_days: number | null;
+  is_stale: boolean;
+  stale_threshold_days: number;
+}
+
 interface ProviderStatus {
   active_provider: string;
   provider_name: string;
@@ -35,6 +46,27 @@ interface ProviderStatus {
   available: boolean;
   status: Record<string, unknown>;
 }
+
+const DATA_NATURE_LABELS: Record<string, string> = {
+  synthetic: '模擬資料',
+  live: '即時資料',
+  delayed: '延遲資料',
+  unknown: '未知',
+};
+
+const ADJUSTMENT_LABELS: Record<string, string> = {
+  not_applicable: '不適用（模擬數據）',
+  unadjusted: '未調整',
+  adjusted: '已調整（股息/拆股）',
+  unknown: '未知（未確認）',
+};
+
+const HEALTH_LABELS: Record<string, string> = {
+  ok: '正常',
+  degraded: '異常（連續錯誤）',
+  rate_limited: '已達速率限制',
+  disconnected: '未連線',
+};
 
 type MarketFilter = 'ALL' | 'US' | 'HK';
 type SourceTab = 'real' | 'demo';
@@ -49,6 +81,7 @@ export default function MarketDataPage() {
   const [selectedSymbol, setSelectedSymbol] = useState<string>('');
   const [latestBar, setLatestBar] = useState<Bar | null>(null);
   const [bars, setBars] = useState<Bar[]>([]);
+  const [dataQuality, setDataQuality] = useState<DataQuality | null>(null);
   const [providerStatus, setProviderStatus] = useState<ProviderStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [dataLoading, setDataLoading] = useState(false);
@@ -95,12 +128,14 @@ export default function MarketDataPage() {
   const loadBarData = useCallback(async (symbol: string) => {
     setDataLoading(true);
     setError(null);
+    setDataQuality(null);
     try {
       if (symbol.includes(':')) {
         const data = await api.instruments.bars(symbol, '2024-01-02', '2024-12-31');
         setBars(data.bars || []);
         const allBars = data.bars || [];
         setLatestBar(allBars.length > 0 ? allBars[allBars.length - 1] : null);
+        setDataQuality(data.data_quality || null);
       } else {
         const [latest, barsData] = await Promise.all([
           api.marketData.latest(symbol),
@@ -108,6 +143,7 @@ export default function MarketDataPage() {
         ]);
         setLatestBar(latest?.bar || null);
         setBars(barsData?.bars || []);
+        setDataQuality(latest?.data_quality || barsData?.data_quality || null);
       }
     } catch (err) {
       console.error('Failed to load bar data:', err);
@@ -222,6 +258,28 @@ export default function MarketDataPage() {
               </div>
             </div>
           </div>
+          {typeof providerStatus.status?.health === 'string' && providerStatus.status.health !== 'ok' && (
+            <div
+              style={{
+                marginTop: '16px',
+                padding: '12px',
+                backgroundColor: '#f8d7da',
+                border: '1px solid #f5c6cb',
+                borderRadius: '6px',
+                fontSize: '14px',
+                color: '#721c24',
+              }}
+            >
+              <strong>提供者健康狀態：</strong>
+              {HEALTH_LABELS[providerStatus.status.health] || providerStatus.status.health}
+              {typeof providerStatus.status?.rate_limited_retry_after_seconds === 'number' &&
+                providerStatus.status.rate_limited_retry_after_seconds > 0 &&
+                ` — 建議 ${providerStatus.status.rate_limited_retry_after_seconds} 秒後重試`}
+              {typeof providerStatus.status?.last_error === 'string' && (
+                <div style={{ marginTop: '4px', fontSize: '13px' }}>最近錯誤：{providerStatus.status.last_error}</div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -318,7 +376,29 @@ export default function MarketDataPage() {
                       ? `${selectedInstrument.lot_size}${selectedInstrument.lot_size_verified ? '' : '（未驗證）'}`
                       : '未知'}
                   </div>
+                  {dataQuality && (
+                    <>
+                      <div>
+                        <span style={{ color: '#666' }}>資料性質：</span>
+                        {DATA_NATURE_LABELS[dataQuality.data_nature] || dataQuality.data_nature}
+                      </div>
+                      <div>
+                        <span style={{ color: '#666' }}>調整狀態：</span>
+                        {ADJUSTMENT_LABELS[dataQuality.adjustment] || dataQuality.adjustment}
+                      </div>
+                      {dataQuality.latest_bar_date && (
+                        <div>
+                          <span style={{ color: '#666' }}>資料截至：</span>
+                          {formatDate(dataQuality.latest_bar_date)}
+                          {dataQuality.bar_age_days !== null && `（${dataQuality.bar_age_days} 天前）`}
+                        </div>
+                      )}
+                    </>
+                  )}
                 </div>
+                {dataQuality?.note && (
+                  <div style={{ marginTop: '8px', fontSize: '13px', color: '#666' }}>{dataQuality.note}</div>
+                )}
               </div>
             )}
           </div>
@@ -357,6 +437,22 @@ export default function MarketDataPage() {
               <h4 style={{ marginBottom: '16px', color: '#333' }}>
                 最新資料 — {selectedSymbol}
                 {selectedInstrument && ` (${selectedInstrument.name})`}
+                {dataQuality?.is_stale && (
+                  <span
+                    style={{
+                      marginLeft: '12px',
+                      padding: '2px 10px',
+                      borderRadius: '12px',
+                      fontSize: '12px',
+                      backgroundColor: '#fff3cd',
+                      color: '#856404',
+                      verticalAlign: 'middle',
+                    }}
+                  >
+                    資料已過期
+                    {dataQuality.bar_age_days !== null && `（${dataQuality.bar_age_days} 天未更新）`}
+                  </span>
+                )}
               </h4>
               <div
                 style={{

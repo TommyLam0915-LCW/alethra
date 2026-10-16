@@ -1,8 +1,11 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from typing import List, Optional, Dict, Any, Union
 from app.providers.instruments import Instrument
+from app.lib.timeutil import utcnow
+
+STALE_THRESHOLD_DAYS = 7
 
 
 @dataclass(frozen=True)
@@ -13,6 +16,37 @@ class OHLCVBar:
     low: float
     close: float
     volume: Optional[float] = None
+
+
+def compute_staleness(
+    latest_bar_date: Optional[str],
+    today: Optional[date] = None,
+    threshold_days: int = STALE_THRESHOLD_DAYS,
+) -> Dict[str, Any]:
+    """Calendar-day staleness of the most recent bar of a series.
+
+    is_stale is True when there is no bar at all or the newest bar is
+    older than threshold_days (weekends/holidays make a 2-3 day age normal
+    for daily bars, so 7 avoids false alarms).
+    """
+    result: Dict[str, Any] = {
+        "latest_bar_date": latest_bar_date,
+        "bar_age_days": None,
+        "is_stale": True,
+        "stale_threshold_days": threshold_days,
+    }
+    if not latest_bar_date:
+        return result
+    if today is None:
+        today = utcnow().date()
+    try:
+        bar_date = date.fromisoformat(latest_bar_date)
+    except ValueError:
+        return result
+    age = (today - bar_date).days
+    result["bar_age_days"] = age
+    result["is_stale"] = age > threshold_days
+    return result
 
 
 @dataclass(frozen=True)
@@ -105,6 +139,24 @@ class DataProvider(ABC):
             "provider_name": self.provider_name,
             "feed_mode": self.feed_mode,
             "available": self.is_available(),
+        }
+
+    def get_data_quality(self, symbol: str) -> Dict[str, Any]:
+        """Provenance metadata for bars this provider serves for a symbol.
+
+        Keys:
+        - data_nature: "synthetic" | "live" | "delayed" | "unknown"
+        - adjustment: "unadjusted" | "adjusted" | "not_applicable" | "unknown"
+          (only claimed when the provider documents it; otherwise "unknown")
+        - timezone: IANA timezone of the bar timestamps, or None if unverified
+        - note / note_zh: optional human-readable caveat (en / zh-Hant)
+        """
+        return {
+            "data_nature": "unknown",
+            "adjustment": "unknown",
+            "timezone": None,
+            "note": None,
+            "note_zh": None,
         }
 
     def resolve_instrument(self, instrument_or_symbol: Union[Instrument, str]) -> str:

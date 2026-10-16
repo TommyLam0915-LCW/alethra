@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException
 from typing import Optional
 
 from app.providers import get_data_provider
+from app.providers.data_provider import compute_staleness
 from app.data.real_instruments import (
     ALL_REAL_INSTRUMENTS,
     get_instrument_by_id,
@@ -15,6 +16,17 @@ from app.providers.instruments import (
 from app.data import real_synthetic_data
 
 router = APIRouter(tags=["instruments"])
+
+
+def _provider_failure(instrument_id: str, exc: Exception) -> HTTPException:
+    provider = get_data_provider()
+    return HTTPException(
+        status_code=503,
+        detail={
+            "error": f"Data provider failed to serve data for {instrument_id}: {exc}",
+            "provider_status": provider.get_status(),
+        },
+    )
 
 
 @router.get("/instruments")
@@ -84,6 +96,7 @@ def get_instrument(instrument_id: str):
 
     provider = get_data_provider()
     latest_bar = None
+    data_quality = None
     try:
         bar = provider.get_latest_bar(instrument_id)
         if bar:
@@ -95,8 +108,11 @@ def get_instrument(instrument_id: str):
                 "close": bar.close,
                 "volume": bar.volume,
             }
-    except Exception:
-        pass
+            data_quality = provider.get_data_quality(instrument_id)
+            data_quality["timezone"] = inst.timezone
+            data_quality.update(compute_staleness(bar.date))
+    except Exception as exc:
+        raise _provider_failure(instrument_id, exc)
 
     return {
         "instrument_id": inst.instrument_id,
@@ -111,6 +127,7 @@ def get_instrument(instrument_id: str):
         "lot_size_verified": inst.lot_size_verified,
         "provider_mappings": _get_provider_mappings(instrument_id),
         "latest_bar": latest_bar,
+        "data_quality": data_quality,
         "data_source": provider.provider_name,
         "feed_mode": provider.feed_mode,
     }
@@ -131,7 +148,14 @@ def get_instrument_bars(
         raise HTTPException(404, f"Instrument not found: {instrument_id}")
 
     provider = get_data_provider()
-    bars = provider.get_bars(instrument_id, start_date, end_date)
+    try:
+        bars = provider.get_bars(instrument_id, start_date, end_date)
+    except Exception as exc:
+        raise _provider_failure(instrument_id, exc)
+
+    quality = provider.get_data_quality(instrument_id)
+    quality["timezone"] = inst.timezone
+    quality.update(compute_staleness(bars[-1].date if bars else None))
 
     return {
         "instrument_id": instrument_id,
@@ -143,6 +167,7 @@ def get_instrument_bars(
         "start_date": start_date,
         "end_date": end_date,
         "bar_count": len(bars),
+        "data_quality": quality,
         "bars": [
             {
                 "date": b.date,
