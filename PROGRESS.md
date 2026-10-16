@@ -1,10 +1,40 @@
 # Alethra Agent Progress
 
-Last updated: 2026-10-17T12:30+08:00
+Last updated: 2026-10-17T13:15+08:00
 Branch: auto/stored-data-backtest-integration
 Draft PR: https://github.com/TommyLam0915-LCW/alethra/pull/18
 Commits: cca606e, b9cb85f
 Status: Pushed. NOT merged. Base: auto/market-data-quality (PR #13)
+
+## Session record: Task-selection engine regression tests (2026-10-17 13:00–13:15 HKT)
+
+### regression-blocking-tests — COMPLETED (previously mis-scoped as N/A)
+The task-selection engine was located: `/Users/tommylam0915/Documents/Qoder/2026-10-15/d405c2aa/server.py` (PID 87955, port 8765) — the orchestrator workspace, NOT the e-commerce repo. Existing `test_blocking_regression.py` covered scenarios A-H (8 tests, e-commerce engine had 6, investment engine only 2).
+
+**Extended investment-engine coverage A-R (18/18 pass)** in `test_blocking_regression.py`:
+- I: no duplicate dispatch on repeated queries (all 4 sections)
+- J: green-CI main PR → owner-gated merge task, priority 100+index, never primary
+- K: failed-CI main PR → blocked fix-ci with skip_to, not merge-ready
+- L: running-CI main PR → info only, not blocked/merge-ready
+- M: zero-CI main PR → NOT merge-ready (all_green requires len(ci) > 0)
+- N: stacked PRs → retarget-blocked with correct base resolution (base PR must be open to resolve)
+- O: PR outside INVESTMENT_MERGE_ORDER → untracked (KNOWN LIMITATION, pinned)
+- P/Q: subagent branch with/without open PR → develop/create-pr task lifecycle
+- R: uncommitted changes → owner-gated commit-investment (mirrors e-com F)
+
+**Engine defect found (owner decision required to fix)**: `INVESTMENT_MERGE_ORDER` is hardcoded (`server.py:137` = [11, 16, 12, 13, 15, 17, 14]); the O1 loop iterates only those PR numbers. Any NEW PR (the three future draft PRs for billing-stripe/legacy-db/deployment-prep, e.g. #19-21) will be **completely invisible** to the engine — never in owner_gated, blocked, or info, so their CI status and merge readiness will never surface. Fix = extend the list (or make the loop iterate all open PRs) + restart server.py. Not done autonomously: editing + restarting the owner's running service is a shared-state action.
+
+Note: test edits live in the orchestrator directory (not a git repo, local-only). The e-commerce repo (57ddc272) was not accessed.
+
+### Verification (2026-10-17 12:45 HKT)
+- Main repo: **850 tests passed** (3m40s) — confirmed stable
+- Billing-stripe worktree: 850 tests pass (41 billing-specific)
+- Deploy worktree: 810 tests pass (6 health-specific)
+- Legacy worktree: 850 tests pass (46 db-upgrade-specific)
+- Billing-webhook worktree: 810 tests pass (16 webhook-specific)
+- Execution-recovery worktree: 783 tests pass (36 recovery-specific)
+
+---
 
 ## Session record: Execution agent hardening + billing-webhook stale event validation (2026-10-17 11:30–12:30 HKT)
 
@@ -24,14 +54,6 @@ Added event timestamp validation to detect and warn about stale webhook events (
 - Events older than 7 days log a warning with event_id, age in days, and event_type
 - Gracefully handles missing/invalid timestamps (no rejection, just warning)
 - 16 webhook tests pass, 810 total tests pass in billing-webhook worktree
-
-### Verification (2026-10-17 12:45 HKT)
-- Main repo: **850 tests passed** (3m40s) — confirmed stable
-- Billing-stripe worktree: 850 tests pass (41 billing-specific)
-- Deploy worktree: 810 tests pass (6 health-specific)
-- Legacy worktree: 850 tests pass (46 db-upgrade-specific)
-- Billing-webhook worktree: 810 tests pass (16 webhook-specific)
-- Execution-recovery worktree: 783 tests pass (36 recovery-specific)
 
 ### PR status (unchanged)
 - PR #11 (config-safety): CI green, awaits owner merge
