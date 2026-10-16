@@ -75,6 +75,7 @@ export default function TrainingPage() {
   const [mlError, setMlError] = useState<string | null>(null);
   const [expandedModelId, setExpandedModelId] = useState<string | null>(null);
   const [latestPredictions, setLatestPredictions] = useState<Record<string, any>>({});
+  const [deletingModelId, setDeletingModelId] = useState<string | null>(null);
 
   useEffect(() => {
     const token = localStorage.getItem('token');
@@ -175,6 +176,20 @@ export default function TrainingPage() {
     } catch (err: any) {
       console.error('Prediction failed:', err);
       alert(err?.message || '預測失敗');
+    }
+  };
+
+  const handleDeleteModel = async (modelId: string) => {
+    if (!confirm('確定刪除此模型？刪除後無法復原。')) return;
+    setDeletingModelId(modelId);
+    try {
+      await api.ml.deleteModel(modelId);
+      setMlModels((prev) => prev.filter((m) => m.model_id !== modelId));
+    } catch (err: any) {
+      console.error('Delete model failed:', err);
+      alert(err?.message || '刪除模型失敗');
+    } finally {
+      setDeletingModelId(null);
     }
   };
 
@@ -638,16 +653,29 @@ export default function TrainingPage() {
                         </span>
                       )}
                     </div>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleLatestPrediction(model.model_id);
-                      }}
-                      className="btn btn-secondary"
-                      style={{ padding: '6px 14px' }}
-                    >
-                      最新預測
-                    </button>
+                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleLatestPrediction(model.model_id);
+                        }}
+                        className="btn btn-secondary"
+                        style={{ padding: '6px 14px' }}
+                      >
+                        最新預測
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleDeleteModel(model.model_id);
+                        }}
+                        disabled={deletingModelId === model.model_id}
+                        className="btn btn-secondary"
+                        style={{ padding: '6px 14px', color: '#a94442' }}
+                      >
+                        {deletingModelId === model.model_id ? '刪除中…' : '刪除'}
+                      </button>
+                    </div>
                   </div>
                 </div>
 
