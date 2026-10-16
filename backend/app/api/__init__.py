@@ -19,11 +19,13 @@ from app.api.inference import router as inference_router
 from app.api.training import router as training_router
 from app.api.kill_switches import router as kill_switches_router
 from app.api.instruments import router as instruments_router
+from app.api.ml_training import router as ml_training_router
 
 v1_router = APIRouter(prefix="/v1")
 v1_router.include_router(brand_router)
 v1_router.include_router(demo_assets_router)
 v1_router.include_router(instruments_router)
+v1_router.include_router(ml_training_router)
 v1_router.include_router(experiments_router)
 v1_router.include_router(runs_router)
 v1_router.include_router(simulations_router)
