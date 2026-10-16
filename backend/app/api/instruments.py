@@ -310,6 +310,96 @@ def get_stored_bars(
     }
 
 
+@router.post("/instruments/{instrument_id}/bars/refresh")
+def refresh_instrument_bars(
+    instrument_id: str,
+    start_date: str,
+    end_date: str,
+    db: Session = Depends(get_db),
+):
+    """Force-refresh market data for an instrument from the provider.
+
+    Fetches fresh data from the provider and updates storage. Useful for:
+    - Updating stale cached data
+    - Extending the cached date range
+    - Ensuring latest data is available for research/backtest
+
+    Returns the number of bars stored and data quality metadata.
+    """
+    inst = get_instrument_by_id(instrument_id)
+    if inst is None:
+        raise HTTPException(404, f"Instrument not found: {instrument_id}")
+
+    provider = get_data_provider()
+    storage = MarketDataStorage(db)
+
+    try:
+        bars = provider.get_bars(instrument_id, start_date, end_date)
+
+        if not bars:
+            return {
+                "instrument_id": instrument_id,
+                "symbol": inst.symbol,
+                "name": inst.name,
+                "status": "no_data",
+                "bars_stored": 0,
+                "message": "Provider returned no data for the requested range.",
+                "message_zh": "數據供應商在請求的範圍內沒有返回數據。",
+            }
+
+        quality = provider.get_data_quality(instrument_id)
+        stored_count = storage.store_bars(
+            instrument_id=instrument_id,
+            provider_id=provider.provider_id,
+            bars=bars,
+            data_nature=quality.get("data_nature", "unknown"),
+            adjustment_status=quality.get("adjustment"),
+            timezone=inst.timezone,
+            currency=inst.currency.value,
+            provider_note=quality.get("note"),
+            provider_note_zh=quality.get("note_zh"),
+        )
+
+        metadata = storage.get_metadata(instrument_id, provider.provider_id)
+
+        return {
+            "instrument_id": instrument_id,
+            "symbol": inst.symbol,
+            "name": inst.name,
+            "status": "refreshed",
+            "bars_stored": stored_count,
+            "provider": provider.provider_name,
+            "feed_mode": provider.feed_mode,
+            "data_quality": {
+                "data_nature": quality.get("data_nature", "unknown"),
+                "adjustment": quality.get("adjustment"),
+                "timezone": inst.timezone,
+                "currency": inst.currency.value,
+                "provider_note": quality.get("note"),
+                "provider_note_zh": quality.get("note_zh"),
+            } if metadata else None,
+            "storage_metadata": {
+                "first_bar_date": metadata.first_bar_date.isoformat() if metadata and metadata.first_bar_date else None,
+                "last_bar_date": metadata.last_bar_date.isoformat() if metadata and metadata.last_bar_date else None,
+                "total_bars": metadata.total_bars if metadata else 0,
+                "last_success_at": metadata.last_success_at.isoformat() if metadata and metadata.last_success_at else None,
+                "health_status": metadata.health_status if metadata else None,
+            } if metadata else None,
+            "message": f"Successfully refreshed {stored_count} bars.",
+            "message_zh": f"成功更新 {stored_count} 條數據。",
+        }
+
+    except Exception as exc:
+        storage.mark_error(instrument_id, provider.provider_id, str(exc))
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": f"Failed to refresh data for {instrument_id}: {exc}",
+                "provider_status": provider.get_status(),
+            },
+        )
+
+
 @router.get("/markets")
 def list_markets():
     """List supported markets with structure info."""
