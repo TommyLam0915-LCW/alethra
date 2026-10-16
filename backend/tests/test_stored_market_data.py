@@ -1,4 +1,5 @@
 """Tests for stored market data query endpoint."""
+import os
 import pytest
 from datetime import date, timedelta
 from fastapi.testclient import TestClient
@@ -7,34 +8,26 @@ from sqlalchemy.orm import sessionmaker
 
 from app.database import Base, get_db
 from app.main import app
+from app.models import *  # noqa: F401, F403 - ensure all tables are created
 from app.models.market_data import MarketDataBar, MarketDataMetadata
 from app.providers.data_provider import OHLCVBar
 from app.services.market_data_storage import MarketDataStorage
 from app.lib.timeutil import utcnow
 
 
+# Use same test DB as conftest
+_TEST_DB_PATH = os.environ.get("ALETHRA_TEST_DB", "sqlite:///./test.db")
+_test_engine = create_engine(_TEST_DB_PATH, connect_args={"check_same_thread": False})
+TestSession = sessionmaker(autocommit=False, autoflush=False, bind=_test_engine)
+
+
 @pytest.fixture
 def db_session():
-    engine = create_engine("sqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    Session = sessionmaker(bind=engine)
-    session = Session()
-    yield session
-    session.close()
-
-
-@pytest.fixture
-def client(db_session):
-    def override_get_db():
-        try:
-            yield db_session
-        finally:
-            pass
-
-    app.dependency_overrides[get_db] = override_get_db
-    with TestClient(app) as c:
-        yield c
-    app.dependency_overrides.clear()
+    session = TestSession()
+    try:
+        yield session
+    finally:
+        session.close()
 
 
 @pytest.fixture
@@ -60,7 +53,7 @@ def sample_bars():
 
 class TestStoredBarsEndpoint:
     def test_get_stored_bars_empty(self, client, db_session):
-        response = client.get("/instruments/US:AAPL/bars/stored")
+        response = client.get("/api/v1/instruments/US:AAPL/bars/stored")
         assert response.status_code == 200
         data = response.json()
         assert data["instrument_id"] == "US:AAPL"
@@ -81,7 +74,7 @@ class TestStoredBarsEndpoint:
             currency="USD",
         )
 
-        response = client.get("/instruments/US:AAPL/bars/stored")
+        response = client.get("/api/v1/instruments/US:AAPL/bars/stored")
         assert response.status_code == 200
         data = response.json()
         assert data["instrument_id"] == "US:AAPL"
@@ -99,7 +92,7 @@ class TestStoredBarsEndpoint:
         storage.store_bars("US:AAPL", "demo", sample_bars, "synthetic")
 
         response = client.get(
-            "/instruments/US:AAPL/bars/stored",
+            "/api/v1/instruments/US:AAPL/bars/stored",
             params={"start_date": "2024-01-02", "end_date": "2024-01-04"},
         )
         assert response.status_code == 200
@@ -112,7 +105,7 @@ class TestStoredBarsEndpoint:
         storage.store_bars("US:AAPL", "demo", sample_bars, "synthetic")
 
         response = client.get(
-            "/instruments/US:AAPL/bars/stored",
+            "/api/v1/instruments/US:AAPL/bars/stored",
             params={"provider_id": "demo"},
         )
         assert response.status_code == 200
@@ -120,7 +113,7 @@ class TestStoredBarsEndpoint:
         assert data["bar_count"] == 5
 
         response = client.get(
-            "/instruments/US:AAPL/bars/stored",
+            "/api/v1/instruments/US:AAPL/bars/stored",
             params={"provider_id": "lseg"},
         )
         assert response.status_code == 200
@@ -131,7 +124,7 @@ class TestStoredBarsEndpoint:
         storage.store_bars("US:AAPL", "demo", sample_bars, "synthetic")
 
         response = client.get(
-            "/instruments/US:AAPL/bars/stored",
+            "/api/v1/instruments/US:AAPL/bars/stored",
             params={"limit": 3},
         )
         assert response.status_code == 200
@@ -139,7 +132,7 @@ class TestStoredBarsEndpoint:
         assert data["bar_count"] == 3
 
     def test_get_stored_bars_invalid_instrument(self, client, db_session):
-        response = client.get("/instruments/INVALID:SYMBOL/bars/stored")
+        response = client.get("/api/v1/instruments/INVALID:SYMBOL/bars/stored")
         assert response.status_code == 404
 
     def test_get_stored_bars_includes_metadata(self, client, storage, sample_bars, db_session):
@@ -152,7 +145,7 @@ class TestStoredBarsEndpoint:
             provider_note_zh="測試數據",
         )
 
-        response = client.get("/instruments/US:AAPL/bars/stored")
+        response = client.get("/api/v1/instruments/US:AAPL/bars/stored")
         assert response.status_code == 200
         data = response.json()
         assert data["data_quality"]["provider_note"] == "Test data"
@@ -165,7 +158,7 @@ class TestStoredBarsEndpoint:
     def test_get_stored_bars_staleness_tracking(self, client, storage, sample_bars, db_session):
         storage.store_bars("US:AAPL", "demo", sample_bars, "synthetic")
 
-        response = client.get("/instruments/US:AAPL/bars/stored")
+        response = client.get("/api/v1/instruments/US:AAPL/bars/stored")
         assert response.status_code == 200
         data = response.json()
         assert "is_stale" in data["data_quality"]

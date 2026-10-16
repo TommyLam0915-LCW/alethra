@@ -1,10 +1,44 @@
 # Alethra Agent Progress
 
-Last updated: 2026-10-17T02:15+08:00
+Last updated: 2026-10-17T02:55+08:00
 Branch: auto/market-data-quality
 Commits: dbf0452, 1b60b53, b2e7478, 4e5d24c, 6abf41f, ba142c9, b2ce0b2
 Status: Pushed. NOT merged.
 Base: main at dc04d95
+
+## Session record: ML e2e locator fix + model deletion lifecycle (2026-10-17 02:15–02:55 HKT)
+
+Branch: `auto/ml-provenance-ui` (worked in isolated git worktree /tmp/alethra-pr12-fix — shared worktree left untouched on auto/market-data-quality)
+Draft PR: https://github.com/TommyLam0915-LCW/alethra/pull/12 (description updated with new scope)
+Commits: 0fad0be, 4494932
+Status: Pushed. NOT merged. Base: main.
+
+### PR #12 Playwright failure — FIXED (0fad0be)
+- CI on PR #12: Backend + Frontend green; Browser Acceptance failed — my training-page ML section added `<h2>ML 模型訓練</h2>` alongside `<h1>訓練 / 最佳化任務</h1>`, so backbone-workflows C1/C2's `page.locator('h1, h2').filter({ hasText: /訓練/ })` matched 2 elements → strict-mode violation (deterministic, 3 retries each)
+- Fix: scoped both locators to `h1` (the page's only h1), matching the inference-page test's convention; assertion strength unchanged (page title must be visible). Line 315's execution-page locator already used `.first()` and was left alone
+
+### Model deletion lifecycle — IMPLEMENTED / TEST + BROWSER VERIFIED (4494932)
+- `DELETE /ml/models/{id}` in api/ml_training.py: UUID-format guard rejects non-UUID ids outright (a UUID can't contain `/` or `..`, so the artifact-dir lookup behind rmtree can never resolve a traversal path); FileNotFoundError → 404, PermissionError → 403
+- `delete_model()` in ml/trainer.py: ownership check via metadata.json (same semantics as load_model), `shutil.rmtree` of the artifact dir, refuses artifacts without metadata.json (ownership cannot be proven)
+- Training page: 刪除 button (red-tinted, confirm dialog, 刪除中… pending state) wired to new `api.ml.deleteModel`; removes row from list on success
+- 6 new tests in TestMLModelDeletion (test_ml_pipeline.py): owner delete → 200 + gone from list/detail/predict-latest; foreign delete → 403 with model surviving; unknown UUID → 404; invalid format → 404; path traversal → 404 with sentinel dir intact; missing-metadata artifact → FileNotFoundError and not deleted
+- File now: 51/51 tests (45 prior + 6)
+
+### Verification
+- Backend: test_ml_pipeline.py 51/51 in isolated temp worktree (own test.db — no collision with other session's concurrent pytest runs)
+- Frontend: production build clean in temp worktree (symlinked node_modules)
+- Browser E2E on isolated stack (uvicorn :8100 scratch DB + next start :3100, CORS_ORIGINS for :3100): token injection → training page shows ML section + 刪除 → click (confirm overridden) → model removed from list (尚無 ML 模型)， API list total 0, artifact dir for that model gone
+- Live API: foreign DELETE → 403 `{"detail":"You do not have access to model ..."}`; model survived (owner detail still 200)
+- Ports 8000/8001/3001 (other sessions' stacks) untouched; my :8100/:3100 torn down after verification
+
+### Coordination / CI notes
+- PR #14 (auto/ml-experiment-durability) has NO CI by design: all three workflows trigger only on `pull_request: branches: [main]` / `push: branches: [main]` — stacked PRs targeting feature branches get no checks. #14 will get CI when retargeted to main after #13 merges. Validated locally instead (39/39 scoped + live API verification in prior session). Did not modify workflow files (CI config changes need owner approval)
+- PR map: #12 (ML hardening + deletion, base main) ← independent; #13 (market data quality + storage, includes 1b60b53); #14 (experiment-link validation, stacked on #13 — retarget to main after #13 merges)
+
+### Blocked on (unchanged)
+- LSEG DataLibrary credentials for live market data
+- IBKR TWS/Gateway for execution
+- Stripe credentials for live payments
 
 ## Session record: Market data storage + query layer (2026-10-17 00:30–02:15 HKT)
 

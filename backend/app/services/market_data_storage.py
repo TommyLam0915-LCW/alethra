@@ -93,6 +93,7 @@ class MarketDataStorage:
             bar_dates.append(bar_date_obj)
             stored_count += 1
 
+        self.db.flush()
         self._update_metadata(
             instrument_id=instrument_id,
             provider_id=provider_id,
