@@ -5,15 +5,73 @@ scikit-learn classifiers on OHLCV data with temporal splits.
 """
 
 import uuid
-from datetime import datetime
+from datetime import datetime, date
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
 from app.models.training import TrainingJob, TrainingJobStatus
 from app.providers import get_data_provider
+from app.services.market_data_storage import MarketDataStorage
 from app.ml.trainer import train_model, load_model, list_models
 from app.lib.timeutil import utcnow
+
+
+def _get_bars_with_storage(
+    db: Session,
+    provider: Any,
+    instrument_id: str,
+    start_date: str,
+    end_date: str,
+) -> tuple[List[Any], str]:
+    """Fetch bars with storage integration.
+
+    Returns (bars, data_source_used) where data_source_used is 'stored' or 'provider'.
+    If stored data is available and sufficient, uses it. Otherwise fetches from provider
+    and stores for future use.
+    """
+    storage = MarketDataStorage(db)
+    start_date_obj = date.fromisoformat(start_date)
+    end_date_obj = date.fromisoformat(end_date)
+
+    stored_bars = storage.get_bars(
+        instrument_id=instrument_id,
+        start_date=start_date_obj,
+        end_date=end_date_obj,
+    )
+
+    if len(stored_bars) >= 60:
+        bar_list = [
+            type('Bar', (), {
+                'date': b.bar_date.isoformat(),
+                'open': b.open,
+                'high': b.high,
+                'low': b.low,
+                'close': b.close,
+                'volume': b.volume,
+            })()
+            for b in stored_bars
+        ]
+        return bar_list, "stored"
+
+    bars = provider.get_bars(instrument_id, start_date, end_date)
+
+    if bars:
+        try:
+            quality = provider.get_data_quality(instrument_id)
+            storage.store_bars(
+                instrument_id=instrument_id,
+                provider_id=provider.provider_id,
+                bars=bars,
+                data_nature=quality.get("data_nature", "unknown"),
+                adjustment_status=quality.get("adjustment"),
+                provider_note=quality.get("note"),
+                provider_note_zh=quality.get("note_zh"),
+            )
+        except Exception:
+            pass
+
+    return bars, "provider"
 
 
 def create_ml_training_job(
@@ -44,7 +102,7 @@ def create_ml_training_job(
         start_date = start_date or real_range.get("min", "2024-01-02")
         end_date = end_date or "2024-12-31"
 
-    bars = provider.get_bars(instrument_id, start_date, end_date)
+    bars, data_source = _get_bars_with_storage(db, provider, instrument_id, start_date, end_date)
     if len(bars) < 60:
         raise ValueError(
             f"Insufficient data for {instrument_id}: got {len(bars)} bars, "
@@ -63,6 +121,7 @@ def create_ml_training_job(
             "start_date": start_date,
             "end_date": end_date,
             "n_bars": len(bars),
+            "data_source": data_source,
         },
     )
     db.add(job)
@@ -97,7 +156,7 @@ def execute_ml_training(
         end_date = spec["end_date"]
 
         provider = get_data_provider()
-        bars = provider.get_bars(instrument_id, start_date, end_date)
+        bars, data_source = _get_bars_with_storage(db, provider, instrument_id, start_date, end_date)
         bar_dicts = [
             {"date": b.date, "open": b.open, "high": b.high, "low": b.low,
              "close": b.close, "volume": b.volume}
@@ -112,7 +171,7 @@ def execute_ml_training(
         )
 
         job.results = result
-        job.best_params = {"model_id": result["model_id"], "model_type": model_type}
+        job.best_params = {"model_id": result["model_id"], "model_type": model_type, "data_source": data_source}
         job.status = TrainingJobStatus.completed
 
     except Exception as e:
