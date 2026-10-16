@@ -1,10 +1,11 @@
 import hashlib
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, date
 from typing import Dict, List, Any, Optional
 
 import pandas as pd
+from sqlalchemy.orm import Session
 
 from app.data.demo_data import get_demo_ohlcv, compute_dataset_checksum, get_available_assets
 from app.engine.strategies import (
@@ -39,6 +40,59 @@ def _provider_bars_to_dataframe(bars: List[Any]) -> pd.DataFrame:
     return df
 
 
+def _stored_bars_to_dataframe(stored_bars: List[Any]) -> pd.DataFrame:
+    """Convert MarketDataBar model instances to DataFrame format.
+
+    Stored bars have bar_date (date object) instead of date (string).
+    """
+    if not stored_bars:
+        return pd.DataFrame(columns=["date", "open", "high", "low", "close"])
+    rows = []
+    for bar in stored_bars:
+        rows.append({
+            "date": datetime.combine(bar.bar_date, datetime.min.time()),
+            "open": bar.open,
+            "high": bar.high,
+            "low": bar.low,
+            "close": bar.close,
+        })
+    df = pd.DataFrame(rows)
+    df = df.sort_values("date").reset_index(drop=True)
+    return df
+
+
+def _load_stored_bars(
+    db: Session,
+    asset_ids: List[str],
+    start_date: str,
+    end_date: str,
+    provider_id: Optional[str] = None,
+) -> Dict[str, pd.DataFrame]:
+    """Load bars from database storage.
+
+    Returns a dict mapping asset_id to DataFrame.
+    Only includes assets that have stored data.
+    """
+    from app.services.market_data_storage import MarketDataStorage
+
+    storage = MarketDataStorage(db)
+    start_date_obj = date.fromisoformat(start_date)
+    end_date_obj = date.fromisoformat(end_date)
+
+    result = {}
+    for asset_id in asset_ids:
+        stored_bars = storage.get_bars(
+            instrument_id=asset_id,
+            provider_id=provider_id,
+            start_date=start_date_obj,
+            end_date=end_date_obj,
+        )
+        if stored_bars:
+            result[asset_id] = _stored_bars_to_dataframe(stored_bars)
+
+    return result
+
+
 def _fetch_ohlcv_via_provider(
     provider: Any,
     asset_ids: List[str],
@@ -57,6 +111,8 @@ def run_backtest(
     strategy_spec: Dict[str, Any],
     engine_version: str = ENGINE_VERSION,
     data_provider: Any = None,
+    db_session: Optional[Session] = None,
+    data_source: str = "auto",
 ) -> Dict[str, Any]:
     errors = []
     warnings = []
@@ -90,25 +146,76 @@ def run_backtest(
 
     all_asset_ids = list(set(asset_ids + ([strategy_spec["benchmark_id"]] if strategy_spec.get("benchmark_id") else [])))
 
-    if data_provider is not None:
-        available = set(data_provider.get_available_symbols())
+    if data_source not in ("auto", "stored", "provider"):
+        errors.append(f"Invalid data_source: {data_source}. Use 'auto', 'stored', or 'provider'.")
+        return _error_result(errors)
+
+    ohlcv_data: Dict[str, pd.DataFrame] = {}
+    provider_name: str = ""
+    feed_mode: str = ""
+    dataset_checksum: Optional[str] = None
+    data_source_used: str = ""
+
+    if data_source == "stored":
+        if db_session is None:
+            errors.append("data_source='stored' requires a database session (db_session)")
+            return _error_result(errors)
+        ohlcv_data = _load_stored_bars(db_session, all_asset_ids, start_date, end_date)
         for aid in asset_ids:
-            if aid not in available:
-                errors.append(f"Unsupported asset: {aid}")
+            if aid not in ohlcv_data or ohlcv_data[aid].empty:
+                errors.append(f"No stored data for {aid} in range {start_date} to {end_date}. Fetch from provider first.")
                 return _error_result(errors)
-        ohlcv_data = _fetch_ohlcv_via_provider(data_provider, all_asset_ids, start_date, end_date)
-        dataset_checksum = data_provider.compute_checksum(all_asset_ids, start_date, end_date)
-        provider_name = data_provider.provider_name
-        feed_mode = data_provider.feed_mode
-    else:
-        for aid in asset_ids:
-            if aid not in get_available_assets():
-                errors.append(f"Unsupported asset: {aid}")
-                return _error_result(errors)
-        ohlcv_data = get_demo_ohlcv(all_asset_ids, start_date, end_date)
-        dataset_checksum = compute_dataset_checksum(all_asset_ids, start_date, end_date)
-        provider_name = "Demo (Synthetic)"
-        feed_mode = "offline"
+        provider_name = "Stored"
+        feed_mode = "cached"
+        data_source_used = "stored"
+        dataset_checksum = _compute_stored_checksum(ohlcv_data, all_asset_ids, start_date, end_date)
+
+    elif data_source == "provider" or data_source == "auto":
+        stored_data: Dict[str, pd.DataFrame] = {}
+        if data_source == "auto" and db_session is not None:
+            stored_data = _load_stored_bars(db_session, all_asset_ids, start_date, end_date)
+
+        missing_from_storage = [aid for aid in all_asset_ids if aid not in stored_data or stored_data[aid].empty]
+
+        provider_data: Dict[str, pd.DataFrame] = {}
+        if missing_from_storage or data_source == "provider":
+            assets_to_fetch = missing_from_storage if data_source == "auto" else all_asset_ids
+            if data_provider is not None:
+                available = set(data_provider.get_available_symbols())
+                for aid in asset_ids:
+                    if aid not in available:
+                        errors.append(f"Unsupported asset: {aid}")
+                        return _error_result(errors)
+                provider_data = _fetch_ohlcv_via_provider(data_provider, assets_to_fetch, start_date, end_date)
+                dataset_checksum = data_provider.compute_checksum(all_asset_ids, start_date, end_date)
+                provider_name = data_provider.provider_name
+                feed_mode = data_provider.feed_mode
+            else:
+                for aid in assets_to_fetch:
+                    if aid not in get_available_assets():
+                        errors.append(f"Unsupported asset: {aid}")
+                        return _error_result(errors)
+                provider_data = get_demo_ohlcv(assets_to_fetch, start_date, end_date)
+                dataset_checksum = compute_dataset_checksum(assets_to_fetch, start_date, end_date)
+                provider_name = "Demo (Synthetic)"
+                feed_mode = "offline"
+
+        ohlcv_data = {**stored_data, **provider_data}
+
+        if data_source == "auto":
+            from_storage = [aid for aid in all_asset_ids if aid in stored_data and aid not in provider_data]
+            from_provider = [aid for aid in all_asset_ids if aid in provider_data]
+            if from_storage and from_provider:
+                data_source_used = "mixed"
+            elif from_storage:
+                data_source_used = "stored"
+            else:
+                data_source_used = "provider"
+        else:
+            data_source_used = "provider"
+
+        if dataset_checksum is None:
+            dataset_checksum = _compute_stored_checksum(ohlcv_data, all_asset_ids, start_date, end_date)
 
     for aid in asset_ids:
         if aid not in ohlcv_data or ohlcv_data[aid].empty:
@@ -117,7 +224,11 @@ def run_backtest(
 
     config_hash = compute_config_hash(strategy_spec)
 
-    if feed_mode == "offline":
+    if data_source_used == "stored":
+        warnings.append(f"Data source: stored/cached data ({provider_name}).")
+    elif data_source_used == "mixed":
+        warnings.append(f"Data source: mixed — some assets from storage, some from {provider_name}.")
+    elif feed_mode == "offline":
         warnings.append(f"Data source: {provider_name} — not live market data.")
     else:
         warnings.append(f"Data source: {provider_name} ({feed_mode}).")
@@ -265,6 +376,8 @@ def run_backtest(
         "config_hash": config_hash,
         "data_provider": provider_name,
         "feed_mode": feed_mode,
+        "data_source_requested": data_source,
+        "data_source_used": data_source_used,
         "start_date": start_date,
         "end_date": end_date,
         "initial_cash": initial_cash,
@@ -371,6 +484,25 @@ def _build_methodology_summary(strategy_spec: Dict[str, Any], template_type: str
     return summary
 
 
+def _compute_stored_checksum(
+    ohlcv_data: Dict[str, pd.DataFrame],
+    asset_ids: List[str],
+    start_date: str,
+    end_date: str,
+) -> str:
+    """Compute a deterministic checksum for stored data (same format as demo checksum)."""
+    canonical_parts = []
+    for aid in sorted(asset_ids):
+        if aid in ohlcv_data and not ohlcv_data[aid].empty:
+            df = ohlcv_data[aid]
+            for _, row in df.iterrows():
+                canonical_parts.append(
+                    f"{aid}:{row['date'].strftime('%Y-%m-%d')}:{row['open']}:{row['high']}:{row['low']}:{row['close']}"
+                )
+    canonical = "|".join(canonical_parts)
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
 def _error_result(errors: List[str]) -> Dict[str, Any]:
     return {
         "run_status": "error",
@@ -381,6 +513,8 @@ def _error_result(errors: List[str]) -> Dict[str, Any]:
         "config_hash": None,
         "data_provider": None,
         "feed_mode": None,
+        "data_source_requested": None,
+        "data_source_used": None,
         "start_date": None,
         "end_date": None,
         "initial_cash": 0,

@@ -24,6 +24,7 @@ router = APIRouter(tags=["runs"])
 @router.post("/versions/{version_id}/runs", response_model=ResearchRunResponse, status_code=status.HTTP_201_CREATED)
 def create_run(
     version_id: UUID,
+    data_source: str = Query("auto", pattern="^(auto|stored|provider)$"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_entitlement(quota_type="research_run")),
     _scope_check=Depends(check_api_key_scope("write")),
@@ -69,7 +70,12 @@ def create_run(
         db.flush()
 
         data_provider = get_data_provider()
-        result = run_backtest(version.strategy_spec, data_provider=data_provider)
+        result = run_backtest(
+            version.strategy_spec,
+            data_provider=data_provider,
+            db_session=db,
+            data_source=data_source,
+        )
 
         run.status = RunStatus.completed
         run.metrics = result["metrics"]

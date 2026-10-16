@@ -1,10 +1,143 @@
 # Alethra Agent Progress
 
-Last updated: 2026-10-17T02:55+08:00
-Branch: auto/market-data-quality
-Commits: dbf0452, 1b60b53, b2e7478, 4e5d24c, 6abf41f, ba142c9, b2ce0b2
-Status: Pushed. NOT merged.
-Base: main at dc04d95
+Last updated: 2026-10-17T04:20+08:00
+Branch: auto/market-data-quality (main worktree)
+Parallel subagent delegation: 3 workers completed (billing, legacy-db, deployment)
+
+## Session record: Billing atomic webhook application (2026-10-17 03:55–04:20 HKT)
+
+**Status: IMPLEMENTED — OFFLINE VERIFIED** (Draft PR #17: https://github.com/TommyLam0915-LCW/alethra/pull/17, base auto/config-safety-and-improvements, branch auto/billing-webhook-application from 6a6b7dd, commit 8198d2b, worktree alethra/alethra-billing-auto)
+
+**Defect fixed (audit finding):** `process_webhook` recorded webhook events with `processed=True` but never applied them to subscription state, and committed the record before/without any state change — a sender retry found the event "already processed" and silently dropped it. Not retry-safe.
+
+**Implementation (backend/app/services/billing.py, backend/app/api/billing.py):**
+- `process_webhook` now commits the event record and its state change in ONE transaction: `INSERT record (processed=False)` → flush (`IntegrityError` on concurrent duplicate → rollback → return False) → `_apply_webhook_event` → mark processed → commit. Application failure rolls back the whole transaction including the record, so sender retries reprocess (retry-safe).
+- `_apply_webhook_event`: activation events (`checkout.session.completed`, `payment_intent.succeeded`, `invoice.paid`, `payment.completed`) → activate subscription + upsert PilotEntitlement with plan limits + record payment; `invoice.payment_failed`/`payment.failed` → past_due; `customer.subscription.deleted`/`subscription.cancelled` → cancel. Unresolvable references and unknown event types are acknowledged without state change.
+- Subscription resolution: `subscription_id`, `client_reference_id` (Stripe checkout convention), or `metadata.subscription_id`; both flat (test adapter) and Stripe `data.object` envelopes accepted.
+- `activate_subscription`/`cancel_subscription`/`record_payment` refactored into no-commit tx helpers (`_*_tx`) reused by the webhook path; existing API behavior unchanged.
+- api/billing.py: removed stray `db.commit()` after `process_webhook` (commits atomically inside).
+
+**Verification:** 16 new tests in `backend/tests/test_billing_webhooks.py` (application+entitlement+payment, Stripe envelope, 3 reference styles, duplicate-applies-once, past_due, cancellation, unknown/unresolvable acknowledged, non-integer amount, failure-rolls-back-record-and-retry-applies, reactivation, 3 signed-endpoint tests incl. tampered signature → 400 no state change). Full backend suite: **763 passed / 0 failed** (worktree-local test DB; directory-based isolation from concurrent sessions).
+
+**Coordination note:** Concurrent branch `auto/billing-stripe-integration` (Subagent A, commit 2d6ad0e, worktree alethra-billing-auto at repo-external path, based on f8bf4f5) adds Stripe checkout/portal/usage/quota but its `process_webhook` is STILL the record-only version — this slice's fix is not duplicated there. Both branches edit `backend/app/services/billing.py` and `backend/app/api/billing.py` from different bases; whichever merges second must carry the atomic `process_webhook`/`_apply_webhook_event` logic over. Noted in PR #17 description.
+
+## Session record: Parallel subagent delegation (2026-10-17 03:50–04:00 HKT)
+
+**Architecture:** 1 main coordinator + 3 parallel subagents with isolated worktrees
+
+### Subagent A: Stripe Billing Integration
+- **Branch:** `auto/billing-stripe-integration` (worktree: alethra-billing-auto)
+- **Commit:** 2d6ad0e
+- **Status:** Complete, 41 tests pass
+- **Deliverables:**
+  - 6 new API endpoints (checkout, portal, subscription, usage)
+  - Usage tracking with quota enforcement
+  - Webhook handling with signature verification
+  - Idempotent webhook processing
+  - Works in test mode without Stripe credentials
+- **Tests:** 41 passed (exceeded 20+ requirement)
+
+### Subagent B: Legacy Database Upgrade
+- **Branch:** `auto/legacy-db-upgrade` (worktree: alethra-legacy-auto)
+- **Commit:** 76421a0
+- **Status:** Complete, 46 tests pass
+- **Deliverables:**
+  - Schema detection (legacy v0, v1, current)
+  - Preflight check with detailed report
+  - Automatic backup before upgrade
+  - Upgrade with data preservation
+  - Rollback with restore from backup
+  - Idempotent (safe to run multiple times)
+  - Supports legacy_v0 and legacy_v1
+- **Tests:** 46 passed (exceeded 15+ requirement)
+- **Documentation:** docs/upgrade-guide.md
+
+### Subagent C: Deployment Preparation
+- **Branch:** `auto/deployment-prep` (worktree: alethra-deploy-auto)
+- **Commit:** a4a6894
+- **Status:** Complete, 6 health tests pass
+- **Deliverables:**
+  - Production Docker Compose (5 services: db, redis, backend, frontend, nginx)
+  - Dockerfile.backend and Dockerfile.frontend
+  - Health endpoints (/health, /health/ready)
+  - Deployment scripts (up/down/migrate/backup)
+  - .env.example with all required variables
+  - Nginx reverse proxy configuration
+- **Tests:** 6 health tests + 34 config tests + 29 API tests (no regressions)
+- **Documentation:** docs/deployment.md
+
+### Integration Summary
+- **Total new tests:** 93 (41 + 46 + 6)
+- **No Git conflicts:** Each subagent used isolated worktree
+- **No coordination issues:** Clear file ownership boundaries
+- **All branches:** Based on f8bf4f5 (auto/market-data-quality)
+
+### Next Steps
+- Review each branch diff
+- Run integration tests
+- Create Draft PRs for each feature
+- Coordinate shared dependencies (config.py, main.py)
+
+---
+
+## Previous session records
+
+## Session record: PostgreSQL migration chain validation + kill switch enum fix (2026-10-17 02:55–03:45 HKT)
+
+Branch: `auto/fix-killswitch-enum` (isolated worktree /tmp/alethra-ks-fix, from origin/main dc04d95)
+Draft PR: https://github.com/TommyLam0915-LCW/alethra/pull/16
+Commit: 82e0267
+
+### Migration chain validation vs real PostgreSQL — DONE (disposable container, scratch DBs, torn down)
+- Scenario B (legacy DB) checked first: BLOCKED on legacy DB access + schema docs (docs/external-prerequisites-checklist.md §5) — so validated the unblocked part of deployment prep instead
+- Disposable postgres:16-alpine container on :5434 (acceptance postgres owns :5433; untouched), removed after verification
+- **Feature-branch union chain (46aeb9d: initial → 3f9c2d81b7a4 nullable experiment_id → a1b2c3d4e5f6 market data storage)**: upgrade head OK (49 tables, head correct, experiment_id nullable YES); downgrade base OK (1 table); re-upgrade OK — round-trip clean. FK enforcement proven: fabricated experiment UUID insert → `training_jobs_experiment_id_fkey` violation (the exact prod failure sqlite masked, fixed in PR #14)
+- **alembic check on main chain: FAILED with real drift on kill_switches** — see fix below
+
+### Kill switch enum defect — FIXED / REPRODUCED + VERIFIED ON POSTGRES (PR #16)
+- SQLAlchemy `Enum(PyEnum)` persists member **names**; member `global_` → ORM writes `'global_'`, but the alembic-created PG enum only accepts `'global'`
+- **Reproduced live on PG16**: `activate_kill_switch(db, global_)` AND `is_kill_switch_active(...)` (global pre-check) both raise `InvalidTextRepresentation` → every kill-switch-gated path (training/execution/inference endpoints + training worker, fail-closed) would 500 on PostgreSQL; invisible on sqlite (create_all CHECK derives from the same names)
+- Fix: `values_callable` on scope column → persists values (global/training/execution/inference); initial migration's scope index now `unique=True` matching the model, redundant UniqueConstraint dropped (no deployed DBs — editing initial migration is safe); `alembic check` now clean on fresh upgrade
+- Tests: 2 regression tests (raw-SQL persistence assertion + global round trip) in test_safety_controls_focused.py → 7/7; **verified the persistence test fails pre-fix** (stash → failed with 'global_' → pop → passed)
+- PG16 live verification post-fix: activate → raw value 'global'; global blocks training+execution scopes; deactivate works; direct model insert works
+- Coordination note: PR #16 is independent (base main, files untouched by #12/#13/#14/#15) — 55a8d07a7f40 edit is compatible with #13's stacked migrations (verified: union chain at 46aeb9d uses the same initial schema)
+
+### PR status after this session
+- #12 (ML hardening + deletion): **CI fully green** (Backend 5m45s / Playwright 4m13s / Frontend 38s) after 0fad0be locator fix + 4494932 deletion lifecycle
+- #14 (experiment-link validation): NO CI by design — workflows trigger only for PRs targeting main; retarget after #13 merges
+- #15 (execution recovery, third session): pushed, CI running (their report)
+- #16 (kill switch enum): pushed, CI starting
+
+### Blocked on (unchanged)
+- LSEG DataLibrary credentials for live market data
+- IBKR TWS/Gateway for execution
+- Stripe credentials for live payments
+- Legacy DB access + schema for Scenario B (checked this session: still blocked per checklist)
+
+## Session record: Execution agent restart safety (2026-10-16 21:00–21:56 HKT)
+
+Branch: `auto/execution-recovery-reconcile` in isolated git worktree `alethra-exec-auto/` (created via `git worktree add` from 6a6b7dd — shared worktree untouched)
+Draft PR: https://github.com/TommyLam0915-LCW/alethra/pull/15 (stacked on PR #11's branch: execution code uses `app.lib.timeutil`)
+Commit: 7c52aff
+
+### Execution agent restart-safety — IMPLEMENTED / TEST + LIVE-E2E VERIFIED
+Defects from the P3 audit, all fixed:
+- `reconcile_on_startup` stored `intent.symbol` as broker_ref (agent.py:112) → restart gave in-flight intents garbage refs. Now the platform's durable `broker_ref` is returned by the poll (DTO also gained `broker_ref`/`rejection_reason` — the old DTO raised TypeError on every real HTTP poll, invisible to mock-based tests) and re-adopted on startup
+- Poll returned only `authorized` intents → submitted intents invisible after restart, fill monitoring never resumed. `list_agent_intents` now returns authorized (unexpired) + submitted (regardless of expiry); expiry rejection only applies to authorized intents
+- Fill dedup was in-memory only → restart re-reported all fills, `agent_report_fill` double-counted quantity. Now idempotent server-side: new `fill_records.broker_fill_key` (unique per intent) — identical re-reports return the existing record. Alembic migration `c7e2f9a41b83` (batch mode), verified up/down on disposable PostgreSQL 16 in the acceptance container (scratch DB created + dropped; operational DB untouched). Full chain doesn't run on SQLite by design (initial migration uses PG-only FK DDL)
+- Lost acknowledgement (crash between submit_order and report_submitted) → agent resubmitted on next poll. Now: before any submission the agent matches unclaimed recent broker orders (`get_recent_orders` on transport, exact match on instrument/side/qty/type/price/creation-time±5s). 0 → submit; 1 → adopt without resubmitting; >1 → `uncertain` (status existed in the enum, now reachable via service + `POST .../uncertain`). Claims = this process ∪ re-adopted ∪ platform-exposed `GET /claimed-broker-refs` (all statuses — added after the e2e caught a fresh agent adopting other intents' filled orders); REJECTED orders never adoptable; claims-fetch failure fails closed (skip + retry, never blind-submit)
+- Kill switch: agent respects the existing execution-scope switch via new `GET /execution-agent/control-status`; active → no new submissions (in-flight monitoring continues); fetch failure → fail-closed
+- Paper/live separation: `trading_mode` config (`paper` default); `live` requires `ALLOW_LIVE_TRADING=true` or validation fails; wired into `load_config_from_env`
+
+### Verification
+- 36 new tests in `tests/test_execution_recovery.py` (fake broker transport): recent-orders, poll contract, fill idempotency incl. restart re-report via HTTP, uncertain flow, restart reconcile, lost-ack adoption, ambiguity, cross-intent claim isolation, claims fail-closed, kill switch (endpoint + agent + fail-closed), paper/live config. `test_execution_agent.py` updated for rename (`list_authorized_intents` → `list_agent_intents`)
+- Full backend suite: **783 passed / 0 failed** (isolated `ALETHRA_TEST_DB=sqlite:///./test-exec-recovery.db`; ran twice — before and after the claims fix)
+- Live full-stack e2e (real agent loop over uvicorn :8010 + scratch sqlite + FakeBrokerTransport; script ad-hoc, deleted after): 6/6 flows — submit+fill; restart reconcile (no resubmission, no duplicate fills); lost-ack adoption; ambiguous→uncertain; kill-switch block; control-status toggle. This e2e caught the cross-restart claims gap that 34 unit tests missed — the claims endpoint was added because of it
+
+### Blockers (unchanged)
+- IBKR TWS/Gateway for real transport (IBKRBrokerTransport still pending ib_insync; agent fully exercised via FakeBrokerTransport)
+
+---
 
 ## Session record: ML e2e locator fix + model deletion lifecycle (2026-10-17 02:15–02:55 HKT)
 
