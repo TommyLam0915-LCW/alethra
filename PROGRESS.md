@@ -1,6 +1,6 @@
 # Alethra Agent Progress
 
-Last updated: 2026-10-17T08:30+08:00
+Last updated: 2026-10-17T09:30+08:00
 Branch: auto/stored-data-backtest-integration
 Draft PR: https://github.com/TommyLam0915-LCW/alethra/pull/18
 Commits: cca606e, b9cb85f
@@ -28,10 +28,29 @@ Path traversal and ownership check ordering in ML model loading:
 
 ### Test results
 - Full suite: **850 passed** (main repo)
-- Billing worktree: **815 passed**
-- Deploy worktree: **810 passed**
-- Legacy DB worktree: **850 passed**
+- Billing worktree: **850 passed** (41 billing-specific)
+- Deploy worktree: **810 passed** (6 health-specific)
+- Legacy DB worktree: **850 passed** (46 db-upgrade-specific)
 - Integration tests: **369 passed** across market-data→storage→backtest, ML→inference, billing→subscription, execution→fill dedup
+
+### Worktree code reviews + fixes
+Reviewed all three feature branches and fixed critical/high issues:
+
+**auto/billing-stripe-integration** (a888f8d):
+- Fixed open redirect: validate checkout/portal redirect URLs against CORS origins allowlist
+- Fixed webhook verification: use verified Event data directly instead of re-parsing raw payload
+
+**auto/deployment-prep** (e3f3f14):
+- Added .dockerignore for backend/frontend to prevent secrets in images
+- Switched healthcheck from /health (liveness) to /health/ready (readiness)
+- Commented out port 443 (no SSL configured yet)
+- Added nginx security headers + server_tokens off
+- Sanitized health check error messages to avoid leaking connection details
+
+**auto/legacy-db-upgrade** (7c7f990):
+- Replaced bare `except Exception: pass` with specific ProgrammingError/DataError handling
+- Data integrity failures now raise instead of silently passing
+- Fixed UUID validation to use uuid.UUID() parsing instead of length-only check
 
 ---
 
