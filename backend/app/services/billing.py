@@ -338,6 +338,16 @@ def process_webhook(db: Session, event_id: str, event_type: str, payload: Dict[s
     back — including the event record — so the sender's retry reprocesses the
     event instead of finding it silently marked processed (retry-safe).
     """
+    event_created = payload.get("created")
+    if event_created:
+        try:
+            from datetime import datetime, timezone
+            event_time = datetime.fromtimestamp(int(event_created), tz=timezone.utc)
+            age_days = (datetime.now(timezone.utc) - event_time).days
+            if age_days > 7:
+                logger.warning("Processing stale webhook event %s (%d days old): %s", event_id, age_days, event_type)
+        except (ValueError, TypeError, OSError):
+            pass
     existing = db.query(WebhookEventRecord).filter(
         WebhookEventRecord.event_id == event_id
     ).first()
