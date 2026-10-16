@@ -272,6 +272,22 @@ export const api = {
     },
     latest: (symbol: string) => apiFetch(`/api/v1/market-data/latest/${symbol}`),
   },
+  instruments: {
+    list: (market?: string, assetType?: string) => {
+      const qs = new URLSearchParams();
+      if (market) qs.set('market', market);
+      if (assetType) qs.set('asset_type', assetType);
+      const q = qs.toString();
+      return apiFetch(`/api/v1/instruments${q ? `?${q}` : ''}`);
+    },
+    get: (instrumentId: string) => apiFetch(`/api/v1/instruments/${instrumentId}`),
+    bars: (instrumentId: string, startDate: string, endDate: string) => {
+      const qs = new URLSearchParams({ start_date: startDate, end_date: endDate });
+      return apiFetch(`/api/v1/instruments/${instrumentId}/bars?${qs}`);
+    },
+    markets: () => apiFetch('/api/v1/markets'),
+    getMarket: (marketCode: string) => apiFetch(`/api/v1/markets/${marketCode}`),
+  },
   execution: {
     listIntents: () => apiFetch('/api/v1/execution/intents'),
     getIntent: (intentId: string) => apiFetch(`/api/v1/execution/intents/${intentId}`),

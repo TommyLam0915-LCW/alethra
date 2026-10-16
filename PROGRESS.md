@@ -1,8 +1,9 @@
 # Alethra Agent Progress
 
-Last updated: 2026-10-16T14:30+08:00
-Current task: alignment (A-F) — all implemented, awaiting owner commit authorization
-Status: complete, NOT committed (awaiting owner authorization)
+Last updated: 2026-10-16T22:00+08:00
+Current branch: auto/real-market-pipeline
+Draft PR: https://github.com/TommyLam0915-LCW/alethra/pull/10
+Status: Two vertical slices complete, continuing with remaining priorities
 Validated: 2026-10-16 14:30 HKT — backend 506/506 passed (2m57s), frontend build clean (22 pages), working tree intact.
 Tree unchanged since 2026-10-15 22:07 HKT (verified by mtime audit 2026-10-16 02:02; prior "09:30 baseline" line used a wrong clock — file mtime was 00:33).
 
@@ -134,3 +135,88 @@ Verified this run:
 - No concurrent-session activity since the 2026-10-15 22:07 state
 
 Still blocked on (unchanged): owner authorization to commit/push the combined working tree on auto/alignment-continuation.
+
+## Session record: autonomous continuation — market data + ML training (2026-10-16 15:00–22:00 HKT)
+
+Branch: `auto/real-market-pipeline`
+Draft PR: https://github.com/TommyLam0915-LCW/alethra/pull/10
+Commits: 69c6ec5, 27b7dd4
+
+### Priority 1: Real US/HK market data pipeline — IMPLEMENTED / OFFLINE VERIFIED
+
+Cherry-picked instrument model foundation from feat/real-integrations (3ebfdd9), then built:
+- Instrument identity model (MARKET:SYMBOL) with per-stock HK board lot sizes (100/400/500)
+- 19 real instruments catalog (7 US stocks, 3 US ETFs, 7 HK stocks, 2 HK ETFs)
+- Deterministic synthetic OHLCV data for real instruments (2023-2025)
+- Demo provider enhanced: serves real instrument data end-to-end
+- LSEG data provider adapter (BLOCKED on credentials — offline contract tests)
+- Backtest engine: provider-aware asset validation (accepts real instrument IDs)
+- New API endpoints: /instruments, /instruments/{id}, /instruments/{id}/bars, /markets
+- Frontend market-data page: real/demo tabs, market filter, instrument metadata
+- 70 new tests
+
+### Priority 2: Personal ML model training — IMPLEMENTED / OFFLINE VERIFIED
+
+- Feature engineering: returns, SMA ratios, RSI, volatility, MACD, volume ratios
+- Temporal train/val/test split (70/15/15) — no data leakage
+- Model types: logistic regression, gradient boosting, baseline
+- Model artifacts: save/load with metadata, scaler, feature names (joblib, gitignored)
+- Prediction API: full-series and latest-bar predictions with confidence
+- New endpoints: POST /ml/train, GET /ml/models, POST /ml/models/{id}/predict
+- Baseline comparison: every model evaluated against most-frequent baseline
+- 31 new tests
+
+### Verification
+- Backend pytest: 645/645 passed (3m02s)
+- Frontend build: clean, 22 pages
+
+### Blocked on (specific prerequisites)
+- LSEG DataLibrary credentials for live market data
+- IBKR TWS/Gateway for execution
+- Stripe credentials for billing
+
+### Next priorities
+3. IBKR execution agent (complete flow with fake broker transport tests)
+4. Billing integration (Stripe SDK, webhook verification)
+5. Database migration/upgrade preparation
+
+## Session record: autonomous continuation — execution agent + billing (2026-10-16 22:30–23:30 HKT)
+
+Branch: `auto/real-market-pipeline`
+Draft PR: https://github.com/TommyLam0915-LCW/alethra/pull/10
+Commits: 6bf174e, 75d0730
+
+### Priority 3: IBKR execution agent — IMPLEMENTED / OFFLINE VERIFIED
+
+- **Broker transport abstraction** (`BrokerTransport` ABC) with `FakeBrokerTransport` supporting 4 fill modes: immediate, delayed, partial, reject
+- **Server-side agent API** (6 endpoints): poll authorized intents, report submitted/fill/rejected/cancelled, heartbeat
+- **Agent control loop** with safety invariants:
+  - Duplicate prevention: tracks submitted intents, never resubmits on ack loss
+  - Partial fill tracking: each fill reported individually with dedup key
+  - Intent expiry: expired intents rejected before submission
+  - Disconnect/restart recovery: reconcile on startup
+- **AlethraAPIClient**: real HTTP client for agent-to-platform communication
+- **IBKRClient** rewritten: delegates to pluggable transport (no more NotImplementedError)
+- 34 new tests covering transport, client, service layer, API endpoints, agent control flow
+
+### Priority 4: Billing integration — IMPLEMENTED / OFFLINE VERIFIED
+
+- **StripePaymentAdapter**: real Stripe SDK integration (PaymentIntent, webhook verification, checkout sessions)
+- Auto-activation: uses Stripe when STRIPE_SECRET_KEY + STRIPE_WEBHOOK_SECRET are set, falls back to TestPaymentAdapter
+- 30 new tests: plan listing, subscription lifecycle, payment intents, webhook processing, entitlement linking, adapter guards
+
+### Priority 5: Database migration — VERIFIED IN SYNC
+
+- All 46 model tables covered by initial migration (55a8d07a7f40)
+- No new migration needed
+
+### Verification
+- Backend pytest: 709/709 passed (3m17s)
+- Frontend build: clean, 22 pages
+
+### Blocked on (specific prerequisites, unchanged)
+- LSEG DataLibrary credentials for live market data
+- IBKR TWS/Gateway for execution
+- Stripe credentials for live payments
+
+### All 5 priorities complete (offline verified)

@@ -71,11 +71,6 @@ def run_backtest(
         errors.append("asset_ids is required")
         return _error_result(errors)
 
-    for aid in asset_ids:
-        if aid not in get_available_assets():
-            errors.append(f"Unsupported asset: {aid}")
-            return _error_result(errors)
-
     start_date = strategy_spec.get("start_date")
     end_date = strategy_spec.get("end_date")
     if not start_date or not end_date:
@@ -96,11 +91,20 @@ def run_backtest(
     all_asset_ids = list(set(asset_ids + ([strategy_spec["benchmark_id"]] if strategy_spec.get("benchmark_id") else [])))
 
     if data_provider is not None:
+        available = set(data_provider.get_available_symbols())
+        for aid in asset_ids:
+            if aid not in available:
+                errors.append(f"Unsupported asset: {aid}")
+                return _error_result(errors)
         ohlcv_data = _fetch_ohlcv_via_provider(data_provider, all_asset_ids, start_date, end_date)
         dataset_checksum = data_provider.compute_checksum(all_asset_ids, start_date, end_date)
         provider_name = data_provider.provider_name
         feed_mode = data_provider.feed_mode
     else:
+        for aid in asset_ids:
+            if aid not in get_available_assets():
+                errors.append(f"Unsupported asset: {aid}")
+                return _error_result(errors)
         ohlcv_data = get_demo_ohlcv(all_asset_ids, start_date, end_date)
         dataset_checksum = compute_dataset_checksum(all_asset_ids, start_date, end_date)
         provider_name = "Demo (Synthetic)"

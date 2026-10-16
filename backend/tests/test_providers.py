@@ -22,15 +22,29 @@ class TestDemoDataProvider:
 
     def test_list_assets(self):
         assets = self.provider.list_assets()
-        assert len(assets) == 3
-        symbols = {a.symbol for a in assets}
-        assert "DEMO-ALPHA" in symbols
-        assert "DEMO-BETA" in symbols
-        assert "DEMO-BENCHMARK" in symbols
+        # Should include 3 demo assets + real instruments
+        assert len(assets) >= 3
+        
+        # Check demo assets are present
+        demo_symbols = {a.symbol for a in assets if a.asset_type == "synthetic"}
+        assert "DEMO-ALPHA" in demo_symbols
+        assert "DEMO-BETA" in demo_symbols
+        assert "DEMO-BENCHMARK" in demo_symbols
+        
+        # Check real instruments are present
+        real_assets = [a for a in assets if a.instrument is not None]
+        assert len(real_assets) > 0
+        
+        # Verify some real instruments
+        real_symbols = {a.symbol for a in real_assets}
+        assert "AAPL" in real_symbols
+        assert "0700" in real_symbols  # HK instrument
+        
+        # Verify all demo assets have correct properties
         for a in assets:
-            assert a.asset_type == "synthetic"
-            assert a.currency == "USD"
             assert a.description
+            if a.asset_type == "synthetic":
+                assert a.currency == "USD"
 
     def test_get_bars_returns_sorted_bars(self):
         bars = self.provider.get_bars("DEMO-ALPHA", "2024-01-02", "2024-01-12")
@@ -90,6 +104,93 @@ class TestDemoDataProvider:
         assert status["provider_id"] == "demo"
         assert status["available"] is True
         assert status["feed_mode"] == "offline"
+        assert "real_instruments_count" in status
+        assert "demo_assets_count" in status
+        assert status["demo_assets_count"] == 3
+        assert status["real_instruments_count"] > 0
+
+    def test_list_demo_assets_backward_compatible(self):
+        assets = self.provider.list_demo_assets()
+        assert len(assets) == 3
+        symbols = {a.symbol for a in assets}
+        assert "DEMO-ALPHA" in symbols
+        assert "DEMO-BETA" in symbols
+        assert "DEMO-BENCHMARK" in symbols
+        for a in assets:
+            assert a.asset_type == "synthetic"
+            assert a.instrument is None
+
+    def test_list_real_instruments(self):
+        assets = self.provider.list_real_instruments()
+        assert len(assets) > 0
+        for a in assets:
+            assert a.instrument is not None
+            assert a.asset_type in ["stock", "etf"]
+        
+        # Check US instruments
+        us_assets = [a for a in assets if a.instrument.market.value == "US"]
+        assert len(us_assets) > 0
+        assert all(a.currency == "USD" for a in us_assets)
+        
+        # Check HK instruments
+        hk_assets = [a for a in assets if a.instrument.market.value == "HK"]
+        assert len(hk_assets) > 0
+        assert all(a.currency == "HKD" for a in hk_assets)
+
+    def test_resolve_instrument_with_instrument_object(self):
+        from app.providers.instruments import Instrument, AssetType
+        instrument = Instrument.create_us("AAPL", "Apple Inc.", AssetType.STOCK)
+        resolved = self.provider.resolve_instrument(instrument)
+        assert resolved == "AAPL"
+
+    def test_resolve_instrument_with_string(self):
+        resolved = self.provider.resolve_instrument("AAPL")
+        assert resolved == "AAPL"
+
+    def test_get_provider_symbol_mapping_lseg(self):
+        mapping = self.provider.get_provider_symbol_mapping("lseg", "US:AAPL")
+        assert mapping is not None
+        assert mapping["provider_id"] == "lseg"
+        assert mapping["instrument_id"] == "US:AAPL"
+        assert mapping["provider_symbol"] == "AAPL.O"
+        assert mapping["provider_exchange"] == "NAS"
+
+    def test_get_provider_symbol_mapping_ibkr(self):
+        mapping = self.provider.get_provider_symbol_mapping("ibkr", "HK:0700")
+        assert mapping is not None
+        assert mapping["provider_id"] == "ibkr"
+        assert mapping["instrument_id"] == "HK:0700"
+        assert mapping["provider_symbol"] == "0700"
+        assert mapping["provider_exchange"] == "SEHK"
+        assert mapping["metadata"]["secType"] == "STK"
+        assert mapping["metadata"]["currency"] == "HKD"
+
+    def test_get_provider_symbol_mapping_not_found(self):
+        mapping = self.provider.get_provider_symbol_mapping("lseg", "US:NONEXISTENT")
+        assert mapping is None
+
+    def test_get_instrument_by_id(self):
+        asset = self.provider.get_instrument("US:AAPL")
+        assert asset is not None
+        assert asset.symbol == "AAPL"
+        assert asset.instrument is not None
+        assert asset.instrument.market.value == "US"
+        assert asset.currency == "USD"
+
+    def test_get_instrument_by_id_hk(self):
+        asset = self.provider.get_instrument("HK:0700")
+        assert asset is not None
+        assert asset.symbol == "0700"
+        assert asset.instrument is not None
+        assert asset.instrument.market.value == "HK"
+        assert asset.currency == "HKD"
+
+    def test_get_instrument_by_id_not_found(self):
+        asset = self.provider.get_instrument("US:NONEXISTENT")
+        assert asset is None
+
+    def test_supports_instrument_id(self):
+        assert self.provider.supports_instrument_id() is True
 
 
 class TestProviderRegistry:

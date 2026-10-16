@@ -1,15 +1,22 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import { brand } from '@/lib/brand';
 
-interface MarketDataStatus {
-  provider: string;
-  is_demo: boolean;
-  last_updated: string;
+interface Instrument {
+  instrument_id: string;
+  symbol: string;
+  name: string;
+  market: string;
+  exchange: string;
+  asset_type: string;
+  currency: string;
+  timezone: string;
+  lot_size: number | null;
+  lot_size_verified: boolean;
 }
 
 interface Bar {
@@ -18,18 +25,33 @@ interface Bar {
   high: number;
   low: number;
   close: number;
-  volume: number;
+  volume: number | null;
 }
 
-const SYMBOLS = ['DEMO-ALPHA', 'DEMO-BETA', 'DEMO-BENCHMARK'];
+interface ProviderStatus {
+  active_provider: string;
+  provider_name: string;
+  feed_mode: string;
+  available: boolean;
+  status: Record<string, unknown>;
+}
+
+type MarketFilter = 'ALL' | 'US' | 'HK';
+type SourceTab = 'real' | 'demo';
+
+const DEMO_SYMBOLS = ['DEMO-ALPHA', 'DEMO-BETA', 'DEMO-BENCHMARK'];
 
 export default function MarketDataPage() {
   const router = useRouter();
-  const [status, setStatus] = useState<MarketDataStatus | null>(null);
-  const [selectedSymbol, setSelectedSymbol] = useState(SYMBOLS[0]);
+  const [sourceTab, setSourceTab] = useState<SourceTab>('real');
+  const [instruments, setInstruments] = useState<Instrument[]>([]);
+  const [marketFilter, setMarketFilter] = useState<MarketFilter>('ALL');
+  const [selectedSymbol, setSelectedSymbol] = useState<string>('');
   const [latestBar, setLatestBar] = useState<Bar | null>(null);
   const [bars, setBars] = useState<Bar[]>([]);
+  const [providerStatus, setProviderStatus] = useState<ProviderStatus | null>(null);
   const [loading, setLoading] = useState(true);
+  const [dataLoading, setDataLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -38,43 +60,78 @@ export default function MarketDataPage() {
       router.push('/login');
       return;
     }
-
-    loadStatus();
-    loadSymbolData(SYMBOLS[0]);
+    loadInstruments();
+    loadProviderStatus();
   }, [router]);
 
-  const loadStatus = async () => {
+  const loadProviderStatus = async () => {
     try {
       const data = await api.marketData.status();
-      setStatus(data);
-    } catch (err) {
-      console.error('Failed to load status:', err);
-      setError('無法載入資料來源狀態');
+      setProviderStatus(data);
+    } catch {
+      // non-critical
     }
   };
 
-  const loadSymbolData = async (symbol: string) => {
+  const loadInstruments = async () => {
     setLoading(true);
-    setError(null);
     try {
-      const [latest, barsData] = await Promise.all([
-        api.marketData.latest(symbol),
-        api.marketData.bars(symbol),
-      ]);
-      setLatestBar(latest);
-      setBars(barsData);
+      const data = await api.instruments.list();
+      const items: Instrument[] = data.instruments || [];
+      setInstruments(items);
+      if (items.length > 0 && !selectedSymbol) {
+        const first = items[0].instrument_id;
+        setSelectedSymbol(first);
+        loadBarData(first);
+      }
     } catch (err) {
-      console.error('Failed to load market data:', err);
-      setError('無法載入市場資料');
+      console.error('Failed to load instruments:', err);
+      setError('無法載入產品目錄');
     } finally {
       setLoading(false);
     }
   };
 
+  const loadBarData = useCallback(async (symbol: string) => {
+    setDataLoading(true);
+    setError(null);
+    try {
+      if (symbol.includes(':')) {
+        const data = await api.instruments.bars(symbol, '2024-01-02', '2024-12-31');
+        setBars(data.bars || []);
+        const allBars = data.bars || [];
+        setLatestBar(allBars.length > 0 ? allBars[allBars.length - 1] : null);
+      } else {
+        const [latest, barsData] = await Promise.all([
+          api.marketData.latest(symbol),
+          api.marketData.bars(symbol, '2024-01-02', '2024-02-13'),
+        ]);
+        setLatestBar(latest?.bar || null);
+        setBars(barsData?.bars || []);
+      }
+    } catch (err) {
+      console.error('Failed to load bar data:', err);
+      setError('無法載入市場資料');
+    } finally {
+      setDataLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (selectedSymbol) {
+      loadBarData(selectedSymbol);
+    }
+  }, [selectedSymbol, loadBarData]);
+
+  const filteredInstruments = instruments.filter((inst) => {
+    if (marketFilter === 'ALL') return true;
+    return inst.market === marketFilter;
+  });
+
+  const selectedInstrument = instruments.find((i) => i.instrument_id === selectedSymbol);
+
   const handleSymbolChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
-    const symbol = e.target.value;
-    setSelectedSymbol(symbol);
-    loadSymbolData(symbol);
+    setSelectedSymbol(e.target.value);
   };
 
   const handleLogout = () => {
@@ -90,8 +147,8 @@ export default function MarketDataPage() {
     return new Date(dateStr).toLocaleDateString('zh-Hant');
   };
 
-  const maxClose = Math.max(...bars.map((b) => b.close));
-  const minClose = Math.min(...bars.map((b) => b.close));
+  const maxClose = bars.length > 0 ? Math.max(...bars.map((b) => b.close)) : 0;
+  const minClose = bars.length > 0 ? Math.min(...bars.map((b) => b.close)) : 0;
   const closeRange = maxClose - minClose || 1;
 
   return (
@@ -117,11 +174,7 @@ export default function MarketDataPage() {
           marginBottom: '24px',
         }}
       >
-        <strong>⚠ 警告：</strong>僅供示範資料 — 非即時市場資料
-      </div>
-
-      <div className="disclaimer">
-        <strong>提醒：</strong>本系統是研究工具，所有結果僅供研究參考，不代表未來績效，不構成投資建議。
+        <strong>⚠ 警告：</strong>所有數據均為模擬或演示數據 — 非即時市場資料。僅供研究用途。
       </div>
 
       {error && (
@@ -139,61 +192,160 @@ export default function MarketDataPage() {
         </div>
       )}
 
-      {status && (
+      {providerStatus && (
         <div className="card" style={{ marginBottom: '24px' }}>
           <h3 style={{ marginBottom: '16px' }}>資料來源狀態</h3>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '16px' }}>
             <div>
               <div style={{ color: '#666', fontSize: '14px', marginBottom: '4px' }}>資料提供者</div>
-              <div style={{ fontSize: '16px', fontWeight: 500 }}>{status.provider}</div>
+              <div style={{ fontSize: '16px', fontWeight: 500 }}>{providerStatus.provider_name}</div>
             </div>
             <div>
-              <div style={{ color: '#666', fontSize: '14px', marginBottom: '4px' }}>資料類型</div>
+              <div style={{ color: '#666', fontSize: '14px', marginBottom: '4px' }}>資料模式</div>
               <div
                 style={{
                   display: 'inline-block',
                   padding: '4px 12px',
                   borderRadius: '12px',
                   fontSize: '14px',
-                  backgroundColor: status.is_demo ? '#fff3cd' : '#d4edda',
-                  color: status.is_demo ? '#856404' : '#155724',
+                  backgroundColor: providerStatus.feed_mode === 'offline' ? '#fff3cd' : '#d4edda',
+                  color: providerStatus.feed_mode === 'offline' ? '#856404' : '#155724',
                 }}
               >
-                {status.is_demo ? '示範資料' : '即時資料'}
+                {providerStatus.feed_mode === 'offline' ? '離線（模擬）' : providerStatus.feed_mode}
               </div>
             </div>
             <div>
-              <div style={{ color: '#666', fontSize: '14px', marginBottom: '4px' }}>最後更新</div>
-              <div style={{ fontSize: '16px', fontWeight: 500 }}>{formatDate(status.last_updated)}</div>
+              <div style={{ color: '#666', fontSize: '14px', marginBottom: '4px' }}>可用產品</div>
+              <div style={{ fontSize: '16px', fontWeight: 500 }}>
+                {instruments.length} 個真實產品 + 3 個演示產品
+              </div>
             </div>
           </div>
         </div>
       )}
 
       <div className="card" style={{ marginBottom: '24px' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-          <h3 style={{ margin: 0 }}>選擇標的</h3>
-          <select
-            value={selectedSymbol}
-            onChange={handleSymbolChange}
-            style={{
-              padding: '8px 12px',
-              fontSize: '14px',
-              border: '1px solid #ddd',
-              borderRadius: '4px',
-              backgroundColor: 'white',
-              cursor: 'pointer',
-            }}
-          >
-            {SYMBOLS.map((symbol) => (
-              <option key={symbol} value={symbol}>
-                {symbol}
-              </option>
-            ))}
-          </select>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', flexWrap: 'wrap', gap: '12px' }}>
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <button
+              onClick={() => setSourceTab('real')}
+              style={{
+                padding: '6px 16px',
+                borderRadius: '4px',
+                border: '1px solid',
+                borderColor: sourceTab === 'real' ? '#007bff' : '#ddd',
+                backgroundColor: sourceTab === 'real' ? '#007bff' : 'white',
+                color: sourceTab === 'real' ? 'white' : '#333',
+                cursor: 'pointer',
+                fontSize: '14px',
+              }}
+            >
+              真實產品 (US/HK)
+            </button>
+            <button
+              onClick={() => setSourceTab('demo')}
+              style={{
+                padding: '6px 16px',
+                borderRadius: '4px',
+                border: '1px solid',
+                borderColor: sourceTab === 'demo' ? '#007bff' : '#ddd',
+                backgroundColor: sourceTab === 'demo' ? '#007bff' : 'white',
+                color: sourceTab === 'demo' ? 'white' : '#333',
+                cursor: 'pointer',
+                fontSize: '14px',
+              }}
+            >
+              演示產品
+            </button>
+          </div>
+
+          {sourceTab === 'real' && (
+            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+              {(['ALL', 'US', 'HK'] as MarketFilter[]).map((m) => (
+                <button
+                  key={m}
+                  onClick={() => setMarketFilter(m)}
+                  style={{
+                    padding: '4px 12px',
+                    borderRadius: '4px',
+                    border: '1px solid',
+                    borderColor: marketFilter === m ? '#28a745' : '#ddd',
+                    backgroundColor: marketFilter === m ? '#28a745' : 'white',
+                    color: marketFilter === m ? 'white' : '#333',
+                    cursor: 'pointer',
+                    fontSize: '13px',
+                  }}
+                >
+                  {m === 'ALL' ? '全部' : m === 'US' ? '美股' : '港股'}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
 
-        {loading ? (
+        {sourceTab === 'real' ? (
+          <div style={{ marginBottom: '20px' }}>
+            <select
+              value={selectedSymbol}
+              onChange={handleSymbolChange}
+              style={{
+                width: '100%',
+                padding: '10px 12px',
+                fontSize: '14px',
+                border: '1px solid #ddd',
+                borderRadius: '4px',
+                backgroundColor: 'white',
+              }}
+            >
+              {filteredInstruments.map((inst) => (
+                <option key={inst.instrument_id} value={inst.instrument_id}>
+                  {inst.instrument_id} — {inst.name} ({inst.market} · {inst.currency})
+                </option>
+              ))}
+            </select>
+
+            {selectedInstrument && (
+              <div style={{ marginTop: '12px', padding: '12px', backgroundColor: '#f8f9fa', borderRadius: '6px', fontSize: '14px' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '8px' }}>
+                  <div><span style={{ color: '#666' }}>交易所：</span>{selectedInstrument.exchange}</div>
+                  <div><span style={{ color: '#666' }}>資產類型：</span>{selectedInstrument.asset_type}</div>
+                  <div><span style={{ color: '#666' }}>貨幣：</span>{selectedInstrument.currency}</div>
+                  <div><span style={{ color: '#666' }}>時區：</span>{selectedInstrument.timezone}</div>
+                  <div>
+                    <span style={{ color: '#666' }}>每手股數：</span>
+                    {selectedInstrument.lot_size !== null
+                      ? `${selectedInstrument.lot_size}${selectedInstrument.lot_size_verified ? '' : '（未驗證）'}`
+                      : '未知'}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        ) : (
+          <div style={{ marginBottom: '20px' }}>
+            <select
+              value={selectedSymbol}
+              onChange={handleSymbolChange}
+              style={{
+                width: '100%',
+                padding: '10px 12px',
+                fontSize: '14px',
+                border: '1px solid #ddd',
+                borderRadius: '4px',
+                backgroundColor: 'white',
+              }}
+            >
+              {DEMO_SYMBOLS.map((symbol) => (
+                <option key={symbol} value={symbol}>
+                  {symbol}（合成數據）
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        {dataLoading ? (
           <div style={{ textAlign: 'center', padding: '40px' }}>載入中...</div>
         ) : !latestBar ? (
           <div style={{ textAlign: 'center', padding: '40px', color: '#666' }}>
@@ -202,7 +354,10 @@ export default function MarketDataPage() {
         ) : (
           <>
             <div style={{ marginBottom: '32px' }}>
-              <h4 style={{ marginBottom: '16px', color: '#333' }}>最新資料</h4>
+              <h4 style={{ marginBottom: '16px', color: '#333' }}>
+                最新資料 — {selectedSymbol}
+                {selectedInstrument && ` (${selectedInstrument.name})`}
+              </h4>
               <div
                 style={{
                   display: 'grid',
@@ -240,7 +395,7 @@ export default function MarketDataPage() {
                 <div>
                   <div style={{ color: '#666', fontSize: '12px', marginBottom: '4px' }}>成交量</div>
                   <div style={{ fontSize: '14px', fontWeight: 500 }}>
-                    {latestBar.volume.toLocaleString('zh-Hant')}
+                    {latestBar.volume !== null ? latestBar.volume.toLocaleString('zh-Hant') : '—'}
                   </div>
                 </div>
               </div>
@@ -249,20 +404,21 @@ export default function MarketDataPage() {
             {bars.length > 0 && (
               <>
                 <div style={{ marginBottom: '32px' }}>
-                  <h4 style={{ marginBottom: '16px', color: '#333' }}>收盤價走勢圖（示範資料）</h4>
+                  <h4 style={{ marginBottom: '16px', color: '#333' }}>收盤價走勢圖（模擬數據）</h4>
                   <div
                     style={{
                       display: 'flex',
                       alignItems: 'flex-end',
-                      gap: '4px',
+                      gap: '2px',
                       height: '200px',
                       padding: '16px',
                       backgroundColor: '#f8f9fa',
                       borderRadius: '6px',
                       border: '1px solid #e9ecef',
+                      overflow: 'hidden',
                     }}
                   >
-                    {bars.map((bar, idx) => {
+                    {bars.slice(-60).map((bar, idx) => {
                       const heightPercent = ((bar.close - minClose) / closeRange) * 100;
                       const height = Math.max(heightPercent, 5);
                       return (
@@ -276,6 +432,7 @@ export default function MarketDataPage() {
                             borderRadius: '2px 2px 0 0',
                             cursor: 'pointer',
                             transition: 'background-color 0.2s',
+                            minWidth: '3px',
                           }}
                           onMouseEnter={(e) => {
                             e.currentTarget.style.backgroundColor = '#0056b3';
@@ -297,12 +454,13 @@ export default function MarketDataPage() {
                     }}
                   >
                     <span>最低: {formatNumber(minClose)}</span>
+                    <span>顯示最近 {Math.min(bars.length, 60)} 天</span>
                     <span>最高: {formatNumber(maxClose)}</span>
                   </div>
                 </div>
 
                 <div>
-                  <h4 style={{ marginBottom: '16px', color: '#333' }}>歷史資料表</h4>
+                  <h4 style={{ marginBottom: '16px', color: '#333' }}>歷史資料表（最近 30 天）</h4>
                   <div style={{ overflowX: 'auto' }}>
                     <table
                       style={{
@@ -312,12 +470,7 @@ export default function MarketDataPage() {
                       }}
                     >
                       <thead>
-                        <tr
-                          style={{
-                            backgroundColor: '#f8f9fa',
-                            borderBottom: '2px solid #dee2e6',
-                          }}
-                        >
+                        <tr style={{ backgroundColor: '#f8f9fa', borderBottom: '2px solid #dee2e6' }}>
                           <th style={{ padding: '12px', textAlign: 'left', fontWeight: 600 }}>日期</th>
                           <th style={{ padding: '12px', textAlign: 'right', fontWeight: 600 }}>開盤價</th>
                           <th style={{ padding: '12px', textAlign: 'right', fontWeight: 600 }}>最高價</th>
@@ -327,7 +480,7 @@ export default function MarketDataPage() {
                         </tr>
                       </thead>
                       <tbody>
-                        {bars.map((bar, idx) => (
+                        {bars.slice(-30).reverse().map((bar, idx) => (
                           <tr
                             key={idx}
                             style={{
@@ -347,7 +500,7 @@ export default function MarketDataPage() {
                               {formatNumber(bar.close)}
                             </td>
                             <td style={{ padding: '12px', textAlign: 'right' }}>
-                              {bar.volume.toLocaleString('zh-Hant')}
+                              {bar.volume !== null ? bar.volume.toLocaleString('zh-Hant') : '—'}
                             </td>
                           </tr>
                         ))}

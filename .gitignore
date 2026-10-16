@@ -39,3 +39,7 @@ frontend/test-results/
 
 # Exports output
 exports_output/
+
+# ML model artifacts (binary files, not for version control)
+backend/app/ml/artifacts/
+*.joblib
