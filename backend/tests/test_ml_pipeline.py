@@ -216,6 +216,67 @@ class TestModelTraining:
         if date_range["val_end"] and date_range["test_end"]:
             assert date_range["val_end"] <= date_range["test_end"]
 
+    def test_scaler_fit_only_on_training_data(self):
+        """Verify scaler is fit only on training data, not validation or test."""
+        bars = _make_bars(200)
+        result = train_model(bars, "US:TEST")
+        model_id = result["model_id"]
+
+        # Load the saved scaler
+        model, scaler, metadata, feature_names = load_model(model_id)
+
+        # The scaler should have been fit on training data only
+        # We can verify this by checking that the scaler's mean and scale
+        # match what we'd get from fitting on training data only
+        from app.ml.features import build_feature_matrix, build_target_direction
+        features, feature_names_check, valid_dates = build_feature_matrix(bars)
+        targets = build_target_direction(bars, valid_dates)
+
+        n_samples = min(len(features), len(targets))
+        features = features[:n_samples]
+        targets = targets[:n_samples]
+
+        train_idx, val_idx, test_idx = temporal_split(n_samples)
+
+        X_train = np.array(features)[train_idx]
+
+        # Fit a new scaler on training data only
+        from sklearn.preprocessing import StandardScaler
+        test_scaler = StandardScaler()
+        test_scaler.fit(X_train)
+
+        # The saved scaler should have the same mean and scale
+        np.testing.assert_array_almost_equal(scaler.mean_, test_scaler.mean_)
+        np.testing.assert_array_almost_equal(scaler.scale_, test_scaler.scale_)
+
+    def test_features_no_future_data_leakage(self):
+        """Verify feature engineering doesn't use future data."""
+        from app.ml.features import compute_sma, compute_rsi
+
+        # Create a simple price series
+        prices = [100, 102, 101, 103, 105, 104, 106, 108, 107, 109]
+
+        # SMA should only use past and current values
+        sma = compute_sma(prices, 3)
+        # sma[2] should be average of prices[0:3] = [100, 102, 101]
+        assert sma[2] == (100 + 102 + 101) / 3
+        # sma[3] should be average of prices[1:4] = [102, 101, 103]
+        assert sma[3] == (102 + 101 + 103) / 3
+
+        # RSI should only use past and current values
+        rsi = compute_rsi(prices, 5)
+        # RSI at index i should only depend on prices[0:i+1]
+        # We can't easily verify the exact value, but we can verify
+        # that changing a future price doesn't affect past RSI values
+        prices_modified = prices.copy()
+        prices_modified[8] = 200  # Change a future price
+        rsi_modified = compute_rsi(prices_modified, 5)
+
+        # RSI values before the modification should be unchanged
+        for i in range(7):
+            if rsi[i] is not None and rsi_modified[i] is not None:
+                assert abs(rsi[i] - rsi_modified[i]) < 0.0001
+
 
 class TestPrediction:
     @pytest.fixture
