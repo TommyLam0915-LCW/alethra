@@ -63,10 +63,12 @@ export default function TrainingPage() {
   const [creating, setCreating] = useState(false);
   const [mlInstruments, setMlInstruments] = useState<MLInstrument[]>([]);
   const [mlModels, setMlModels] = useState<MLModel[]>([]);
+  const [mlExperiments, setMlExperiments] = useState<Array<{ id: string; title: string }>>([]);
   const [showMLForm, setShowMLForm] = useState(false);
   const [mlForm, setMlForm] = useState({
     instrument_id: 'US:AAPL',
     model_type: 'logistic_regression',
+    experiment_id: '',
     start_date: '',
     end_date: '',
   });
@@ -89,12 +91,16 @@ export default function TrainingPage() {
 
   const loadMLData = async () => {
     try {
-      const [instData, modelData] = await Promise.all([
+      const [instData, modelData, expData] = await Promise.all([
         api.instruments.list(),
         api.ml.listModels(),
+        api.experiments.list(),
       ]);
       setMlInstruments(instData.instruments || []);
       setMlModels(modelData.models || []);
+      setMlExperiments(
+        (Array.isArray(expData) ? expData : []).map((e: any) => ({ id: e.id, title: e.title }))
+      );
     } catch (err) {
       console.error('Failed to load ML data:', err);
     }
@@ -156,6 +162,7 @@ export default function TrainingPage() {
       const result = await api.ml.train({
         instrument_id: mlForm.instrument_id,
         model_type: mlForm.model_type,
+        ...(mlForm.experiment_id ? { experiment_id: mlForm.experiment_id } : {}),
         ...(mlForm.start_date ? { start_date: mlForm.start_date } : {}),
         ...(mlForm.end_date ? { end_date: mlForm.end_date } : {}),
       });
@@ -522,6 +529,27 @@ export default function TrainingPage() {
                   <option value="logistic_regression">邏輯回歸</option>
                   <option value="gradient_boosting">梯度提升</option>
                   <option value="baseline">基線（最常見類別）</option>
+                </select>
+              </div>
+              <div style={{ marginBottom: '16px' }}>
+                <label style={{ display: 'block', marginBottom: '8px', fontWeight: 500 }}>關聯實驗（選填）</label>
+                <select
+                  value={mlForm.experiment_id}
+                  onChange={(e) => setMlForm({ ...mlForm, experiment_id: e.target.value })}
+                  style={{
+                    width: '100%',
+                    padding: '8px 12px',
+                    border: '1px solid #ddd',
+                    borderRadius: '4px',
+                    fontSize: '14px',
+                  }}
+                >
+                  <option value="">不綁定實驗</option>
+                  {mlExperiments.map((exp) => (
+                    <option key={exp.id} value={exp.id}>
+                      {exp.title}
+                    </option>
+                  ))}
                 </select>
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', marginBottom: '16px' }}>
