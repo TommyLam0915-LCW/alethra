@@ -161,7 +161,7 @@ export default function SubscriptionPage() {
         <h1>訂閱方案</h1>
         <div style={{ display: 'flex', gap: '12px' }}>
           <Link href="/dashboard" className="btn btn-secondary">
-            返回實驗
+            返回我的實驗
           </Link>
           <button onClick={handleLogout} className="btn btn-secondary">
             {brand.ui.auth.logoutZh}
@@ -313,7 +313,7 @@ export default function SubscriptionPage() {
                 )}
                 {!entitlement && (
                   <p style={{ color: '#999', fontSize: '14px' }}>
-                    基礎免費方案 — 可建立實驗並執行研究。如需更多功能，請聯絡我們的團隊。
+                    基礎免費方案 — 可建立實驗並執行研究。你可以先從一個實驗開始，記錄假設並執行回測。
                   </p>
                 )}
               </div>
@@ -344,8 +344,8 @@ export default function SubscriptionPage() {
                     fontSize: '14px',
                   }}>
                     <span>{item.label}</span>
-                    <span style={{ fontWeight: 600, color: item.limit <= 0 ? '#dc3545' : '#333' }}>
-                      {item.limit <= 0 ? '無上限' : item.limit}
+                    <span style={{ fontWeight: 600, color: item.limit != null && item.limit <= 0 ? '#dc3545' : '#333' }}>
+                      {item.limit == null ? '無上限' : item.limit <= 0 ? '無配額（無法使用）' : item.limit}
                     </span>
                   </div>
                 ))}

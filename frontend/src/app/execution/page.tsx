@@ -17,6 +17,9 @@ interface ExecutionIntent {
   limit_price?: number;
   broker_ref?: string;
   authorization_token?: string;
+  fill_source?: string | null;
+  broker_confirmed_at?: string | null;
+  rejection_reason?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -32,6 +35,7 @@ const STATUS_LABELS: Record<string, string> = {
   filled: '已成交',
   cancelled: '已取消',
   rejected: '已拒絕',
+  uncertain: '狀態不明',
 };
 
 const STATUS_COLORS: Record<string, { bg: string; color: string }> = {
@@ -41,6 +45,7 @@ const STATUS_COLORS: Record<string, { bg: string; color: string }> = {
   filled: { bg: '#d4edda', color: '#155724' },
   cancelled: { bg: '#e2e3e5', color: '#383d41' },
   rejected: { bg: '#f8d7da', color: '#721c24' },
+  uncertain: { bg: '#e2e3e5', color: '#383d41' },
 };
 
 export default function ExecutionPage() {
@@ -271,11 +276,23 @@ export default function ExecutionPage() {
     }
 
     if (intent.status === 'filled') {
+      const isBrokerConfirmed = intent.fill_source === 'broker' && intent.broker_confirmed_at;
       return (
         <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+          <span
+            style={{
+              fontSize: '12px',
+              padding: '2px 10px',
+              borderRadius: '10px',
+              backgroundColor: isBrokerConfirmed ? '#d4edda' : '#fff3cd',
+              color: isBrokerConfirmed ? '#155724' : '#856404',
+            }}
+          >
+            {isBrokerConfirmed ? '券商確認成交' : '模擬成交（離線）'}
+          </span>
           {intent.broker_ref && (
             <span style={{ fontSize: '12px', color: '#666' }}>
-              券商參考號: <code style={{ fontSize: '12px' }}>{intent.broker_ref}</code>
+              {isBrokerConfirmed ? '券商參考號' : '模擬參考號'}: <code style={{ fontSize: '12px' }}>{intent.broker_ref}</code>
             </span>
           )}
           <button
@@ -300,7 +317,7 @@ export default function ExecutionPage() {
         <h1>執行意圖</h1>
         <div style={{ display: 'flex', gap: '12px' }}>
           <Link href="/dashboard" className="btn btn-secondary">
-            返回儀表板
+            返回我的實驗
           </Link>
           <button onClick={handleLogout} className="btn btn-secondary">
             {brand.ui.auth.logoutZh}
@@ -557,6 +574,19 @@ export default function ExecutionPage() {
                         <span><strong>限價:</strong> {intent.limit_price}</span>
                       )}
                     </div>
+                    <div style={{ marginTop: '6px' }}>
+                      <Link
+                        href={`/paper-portfolio/${intent.portfolio_id}`}
+                        style={{ fontSize: '13px', color: '#0070f3', textDecoration: 'none' }}
+                      >
+                        查看投資組合 →
+                      </Link>
+                    </div>
+                    {intent.status === 'rejected' && intent.rejection_reason && (
+                      <div style={{ marginTop: '6px', fontSize: '13px', color: '#721c24' }}>
+                        <strong>拒絕原因：</strong>{intent.rejection_reason}
+                      </div>
+                    )}
                     <div style={{ fontSize: '12px', color: '#999', marginTop: '6px' }}>
                       建立於 {new Date(intent.created_at).toLocaleString('zh-Hant')}
                     </div>

@@ -251,7 +251,7 @@ export default function ExperimentDetailPage() {
     <div className="container" style={{ paddingTop: '40px', paddingBottom: '40px' }}>
       <div style={{ marginBottom: '20px' }}>
         <Link href="/dashboard" style={{ color: '#0070f3', textDecoration: 'none' }}>
-          ← 返回控制台
+          返回我的實驗
         </Link>
       </div>
 

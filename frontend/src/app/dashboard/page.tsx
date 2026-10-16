@@ -109,78 +109,76 @@ export default function DashboardPage() {
           </Link>
         </div>
       ) : (
-        <>
-          <div style={{ display: 'grid', gap: '16px', marginBottom: '32px' }}>
-            {experiments.map((exp) => {
-              const nextAction = getNextAction(exp);
-              return (
-                <Link
-                  key={exp.id}
-                  href={`/experiments/${exp.id}`}
-                  style={{ textDecoration: 'none', color: 'inherit' }}
-                >
-                  <div className="card" style={{ cursor: 'pointer', transition: 'transform 0.2s' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start', marginBottom: '12px' }}>
-                      <div style={{ flex: 1 }}>
-                        <h3 style={{ marginBottom: '8px' }}>{exp.title}</h3>
-                        <p style={{ color: '#666', fontSize: '14px', margin: 0 }}>
-                          建立於 {new Date(exp.created_at).toLocaleDateString('zh-Hant')}
-                          {exp.updated_at !== exp.created_at && (
-                            <> · 最後活動 {new Date(exp.updated_at).toLocaleDateString('zh-Hant')}</>
-                          )}
-                        </p>
-                      </div>
-                      <span
-                        style={{
-                          padding: '4px 12px',
-                          borderRadius: '12px',
-                          fontSize: '12px',
-                          backgroundColor: exp.status === 'locked' ? '#d1ecf1' : '#eaeaea',
-                          color: exp.status === 'locked' ? '#0c5460' : '#666',
-                        }}
-                      >
-                        {getStatusLabel(exp.status)}
-                      </span>
+        <div style={{ display: 'grid', gap: '16px', marginBottom: '32px' }}>
+          {experiments.map((exp) => {
+            const nextAction = getNextAction(exp);
+            return (
+              <Link
+                key={exp.id}
+                href={`/experiments/${exp.id}`}
+                style={{ textDecoration: 'none', color: 'inherit' }}
+              >
+                <div className="card" style={{ cursor: 'pointer', transition: 'transform 0.2s' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start', marginBottom: '12px' }}>
+                    <div style={{ flex: 1 }}>
+                      <h3 style={{ marginBottom: '8px' }}>{exp.title}</h3>
+                      <p style={{ color: '#666', fontSize: '14px', margin: 0 }}>
+                        建立於 {new Date(exp.created_at).toLocaleDateString('zh-Hant')}
+                        {exp.updated_at !== exp.created_at && (
+                          <> · 最後活動 {new Date(exp.updated_at).toLocaleDateString('zh-Hant')}</>
+                        )}
+                      </p>
                     </div>
-                    <div style={{ borderTop: '1px solid #eaeaea', paddingTop: '12px' }}>
-                      <span style={{ color: '#0070f3', fontSize: '14px' }}>
-                        {nextAction.label} →
-                      </span>
-                    </div>
+                    <span
+                      style={{
+                        padding: '4px 12px',
+                        borderRadius: '12px',
+                        fontSize: '12px',
+                        backgroundColor: exp.status === 'locked' ? '#d1ecf1' : '#eaeaea',
+                        color: exp.status === 'locked' ? '#0c5460' : '#666',
+                      }}
+                    >
+                      {getStatusLabel(exp.status)}
+                    </span>
                   </div>
-                </Link>
-              );
-            })}
-          </div>
-
-          <div style={{ borderTop: '1px solid #eaeaea', paddingTop: '24px' }}>
-            <h4 style={{ marginBottom: '16px', color: '#666', fontSize: '14px' }}>其他功能</h4>
-            <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
-              <Link href="/models" className="btn btn-secondary">
-                模型研究
+                  <div style={{ borderTop: '1px solid #eaeaea', paddingTop: '12px' }}>
+                    <span style={{ color: '#0070f3', fontSize: '14px' }}>
+                      {nextAction.label} →
+                    </span>
+                  </div>
+                </div>
               </Link>
-              <Link href="/training" className="btn btn-secondary">
-                訓練任務
-              </Link>
-              <Link href="/inference" className="btn btn-secondary">
-                推論執行
-              </Link>
-              <Link href="/execution" className="btn btn-secondary">
-                執行意向
-              </Link>
-              <Link href="/market-data" className="btn btn-secondary">
-                市場數據
-              </Link>
-              <Link href="/api-keys" className="btn btn-secondary">
-                API 金鑰
-              </Link>
-              <Link href="/subscription" className="btn btn-secondary">
-                訂閱方案
-              </Link>
-            </div>
-          </div>
-        </>
+            );
+          })}
+        </div>
       )}
+
+      <div style={{ borderTop: '1px solid #eaeaea', paddingTop: '24px', marginBottom: '32px' }}>
+        <h4 style={{ marginBottom: '16px', color: '#666', fontSize: '14px' }}>其他功能</h4>
+        <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
+          <Link href="/models" className="btn btn-secondary">
+            模型研究
+          </Link>
+          <Link href="/training" className="btn btn-secondary">
+            訓練任務
+          </Link>
+          <Link href="/inference" className="btn btn-secondary">
+            推論執行
+          </Link>
+          <Link href="/execution" className="btn btn-secondary">
+            執行意向
+          </Link>
+          <Link href="/market-data" className="btn btn-secondary">
+            市場數據
+          </Link>
+          <Link href="/api-keys" className="btn btn-secondary">
+            API 金鑰
+          </Link>
+          <Link href="/subscription" className="btn btn-secondary">
+            訂閱方案
+          </Link>
+        </div>
+      </div>
     </div>
   );
 }

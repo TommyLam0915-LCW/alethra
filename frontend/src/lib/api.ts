@@ -294,10 +294,10 @@ export const api = {
       apiFetch(`/api/v1/training/jobs/${jobId}/cancel`, { method: 'POST' }),
   },
   billing: {
-    listPlans: () => apiFetch('/api/v1/billing/plans'),
-    getMySubscription: () => apiFetch('/api/v1/billing/subscriptions/me'),
+    listPlans: () => apiFetch('/api/v1/plans'),
+    getMySubscription: () => apiFetch('/api/v1/subscriptions/me'),
     createPaymentIntent: (data: { subscription_id: string }) =>
-      apiFetch('/api/v1/billing/payments/create-intent', { method: 'POST', body: JSON.stringify(data) }),
-    getOperationalStatus: () => apiFetch('/api/v1/billing/operational-status'),
+      apiFetch('/api/v1/payments/create-intent', { method: 'POST', body: JSON.stringify(data) }),
+    getOperationalStatus: () => apiFetch('/api/v1/operational-status'),
   },
 };
