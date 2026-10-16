@@ -10,6 +10,7 @@ the adapter's structure, error handling, and symbol mapping logic.
 """
 
 import logging
+import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -21,8 +22,12 @@ from app.data.real_instruments import (
     get_instrument_by_id,
     get_provider_mapping,
 )
+from app.lib.timeutil import utcnow
 
 logger = logging.getLogger(__name__)
+
+LSEG_OAUTH2_TOKEN_URL = "https://api.refinitiv.com/auth/oauth2/v2/token"
+LSEG_API_BASE_URL = "https://api.refinitiv.com"
 
 
 class LSEGConfigurationError(Exception):
@@ -42,6 +47,11 @@ class LSEGDataProvider(DataProvider):
 
     Symbol mapping: Internal instrument IDs (US:AAPL) are mapped to
     LSEG RIC format (AAPL.O) via LSEG_MAPPINGS in real_instruments.py.
+
+    Authentication:
+    - API key mode: static Bearer token (LSEG_API_KEY)
+    - OAuth2 mode: client credentials grant with automatic token refresh
+      (LSEG_CLIENT_ID + LSEG_CLIENT_SECRET)
     """
 
     def __init__(
@@ -49,13 +59,17 @@ class LSEGDataProvider(DataProvider):
         api_key: Optional[str] = None,
         client_id: Optional[str] = None,
         client_secret: Optional[str] = None,
+        token_url: str = LSEG_OAUTH2_TOKEN_URL,
     ):
         self._api_key = api_key
         self._client_id = client_id
         self._client_secret = client_secret
+        self._token_url = token_url
         self._session = None
         self._connected = False
         self._last_error: Optional[str] = None
+        self._access_token: Optional[str] = None
+        self._token_expires_at: float = 0.0
 
     @property
     def provider_id(self) -> str:
@@ -76,12 +90,34 @@ class LSEGDataProvider(DataProvider):
                 "Set LSEG_API_KEY or LSEG_CLIENT_ID + LSEG_CLIENT_SECRET."
             )
 
-    def connect(self) -> bool:
-        """Establish connection to LSEG API.
+    def _acquire_oauth2_token(self) -> None:
+        import requests
 
-        Returns True on success, False on failure.
-        Sets _last_error on failure for status reporting.
-        """
+        resp = requests.post(
+            self._token_url,
+            data={
+                "grant_type": "client_credentials",
+                "client_id": self._client_id,
+                "client_secret": self._client_secret,
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        token_data = resp.json()
+
+        self._access_token = token_data["access_token"]
+        expires_in = int(token_data.get("expires_in", 300))
+        self._token_expires_at = time.monotonic() + expires_in - 60
+
+    def _ensure_valid_token(self) -> None:
+        if self._api_key:
+            return
+        if self._access_token and time.monotonic() < self._token_expires_at:
+            return
+        self._acquire_oauth2_token()
+
+    def connect(self) -> bool:
         try:
             self._check_credentials()
         except LSEGConfigurationError as e:
@@ -92,12 +128,20 @@ class LSEGDataProvider(DataProvider):
         try:
             import requests
             self._session = requests.Session()
-            self._session.headers.update({
-                "Authorization": f"Bearer {self._api_key or ''}",
-            })
+
+            if self._api_key:
+                self._session.headers.update({
+                    "Authorization": f"Bearer {self._api_key}",
+                })
+            else:
+                self._acquire_oauth2_token()
+                self._session.headers.update({
+                    "Authorization": f"Bearer {self._access_token}",
+                })
+
             self._connected = True
             self._last_error = None
-            logger.info("LSEG provider connected")
+            logger.info("LSEG provider connected (auth=%s)", "api_key" if self._api_key else "oauth2")
             return True
         except Exception as e:
             self._last_error = f"Connection failed: {e}"
@@ -110,6 +154,8 @@ class LSEGDataProvider(DataProvider):
             self._session.close()
             self._session = None
         self._connected = False
+        self._access_token = None
+        self._token_expires_at = 0.0
 
     def is_available(self) -> bool:
         return self._connected and self._session is not None
@@ -164,8 +210,11 @@ class LSEGDataProvider(DataProvider):
         end_date: str,
     ) -> List[OHLCVBar]:
         assert self._session is not None
+        self._ensure_valid_token()
+        if not self._api_key and self._access_token:
+            self._session.headers["Authorization"] = f"Bearer {self._access_token}"
 
-        url = "https://api.refinitiv.com/data/historical-pricing/v1/views/eod-summaries"
+        url = f"{LSEG_API_BASE_URL}/data/historical-pricing/v1/views/eod-summaries"
         params = {
             "universe": ric,
             "start": start_date,
@@ -203,13 +252,17 @@ class LSEGDataProvider(DataProvider):
 
         try:
             assert self._session is not None
-            url = f"https://api.refinitiv.com/data/quotes/v1/{ric}"
+            self._ensure_valid_token()
+            if not self._api_key and self._access_token:
+                self._session.headers["Authorization"] = f"Bearer {self._access_token}"
+
+            url = f"{LSEG_API_BASE_URL}/data/quotes/v1/{ric}"
             resp = self._session.get(url, timeout=10)
             resp.raise_for_status()
             data = resp.json()
 
             return OHLCVBar(
-                date=data.get("trading_date", datetime.utcnow().strftime("%Y-%m-%d")),
+                date=data.get("trading_date", utcnow().strftime("%Y-%m-%d")),
                 open=float(data.get("open", 0)),
                 high=float(data.get("high", 0)),
                 low=float(data.get("low", 0)),
@@ -224,7 +277,7 @@ class LSEGDataProvider(DataProvider):
     def get_date_range(self) -> Dict[str, Any]:
         return {
             "min": "2020-01-02",
-            "max": datetime.utcnow().strftime("%Y-%m-%d"),
+            "max": utcnow().strftime("%Y-%m-%d"),
             "total_trading_days": None,
             "note": "Actual range depends on LSEG subscription entitlements.",
         }

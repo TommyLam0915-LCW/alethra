@@ -10,7 +10,7 @@ from app.database import get_db
 from app.auth.jwt import get_current_user
 from app.models.user import User
 from app.services.ml_training import create_ml_training_job, execute_ml_training
-from app.ml.trainer import list_models, load_model
+from app.ml.trainer import list_models, load_model, delete_model
 from app.ml.predictor import predict, predict_latest
 from app.providers import get_data_provider
 
@@ -68,6 +68,7 @@ def start_ml_training(
         "metrics": job.results.get("metrics") if job.results else None,
         "split": job.results.get("split") if job.results else None,
         "date_range": job.results.get("date_range") if job.results else None,
+        "data_provenance": job.results.get("data_provenance") if job.results else None,
         "model_type": model_type,
         "instrument_id": instrument_id,
         "disclaimer": "Model is for research purposes only. Not suitable for trading decisions.",
@@ -79,8 +80,8 @@ def start_ml_training(
 def list_trained_models(
     current_user: User = Depends(get_current_user),
 ):
-    """List all trained model artifacts."""
-    models = list_models()
+    """List all trained model artifacts owned by the current user."""
+    models = list_models(user_id=str(current_user.id))
     return {
         "models": models,
         "total": len(models),
@@ -94,15 +95,40 @@ def get_model_detail(
 ):
     """Get detail for a specific trained model."""
     try:
-        _, _, metadata, feature_names = load_model(model_id)
+        _, _, metadata, feature_names = load_model(model_id, user_id=str(current_user.id))
     except FileNotFoundError:
         raise HTTPException(404, f"Model not found: {model_id}")
+    except PermissionError:
+        raise HTTPException(403, f"You do not have access to model {model_id}")
 
     return {
         "model_id": model_id,
         "metadata": metadata,
         "feature_names": feature_names,
     }
+
+
+@router.delete("/models/{model_id}")
+def delete_trained_model(
+    model_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    """Delete a trained model artifact owned by the current user."""
+    # Model IDs are UUIDs — rejecting non-UUID strings keeps the artifact
+    # directory lookup (and rmtree) from ever resolving a traversal path.
+    try:
+        uuid.UUID(model_id)
+    except ValueError:
+        raise HTTPException(404, f"Model not found: {model_id}")
+
+    try:
+        delete_model(model_id, user_id=str(current_user.id))
+    except FileNotFoundError:
+        raise HTTPException(404, f"Model not found: {model_id}")
+    except PermissionError:
+        raise HTTPException(403, f"You do not have access to model {model_id}")
+
+    return {"deleted": model_id}
 
 
 @router.post("/models/{model_id}/predict")
@@ -118,9 +144,11 @@ def run_prediction(
     Fetches recent data for the instrument and generates signals.
     """
     try:
-        _, _, metadata, _ = load_model(model_id)
+        _, _, metadata, _ = load_model(model_id, user_id=str(current_user.id))
     except FileNotFoundError:
         raise HTTPException(404, f"Model not found: {model_id}")
+    except PermissionError:
+        raise HTTPException(403, f"You do not have access to model {model_id}")
 
     pred_instrument = instrument_id or metadata.get("instrument_id")
     if not pred_instrument:
@@ -143,7 +171,9 @@ def run_prediction(
     ]
 
     try:
-        result = predict(model_id, bar_dicts)
+        result = predict(model_id, bar_dicts, user_id=str(current_user.id))
+    except PermissionError:
+        raise HTTPException(403, f"You do not have access to model {model_id}")
     except Exception as e:
         raise HTTPException(422, f"Prediction failed: {e}")
 
@@ -162,9 +192,11 @@ def run_latest_prediction(
 ):
     """Get the latest prediction from a trained model."""
     try:
-        _, _, metadata, _ = load_model(model_id)
+        _, _, metadata, _ = load_model(model_id, user_id=str(current_user.id))
     except FileNotFoundError:
         raise HTTPException(404, f"Model not found: {model_id}")
+    except PermissionError:
+        raise HTTPException(403, f"You do not have access to model {model_id}")
 
     pred_instrument = instrument_id or metadata.get("instrument_id")
     if not pred_instrument:
@@ -182,7 +214,9 @@ def run_latest_prediction(
     ]
 
     try:
-        result = predict_latest(model_id, bar_dicts)
+        result = predict_latest(model_id, bar_dicts, user_id=str(current_user.id))
+    except PermissionError:
+        raise HTTPException(403, f"You do not have access to model {model_id}")
     except Exception as e:
         raise HTTPException(422, f"Prediction failed: {e}")
 

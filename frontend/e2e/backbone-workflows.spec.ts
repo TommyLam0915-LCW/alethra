@@ -231,8 +231,8 @@ test.describe('Backbone Workflow Acceptance', () => {
       await loginViaBrowser(page);
       await page.goto(`${FRONTEND_URL}/training`);
       
-      // Verify page loads
-      await expect(page.locator('h1, h2').filter({ hasText: /訓練|Training/i })).toBeVisible();
+      // Verify page loads (h1 "訓練 / 最佳化任務"; page also has h2 sections incl. ML 訓練)
+      await expect(page.locator('h1').filter({ hasText: /訓練|Training/i })).toBeVisible();
       
       // Submit a training job via API (browser UI may not have full form)
       const resp = await request.post(`${BACKEND_URL}/api/v1/training/jobs`, {
@@ -261,8 +261,8 @@ test.describe('Backbone Workflow Acceptance', () => {
       // Wait for jobs to load
       await page.waitForTimeout(2000);
       
-      // Verify training page is accessible
-      await expect(page.locator('h1, h2').filter({ hasText: /訓練|Training/i })).toBeVisible();
+      // Verify training page is accessible (h1 page title; h2 sections exist separately)
+      await expect(page.locator('h1').filter({ hasText: /訓練|Training/i })).toBeVisible();
     });
   });
 

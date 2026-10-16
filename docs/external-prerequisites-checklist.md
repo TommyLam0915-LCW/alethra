@@ -73,11 +73,15 @@ This document lists all external dependencies required to complete the six real 
   - 19 instruments defined (7 US stocks, 3 US ETFs, 7 HK stocks, 2 HK ETFs)
   - Provider symbol mappings for LSEG (RIC format) and IBKR (contract spec)
 
-- **LSEG provider adapter**: NOT IMPLEMENTED
-  - **BLOCKED**: Requires LSEG API credentials
-  - Expected structure: `backend/app/providers/lseg_provider.py`
-  - Must implement: `get_bars`, `get_latest_bar`, `list_assets`, `compute_checksum`
-  - Must handle: RIC symbol mapping, pagination, rate limits, error states
+- **LSEG provider adapter**: IMPLEMENTED—OFFLINE VERIFIED
+  - `backend/app/providers/lseg_provider.py`
+  - Full DataProvider implementation: `get_bars`, `get_latest_bar`, `list_assets`, `compute_checksum`
+  - RIC symbol mapping (US: .O/.N, HK: .HK)
+  - OAuth2 client credentials flow with automatic token refresh
+  - Also supports static API key mode
+  - Auto-registration in provider registry when credentials present
+  - **BLOCKED on live data**: Requires LSEG API credentials for actual data fetches
+  - 32 offline contract tests passing (adapter + OAuth2 flow)
 
 ### Integration Checklist
 
@@ -149,14 +153,16 @@ This document lists all external dependencies required to complete the six real 
 
 ### Implementation Status
 
-- **Execution agent architecture**: NOT IMPLEMENTED
-  - Expected structure: `backend/app/execution_agent/`
+- **Execution agent architecture**: IMPLEMENTED—OFFLINE VERIFIED
+  - `backend/app/execution_agent/`
   - Components:
-    - `agent.py`: Main agent loop, connects to IB Gateway
-    - `ibkr_client.py`: IBKR API wrapper (using `ib_insync` library)
-    - `intent_handler.py`: Receives order intents from Alethra platform
-    - `fill_reporter.py`: Reports fills back to Alethra platform
-    - `config.py`: Agent configuration (IB Gateway host/port, Alethra API endpoint)
+    - `agent.py`: Main agent loop with signal handling, reconnection, reconciliation
+    - `ibkr_client.py`: Thin facade over pluggable BrokerTransport
+    - `broker_transport.py`: Abstract interface + FakeBrokerTransport (4 fill modes)
+    - `alethra_client.py`: HTTP client for agent-to-platform communication
+    - `config.py`: Configuration with validation (env var loading)
+  - **Missing**: `IBKRBrokerTransport` — real IBKR transport (requires ib_insync + IB Gateway)
+  - 34 tests passing (transport, client, service, API, agent control flow)
 
 - **Order intent model**: IMPLEMENTED—OFFLINE VERIFIED
   - `backend/app/models/execution.py`
@@ -171,10 +177,10 @@ This document lists all external dependencies required to complete the six real 
   - Kill switch integration
   - Rate limiting integration
 
-- **IBKR execution agent**: NOT IMPLEMENTED
+- **IBKR execution agent**: IMPLEMENTED—OFFLINE VERIFIED (missing real IBKR transport)
   - **BLOCKED**: Requires user to have IBKR account and IB Gateway installed
-  - Must use `ib_insync` library for IBKR API
-  - Must handle: connection, reconnect, error states, partial fills, rejections
+  - Agent loop, transport abstraction, and fake transport all implemented and tested
+  - Missing: `IBKRBrokerTransport` using `ib_insync` library for real IBKR connection
 
 ### Integration Checklist
 
@@ -257,11 +263,13 @@ This document lists all external dependencies required to complete the six real 
   - Subscription management, invoice tracking
   - Entitlement enforcement middleware
 
-- **Stripe adapter**: NOT IMPLEMENTED
-  - **BLOCKED**: Requires Stripe API credentials
-  - Expected structure: `backend/app/providers/stripe_adapter.py`
-  - Must implement: `create_payment_intent`, `create_subscription`, `handle_webhook`
-  - Must handle: webhook signature verification, idempotency, error states
+- **Stripe adapter**: IMPLEMENTED—OFFLINE VERIFIED
+  - `backend/app/providers/stripe_adapter.py`
+  - Real Stripe SDK integration: PaymentIntent, webhook verification, checkout sessions
+  - Auto-activation: uses Stripe when STRIPE_SECRET_KEY + STRIPE_WEBHOOK_SECRET are set
+  - Falls back to TestPaymentAdapter when credentials missing
+  - **BLOCKED on live payments**: Requires Stripe API credentials for actual transactions
+  - 30 tests passing (plan listing, subscription lifecycle, webhooks, entitlements)
 
 ### Integration Checklist
 
@@ -495,16 +503,37 @@ This document lists all external dependencies required to complete the six real 
    - 19 instruments (US stocks/ETFs, HK stocks/ETFs)
    - Provider symbol mappings for LSEG and IBKR
 
-4. **Order intent model and API**: IMPLEMENTED—OFFLINE VERIFIED
+4. **LSEG provider adapter**: IMPLEMENTED—OFFLINE VERIFIED
+   - Full DataProvider implementation with OAuth2 support
+   - Auto-registration when credentials present
+   - 32 offline contract tests
+
+5. **Order intent model and API**: IMPLEMENTED—OFFLINE VERIFIED
    - Full order lifecycle (pending → filled/cancelled/rejected)
    - Idempotency, kill switch, rate limiting
 
-5. **Payment adapter interface and models**: IMPLEMENTED—OFFLINE VERIFIED
-   - Subscription and invoice tracking
-   - Entitlement enforcement
+6. **Execution agent**: IMPLEMENTED—OFFLINE VERIFIED
+   - Agent control loop, broker transport abstraction, fake transport
+   - Missing: IBKRBrokerTransport (real IBKR connection)
+   - 34 tests passing
 
-6. **Docker Compose and Dockerfiles**: IMPLEMENTED—OFFLINE VERIFIED
+7. **Payment adapter interface and Stripe adapter**: IMPLEMENTED—OFFLINE VERIFIED
+   - Real Stripe SDK integration with webhook verification
+   - Auto-activation when credentials present
+   - 30 tests passing
+
+8. **ML training pipeline**: IMPLEMENTED—OFFLINE VERIFIED
+   - Feature engineering, temporal train/val/test split
+   - Logistic regression, gradient boosting, baseline models
+   - Model artifact persistence and versioned inference
+   - 31 tests passing
+
+9. **Docker Compose and Dockerfiles**: IMPLEMENTED—OFFLINE VERIFIED
    - Local development and acceptance testing
+
+10. **Production config safety**: IMPLEMENTED—VERIFIED
+    - 6 validation rules preventing unsafe deployments
+    - 34 config tests
 
 ### Next Steps
 

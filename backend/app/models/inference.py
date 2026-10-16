@@ -5,6 +5,7 @@ from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
 from app.database import Base
 import enum
+from app.lib.timeutil import utcnow
 
 
 class InferenceRunStatus(str, enum.Enum):
@@ -24,7 +25,7 @@ class InferenceRun(Base):
     output_signals = Column(JSONB, nullable=True)
     status = Column(SAEnum(InferenceRunStatus), default=InferenceRunStatus.pending, nullable=False)
     error_details = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
     completed_at = Column(DateTime, nullable=True)
 
     model_version = relationship("ModelVersion")

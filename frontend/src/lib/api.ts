@@ -316,6 +316,32 @@ export const api = {
     cancel: (jobId: string) =>
       apiFetch(`/api/v1/training/jobs/${jobId}/cancel`, { method: 'POST' }),
   },
+  ml: {
+    train: (params: { instrument_id: string; model_type?: string; experiment_id?: string; start_date?: string; end_date?: string }) => {
+      const qs = new URLSearchParams();
+      qs.set('instrument_id', params.instrument_id);
+      if (params.model_type) qs.set('model_type', params.model_type);
+      if (params.experiment_id) qs.set('experiment_id', params.experiment_id);
+      if (params.start_date) qs.set('start_date', params.start_date);
+      if (params.end_date) qs.set('end_date', params.end_date);
+      return apiFetch(`/api/v1/ml/train?${qs}`, { method: 'POST' });
+    },
+    listModels: () => apiFetch('/api/v1/ml/models'),
+    getModel: (modelId: string) => apiFetch(`/api/v1/ml/models/${modelId}`),
+    deleteModel: (modelId: string) => apiFetch(`/api/v1/ml/models/${modelId}`, { method: 'DELETE' }),
+    predict: (modelId: string, params?: { instrument_id?: string; start_date?: string; end_date?: string }) => {
+      const qs = new URLSearchParams();
+      if (params?.instrument_id) qs.set('instrument_id', params.instrument_id);
+      if (params?.start_date) qs.set('start_date', params.start_date);
+      if (params?.end_date) qs.set('end_date', params.end_date);
+      const q = qs.toString();
+      return apiFetch(`/api/v1/ml/models/${modelId}/predict${q ? `?${q}` : ''}`, { method: 'POST' });
+    },
+    predictLatest: (modelId: string, instrumentId?: string) => {
+      const qs = instrumentId ? `?instrument_id=${instrumentId}` : '';
+      return apiFetch(`/api/v1/ml/models/${modelId}/predict-latest${qs}`, { method: 'POST' });
+    },
+  },
   billing: {
     listPlans: () => apiFetch('/api/v1/plans'),
     getMySubscription: () => apiFetch('/api/v1/subscriptions/me'),

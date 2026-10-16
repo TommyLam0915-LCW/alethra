@@ -16,6 +16,7 @@ from app.models.execution import (
     FillSource,
     FillRecord,
 )
+from app.lib.timeutil import utcnow
 
 
 def list_authorized_intents(
@@ -26,7 +27,7 @@ def list_authorized_intents(
 
     Only returns intents that have not expired.
     """
-    now = datetime.utcnow()
+    now = utcnow()
     return (
         db.query(OrderIntent)
         .filter(
@@ -75,7 +76,7 @@ def agent_report_submitted(
     intent.status = IntentStatus.submitted
     intent.broker_ref = broker_ref
     intent.fill_source = FillSource.broker
-    intent.updated_at = datetime.utcnow()
+    intent.updated_at = utcnow()
     if submitted_at:
         intent.broker_confirmed_at = submitted_at
 
@@ -137,9 +138,9 @@ def agent_report_fill(
 
     if total_filled >= intent.quantity:
         intent.status = IntentStatus.filled
-        intent.broker_confirmed_at = datetime.utcnow()
+        intent.broker_confirmed_at = utcnow()
 
-    intent.updated_at = datetime.utcnow()
+    intent.updated_at = utcnow()
     db.commit()
     db.refresh(fill_record)
     return fill_record
@@ -172,7 +173,7 @@ def agent_report_rejected(
 
     intent.status = IntentStatus.rejected
     intent.rejection_reason = reason
-    intent.updated_at = datetime.utcnow()
+    intent.updated_at = utcnow()
     db.commit()
     db.refresh(intent)
     return intent
@@ -205,7 +206,7 @@ def agent_report_cancelled(
 
     intent.status = IntentStatus.cancelled
     intent.rejection_reason = reason
-    intent.updated_at = datetime.utcnow()
+    intent.updated_at = utcnow()
     db.commit()
     db.refresh(intent)
     return intent

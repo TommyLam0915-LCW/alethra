@@ -4,6 +4,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from app.models.rate_limit import RateLimitCounter
+from app.lib.timeutil import utcnow
 
 
 # Rate limit configuration (requests per window)
@@ -54,7 +55,7 @@ def increment_rate_limit(
     
     # Use fixed hourly window (truncated to hour boundary)
     # This eliminates race conditions: all requests in the same hour use the same window_start
-    now = datetime.utcnow()
+    now = utcnow()
     window_start = now.replace(minute=0, second=0, microsecond=0)
     
     # Use raw SQL for atomic upsert with conflict handling
@@ -102,7 +103,7 @@ def cleanup_old_counters(db: Session, max_age_hours: int = 24) -> int:
     Only deletes counters outside the active window, so it does not affect
     current rate limiting or audit evidence.
     """
-    cutoff = datetime.utcnow() - timedelta(hours=max_age_hours)
+    cutoff = utcnow() - timedelta(hours=max_age_hours)
     
     deleted = db.query(RateLimitCounter).filter(
         RateLimitCounter.window_start < cutoff

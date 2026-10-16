@@ -5,6 +5,7 @@ from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
 from app.database import Base
 import enum
+from app.lib.timeutil import utcnow
 
 
 class IntentSide(str, enum.Enum):
@@ -48,8 +49,8 @@ class OrderIntent(Base):
     status = Column(SAEnum(IntentStatus), default=IntentStatus.pending, nullable=False)
     authorization_token = Column(String(255), nullable=False)
     expires_at = Column(DateTime, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
     rejection_reason = Column(Text, nullable=True)
     broker_ref = Column(String(255), nullable=True)
 
@@ -73,7 +74,7 @@ class ExecutionAgent(Base):
     agent_type = Column(String(100), nullable=False)
     config_encrypted = Column(JSONB, nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
 
 
 class FillRecord(Base):
@@ -91,7 +92,7 @@ class FillRecord(Base):
     fill_source = Column(SAEnum(FillSource), nullable=False, default=FillSource.simulated)
     broker_ref = Column(String(255), nullable=True)
     broker_confirmed_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
 
     order_intent = relationship("OrderIntent", back_populates="fill_records")
 
@@ -104,6 +105,6 @@ class FillReconciliation(Base):
     expected_quantity = Column(Integer, nullable=False)
     filled_quantity = Column(Integer, nullable=False)
     discrepancy = Column(Boolean, nullable=False, default=False)
-    reconciled_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    reconciled_at = Column(DateTime, default=utcnow, nullable=False)
 
     order_intent = relationship("OrderIntent", back_populates="fill_reconciliations")
