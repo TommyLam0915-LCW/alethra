@@ -257,3 +257,21 @@ class DemoDataProvider(DataProvider):
         status["data_is_synthetic"] = True
         status["real_instruments_date_range"] = syn.get_real_date_range()
         return status
+
+    def get_data_quality(self, symbol: str) -> Dict[str, Any]:
+        if self._is_real_instrument(symbol):
+            inst = _get_instrument_by_id(symbol)
+            return {
+                "data_nature": "synthetic",
+                "adjustment": "not_applicable",
+                "timezone": inst.timezone if inst else None,
+                "note": "Deterministic synthetic series for a real instrument; no corporate actions are modeled.",
+                "note_zh": "以真實產品 metadata 建立的確定性模擬數列；未模擬股息或拆股等公司行動。",
+            }
+        return {
+            "data_nature": "synthetic",
+            "adjustment": "not_applicable",
+            "timezone": None,
+            "note": "Legacy demo asset with synthetic prices.",
+            "note_zh": "舊有演示產品，價格為合成數據。",
+        }

@@ -7,7 +7,7 @@ from app.models import *
 
 settings = get_settings()
 
-Base.metadata.create_all(bind=engine)
+Base.metadata.create_all(bind=engine, checkfirst=True)
 
 app = FastAPI(
     title="Alethra",

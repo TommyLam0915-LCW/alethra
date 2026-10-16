@@ -80,6 +80,7 @@ from app.models.execution import (
 )
 from app.models.kill_switch import KillSwitch, KillSwitchScope
 from app.models.rate_limit import RateLimitCounter
+from app.models.market_data import MarketDataBar, MarketDataMetadata
 
 __all__ = [
     "User",
@@ -172,4 +173,6 @@ __all__ = [
     "KillSwitch",
     "KillSwitchScope",
     "RateLimitCounter",
+    "MarketDataBar",
+    "MarketDataMetadata",
 ]

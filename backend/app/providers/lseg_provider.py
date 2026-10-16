@@ -38,6 +38,16 @@ class LSEGDataError(Exception):
     """Raised when LSEG API returns an error or unexpected data."""
 
 
+class LSEGRateLimitError(LSEGDataError):
+    """Raised on HTTP 429 or while a previously observed rate-limit window is active."""
+
+_RATE_LIMIT_DEFAULT_SECONDS = 60
+_RATE_LIMIT_MAX_SECONDS = 300
+_MAX_RETRIES = 2
+_RETRY_BACKOFF_SECONDS = 1.0
+_DEGRADED_THRESHOLD = 3
+
+
 class LSEGDataProvider(DataProvider):
     """LSEG market data provider.
 
@@ -70,6 +80,11 @@ class LSEGDataProvider(DataProvider):
         self._last_error: Optional[str] = None
         self._access_token: Optional[str] = None
         self._token_expires_at: float = 0.0
+        self._rate_limited_until: float = 0.0
+        self._rate_limited_retry_after: Optional[int] = None
+        self._consecutive_errors: int = 0
+        self._last_success_at: Optional[str] = None
+        self._last_error_at: Optional[str] = None
 
     @property
     def provider_id(self) -> str:
@@ -156,9 +171,78 @@ class LSEGDataProvider(DataProvider):
         self._connected = False
         self._access_token = None
         self._token_expires_at = 0.0
+        self._rate_limited_until = 0.0
+        self._rate_limited_retry_after = None
+        self._consecutive_errors = 0
 
     def is_available(self) -> bool:
         return self._connected and self._session is not None
+
+    def _sleep(self, seconds: float) -> None:
+        time.sleep(seconds)
+
+    def _record_success(self) -> None:
+        self._consecutive_errors = 0
+        self._last_success_at = utcnow().isoformat()
+
+    def _record_error(self, message: str) -> None:
+        self._consecutive_errors += 1
+        self._last_error = message
+        self._last_error_at = utcnow().isoformat()
+
+    def _rate_limit_state(self) -> tuple:
+        remaining = self._rate_limited_until - time.monotonic()
+        if remaining <= 0:
+            return False, 0
+        return True, max(1, int(remaining))
+
+    def _parse_retry_after(self, value: Optional[str]) -> int:
+        try:
+            return min(max(int(float(value)), 1), _RATE_LIMIT_MAX_SECONDS)
+        except (TypeError, ValueError):
+            return _RATE_LIMIT_DEFAULT_SECONDS
+
+    def _request_with_retry(self, url: str, *, timeout: float, params: Optional[dict] = None):
+        """GET with fail-fast during rate-limit windows and bounded retry
+        for transient failures (timeout, connection error, 5xx).
+
+        429 responses start a rate-limit window honored by subsequent calls
+        without touching the network; they are never retried.
+        """
+        import requests
+
+        rate_limited, retry_after = self._rate_limit_state()
+        if rate_limited:
+            raise LSEGRateLimitError(
+                f"LSEG rate limit active; retry after {retry_after}s"
+            )
+
+        last_exc: Optional[Exception] = None
+        for attempt in range(_MAX_RETRIES + 1):
+            try:
+                resp = self._session.get(url, params=params, timeout=timeout)
+                if resp.status_code == 429:
+                    delay = self._parse_retry_after(resp.headers.get("Retry-After"))
+                    self._rate_limited_until = time.monotonic() + delay
+                    self._rate_limited_retry_after = delay
+                    raise LSEGRateLimitError(
+                        f"LSEG rate limited (HTTP 429); retry after {delay}s"
+                    )
+                if resp.status_code >= 500:
+                    last_exc = RuntimeError(f"HTTP {resp.status_code}")
+                    if attempt < _MAX_RETRIES:
+                        self._sleep(_RETRY_BACKOFF_SECONDS * (attempt + 1))
+                        continue
+                    raise LSEGDataError(
+                        f"LSEG server error (HTTP {resp.status_code}) after retries"
+                    )
+                return resp
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+                last_exc = exc
+                if attempt < _MAX_RETRIES:
+                    self._sleep(_RETRY_BACKOFF_SECONDS * (attempt + 1))
+                    continue
+        raise LSEGDataError(f"LSEG request failed after retries: {last_exc}")
 
     def list_assets(self) -> List[AssetInfo]:
         assets = []
@@ -194,12 +278,20 @@ class LSEGDataProvider(DataProvider):
         if not self.is_available():
             raise LSEGDataError("LSEG provider not connected. Call connect() first.")
 
+        rate_limited, retry_after = self._rate_limit_state()
+        if rate_limited:
+            raise LSEGRateLimitError(
+                f"LSEG rate limit active; retry after {retry_after}s"
+            )
+
         ric = self.resolve_instrument(symbol)
 
         try:
             return self._fetch_history(ric, start_date, end_date)
+        except LSEGRateLimitError:
+            raise
         except Exception as e:
-            self._last_error = f"get_bars({symbol}) failed: {e}"
+            self._record_error(f"get_bars({symbol}) failed: {e}")
             logger.error("LSEG get_bars failed for %s: %s", symbol, e)
             raise LSEGDataError(f"Failed to fetch bars for {symbol}: {e}") from e
 
@@ -221,7 +313,7 @@ class LSEGDataProvider(DataProvider):
             "end": end_date,
         }
 
-        resp = self._session.get(url, params=params, timeout=30)
+        resp = self._request_with_retry(url, params=params, timeout=30)
         resp.raise_for_status()
         data = resp.json()
 
@@ -242,11 +334,18 @@ class LSEGDataProvider(DataProvider):
                 continue
 
         bars.sort(key=lambda b: b.date)
+        self._record_success()
         return bars
 
     def get_latest_bar(self, symbol: str) -> Optional[OHLCVBar]:
         if not self.is_available():
             return None
+
+        rate_limited, retry_after = self._rate_limit_state()
+        if rate_limited:
+            raise LSEGRateLimitError(
+                f"LSEG rate limit active; retry after {retry_after}s"
+            )
 
         ric = self.resolve_instrument(symbol)
 
@@ -257,11 +356,11 @@ class LSEGDataProvider(DataProvider):
                 self._session.headers["Authorization"] = f"Bearer {self._access_token}"
 
             url = f"{LSEG_API_BASE_URL}/data/quotes/v1/{ric}"
-            resp = self._session.get(url, timeout=10)
+            resp = self._request_with_retry(url, timeout=10)
             resp.raise_for_status()
             data = resp.json()
 
-            return OHLCVBar(
+            bar = OHLCVBar(
                 date=data.get("trading_date", utcnow().strftime("%Y-%m-%d")),
                 open=float(data.get("open", 0)),
                 high=float(data.get("high", 0)),
@@ -269,8 +368,10 @@ class LSEGDataProvider(DataProvider):
                 close=float(data.get("last", data.get("close", 0))),
                 volume=int(data.get("volume", 0)) or None,
             )
+            self._record_success()
+            return bar
         except Exception as e:
-            self._last_error = f"get_latest_bar({symbol}) failed: {e}"
+            self._record_error(f"get_latest_bar({symbol}) failed: {e}")
             logger.warning("LSEG get_latest_bar failed for %s: %s", symbol, e)
             return None
 
@@ -311,9 +412,36 @@ class LSEGDataProvider(DataProvider):
             "connected": self._connected,
             "instruments_available": len(self.list_assets()),
         }
+        rate_limited, retry_after = self._rate_limit_state()
+        if not self._connected:
+            health = "disconnected"
+        elif rate_limited:
+            health = "rate_limited"
+        elif self._consecutive_errors >= _DEGRADED_THRESHOLD:
+            health = "degraded"
+        else:
+            health = "ok"
+        status.update({
+            "health": health,
+            "rate_limited": rate_limited,
+            "rate_limited_retry_after_seconds": retry_after if rate_limited else 0,
+            "consecutive_errors": self._consecutive_errors,
+            "last_success_at": self._last_success_at,
+            "last_error_at": self._last_error_at,
+        })
         if self._last_error:
             status["last_error"] = self._last_error
         return status
+
+    def get_data_quality(self, symbol: str) -> Dict[str, Any]:
+        inst = get_instrument_by_id(symbol)
+        return {
+            "data_nature": "live" if self.is_available() else "unknown",
+            "adjustment": "unknown",
+            "timezone": inst.timezone if inst else None,
+            "note": "Corporate-action adjustment depends on LSEG entitlement; treated as unverified.",
+            "note_zh": "公司行動調整視 LSEG 訂閱權限而定；未經確認前不作假設。",
+        }
 
     def get_instrument(self, instrument_id: str) -> Optional[AssetInfo]:
         inst = get_instrument_by_id(instrument_id)
