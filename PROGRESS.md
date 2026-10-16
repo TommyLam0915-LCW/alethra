@@ -1,12 +1,12 @@
 # Alethra Agent Progress
 
-Last updated: 2026-10-17T06:45+08:00
+Last updated: 2026-10-17T07:00+08:00
 Branch: auto/stored-data-backtest-integration
 Draft PR: https://github.com/TommyLam0915-LCW/alethra/pull/18
-Commits: 757e4ab, 937f62b, a277899, 47b48d2, 433f79d, 0fe7ddf, 04c6327, e470b11
+Commits: 757e4ab, 937f62b, a277899, 47b48d2, 433f79d, 0fe7ddf, 04c6327, e470b11, 21dd963, 24b10ee
 Status: Pushed. NOT merged. Base: auto/market-data-quality (PR #13)
 
-## Session record: Two-phase quota reserve/settle/release (2026-10-17 06:30–06:45 HKT)
+## Session record: Two-phase quota reserve/settle/release (2026-10-17 06:30–07:00 HKT)
 
 ### Two-phase quota flow — IMPLEMENTED / TESTED (e470b11)
 Replaces immediate consumption with a two-phase protocol for operations that may fail after starting:
@@ -18,6 +18,12 @@ Replaces immediate consumption with a two-phase protocol for operations that may
 - **runs.py**: updated to use reserve/settle/release pattern with try/except
 - **Migration**: adds quota_reservations table with indexes
 - **28 new tests**: covering reserve, settle, release, tracking, integration, isolation
+
+### ML training quota enforcement — IMPLEMENTED / TESTED (24b10ee)
+- ML training endpoint now enforces ai_usage quota using two-phase flow
+- require_entitlement(quota_type="ai_usage") as pre-flight check
+- Quota reserved before training, settled on success, released on failure
+- 39 ML pipeline tests pass
 
 Benefits:
 - Quota not consumed when operations fail (backtests, ML training)
