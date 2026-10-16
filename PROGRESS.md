@@ -1,5 +1,50 @@
 # Alethra Agent Progress
 
+Last updated: 2026-10-17T05:30+08:00
+Branch: auto/stored-data-backtest-integration
+Draft PR: https://github.com/TommyLam0915-LCW/alethra/pull/18
+Commits: 757e4ab, 937f62b
+Status: Pushed. NOT merged. Base: auto/market-data-quality (PR #13)
+
+## Session record: Stored market data → backtest + ML integration (2026-10-17 04:30–05:30 HKT)
+
+### Stored data → backtest pipeline — IMPLEMENTED / OFFLINE VERIFIED (757e4ab)
+Completes the "adapter -> storage -> research/backtest" pipeline (P1 requirement):
+- `run_backtest()` accepts `data_source` parameter: `auto` (default), `stored`, `provider`
+- `data_source="stored"`: loads bars from database via MarketDataStorage, errors if not available
+- `data_source="auto"`: tries stored first, falls back to provider for missing assets
+- `data_source="provider"`: ignores stored data, uses existing provider/demo logic
+- `_stored_bars_to_dataframe()`: converts MarketDataBar model instances to DataFrame format
+- `_load_stored_bars()`: reads from storage with date range and provider filters
+- `_compute_stored_checksum()`: deterministic checksum for stored data
+- Result includes `data_source_requested` and `data_source_used` for provenance tracking
+- Warning messages reflect actual data source (stored/cached, mixed, or provider)
+
+### API integration — IMPLEMENTED / OFFLINE VERIFIED (757e4ab)
+- `POST /versions/{version_id}/runs` accepts `data_source` query parameter (validated: auto|stored|provider)
+- Passes `db_session` and `data_source` to `run_backtest()`
+- Parameter sweep (`run_parameter_sweep`) passes `db_session` so training benefits from cached data
+
+### ML training storage integration — IMPLEMENTED / OFFLINE VERIFIED (937f62b)
+- ML training checks stored data first before fetching from provider
+- If stored data is available and sufficient (≥60 bars), uses it directly
+- Otherwise fetches from provider and stores for future use
+- Tracks `data_source` in job metadata for provenance
+- Reduces API calls and speeds up training when data is cached
+
+### Verification
+- 13 new tests in `test_backtest_storage_integration.py`: stored/provider/auto modes, mixed data source, backward compatibility, error cases, warning messages
+- Full backend suite: **817 passed / 0 failed** (240s)
+- Frontend build: clean
+- No credentials in diff, git diff --check clean
+
+### Blockers (unchanged)
+- LSEG DataLibrary credentials for live market data
+- IBKR TWS/Gateway for execution
+- Stripe credentials for live payments
+
+---
+
 Last updated: 2026-10-17T04:20+08:00
 Branch: auto/market-data-quality (main worktree)
 Parallel subagent delegation: 3 workers completed (billing, legacy-db, deployment)
