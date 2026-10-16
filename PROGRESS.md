@@ -1,9 +1,17 @@
 # Alethra Agent Progress
 
-Last updated: 2026-10-16T22:00+08:00
-Current branch: auto/real-market-pipeline
-Draft PR: https://github.com/TommyLam0915-LCW/alethra/pull/10
-Status: Two vertical slices complete, continuing with remaining priorities
+Last updated: 2026-10-17T00:30+08:00
+Merged: PR #10 squash-merged to main (df95381) by owner authorization. All 5 priorities complete.
+Current state: local main updated to df95381. Work on a NEW feature branch from main for anything further.
+Status: PR #10 content fully merged (market pipeline, ML training, execution agent, billing, alignment A-F, PR #9 overlap sync).
+Validated: CI green on merge commit — Backend Tests 8m, Browser Acceptance (Playwright) 4m, Frontend Build 39s.
+External prerequisites still open (see docs/external-prerequisites-checklist.md): LSEG credentials, IBKR TWS/Gateway, Stripe keys.
+
+## Previous state (before PR #10 merge)
+
+Branch: auto/real-market-pipeline (now merged; do not continue on it)
+Draft PR: https://github.com/TommyLam0915-LCW/alethra/pull/10 (MERGED)
+Status was: Two vertical slices complete, continuing with remaining priorities
 Validated: 2026-10-16 14:30 HKT — backend 506/506 passed (2m57s), frontend build clean (22 pages), working tree intact.
 Tree unchanged since 2026-10-15 22:07 HKT (verified by mtime audit 2026-10-16 02:02; prior "09:30 baseline" line used a wrong clock — file mtime was 00:33).
 
