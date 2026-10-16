@@ -1,9 +1,7 @@
 """Execution agent configuration.
 
 This module defines the configuration schema for the IBKR execution agent.
-Configuration is loaded from environment variables or a config file.
-
-STATUS: NOT IMPLEMENTED — skeleton for architecture documentation.
+Configuration is loaded from environment variables.
 """
 
 from dataclasses import dataclass
