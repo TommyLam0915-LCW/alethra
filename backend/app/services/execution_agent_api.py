@@ -166,6 +166,24 @@ def agent_report_fill(
             detail=f"Intent is '{intent.status.value}', cannot report fill",
         )
 
+    if intent.broker_ref and broker_ref != intent.broker_ref:
+        raise HTTPException(
+            status_code=400,
+            detail=f"broker_ref mismatch: intent has '{intent.broker_ref}', fill reports '{broker_ref}'",
+        )
+
+    from sqlalchemy import func
+    current_filled = (
+        db.query(func.coalesce(func.sum(FillRecord.quantity), 0))
+        .filter(FillRecord.order_intent_id == intent.id)
+        .scalar()
+    )
+    if current_filled + quantity > intent.quantity:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Overfill: {current_filled} already filled, reporting {quantity} would exceed {intent.quantity}",
+        )
+
     fill_record = FillRecord(
         order_intent_id=intent.id,
         quantity=quantity,
@@ -178,12 +196,7 @@ def agent_report_fill(
     db.add(fill_record)
     db.flush()
 
-    from sqlalchemy import func
-    total_filled = (
-        db.query(func.coalesce(func.sum(FillRecord.quantity), 0))
-        .filter(FillRecord.order_intent_id == intent.id)
-        .scalar()
-    )
+    total_filled = current_filled + quantity
 
     if total_filled >= intent.quantity:
         intent.status = IntentStatus.filled
