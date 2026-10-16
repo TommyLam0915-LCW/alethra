@@ -442,3 +442,26 @@ class TestModelOwnership:
             headers=self._headers(user1_token),
         )
         assert resp_predict.status_code == 200
+
+    def test_path_traversal_rejected(self, client, user1_token):
+        """Path traversal attempts in model_id should be rejected."""
+        traversal_ids = [
+            "../../../etc/passwd",
+            "..\\..\\windows\\system32",
+            "model/../../../etc/passwd",
+            "%2e%2e%2f%2e%2e%2fetc%2fpasswd",
+        ]
+        for bad_id in traversal_ids:
+            resp = client.get(f"/api/v1/ml/models/{bad_id}", headers=self._headers(user1_token))
+            assert resp.status_code in (400, 404), f"Path traversal {bad_id} should be rejected"
+
+    def test_invalid_model_id_format(self, client, user1_token):
+        """Invalid model ID formats should return 404."""
+        invalid_ids = [
+            "not-a-uuid",
+            "12345",
+            "model-with-special-chars!@#",
+        ]
+        for bad_id in invalid_ids:
+            resp = client.get(f"/api/v1/ml/models/{bad_id}", headers=self._headers(user1_token))
+            assert resp.status_code == 404
