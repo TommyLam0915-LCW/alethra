@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.auth.jwt import get_current_user
+from app.auth.entitlements import require_entitlement, reserve_quota, settle_reservation, release_reservation
 from app.models.user import User
 from app.services.ml_training import create_ml_training_job, execute_ml_training
 from app.ml.trainer import list_models, load_model
@@ -24,7 +25,7 @@ def start_ml_training(
     experiment_id: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_entitlement(quota_type="ai_usage")),
     db: Session = Depends(get_db),
 ):
     """Start an ML training job.
@@ -54,40 +55,55 @@ def start_ml_training(
         if not experiment:
             raise HTTPException(404, "Experiment not found")
 
-    try:
-        job = create_ml_training_job(
-            db=db,
-            user_id=current_user.id,
-            experiment_id=experiment_uuid,
-            instrument_id=instrument_id,
-            model_type=model_type,
-            start_date=start_date,
-            end_date=end_date,
-        )
-        job_id = job.id
-    except ValueError as e:
-        raise HTTPException(400, str(e))
+    reservation = reserve_quota(db, current_user.id, "ai_usage")
 
     try:
-        job = execute_ml_training(db, job_id)
+        try:
+            job = create_ml_training_job(
+                db=db,
+                user_id=current_user.id,
+                experiment_id=experiment_uuid,
+                instrument_id=instrument_id,
+                model_type=model_type,
+                start_date=start_date,
+                end_date=end_date,
+            )
+            job_id = job.id
+        except ValueError as e:
+            release_reservation(db, reservation.id)
+            raise HTTPException(400, str(e))
+
+        try:
+            job = execute_ml_training(db, job_id)
+        except Exception as e:
+            release_reservation(db, reservation.id)
+            raise HTTPException(500, f"Training failed: {e}")
+
+        if job.status.value == "failed":
+            release_reservation(db, reservation.id)
+            raise HTTPException(422, f"Training failed: {job.error_details}")
+
+        settle_reservation(db, reservation.id)
+        db.commit()
+
+        return {
+            "job_id": str(job.id),
+            "status": job.status.value,
+            "model_id": job.best_params.get("model_id") if job.best_params else None,
+            "metrics": job.results.get("metrics") if job.results else None,
+            "split": job.results.get("split") if job.results else None,
+            "date_range": job.results.get("date_range") if job.results else None,
+            "model_type": model_type,
+            "instrument_id": instrument_id,
+            "disclaimer": "Model is for research purposes only. Not suitable for trading decisions.",
+            "disclaimer_zh": "模型僅供研究用途。不適合用於交易決策。",
+        }
+
+    except HTTPException:
+        raise
     except Exception as e:
+        release_reservation(db, reservation.id)
         raise HTTPException(500, f"Training failed: {e}")
-
-    if job.status.value == "failed":
-        raise HTTPException(422, f"Training failed: {job.error_details}")
-
-    return {
-        "job_id": str(job.id),
-        "status": job.status.value,
-        "model_id": job.best_params.get("model_id") if job.best_params else None,
-        "metrics": job.results.get("metrics") if job.results else None,
-        "split": job.results.get("split") if job.results else None,
-        "date_range": job.results.get("date_range") if job.results else None,
-        "model_type": model_type,
-        "instrument_id": instrument_id,
-        "disclaimer": "Model is for research purposes only. Not suitable for trading decisions.",
-        "disclaimer_zh": "模型僅供研究用途。不適合用於交易決策。",
-    }
 
 
 @router.get("/models")
