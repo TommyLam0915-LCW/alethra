@@ -355,6 +355,7 @@ class TestLSEGDataQuality:
 
 
 class FailingProvider:
+    provider_id = "failing"
     provider_name = "Failing (Test)"
     feed_mode = "disconnected"
 

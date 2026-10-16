@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends
 from typing import Optional
+from datetime import date
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -204,6 +205,108 @@ def get_instrument_bars(
         ],
         "disclaimer": "Data may be synthetic or demo-only. Not suitable for trading decisions.",
         "disclaimer_zh": "數據可能為模擬或演示數據。不適合用於交易決策。",
+    }
+
+
+@router.get("/instruments/{instrument_id}/bars/stored")
+def get_stored_bars(
+    instrument_id: str,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    provider_id: Optional[str] = None,
+    limit: Optional[int] = None,
+    db: Session = Depends(get_db),
+):
+    """Query market data directly from storage without provider fetch.
+
+    Returns bars that have been previously fetched and persisted. Useful for:
+    - Faster historical queries (no API call)
+    - Backtesting with cached data
+    - Checking data availability before provider fetch
+
+    Query params:
+    - start_date: Filter bars from this date (YYYY-MM-DD)
+    - end_date: Filter bars until this date (YYYY-MM-DD)
+    - provider_id: Filter by provider (e.g., demo, lseg)
+    - limit: Maximum number of bars to return
+    """
+    inst = get_instrument_by_id(instrument_id)
+    if inst is None:
+        raise HTTPException(404, f"Instrument not found: {instrument_id}")
+
+    storage = MarketDataStorage(db)
+
+    start_date_obj = date.fromisoformat(start_date) if start_date else None
+    end_date_obj = date.fromisoformat(end_date) if end_date else None
+
+    bars = storage.get_bars(
+        instrument_id=instrument_id,
+        provider_id=provider_id,
+        start_date=start_date_obj,
+        end_date=end_date_obj,
+        limit=limit,
+    )
+
+    metadata = storage.get_metadata(instrument_id, provider_id)
+
+    if not bars and not metadata:
+        return {
+            "instrument_id": instrument_id,
+            "symbol": inst.symbol,
+            "name": inst.name,
+            "source": "storage",
+            "bar_count": 0,
+            "bars": [],
+            "metadata": None,
+            "message": "No stored data available. Fetch from provider first.",
+            "message_zh": "無儲存數據。請先從數據供應商獲取。",
+        }
+
+    quality = None
+    if metadata:
+        quality = {
+            "data_nature": metadata.data_nature,
+            "adjustment": metadata.adjustment_status,
+            "timezone": metadata.timezone,
+            "currency": metadata.currency,
+            "provider_note": metadata.provider_note,
+            "provider_note_zh": metadata.provider_note_zh,
+            "first_bar_date": metadata.first_bar_date.isoformat() if metadata.first_bar_date else None,
+            "last_bar_date": metadata.last_bar_date.isoformat() if metadata.last_bar_date else None,
+            "total_bars": metadata.total_bars,
+            "last_success_at": metadata.last_success_at.isoformat() if metadata.last_success_at else None,
+            "health_status": metadata.health_status,
+        }
+        quality.update(compute_staleness(metadata.last_bar_date.isoformat() if metadata.last_bar_date else None))
+
+    return {
+        "instrument_id": instrument_id,
+        "symbol": inst.symbol,
+        "name": inst.name,
+        "source": "storage",
+        "bar_count": len(bars),
+        "data_quality": quality,
+        "bars": [
+            {
+                "date": bar.bar_date.isoformat(),
+                "open": bar.open,
+                "high": bar.high,
+                "low": bar.low,
+                "close": bar.close,
+                "volume": bar.volume,
+                "provider_id": bar.provider_id,
+                "fetched_at": bar.fetched_at.isoformat(),
+            }
+            for bar in bars
+        ],
+        "metadata": {
+            "storage_provider": metadata.provider_id if metadata else None,
+            "query_provider_filter": provider_id,
+            "query_date_range": {
+                "start": start_date,
+                "end": end_date,
+            },
+        },
     }
 
 
