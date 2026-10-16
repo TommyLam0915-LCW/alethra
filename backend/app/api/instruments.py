@@ -1,8 +1,11 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from typing import Optional
+from sqlalchemy.orm import Session
 
+from app.database import get_db
 from app.providers import get_data_provider
 from app.providers.data_provider import compute_staleness
+from app.services.market_data_storage import MarketDataStorage
 from app.data.real_instruments import (
     ALL_REAL_INSTRUMENTS,
     get_instrument_by_id,
@@ -138,19 +141,39 @@ def get_instrument_bars(
     instrument_id: str,
     start_date: str,
     end_date: str,
+    db: Session = Depends(get_db),
 ):
     """Get OHLCV bars for a specific instrument.
 
     instrument_id format: MARKET:SYMBOL (e.g., US:AAPL, HK:0700)
+
+    Bars are fetched from the provider and persisted to storage for future use.
     """
     inst = get_instrument_by_id(instrument_id)
     if inst is None:
         raise HTTPException(404, f"Instrument not found: {instrument_id}")
 
     provider = get_data_provider()
+    storage = MarketDataStorage(db)
+
     try:
         bars = provider.get_bars(instrument_id, start_date, end_date)
+
+        if bars:
+            quality = provider.get_data_quality(instrument_id)
+            storage.store_bars(
+                instrument_id=instrument_id,
+                provider_id=provider.provider_id,
+                bars=bars,
+                data_nature=quality.get("data_nature", "unknown"),
+                adjustment_status=quality.get("adjustment"),
+                timezone=inst.timezone,
+                currency=inst.currency.value,
+                provider_note=quality.get("note"),
+                provider_note_zh=quality.get("note_zh"),
+            )
     except Exception as exc:
+        storage.mark_error(instrument_id, provider.provider_id, str(exc))
         raise _provider_failure(instrument_id, exc)
 
     quality = provider.get_data_quality(instrument_id)

@@ -278,6 +278,12 @@ class LSEGDataProvider(DataProvider):
         if not self.is_available():
             raise LSEGDataError("LSEG provider not connected. Call connect() first.")
 
+        rate_limited, retry_after = self._rate_limit_state()
+        if rate_limited:
+            raise LSEGRateLimitError(
+                f"LSEG rate limit active; retry after {retry_after}s"
+            )
+
         ric = self.resolve_instrument(symbol)
 
         try:
@@ -334,6 +340,12 @@ class LSEGDataProvider(DataProvider):
     def get_latest_bar(self, symbol: str) -> Optional[OHLCVBar]:
         if not self.is_available():
             return None
+
+        rate_limited, retry_after = self._rate_limit_state()
+        if rate_limited:
+            raise LSEGRateLimitError(
+                f"LSEG rate limit active; retry after {retry_after}s"
+            )
 
         ric = self.resolve_instrument(symbol)
 

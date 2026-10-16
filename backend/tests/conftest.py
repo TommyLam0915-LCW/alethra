@@ -57,7 +57,7 @@ def setup_db():
     from app.database import engine as _orig_engine
     import app.database as db_mod
     db_mod.engine = TEST_ENGINE
-    Base.metadata.create_all(bind=TEST_ENGINE)
+    Base.metadata.create_all(bind=TEST_ENGINE, checkfirst=True)
     yield
     # Use raw SQL to reliably drop tables even when FK cycles prevent
     # Base.metadata.drop_all from sorting them correctly in SQLite.
