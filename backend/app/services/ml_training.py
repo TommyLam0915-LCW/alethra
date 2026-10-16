@@ -68,8 +68,9 @@ def _get_bars_with_storage(
                 provider_note=quality.get("note"),
                 provider_note_zh=quality.get("note_zh"),
             )
-        except Exception:
-            pass
+        except Exception as e:
+            import logging
+            logging.warning(f"Failed to store bars for {instrument_id}: {e}")
 
     return bars, "provider"
 
