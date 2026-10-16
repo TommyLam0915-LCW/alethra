@@ -1,10 +1,55 @@
 # Alethra Agent Progress
 
-Last updated: 2026-10-17T11:00+08:00
+Last updated: 2026-10-17T12:30+08:00
 Branch: auto/stored-data-backtest-integration
 Draft PR: https://github.com/TommyLam0915-LCW/alethra/pull/18
 Commits: cca606e, b9cb85f
 Status: Pushed. NOT merged. Base: auto/market-data-quality (PR #13)
+
+## Session record: Execution agent hardening + billing-webhook stale event validation (2026-10-17 11:30–12:30 HKT)
+
+### Execution agent improvements — IMPLEMENTED / TESTED (13a6ac8)
+Widened `_SUBMISSION_MATCH_SKEW_SECONDS` from 5 to 60 seconds to accommodate broker clock drift and network latency in order matching during restart recovery. Added fill report retry limit (3 attempts) to prevent infinite retry loops on transient failures.
+
+**auto/execution-recovery-reconcile** (alethra/alethra-exec-auto):
+- `_SUBMISSION_MATCH_SKEW_SECONDS`: 5 → 60 (accommodates broker clock skew)
+- Fill report retry: max 3 attempts before logging error and moving on
+- 783 tests pass in execution-recovery worktree
+
+### Billing-webhook stale event validation — IMPLEMENTED / TESTED (1b0dfc2)
+Added event timestamp validation to detect and warn about stale webhook events (>7 days old) that may indicate replay attacks or processing delays.
+
+**auto/billing-webhook-application** (alethra/alethra-billing-auto):
+- `process_webhook()` now checks `payload.created` timestamp
+- Events older than 7 days log a warning with event_id, age in days, and event_type
+- Gracefully handles missing/invalid timestamps (no rejection, just warning)
+- 16 webhook tests pass, 810 total tests pass in billing-webhook worktree
+
+### Verification
+- Main repo: 850 tests pass
+- Billing-stripe worktree: 850 tests pass (41 billing-specific)
+- Deploy worktree: 810 tests pass (6 health-specific)
+- Legacy worktree: 850 tests pass (46 db-upgrade-specific)
+- Billing-webhook worktree: 810 tests pass (16 webhook-specific)
+- Execution-recovery worktree: 783 tests pass (36 recovery-specific)
+
+### PR status (unchanged)
+- PR #11 (config-safety): CI green, awaits owner merge
+- PR #12 (ml-provenance-ui): CI green, awaits owner merge
+- PR #16 (killswitch-enum): CI green, awaits owner merge
+- PR #13 (market-data-quality): stacked, needs retarget after #11 merges
+- PR #14 (ml-experiment-durability): stacked on #13, needs retarget
+- PR #15 (execution-recovery): stacked on #11, needs retarget
+- PR #17 (billing-webhook-application): stacked on #13, needs retarget
+- PR #18 (stored-data-backtest): stacked on #13, needs retarget
+
+### Blocked on (unchanged)
+- LSEG DataLibrary credentials for live market data
+- IBKR TWS/Gateway for execution
+- Stripe credentials for live payments
+- Owner merge decisions for PRs #11, #12, #16
+
+---
 
 ## Session record: Security fixes + code quality (2026-10-17 07:30–08:30 HKT)
 
