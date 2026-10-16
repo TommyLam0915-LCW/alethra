@@ -1,5 +1,6 @@
 from typing import List
 from uuid import UUID
+from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Request, Header, Query
 from sqlalchemy.orm import Session
 
@@ -20,8 +21,23 @@ from app.services.billing import (
 )
 from app.services.stripe_service import get_stripe_service
 from app.services.feature_switches import get_operational_status
+from app.config import get_settings
+from app.providers.payment_adapter import WebhookEvent
+from urllib.parse import urlparse
 
 router = APIRouter(tags=["billing"])
+
+
+def _validate_redirect_url(url: str, param_name: str) -> None:
+    """Validate that a redirect URL belongs to an allowed origin."""
+    allowed_origins = get_settings().cors_origins_list
+    parsed = urlparse(url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    if origin not in allowed_origins:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{param_name} must be an allowed origin ({', '.join(allowed_origins)})",
+        )
 
 
 @router.get("/plans")
@@ -127,10 +143,20 @@ async def handle_payment_webhook(
     payload = (await request.body()).decode()
     adapter = get_payment_adapter()
 
-    if not adapter.verify_webhook_signature(payload, x_webhook_signature):
+    verified_event = adapter.verify_webhook_signature(payload, x_webhook_signature)
+    if not verified_event:
         raise HTTPException(status_code=400, detail="Invalid signature")
 
-    event = adapter.parse_webhook_event(payload)
+    if hasattr(verified_event, 'type'):
+        event = WebhookEvent(
+            id=verified_event.id,
+            event_type=verified_event.type,
+            data=verified_event.data.get("object", {}) if hasattr(verified_event.data, 'get') else verified_event.data.object,
+            created_at=datetime.fromtimestamp(verified_event.created).isoformat() if hasattr(verified_event, 'created') else "",
+            signature="",
+        )
+    else:
+        event = adapter.parse_webhook_event(payload)
 
     is_duplicate = not process_webhook(db, event.id, event.event_type, event.data)
     db.commit()
@@ -157,6 +183,9 @@ def create_checkout(
     current_user: User = Depends(get_current_user),
 ):
     """Create a Stripe Checkout session for subscription."""
+    _validate_redirect_url(success_url, "success_url")
+    _validate_redirect_url(cancel_url, "cancel_url")
+
     stripe_service = get_stripe_service()
 
     # Get plan
@@ -189,6 +218,8 @@ def create_portal(
     current_user: User = Depends(get_current_user),
 ):
     """Create a Stripe Customer Portal session."""
+    _validate_redirect_url(return_url, "return_url")
+
     stripe_service = get_stripe_service()
 
     # Get customer ID (in production, this would be stored in user metadata)

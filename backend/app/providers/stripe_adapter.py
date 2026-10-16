@@ -91,14 +91,18 @@ class StripePaymentAdapter(PaymentAdapter):
             created_at=datetime.fromtimestamp(intent.created).isoformat(),
         )
 
-    def verify_webhook_signature(self, payload: str, signature: str) -> bool:
+    def verify_webhook_signature(self, payload: str, signature: str):
+        """Verify webhook signature and return the verified Event object.
+
+        Returns the Stripe Event on success, None on failure.
+        """
         try:
-            self._stripe.Webhook.construct_event(
+            event = self._stripe.Webhook.construct_event(
                 payload, signature, self._webhook_secret
             )
-            return True
+            return event
         except (self._stripe.error.SignatureVerificationError, ValueError):
-            return False
+            return None
 
     def parse_webhook_event(self, payload: str) -> WebhookEvent:
         data = json.loads(payload)

@@ -442,7 +442,7 @@ class TestStripeCheckoutPortal:
         plan = _create_plan(db, "Pro", 9900, features={"stripe_price_id": "price_test_123"})
 
         resp = client.post(
-            f"/api/v1/checkout?plan_id={plan.id}&success_url=http://localhost/success&cancel_url=http://localhost/cancel",
+            f"/api/v1/checkout?plan_id={plan.id}&success_url=http://localhost:3000/success&cancel_url=http://localhost:3000/cancel",
             headers=auth,
         )
         assert resp.status_code == 200
@@ -456,7 +456,7 @@ class TestStripeCheckoutPortal:
         fake_plan_id = uuid.uuid4()
 
         resp = client.post(
-            f"/api/v1/checkout?plan_id={fake_plan_id}&success_url=http://localhost/success&cancel_url=http://localhost/cancel",
+            f"/api/v1/checkout?plan_id={fake_plan_id}&success_url=http://localhost:3000/success&cancel_url=http://localhost:3000/cancel",
             headers=auth,
         )
         assert resp.status_code == 404
@@ -465,7 +465,7 @@ class TestStripeCheckoutPortal:
         auth = _create_user_via_api(client)
 
         resp = client.post(
-            "/api/v1/portal?return_url=http://localhost/dashboard",
+            "/api/v1/portal?return_url=http://localhost:3000/dashboard",
             headers=auth,
         )
         assert resp.status_code == 200
