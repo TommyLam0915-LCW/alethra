@@ -72,7 +72,15 @@ _payment_adapter: Optional[PaymentAdapter] = None
 def get_payment_adapter() -> PaymentAdapter:
     global _payment_adapter
     if _payment_adapter is None:
-        _payment_adapter = TestPaymentAdapter()
+        import os
+        if os.environ.get("STRIPE_SECRET_KEY") and os.environ.get("STRIPE_WEBHOOK_SECRET"):
+            try:
+                from app.providers.stripe_adapter import StripePaymentAdapter
+                _payment_adapter = StripePaymentAdapter()
+            except (ValueError, ImportError):
+                _payment_adapter = TestPaymentAdapter()
+        else:
+            _payment_adapter = TestPaymentAdapter()
     return _payment_adapter
 
 
