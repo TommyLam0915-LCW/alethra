@@ -14,7 +14,7 @@ from app.services.ml_training import (
     create_ml_training_job,
     get_recent_bars_for_prediction,
 )
-from app.ml.trainer import list_models, load_model
+from app.ml.trainer import list_models, load_model, delete_model
 from app.ml.predictor import predict, predict_latest
 from app.providers import get_data_provider
 
@@ -126,6 +126,29 @@ def get_model_detail(
         "metadata": metadata,
         "feature_names": feature_names,
     }
+
+
+@router.delete("/models/{model_id}")
+def delete_trained_model(
+    model_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    """Delete a trained model artifact owned by the current user."""
+    # Model IDs are UUIDs — rejecting non-UUID strings keeps the artifact
+    # directory lookup (and rmtree) from ever resolving a traversal path.
+    try:
+        uuid.UUID(model_id)
+    except ValueError:
+        raise HTTPException(404, f"Model not found: {model_id}")
+
+    try:
+        delete_model(model_id, user_id=str(current_user.id))
+    except FileNotFoundError:
+        raise HTTPException(404, f"Model not found: {model_id}")
+    except PermissionError:
+        raise HTTPException(403, f"You do not have access to model {model_id}")
+
+    return {"deleted": model_id}
 
 
 @router.post("/models/{model_id}/predict")

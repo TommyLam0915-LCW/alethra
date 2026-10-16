@@ -11,6 +11,7 @@ Covers:
 """
 
 import os
+import shutil
 import json
 import pytest
 import numpy as np
@@ -29,6 +30,7 @@ from app.ml.trainer import (
     train_model,
     load_model,
     list_models,
+    delete_model,
     temporal_split,
     ARTIFACTS_DIR,
 )
@@ -601,3 +603,122 @@ class TestModelOwnership:
         for bad_id in invalid_ids:
             resp = client.get(f"/api/v1/ml/models/{bad_id}", headers=self._headers(user1_token))
             assert resp.status_code == 404
+
+
+class TestMLModelDeletion:
+    """Model deletion lifecycle with ownership enforcement."""
+
+    @pytest.fixture
+    def client(self):
+        from app.main import app
+        return TestClient(app)
+
+    @pytest.fixture
+    def user1_token(self, client):
+        client.post("/api/auth/register", json={
+            "email": "user1-delete@example.com",
+            "password": "testpassword123",
+            "display_name": "User 1 Delete",
+        })
+        resp = client.post("/api/auth/login", json={
+            "email": "user1-delete@example.com",
+            "password": "testpassword123",
+        })
+        return resp.json()["access_token"]
+
+    @pytest.fixture
+    def user2_token(self, client):
+        client.post("/api/auth/register", json={
+            "email": "user2-delete@example.com",
+            "password": "testpassword123",
+            "display_name": "User 2 Delete",
+        })
+        resp = client.post("/api/auth/login", json={
+            "email": "user2-delete@example.com",
+            "password": "testpassword123",
+        })
+        return resp.json()["access_token"]
+
+    def _headers(self, token):
+        return {"Authorization": f"Bearer {token}"}
+
+    def _train(self, client, auth_token):
+        resp = client.post(
+            "/api/v1/ml/train?instrument_id=US:AAPL&model_type=baseline",
+            headers=self._headers(auth_token),
+        )
+        assert resp.status_code == 200
+        return resp.json()
+
+    def test_owner_can_delete_own_model(self, client, user1_token):
+        """Owner deletes their model: 200, then gone from list/detail/predict."""
+        data = self._train(client, user1_token)
+        model_id = data["model_id"]
+
+        resp = client.delete(f"/api/v1/ml/models/{model_id}", headers=self._headers(user1_token))
+        assert resp.status_code == 200
+        assert resp.json()["deleted"] == model_id
+
+        resp_list = client.get("/api/v1/ml/models", headers=self._headers(user1_token))
+        assert model_id not in [m["model_id"] for m in resp_list.json()["models"]]
+
+        resp_detail = client.get(f"/api/v1/ml/models/{model_id}", headers=self._headers(user1_token))
+        assert resp_detail.status_code == 404
+
+        resp_predict = client.post(
+            f"/api/v1/ml/models/{model_id}/predict-latest",
+            headers=self._headers(user1_token),
+        )
+        assert resp_predict.status_code == 404
+
+    def test_user_cannot_delete_others_model(self, client, user1_token, user2_token):
+        """User B's DELETE on User A's model → 403 and the model survives."""
+        data = self._train(client, user1_token)
+        model_id = data["model_id"]
+
+        resp = client.delete(f"/api/v1/ml/models/{model_id}", headers=self._headers(user2_token))
+        assert resp.status_code == 403
+
+        resp_detail = client.get(f"/api/v1/ml/models/{model_id}", headers=self._headers(user1_token))
+        assert resp_detail.status_code == 200, "Model must survive a foreign delete attempt"
+
+    def test_delete_unknown_model_404(self, client, user1_token):
+        unknown_uuid = "00000000-0000-0000-0000-000000000000"
+        resp = client.delete(f"/api/v1/ml/models/{unknown_uuid}", headers=self._headers(user1_token))
+        assert resp.status_code == 404
+
+    def test_delete_invalid_model_id_format(self, client, user1_token):
+        """DELETE must not probe the filesystem for malformed IDs."""
+        for bad_id in ["not-a-uuid", "12345", "model-with-special-chars!@#"]:
+            resp = client.delete(f"/api/v1/ml/models/{bad_id}", headers=self._headers(user1_token))
+            assert resp.status_code == 404
+
+    def test_delete_path_traversal_rejected(self, client, user1_token):
+        """DELETE must never rmtree a path outside the artifacts dir."""
+        sentinel_dir = os.path.join(ARTIFACTS_DIR, "..", "sentinel-keep-me")
+        os.makedirs(sentinel_dir, exist_ok=True)
+
+        traversal_ids = [
+            "../sentinel-keep-me",
+            "../../../etc/passwd",
+            "..%2F..%2Fsentinel-keep-me",
+        ]
+        try:
+            for bad_id in traversal_ids:
+                resp = client.delete(f"/api/v1/ml/models/{bad_id}", headers=self._headers(user1_token))
+                assert resp.status_code == 404, f"Traversal {bad_id} must be rejected"
+            assert os.path.isdir(sentinel_dir), "Traversal must not delete directories"
+        finally:
+            shutil.rmtree(sentinel_dir, ignore_errors=True)
+
+    def test_delete_refuses_artifact_without_metadata(self):
+        """A directory without metadata.json proves no ownership — refuse to delete."""
+        fake_id = "10000000-0000-0000-0000-000000000000"
+        fake_dir = os.path.join(ARTIFACTS_DIR, fake_id)
+        os.makedirs(fake_dir, exist_ok=True)
+        try:
+            with pytest.raises(FileNotFoundError):
+                delete_model(fake_id, user_id="someone")
+            assert os.path.isdir(fake_dir), "Artifact without metadata must not be deleted"
+        finally:
+            shutil.rmtree(fake_dir, ignore_errors=True)
