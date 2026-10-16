@@ -1,12 +1,12 @@
 # Alethra Agent Progress
 
-Last updated: 2026-10-17T05:30+08:00
+Last updated: 2026-10-17T05:45+08:00
 Branch: auto/stored-data-backtest-integration
 Draft PR: https://github.com/TommyLam0915-LCW/alethra/pull/18
-Commits: 757e4ab, 937f62b
+Commits: 757e4ab, 937f62b, a277899, 47b48d2
 Status: Pushed. NOT merged. Base: auto/market-data-quality (PR #13)
 
-## Session record: Stored market data → backtest + ML integration (2026-10-17 04:30–05:30 HKT)
+## Session record: Stored market data → backtest + ML + refresh (2026-10-17 04:30–05:45 HKT)
 
 ### Stored data → backtest pipeline — IMPLEMENTED / OFFLINE VERIFIED (757e4ab)
 Completes the "adapter -> storage -> research/backtest" pipeline (P1 requirement):
@@ -32,9 +32,16 @@ Completes the "adapter -> storage -> research/backtest" pipeline (P1 requirement
 - Tracks `data_source` in job metadata for provenance
 - Reduces API calls and speeds up training when data is cached
 
+### Data refresh endpoint — IMPLEMENTED / OFFLINE VERIFIED (47b48d2)
+- `POST /instruments/{instrument_id}/bars/refresh` allows manual cache updates
+- Force-refresh stale data or extend cached date range
+- Returns bars stored count, data quality metadata, and storage metadata
+- Handles provider errors gracefully with 503 and provider status
+- 5 new tests covering success, no data, invalid instrument, provider error, metadata updates
+
 ### Verification
-- 13 new tests in `test_backtest_storage_integration.py`: stored/provider/auto modes, mixed data source, backward compatibility, error cases, warning messages
-- Full backend suite: **817 passed / 0 failed** (240s)
+- 18 new tests total (13 backtest storage + 5 data refresh)
+- Full backend suite: **822 passed / 0 failed**
 - Frontend build: clean
 - No credentials in diff, git diff --check clean
 
