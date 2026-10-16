@@ -33,6 +33,7 @@ from app.models.training import TrainingJob, TrainingJobStatus
 from app.models.kill_switch import KillSwitchScope
 from app.services.kill_switch import is_kill_switch_active
 from app.services.training import run_parameter_sweep
+from app.lib.timeutil import utcnow
 
 logging.basicConfig(
     level=logging.INFO,
@@ -117,7 +118,7 @@ def execute_job(job_id: int) -> None:
         if job:
             job.status = TrainingJobStatus.failed
             job.error_details = str(exc)
-            job.completed_at = datetime.utcnow()
+            job.completed_at = utcnow()
             db.commit()
 
     finally:

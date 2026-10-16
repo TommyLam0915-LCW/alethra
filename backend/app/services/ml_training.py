@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.models.training import TrainingJob, TrainingJobStatus
 from app.providers import get_data_provider
 from app.ml.trainer import train_model, load_model, list_models
+from app.lib.timeutil import utcnow
 
 
 def create_ml_training_job(
@@ -45,11 +46,6 @@ def create_ml_training_job(
             f"Insufficient data for {instrument_id}: got {len(bars)} bars, "
             f"need at least 60 for ML training."
         )
-
-    bar_dicts = [
-        {"date": b.date, "open": b.open, "high": b.high, "low": b.low, "close": b.close, "volume": b.volume}
-        for b in bars
-    ]
 
     job = TrainingJob(
         user_id=user_id,
@@ -108,6 +104,7 @@ def execute_ml_training(
             bars=bar_dicts,
             instrument_id=instrument_id,
             model_type=model_type,
+            user_id=str(job.user_id),
         )
 
         job.results = result
@@ -118,6 +115,6 @@ def execute_ml_training(
         job.status = TrainingJobStatus.failed
         job.error_details = str(e)
 
-    job.completed_at = datetime.utcnow()
+    job.completed_at = utcnow()
     db.flush()
     return job

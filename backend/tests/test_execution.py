@@ -41,6 +41,7 @@ from app.services.execution import (
 )
 from app.models.kill_switch import KillSwitchScope
 from app.services.kill_switch import activate_kill_switch, deactivate_kill_switch
+from app.lib.timeutil import utcnow
 
 
 # ── Helpers ──
@@ -239,7 +240,7 @@ class TestExpiredIntent:
         db = TestSession()
         try:
             intent = db.query(OrderIntent).filter(OrderIntent.intent_id == intent_id).first()
-            intent.expires_at = datetime.utcnow() - timedelta(minutes=1)
+            intent.expires_at = utcnow() - timedelta(minutes=1)
             db.commit()
         finally:
             db.close()
@@ -269,7 +270,7 @@ class TestExpiredIntent:
         db = TestSession()
         try:
             intent = db.query(OrderIntent).filter(OrderIntent.intent_id == intent_id).first()
-            intent.expires_at = datetime.utcnow() - timedelta(minutes=1)
+            intent.expires_at = utcnow() - timedelta(minutes=1)
             db.commit()
         finally:
             db.close()
@@ -308,7 +309,7 @@ class TestDuplicateIntentId:
                 order_type="MARKET",
                 status=IntentStatus.pending,
                 authorization_token=secrets.token_urlsafe(32),
-                expires_at=datetime.utcnow() + timedelta(minutes=5),
+                expires_at=utcnow() + timedelta(minutes=5),
             )
             db.add(duplicate)
             with pytest.raises(Exception):

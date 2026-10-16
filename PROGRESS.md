@@ -1,11 +1,59 @@
 # Alethra Agent Progress
 
-Last updated: 2026-10-17T00:30+08:00
-Merged: PR #10 squash-merged to main (df95381) by owner authorization. All 5 priorities complete.
-Current state: local main updated to df95381. Work on a NEW feature branch from main for anything further.
-Status: PR #10 content fully merged (market pipeline, ML training, execution agent, billing, alignment A-F, PR #9 overlap sync).
-Validated: CI green on merge commit — Backend Tests 8m, Browser Acceptance (Playwright) 4m, Frontend Build 39s.
-External prerequisites still open (see docs/external-prerequisites-checklist.md): LSEG credentials, IBKR TWS/Gateway, Stripe keys.
+Last updated: 2026-10-16T23:30+08:00
+Branch: auto/config-safety-and-improvements
+Draft PR: https://github.com/TommyLam0915-LCW/alethra/pull/11
+Commits: 6891274, 5e12b97, 214ccec, 20cc74e
+Status: Pushed, CI running. NOT merged.
+Base: main at df95381 (PR #10 merged)
+
+## This session: config safety + LSEG OAuth2 + deprecation fix + ML wiring
+
+### Production config hardening — IMPLEMENTED / VERIFIED
+- CORS wildcard (*) rejected in production/staging
+- data_provider validated against known providers (demo, lseg)
+- AI_API_KEY required when AI_PROVIDER is not mock
+- ENABLE_LIVE_PAYMENTS requires STRIPE_SECRET_KEY + STRIPE_WEBHOOK_SECRET
+- DATABASE_URL localhost/127.0.0.1 rejected in production/staging
+- 30 new config tests (34 total, was 14)
+
+### LSEG OAuth2 authentication — IMPLEMENTED / OFFLINE VERIFIED
+- Proper OAuth2 client credentials flow (token acquisition + refresh)
+- Automatic token refresh before each API call when expired
+- Dual mode: API key (static Bearer) or OAuth2 (client credentials)
+- Token state cleared on disconnect
+- 6 new offline contract tests
+
+### datetime.utcnow() deprecation fix — IMPLEMENTED / VERIFIED
+- Created app/lib/timeutil.py with utcnow() helper (naive UTC, DB-compatible)
+- Replaced all datetime.utcnow() across 48 files (20 models, 24 services/APIs, 7 tests)
+- Also updated model defaults and dataclass/Pydantic field defaults
+- Deprecation warnings reduced: 4754 → 1866
+
+### Provider registry LSEG auto-registration — IMPLEMENTED / VERIFIED
+- LSEG provider auto-initializes when LSEG_API_KEY or LSEG_CLIENT_ID+SECRET present
+- Lazy init avoids import errors when credentials missing
+
+### ML training frontend wiring — IMPLEMENTED / VERIFIED
+- Added api.ml client methods (train, listModels, getModel, predict, predictLatest)
+- Connects frontend to orphaned /api/v1/ml/* endpoints from PR #10
+
+### Minor fixes
+- Removed misleading 'NOT IMPLEMENTED' from execution agent config docstring
+- Removed dead bar_dicts code in ml_training service
+- Updated external-prerequisites-checklist.md to reflect actual implementation state
+
+### Verification
+- Backend pytest: 739/739 passed (3m17s)
+- Frontend build: clean, 22 pages
+- No credentials in diff, git diff --check clean
+
+### Blocked on (unchanged)
+- LSEG credentials for live market data
+- IBKR TWS/Gateway for execution
+- Stripe credentials for live payments
+
+## Previous: PR #10 (merged)
 
 ## Previous state (before PR #10 merge)
 

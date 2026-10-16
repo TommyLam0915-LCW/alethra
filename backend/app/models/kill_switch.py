@@ -4,6 +4,7 @@ from enum import Enum as PyEnum
 from sqlalchemy import Column, String, DateTime, Boolean, Text, Enum
 from sqlalchemy.dialects.postgresql import UUID
 from app.database import Base
+from app.lib.timeutil import utcnow
 
 
 class KillSwitchScope(str, PyEnum):
@@ -31,8 +32,8 @@ class KillSwitch(Base):
     activated_at = Column(DateTime, nullable=True)
     activated_by = Column(String(255), nullable=True)  # User ID or "system"
     reason = Column(Text, nullable=True)
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, nullable=False, default=utcnow)
+    updated_at = Column(DateTime, nullable=False, default=utcnow, onupdate=utcnow)
     
     def __repr__(self):
         return f"<KillSwitch scope={self.scope} active={self.is_active}>"

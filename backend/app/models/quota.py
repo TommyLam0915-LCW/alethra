@@ -3,6 +3,7 @@ from datetime import datetime
 from sqlalchemy import Column, String, Integer, DateTime, ForeignKey, UniqueConstraint, Index
 from sqlalchemy.dialects.postgresql import UUID
 from app.database import Base
+from app.lib.timeutil import utcnow
 
 
 class QuotaCounter(Base):
@@ -13,7 +14,7 @@ class QuotaCounter(Base):
     quota_type = Column(String(100), nullable=False)
     period = Column(String(20), nullable=False, default="lifetime")
     used = Column(Integer, default=0, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
     __table_args__ = (
         UniqueConstraint("user_id", "quota_type", "period", name="uq_quota_counter"),

@@ -30,6 +30,7 @@ from app.models.user import User
 from app.models.pilot import PilotEntitlement
 from app.models.quota import QuotaCounter
 from app.auth.jwt import get_current_user
+from app.lib.timeutil import utcnow
 
 
 # ── Quota-type → entitlement-column mapping ──────────────────────────────────
@@ -89,7 +90,7 @@ def get_entitlement(db: Session, user_id: UUID) -> Optional[PilotEntitlement]:
 def check_entitlement_active(entitlement: PilotEntitlement) -> bool:
     if not entitlement.pilot_access:
         return False
-    if entitlement.expiry_date and entitlement.expiry_date < datetime.utcnow():
+    if entitlement.expiry_date and entitlement.expiry_date < utcnow():
         return False
     return True
 

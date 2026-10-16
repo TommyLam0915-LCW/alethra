@@ -4,6 +4,7 @@ from sqlalchemy import Column, String, Integer, DateTime, ForeignKey, Boolean, T
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from app.database import Base
 import enum
+from app.lib.timeutil import utcnow
 
 
 class SubscriptionStatus(str, enum.Enum):
@@ -24,7 +25,7 @@ class Plan(Base):
     currency = Column(String(10), default="USD", nullable=False)
     features = Column(JSONB, nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
 
 
 class Subscription(Base):
@@ -38,8 +39,8 @@ class Subscription(Base):
     current_period_start = Column(DateTime, nullable=True)
     current_period_end = Column(DateTime, nullable=True)
     cancelled_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
 
 class PaymentRecord(Base):
@@ -55,7 +56,7 @@ class PaymentRecord(Base):
     provider = Column(String(50), nullable=False)
     test_mode = Column(Boolean, default=True, nullable=False)
     metadata_json = Column(JSONB, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
 
     __table_args__ = (
         Index("ix_payment_user_status", "user_id", "status"),
@@ -71,4 +72,4 @@ class WebhookEventRecord(Base):
     payload = Column(JSONB, nullable=False)
     processed = Column(Boolean, default=False, nullable=False)
     processed_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)

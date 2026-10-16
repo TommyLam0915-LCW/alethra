@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import List, Optional
 
 import requests
+from app.lib.timeutil import utcnow
 
 
 @dataclass
@@ -120,7 +121,7 @@ class AlethraAPIClient:
                 "connected": connected,
                 "ib_gateway_host": ib_gateway_host,
                 "ib_gateway_port": ib_gateway_port,
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": utcnow().isoformat(),
             },
             headers=self._headers(),
             timeout=self.timeout,

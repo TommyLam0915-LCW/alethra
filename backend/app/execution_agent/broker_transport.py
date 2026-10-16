@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Dict, List, Optional
+from app.lib.timeutil import utcnow
 
 
 class BrokerOrderStatus(str, Enum):
@@ -53,7 +54,7 @@ class BrokerOrderState:
     status: BrokerOrderStatus
     filled_quantity: int = 0
     fills: List[BrokerFill] = field(default_factory=list)
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=utcnow)
 
 
 class BrokerTransport(ABC):
@@ -147,7 +148,7 @@ class FakeBrokerTransport(BrokerTransport):
 
         self._order_counter += 1
         order_id = f"FAKE-{self._order_counter:06d}"
-        now = datetime.utcnow()
+        now = utcnow()
 
         if self.fill_mode == "reject":
             order = BrokerOrderState(
@@ -216,7 +217,7 @@ class FakeBrokerTransport(BrokerTransport):
                     broker_order_id=broker_order_id,
                     quantity=order.quantity,
                     price=self.fill_price,
-                    fill_time=datetime.utcnow(),
+                    fill_time=utcnow(),
                     commission=self._compute_commission(order.quantity, self.fill_price),
                 )
                 order.fills.append(fill)
@@ -234,7 +235,7 @@ class FakeBrokerTransport(BrokerTransport):
                     broker_order_id=broker_order_id,
                     quantity=partial_qty,
                     price=self.fill_price,
-                    fill_time=datetime.utcnow(),
+                    fill_time=utcnow(),
                     commission=self._compute_commission(partial_qty, self.fill_price),
                 )
                 order.fills.append(fill)

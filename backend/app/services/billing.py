@@ -10,6 +10,7 @@ from app.providers.payment_adapter import PaymentAdapter, TestPaymentAdapter
 
 
 from app.auth.entitlements import FREE_PLAN_ENTITLEMENT
+from app.lib.timeutil import utcnow
 
 
 # Default entitlement limits keyed by rough price tier.
@@ -106,7 +107,7 @@ def create_subscription(
         user_id=user_id,
         plan_id=plan_id,
         status=SubscriptionStatus.trialing,
-        current_period_start=datetime.utcnow(),
+        current_period_start=utcnow(),
     )
     db.add(sub)
     db.flush()
@@ -129,7 +130,7 @@ def activate_subscription(
 
     sub.status = SubscriptionStatus.active
     sub.payment_provider_id = payment_intent_id
-    sub.current_period_start = datetime.utcnow()
+    sub.current_period_start = utcnow()
 
     # --- Atomic entitlement link -------------------------------------------
     limits = _limits_for_plan(plan)
@@ -159,7 +160,7 @@ def cancel_subscription(db: Session, subscription_id: UUID) -> Subscription:
         raise ValueError(f"Subscription not found: {subscription_id}")
 
     sub.status = SubscriptionStatus.cancelled
-    sub.cancelled_at = datetime.utcnow()
+    sub.cancelled_at = utcnow()
     db.flush()
     db.commit()
     return sub
@@ -203,7 +204,7 @@ def process_webhook(db: Session, event_id: str, event_type: str, payload: Dict[s
         event_type=event_type,
         payload=payload,
         processed=True,
-        processed_at=datetime.utcnow(),
+        processed_at=utcnow(),
     )
     db.add(record)
     db.flush()
