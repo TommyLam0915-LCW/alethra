@@ -73,3 +73,22 @@ class WebhookEventRecord(Base):
     processed = Column(Boolean, default=False, nullable=False)
     processed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=utcnow, nullable=False)
+
+
+class UsageRecord(Base):
+    __tablename__ = "usage_records"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
+    subscription_id = Column(UUID(as_uuid=True), ForeignKey("subscriptions.id"), nullable=True)
+    endpoint = Column(String(255), nullable=False)
+    model = Column(String(100), nullable=True)
+    tokens_used = Column(Integer, default=0, nullable=False)
+    cost = Column(Integer, default=0, nullable=False)  # Cost in cents
+    metadata_json = Column(JSONB, nullable=True)
+    created_at = Column(DateTime, default=utcnow, nullable=False, index=True)
+
+    __table_args__ = (
+        Index("ix_usage_user_date", "user_id", "created_at"),
+        Index("ix_usage_subscription", "subscription_id", "created_at"),
+    )

@@ -210,3 +210,181 @@ def process_webhook(db: Session, event_id: str, event_type: str, payload: Dict[s
     db.flush()
     db.commit()
     return True
+
+
+def record_api_call(
+    db: Session,
+    user_id: UUID,
+    endpoint: str,
+    model: Optional[str] = None,
+    tokens_used: int = 0,
+    cost: int = 0,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> "UsageRecord":
+    """Record an API call for usage tracking."""
+    from app.models.billing import UsageRecord
+
+    # Get user's subscription
+    sub = db.query(Subscription).filter(Subscription.user_id == user_id).first()
+
+    record = UsageRecord(
+        user_id=user_id,
+        subscription_id=sub.id if sub else None,
+        endpoint=endpoint,
+        model=model,
+        tokens_used=tokens_used,
+        cost=cost,
+        metadata_json=metadata,
+    )
+    db.add(record)
+    db.flush()
+    db.commit()
+    return record
+
+
+def check_quota(
+    db: Session,
+    user_id: UUID,
+    quota_type: str,
+    period: str = "monthly",
+) -> Dict[str, Any]:
+    """Check if user has remaining quota.
+
+    Returns dict with 'allowed', 'used', 'limit', 'remaining'.
+    """
+    from app.models.quota import QuotaCounter
+    from app.models.pilot import PilotEntitlement
+
+    # Get entitlement limits
+    entitlement = db.query(PilotEntitlement).filter(
+        PilotEntitlement.user_id == user_id,
+    ).first()
+
+    if entitlement is None:
+        # No entitlement - use free plan limits
+        limit = FREE_PLAN_ENTITLEMENT.get(quota_type, 0)
+    else:
+        limit = getattr(entitlement, quota_type, None)
+        if limit is None:
+            return {"allowed": True, "used": 0, "limit": None, "remaining": None}
+
+    # Get current usage
+    counter = db.query(QuotaCounter).filter(
+        QuotaCounter.user_id == user_id,
+        QuotaCounter.quota_type == quota_type,
+        QuotaCounter.period == period,
+    ).first()
+
+    used = counter.used if counter else 0
+    remaining = max(0, limit - used)
+
+    return {
+        "allowed": used < limit,
+        "used": used,
+        "limit": limit,
+        "remaining": remaining,
+    }
+
+
+def increment_quota(
+    db: Session,
+    user_id: UUID,
+    quota_type: str,
+    amount: int = 1,
+    period: str = "monthly",
+) -> int:
+    """Increment quota usage counter.
+
+    Returns new used amount.
+    """
+    from app.models.quota import QuotaCounter
+
+    counter = db.query(QuotaCounter).filter(
+        QuotaCounter.user_id == user_id,
+        QuotaCounter.quota_type == quota_type,
+        QuotaCounter.period == period,
+    ).first()
+
+    if counter is None:
+        counter = QuotaCounter(
+            user_id=user_id,
+            quota_type=quota_type,
+            period=period,
+            used=amount,
+        )
+        db.add(counter)
+    else:
+        counter.used += amount
+
+    db.flush()
+    db.commit()
+    return counter.used
+
+
+def enforce_quota(
+    db: Session,
+    user_id: UUID,
+    quota_type: str,
+    period: str = "monthly",
+) -> bool:
+    """Check and increment quota atomically.
+
+    Returns True if allowed, False if quota exceeded.
+    Raises HTTPException if quota exceeded.
+    """
+    from fastapi import HTTPException
+
+    quota_status = check_quota(db, user_id, quota_type, period)
+
+    if not quota_status["allowed"]:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "quota_exceeded",
+                "quota_type": quota_type,
+                "used": quota_status["used"],
+                "limit": quota_status["limit"],
+            },
+        )
+
+    # Increment usage
+    increment_quota(db, user_id, quota_type, 1, period)
+    return True
+
+
+def get_usage_summary(
+    db: Session,
+    user_id: UUID,
+    days: int = 30,
+) -> Dict[str, Any]:
+    """Get usage summary for the user."""
+    from app.models.billing import UsageRecord
+    from datetime import timedelta
+
+    start_date = utcnow() - timedelta(days=days)
+
+    usage_records = db.query(UsageRecord).filter(
+        UsageRecord.user_id == user_id,
+        UsageRecord.created_at >= start_date,
+    ).all()
+
+    total_calls = len(usage_records)
+    total_tokens = sum(r.tokens_used for r in usage_records)
+    total_cost = sum(r.cost for r in usage_records)
+
+    # Group by endpoint
+    by_endpoint = {}
+    for record in usage_records:
+        if record.endpoint not in by_endpoint:
+            by_endpoint[record.endpoint] = {"calls": 0, "tokens": 0, "cost": 0}
+        by_endpoint[record.endpoint]["calls"] += 1
+        by_endpoint[record.endpoint]["tokens"] += record.tokens_used
+        by_endpoint[record.endpoint]["cost"] += record.cost
+
+    return {
+        "period_days": days,
+        "total_api_calls": total_calls,
+        "total_tokens": total_tokens,
+        "total_cost_cents": total_cost,
+        "by_endpoint": by_endpoint,
+    }
