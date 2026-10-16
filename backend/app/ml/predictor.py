@@ -10,17 +10,19 @@ from app.ml.trainer import load_model
 def predict(
     model_id: str,
     bars: List[Dict],
+    user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run inference using a saved model.
 
     Args:
         model_id: ID of the saved model artifact.
         bars: Recent OHLCV bars (should be at least 30 bars for feature warmup).
+        user_id: Owner check — raises PermissionError if model belongs to another user.
 
     Returns:
         Dict with predictions, confidence, and metadata.
     """
-    model, scaler, metadata, feature_names = load_model(model_id)
+    model, scaler, metadata, feature_names = load_model(model_id, user_id=user_id)
 
     features, actual_feature_names, dates = build_feature_matrix(
         bars,
@@ -74,6 +76,7 @@ def predict(
         "model_id": model_id,
         "model_type": metadata.get("model_type", "unknown"),
         "instrument_id": metadata.get("instrument_id", "unknown"),
+        "data_provenance": metadata.get("data_provenance", {}),
         "predictions": results,
         "n_predictions": len(results),
         "date_range": {
@@ -86,9 +89,10 @@ def predict(
 def predict_latest(
     model_id: str,
     bars: List[Dict],
+    user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Get prediction for the most recent bar only."""
-    result = predict(model_id, bars)
+    result = predict(model_id, bars, user_id=user_id)
     if not result.get("predictions"):
         return result
 
@@ -97,6 +101,7 @@ def predict_latest(
         "model_id": model_id,
         "model_type": result.get("model_type", "unknown"),
         "instrument_id": result.get("instrument_id", "unknown"),
+        "data_provenance": result.get("data_provenance", {}),
         "latest_prediction": latest,
         "generated_at": latest["date"],
     }

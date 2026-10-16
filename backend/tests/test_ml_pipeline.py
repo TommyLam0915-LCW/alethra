@@ -409,6 +409,113 @@ class TestMLAPIEndpoints:
         assert resp.status_code == 404
 
 
+class TestMLDataProvenance:
+    """Every trained model must carry traceable data provenance.
+
+    The demo provider serves synthetic data under real ticker IDs, so
+    is_synthetic must be true even when instrument_id looks like a real
+    stock — models trained on synthetic data must be identifiable.
+    """
+
+    @pytest.fixture
+    def client(self):
+        from app.main import app
+        return TestClient(app)
+
+    @pytest.fixture
+    def auth_token(self, client):
+        client.post("/api/auth/register", json={
+            "email": "ml-provenance@example.com",
+            "password": "testpassword123",
+            "display_name": "ML Provenance User",
+        })
+        resp = client.post("/api/auth/login", json={
+            "email": "ml-provenance@example.com",
+            "password": "testpassword123",
+        })
+        return resp.json()["access_token"]
+
+    def _headers(self, token):
+        return {"Authorization": f"Bearer {token}"}
+
+    def _train(self, client, auth_token, model_type="baseline"):
+        resp = client.post(
+            f"/api/v1/ml/train?instrument_id=US:AAPL&model_type={model_type}&start_date=2024-01-02&end_date=2024-12-31",
+            headers=self._headers(auth_token),
+        )
+        assert resp.status_code == 200
+        return resp.json()
+
+    def test_train_response_contains_provenance(self, client, auth_token):
+        data = self._train(client, auth_token)
+        prov = data["data_provenance"]
+        assert prov["provider_id"] == "demo"
+        assert prov["is_synthetic"] is True, (
+            "Demo provider serves synthetic data — must be flagged even for real tickers"
+        )
+        assert prov["feed_mode"] == "offline"
+        assert prov["instrument_id"] == "US:AAPL"
+        assert prov["n_bars"] > 0
+        assert len(prov["bars_sha256"]) == 64
+        assert prov["first_bar_date"] is not None
+        assert prov["last_bar_date"] is not None
+
+    def test_model_detail_metadata_contains_provenance_and_hyperparameters(self, client, auth_token):
+        data = self._train(client, auth_token, model_type="logistic_regression")
+        model_id = data["model_id"]
+
+        resp = client.get(f"/api/v1/ml/models/{model_id}", headers=self._headers(auth_token))
+        assert resp.status_code == 200
+        metadata = resp.json()["metadata"]
+        prov = metadata["data_provenance"]
+        assert prov["provider_id"] == "demo"
+        assert prov["is_synthetic"] is True
+        assert prov["bars_sha256"] == data["data_provenance"]["bars_sha256"]
+
+        hyper = metadata["hyperparameters"]
+        assert isinstance(hyper, dict) and len(hyper) > 0
+        assert hyper["max_iter"] == 1000
+        assert hyper["random_state"] == 42
+
+    def test_provenance_is_deterministic_for_same_data(self, client, auth_token):
+        """Same instrument + date range must produce identical bars_sha256."""
+        data1 = self._train(client, auth_token)
+        data2 = self._train(client, auth_token)
+        assert data1["data_provenance"]["bars_sha256"] == \
+            data2["data_provenance"]["bars_sha256"]
+        assert data1["model_id"] != data2["model_id"]
+
+    def test_predict_response_includes_provenance(self, client, auth_token):
+        data = self._train(client, auth_token)
+        model_id = data["model_id"]
+
+        resp = client.post(
+            f"/api/v1/ml/models/{model_id}/predict-latest",
+            headers=self._headers(auth_token),
+        )
+        assert resp.status_code == 200
+        prov = resp.json()["data_provenance"]
+        assert prov["is_synthetic"] is True
+        assert prov["provider_id"] == "demo"
+
+    def test_train_model_unit_level_provenance(self):
+        """train_model stores an explicitly-passed provenance verbatim."""
+        bars = _make_bars(200)
+        provenance = {
+            "provider_id": "lseg",
+            "provider_name": "LSEG (Refinitiv)",
+            "feed_mode": "live",
+            "is_synthetic": False,
+        }
+        result = train_model(bars, "US:TEST", model_type="baseline",
+                             data_provenance=provenance)
+        assert result["data_provenance"] == provenance
+
+        _, _, metadata, _ = load_model(result["model_id"])
+        assert metadata["data_provenance"] == provenance
+        assert metadata["hyperparameters"]["strategy"] == "most_frequent"
+
+
 class TestModelOwnership:
     """Model ownership and user isolation tests."""
 
@@ -482,6 +589,20 @@ class TestModelOwnership:
 
         resp2 = client.post(
             f"/api/v1/ml/models/{model_id}/predict",
+            headers=self._headers(user2_token),
+        )
+        assert resp2.status_code == 403
+
+    def test_user_cannot_predict_latest_with_others_model(self, client, user1_token, user2_token):
+        """User B should not be able to use User A's model for latest prediction."""
+        resp1 = client.post(
+            "/api/v1/ml/train?instrument_id=US:AAPL&model_type=baseline",
+            headers=self._headers(user1_token),
+        )
+        model_id = resp1.json()["model_id"]
+
+        resp2 = client.post(
+            f"/api/v1/ml/models/{model_id}/predict-latest",
             headers=self._headers(user2_token),
         )
         assert resp2.status_code == 403

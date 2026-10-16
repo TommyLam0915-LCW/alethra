@@ -68,6 +68,7 @@ def start_ml_training(
         "metrics": job.results.get("metrics") if job.results else None,
         "split": job.results.get("split") if job.results else None,
         "date_range": job.results.get("date_range") if job.results else None,
+        "data_provenance": job.results.get("data_provenance") if job.results else None,
         "model_type": model_type,
         "instrument_id": instrument_id,
         "disclaimer": "Model is for research purposes only. Not suitable for trading decisions.",
@@ -147,7 +148,9 @@ def run_prediction(
     ]
 
     try:
-        result = predict(model_id, bar_dicts)
+        result = predict(model_id, bar_dicts, user_id=str(current_user.id))
+    except PermissionError:
+        raise HTTPException(403, f"You do not have access to model {model_id}")
     except Exception as e:
         raise HTTPException(422, f"Prediction failed: {e}")
 
@@ -166,9 +169,11 @@ def run_latest_prediction(
 ):
     """Get the latest prediction from a trained model."""
     try:
-        _, _, metadata, _ = load_model(model_id)
+        _, _, metadata, _ = load_model(model_id, user_id=str(current_user.id))
     except FileNotFoundError:
         raise HTTPException(404, f"Model not found: {model_id}")
+    except PermissionError:
+        raise HTTPException(403, f"You do not have access to model {model_id}")
 
     pred_instrument = instrument_id or metadata.get("instrument_id")
     if not pred_instrument:
@@ -186,7 +191,9 @@ def run_latest_prediction(
     ]
 
     try:
-        result = predict_latest(model_id, bar_dicts)
+        result = predict_latest(model_id, bar_dicts, user_id=str(current_user.id))
+    except PermissionError:
+        raise HTTPException(403, f"You do not have access to model {model_id}")
     except Exception as e:
         raise HTTPException(422, f"Prediction failed: {e}")
 
