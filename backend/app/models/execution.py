@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timedelta
-from sqlalchemy import Column, String, Text, DateTime, Integer, Float, ForeignKey, Enum as SAEnum, Boolean
+from sqlalchemy import Column, String, Text, DateTime, Integer, Float, ForeignKey, Enum as SAEnum, Boolean, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
 from app.database import Base
@@ -85,12 +85,20 @@ class FillRecord(Base):
     """
     __tablename__ = "fill_records"
 
+    # Idempotency key for broker fill reports: "<broker_ref>:<fill_time isoformat>:<quantity>".
+    # Nullable for simulated fills; unique per intent so a fill re-reported after an
+    # agent restart is deduplicated instead of double-counting filled quantity.
+    __table_args__ = (
+        UniqueConstraint("order_intent_id", "broker_fill_key", name="uq_fill_records_intent_fill_key"),
+    )
+
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     order_intent_id = Column(UUID(as_uuid=True), ForeignKey("order_intents.id"), nullable=False)
     quantity = Column(Integer, nullable=False)
     price = Column(Float, nullable=True)
     fill_source = Column(SAEnum(FillSource), nullable=False, default=FillSource.simulated)
     broker_ref = Column(String(255), nullable=True)
+    broker_fill_key = Column(String(255), nullable=True, index=True)
     broker_confirmed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=utcnow, nullable=False)
 

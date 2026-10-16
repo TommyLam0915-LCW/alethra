@@ -95,6 +95,16 @@ class BrokerTransport(ABC):
     def get_fills(self, broker_order_id: str) -> List[BrokerFill]:
         ...
 
+    @abstractmethod
+    def get_recent_orders(self, since: datetime) -> List[BrokerOrderState]:
+        """Return all orders (any status) created at or after `since`.
+
+        Used for lost-acknowledgement recovery: after a crash between order
+        submission and platform reporting, the agent matches recent broker
+        orders against authorized intents instead of resubmitting.
+        """
+        ...
+
 
 class FakeBrokerTransport(BrokerTransport):
     """Deterministic in-memory broker transport for testing.
@@ -252,6 +262,12 @@ class FakeBrokerTransport(BrokerTransport):
         if not order:
             return []
         return list(order.fills)
+
+    def get_recent_orders(self, since: datetime) -> List[BrokerOrderState]:
+        return [
+            order for order in self._orders.values()
+            if order.created_at >= since
+        ]
 
     def _compute_commission(self, quantity: int, price: float) -> float:
         return max(1.0, quantity * price * 0.0001)

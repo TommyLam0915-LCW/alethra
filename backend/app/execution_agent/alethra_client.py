@@ -23,6 +23,10 @@ class OrderIntentDTO:
     status: str
     expires_at: str
     created_at: str
+    # Present on the platform's poll response; broker_ref lets a restarted
+    # agent re-adopt the mapped broker order instead of resubmitting.
+    broker_ref: Optional[str] = None
+    rejection_reason: Optional[str] = None
 
 
 @dataclass
@@ -99,6 +103,33 @@ class AlethraAPIClient:
             timeout=self.timeout,
         )
         resp.raise_for_status()
+
+    def report_order_uncertain(self, intent_id: str, reason: str) -> None:
+        resp = requests.post(
+            f"{self.api_url}/v1/execution-agent/order-intents/{intent_id}/uncertain",
+            json={"reason": reason},
+            headers=self._headers(),
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+
+    def get_control_status(self) -> dict:
+        resp = requests.get(
+            f"{self.api_url}/v1/execution-agent/control-status",
+            headers=self._headers(),
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_claimed_broker_refs(self) -> List[str]:
+        resp = requests.get(
+            f"{self.api_url}/v1/execution-agent/claimed-broker-refs",
+            headers=self._headers(),
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+        return resp.json().get("broker_refs", [])
 
     def report_order_cancelled(self, intent_id: str, reason: str) -> None:
         resp = requests.post(
