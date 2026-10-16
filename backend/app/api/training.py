@@ -53,7 +53,7 @@ class TrainingJobResponse(BaseModel):
     status: str
     parameter_grid: dict
     strategy_spec_snapshot: Optional[dict]
-    results: Optional[List[dict]]
+    results: Optional[Any]
     best_params: Optional[dict]
     error_details: Optional[str]
     created_at: datetime
