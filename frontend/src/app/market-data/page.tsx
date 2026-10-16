@@ -33,6 +33,7 @@ interface DataQuality {
   adjustment: string;
   timezone: string | null;
   note: string | null;
+  note_zh: string | null;
   latest_bar_date: string | null;
   bar_age_days: number | null;
   is_stale: boolean;
@@ -396,8 +397,10 @@ export default function MarketDataPage() {
                     </>
                   )}
                 </div>
-                {dataQuality?.note && (
-                  <div style={{ marginTop: '8px', fontSize: '13px', color: '#666' }}>{dataQuality.note}</div>
+                {(dataQuality?.note_zh || dataQuality?.note) && (
+                  <div style={{ marginTop: '8px', fontSize: '13px', color: '#666' }}>
+                    {dataQuality?.note_zh || dataQuality?.note}
+                  </div>
                 )}
               </div>
             )}

@@ -428,6 +428,7 @@ class LSEGDataProvider(DataProvider):
             "adjustment": "unknown",
             "timezone": inst.timezone if inst else None,
             "note": "Corporate-action adjustment depends on LSEG entitlement; treated as unverified.",
+            "note_zh": "公司行動調整視 LSEG 訂閱權限而定；未經確認前不作假設。",
         }
 
     def get_instrument(self, instrument_id: str) -> Optional[AssetInfo]:

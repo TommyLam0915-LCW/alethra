@@ -60,6 +60,7 @@ class TestDemoDataQuality:
         assert quality["adjustment"] == "not_applicable"
         assert quality["timezone"] == "America/New_York"
         assert "synthetic" in quality["note"].lower()
+        assert quality["note_zh"] is not None
 
     def test_hk_instrument_timezone(self):
         provider = DemoDataProvider()
