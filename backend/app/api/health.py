@@ -29,7 +29,7 @@ def _check_database() -> dict:
         return {"status": "connected", "latency_ms": latency_ms}
     except Exception as exc:
         logger.warning("Database health check failed: %s", exc)
-        return {"status": "unavailable", "error": str(exc)}
+        return {"status": "unavailable", "error": "connection failed"}
 
 
 def _check_redis() -> dict:
@@ -49,7 +49,7 @@ def _check_redis() -> dict:
         return {"status": "connected", "latency_ms": latency_ms}
     except Exception as exc:
         logger.warning("Redis health check failed: %s", exc)
-        return {"status": "unavailable", "error": str(exc)}
+        return {"status": "unavailable", "error": "connection failed"}
 
 
 @router.get("/health")
