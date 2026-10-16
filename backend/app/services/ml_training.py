@@ -19,7 +19,7 @@ from app.lib.timeutil import utcnow
 def create_ml_training_job(
     db: Session,
     user_id: uuid.UUID,
-    experiment_id: uuid.UUID,
+    experiment_id: Optional[uuid.UUID],
     instrument_id: str,
     model_type: str = "logistic_regression",
     start_date: Optional[str] = None,
@@ -29,6 +29,10 @@ def create_ml_training_job(
 
     Unlike parameter sweep, this trains an actual ML model (classifier)
     to predict next-day return direction.
+
+    experiment_id is optional: ML jobs started from the training page are
+    not tied to an experiment. The column is nullable — never fabricate a
+    random experiment UUID, it violates the FK on PostgreSQL.
 
     The training_type is stored in strategy_spec_snapshot as a marker.
     """

@@ -7,7 +7,7 @@ import { api } from '@/lib/api';
 
 interface TrainingJob {
   id: string;
-  experiment_id: string;
+  experiment_id: string | null;
   status: string;
   created_at: string;
   completed_at: string | null;
@@ -227,16 +227,18 @@ export default function TrainingPage() {
                         <span style={{ color: '#666' }}>任務 ID：</span>
                         <span style={{ fontFamily: 'monospace' }}>{truncateId(job.id)}</span>
                       </div>
-                      <div>
-                        <span style={{ color: '#666' }}>實驗：</span>
-                        <Link
-                          href={`/experiments/${job.experiment_id}`}
-                          style={{ fontFamily: 'monospace', color: '#0070f3', textDecoration: 'none' }}
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          {truncateId(job.experiment_id)}
-                        </Link>
-                      </div>
+                      {job.experiment_id && (
+                        <div>
+                          <span style={{ color: '#666' }}>實驗：</span>
+                          <Link
+                            href={`/experiments/${job.experiment_id}`}
+                            style={{ fontFamily: 'monospace', color: '#0070f3', textDecoration: 'none' }}
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            {truncateId(job.experiment_id)}
+                          </Link>
+                        </div>
+                      )}
                     </div>
                     <div style={{ display: 'flex', gap: '24px', fontSize: '13px', color: '#666' }}>
                       <div>建立：{new Date(job.created_at).toLocaleString('zh-Hant')}</div>

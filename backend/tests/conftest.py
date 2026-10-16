@@ -1,5 +1,9 @@
 import os
-os.environ["DATABASE_URL"] = "sqlite:///./test.db"
+# Concurrent sessions in this worktree share backend/test.db, which corrupts
+# parallel pytest runs ("table already exists"). Override the DB file per run:
+#   ALETHRA_TEST_DB=sqlite:///./test-<session>.db
+_TEST_DB_PATH = os.environ.get("ALETHRA_TEST_DB", "sqlite:///./test.db")
+os.environ["DATABASE_URL"] = _TEST_DB_PATH
 
 import pytest
 from sqlalchemy import create_engine, event
@@ -24,7 +28,7 @@ def _compile_uuid_sqlite(element, compiler, **kw):
 
 
 TEST_ENGINE = create_engine(
-    "sqlite:///./test.db",
+    _TEST_DB_PATH,
     connect_args={"check_same_thread": False},
     poolclass=StaticPool,
 )

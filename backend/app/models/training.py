@@ -21,7 +21,7 @@ class TrainingJob(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
-    experiment_id = Column(UUID(as_uuid=True), ForeignKey("experiments.id"), nullable=False)
+    experiment_id = Column(UUID(as_uuid=True), ForeignKey("experiments.id"), nullable=True)
     status = Column(SAEnum(TrainingJobStatus), default=TrainingJobStatus.pending, nullable=False)
     parameter_grid = Column(JSONB, nullable=False)
     strategy_spec_snapshot = Column(JSONB, nullable=True)

@@ -49,7 +49,7 @@ class TrainingJobCreate(BaseModel):
 class TrainingJobResponse(BaseModel):
     id: UUID
     user_id: UUID
-    experiment_id: UUID
+    experiment_id: Optional[UUID] = None
     status: str
     parameter_grid: dict
     strategy_spec_snapshot: Optional[dict]

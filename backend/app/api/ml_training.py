@@ -33,17 +33,32 @@ def start_ml_training(
     technical features from OHLCV data. Uses temporal train/val/test split.
 
     model_type: "logistic_regression" | "gradient_boosting" | "baseline"
+    experiment_id: optional — links the job to an experiment you own.
     """
     if model_type not in ("logistic_regression", "gradient_boosting", "baseline"):
         raise HTTPException(400, f"Unknown model_type: {model_type}")
 
-    fake_experiment_id = experiment_id or uuid.uuid4()
+    experiment_uuid = None
+    if experiment_id:
+        from app.models.experiment import Experiment
+
+        try:
+            experiment_uuid = uuid.UUID(experiment_id)
+        except ValueError:
+            raise HTTPException(400, f"Invalid experiment_id format: {experiment_id}")
+
+        experiment = db.query(Experiment).filter(
+            Experiment.id == experiment_uuid,
+            Experiment.owner_id == current_user.id,
+        ).first()
+        if not experiment:
+            raise HTTPException(404, "Experiment not found")
 
     try:
         job = create_ml_training_job(
             db=db,
             user_id=current_user.id,
-            experiment_id=uuid.UUID(fake_experiment_id) if isinstance(fake_experiment_id, str) else fake_experiment_id,
+            experiment_id=experiment_uuid,
             instrument_id=instrument_id,
             model_type=model_type,
             start_date=start_date,
