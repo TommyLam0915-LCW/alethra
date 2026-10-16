@@ -18,6 +18,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.dummy import DummyClassifier
 
 from app.ml.features import build_feature_matrix, build_target_direction
+from app.lib.timeutil import utcnow
 
 
 ARTIFACTS_DIR = os.path.join(os.path.dirname(__file__), "artifacts")
@@ -130,7 +131,7 @@ def train_model(
         metadata={
             "instrument_id": instrument_id,
             "model_type": model_type,
-            "trained_at": datetime.utcnow().isoformat(),
+            "trained_at": utcnow().isoformat(),
             "n_train": len(train_idx),
             "n_val": len(val_idx),
             "n_test": len(test_idx),

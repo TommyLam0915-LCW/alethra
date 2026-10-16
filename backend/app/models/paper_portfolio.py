@@ -5,6 +5,7 @@ from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
 from app.database import Base
 import enum
+from app.lib.timeutil import utcnow
 
 
 class PortfolioStatus(str, enum.Enum):
@@ -88,7 +89,7 @@ class PaperPortfolio(Base):
     initial_virtual_cash = Column(Float, nullable=False)
     current_virtual_cash = Column(Float, nullable=False)
     status = Column(SAEnum(PortfolioStatus), default=PortfolioStatus.active)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
     closed_at = Column(DateTime, nullable=True)
 
     positions = relationship("PaperPosition", back_populates="portfolio", order_by="PaperPosition.opened_at")
@@ -111,7 +112,7 @@ class PaperPosition(Base):
     asset_id = Column(String(50), nullable=False)
     quantity = Column(Float, nullable=False)
     average_entry_price = Column(Float, nullable=False)
-    opened_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    opened_at = Column(DateTime, default=utcnow, nullable=False)
     closed_at = Column(DateTime, nullable=True)
     realized_pnl = Column(Float, nullable=True)
     unrealized_pnl = Column(Float, nullable=True)
@@ -130,7 +131,7 @@ class PaperOrder(Base):
     side = Column(SAEnum(OrderSide), nullable=False)
     quantity = Column(Float, nullable=False)
     order_type = Column(SAEnum(OrderType), default=OrderType.market)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
     status = Column(SAEnum(OrderStatus), default=OrderStatus.pending)
     model_or_strategy_version_id = Column(UUID(as_uuid=True), nullable=True)
     data_cutoff_at = Column(String(10), nullable=True)
@@ -167,7 +168,7 @@ class DecisionRecord(Base):
     simulation_session_id = Column(UUID(as_uuid=True), ForeignKey("simulation_sessions.id"), nullable=True)
     actor_type = Column(SAEnum(PaperDecisionActorType), nullable=False)
     decision_type = Column(SAEnum(PaperDecisionType), nullable=False)
-    decision_time = Column(DateTime, default=datetime.utcnow, nullable=False)
+    decision_time = Column(DateTime, default=utcnow, nullable=False)
     data_cutoff_at = Column(String(10), nullable=True)
     linked_experiment_version_id = Column(UUID(as_uuid=True), nullable=True)
     linked_model_research_record_id = Column(UUID(as_uuid=True), nullable=True)
@@ -187,7 +188,7 @@ class OutcomeEvaluation(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     decision_id = Column(UUID(as_uuid=True), ForeignKey("decision_records.id"), nullable=False)
-    evaluated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    evaluated_at = Column(DateTime, default=utcnow, nullable=False)
     actual_outcome_summary = Column(Text, nullable=True)
     net_simulated_return_pct = Column(Float, nullable=True)
     max_drawdown_pct = Column(Float, nullable=True)

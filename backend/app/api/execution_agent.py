@@ -21,6 +21,7 @@ from app.services.execution_agent_api import (
     agent_report_rejected,
     agent_report_cancelled,
 )
+from app.lib.timeutil import utcnow
 
 
 router = APIRouter(prefix="/execution-agent", tags=["execution-agent"])
@@ -164,5 +165,5 @@ def api_agent_heartbeat(
     return {
         "status": "ok",
         "user_id": str(current_user.id),
-        "received_at": datetime.utcnow().isoformat(),
+        "received_at": utcnow().isoformat(),
     }

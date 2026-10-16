@@ -5,6 +5,7 @@ from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from app.database import Base
 import enum
+from app.lib.timeutil import utcnow
 
 
 class SourceType(str, enum.Enum):
@@ -22,7 +23,7 @@ class Dataset(Base):
     source_type = Column(SAEnum(SourceType), default=SourceType.demo)
     license_status = Column(String(255), nullable=True)
     description = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
 
     snapshots = relationship("DatasetSnapshot", back_populates="dataset")
 
@@ -37,6 +38,6 @@ class DatasetSnapshot(Base):
     checksum = Column(String(64), nullable=True)
     corporate_actions_adjusted = Column(Boolean, default=False)
     missing_data_notes = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
 
     dataset = relationship("Dataset", back_populates="snapshots")

@@ -26,6 +26,7 @@ from .config import AgentConfig, load_config_from_env
 from .ibkr_client import IBKRClient
 from .alethra_client import AlethraAPIClient, OrderIntentDTO, FillReport
 from .broker_transport import BrokerTransport, BrokerOrderStatus
+from app.lib.timeutil import utcnow
 
 
 logger = logging.getLogger(__name__)
@@ -146,7 +147,7 @@ class ExecutionAgent:
             f"{intent.side} {intent.quantity} {intent.symbol}"
         )
 
-        if datetime.utcnow() > datetime.fromisoformat(intent.expires_at):
+        if utcnow() > datetime.fromisoformat(intent.expires_at):
             logger.warning(f"Intent {intent.intent_id} has expired")
             self.alethra_client.report_order_rejected(
                 intent_id=intent.intent_id,
