@@ -11,7 +11,10 @@ Revises: a1b2c3d4e5f6
 Create Date: 2026-10-16
 
 """
+import logging
 from typing import Sequence, Union
+
+logger = logging.getLogger(__name__)
 
 import sqlalchemy as sa
 from alembic import op, context
@@ -179,9 +182,11 @@ def upgrade() -> None:
                 f"ALTER TABLE {table_name} ALTER COLUMN {col_name} TYPE UUID"
                 f" USING {col_name}::UUID"
             ))
-        except Exception:
-            # Column may already be UUID type - safe to skip
-            pass
+        except sa.exc.ProgrammingError as e:
+            logger.warning("UUID conversion skipped for %s.%s: %s", table_name, col_name, e.orig)
+        except sa.exc.DataError as e:
+            logger.error("UUID conversion FAILED for %s.%s — non-UUID data: %s", table_name, col_name, e.orig)
+            raise
 
     for table_name, col_name in jsonb_conversions:
         try:
@@ -189,9 +194,11 @@ def upgrade() -> None:
                 f"ALTER TABLE {table_name} ALTER COLUMN {col_name} TYPE JSONB"
                 f" USING {col_name}::JSONB"
             ))
-        except Exception:
-            # Column may already be JSONB - safe to skip
-            pass
+        except sa.exc.ProgrammingError as e:
+            logger.warning("JSONB conversion skipped for %s.%s: %s", table_name, col_name, e.orig)
+        except sa.exc.DataError as e:
+            logger.error("JSONB conversion FAILED for %s.%s — invalid JSON: %s", table_name, col_name, e.orig)
+            raise
 
     # Phase 3: Ensure all expected tables exist (for v0/v1 legacy that may be missing tables)
     if legacy_ver in (0, 1):
@@ -252,9 +259,11 @@ def downgrade() -> None:
                     f"ALTER TABLE {table_name} ALTER COLUMN {col_name} TYPE TEXT"
                     f" USING {col_name}::TEXT"
                 ))
-        except Exception:
-            # Column conversion may fail if data is incompatible - log and continue
-            pass
+        except sa.exc.ProgrammingError as e:
+            logger.warning("Downgrade conversion skipped for %s.%s: %s", table_name, col_name, e.orig)
+        except sa.exc.DataError as e:
+            logger.error("Downgrade conversion FAILED for %s.%s: %s", table_name, col_name, e.orig)
+            raise
 
     # Clean up backup table
     connection.execute(text("DROP TABLE IF EXISTS _legacy_schema_backup"))

@@ -20,6 +20,7 @@ import os
 import shutil
 import sqlite3
 import tempfile
+import uuid
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -387,11 +388,14 @@ def run_upgrade(db_path: str, backup_dir: Optional[str] = None,
                     try:
                         rows = conn.execute(f"SELECT {col_name} FROM {table} WHERE {col_name} IS NOT NULL").fetchall()
                         for row in rows:
-                            if row[0] and len(row[0]) != 36:
-                                errors.append(
-                                    f"Table '{table}' column '{col_name}' has "
-                                    f"non-UUID value: '{row[0]}'"
-                                )
+                            if row[0]:
+                                try:
+                                    uuid.UUID(str(row[0]))
+                                except ValueError:
+                                    errors.append(
+                                        f"Table '{table}' column '{col_name}' has "
+                                        f"non-UUID value: '{row[0]}'"
+                                    )
                     except sqlite3.Error:
                         pass
                     tables_migrated.append(f"{table}.{col_name}")
