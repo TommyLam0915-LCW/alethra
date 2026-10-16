@@ -11,6 +11,12 @@ BACKUP_DIR="${BACKUP_DIR:-$PROJECT_ROOT/backups}"
 
 cd "$PROJECT_ROOT"
 
+if [ -f .env ]; then
+    set -a
+    source .env
+    set +a
+fi
+
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 BACKUP_FILE="$BACKUP_DIR/alethra_db_$TIMESTAMP.sql.gz"
 
@@ -20,6 +26,12 @@ echo "==> Backing up database to $BACKUP_FILE ..."
 docker compose -f "$COMPOSE_FILE" exec -T db \
     pg_dump -U "${POSTGRES_USER:-alethra}" "${POSTGRES_DB:-alethra}" \
     | gzip > "$BACKUP_FILE"
+
+if [ ! -s "$BACKUP_FILE" ]; then
+    echo "ERROR: Backup file is empty — pg_dump may have failed" >&2
+    rm -f "$BACKUP_FILE"
+    exit 1
+fi
 
 SIZE=$(du -h "$BACKUP_FILE" | cut -f1)
 echo "==> Backup complete: $BACKUP_FILE ($SIZE)"

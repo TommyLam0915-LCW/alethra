@@ -17,9 +17,9 @@ if [ ! -f .env ]; then
     exit 1
 fi
 
-# Verify required secrets are set (non-empty)
+# Verify required secrets are set (non-empty, stripping quotes)
 for var in POSTGRES_PASSWORD REDIS_PASSWORD JWT_SECRET_KEY; do
-    val=$(grep "^${var}=" .env | cut -d= -f2-)
+    val=$(grep "^${var}=" .env | cut -d= -f2- | tr -d '"' | tr -d "'")
     if [ -z "$val" ]; then
         echo "ERROR: $var is not set in .env"
         exit 1
