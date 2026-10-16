@@ -209,6 +209,13 @@ def _record_payment_tx(
     status: str,
     payment_intent_id: Optional[str] = None,
 ) -> PaymentRecord:
+    if payment_intent_id:
+        existing = db.query(PaymentRecord).filter(
+            PaymentRecord.payment_intent_id == payment_intent_id,
+        ).first()
+        if existing:
+            return existing
+
     adapter = get_payment_adapter()
     record = PaymentRecord(
         user_id=user_id,
