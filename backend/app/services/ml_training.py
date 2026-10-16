@@ -4,9 +4,11 @@ Provides an alternative to parameter sweep: actual model training using
 scikit-learn classifiers on OHLCV data with temporal splits.
 """
 
+import logging
 import uuid
 from datetime import datetime, date
-from typing import Any, Dict, List, Optional
+from types import SimpleNamespace
+from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
@@ -16,6 +18,8 @@ from app.services.market_data_storage import MarketDataStorage
 from app.ml.trainer import train_model, load_model, list_models
 from app.lib.timeutil import utcnow
 
+logger = logging.getLogger(__name__)
+
 
 def _get_bars_with_storage(
     db: Session,
@@ -23,7 +27,7 @@ def _get_bars_with_storage(
     instrument_id: str,
     start_date: str,
     end_date: str,
-) -> tuple[List[Any], str]:
+) -> Tuple[List[Any], str]:
     """Fetch bars with storage integration.
 
     Returns (bars, data_source_used) where data_source_used is 'stored' or 'provider'.
@@ -42,14 +46,14 @@ def _get_bars_with_storage(
 
     if len(stored_bars) >= 60:
         bar_list = [
-            type('Bar', (), {
-                'date': b.bar_date.isoformat(),
-                'open': b.open,
-                'high': b.high,
-                'low': b.low,
-                'close': b.close,
-                'volume': b.volume,
-            })()
+            SimpleNamespace(
+                date=b.bar_date.isoformat(),
+                open=b.open,
+                high=b.high,
+                low=b.low,
+                close=b.close,
+                volume=b.volume,
+            )
             for b in stored_bars
         ]
         return bar_list, "stored"
@@ -69,8 +73,7 @@ def _get_bars_with_storage(
                 provider_note_zh=quality.get("note_zh"),
             )
         except Exception as e:
-            import logging
-            logging.warning(f"Failed to store bars for {instrument_id}: {e}")
+            logger.warning(f"Failed to store bars for {instrument_id}: {e}")
 
     return bars, "provider"
 
