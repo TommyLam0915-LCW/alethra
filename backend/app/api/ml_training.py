@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.auth.jwt import get_current_user
-from app.auth.entitlements import require_entitlement, reserve_quota
+from app.auth.entitlements import require_entitlement, reserve_quota, release_reservation, settle_reservation
 from app.auth.api_keys import check_api_key_scope
 from app.models.user import User
 from app.services.ml_training import (
@@ -170,6 +170,9 @@ def run_prediction(
 
     Fetches data for the instrument and generates signals. When no date
     range is given, uses the most recent bars available (stored data first).
+    
+    Quota: 1 ai_usage unit is reserved before prediction and settled on success;
+    failures release the reservation (no charge).
     """
     try:
         _, _, metadata, _ = load_model(model_id, user_id=str(current_user.id))
@@ -179,6 +182,9 @@ def run_prediction(
         raise HTTPException(404, f"Model not found: {model_id}")
     except PermissionError:
         raise HTTPException(403, f"You do not have access to model {model_id}")
+
+    # Reserve quota for inference
+    reservation = reserve_quota(db, current_user.id, "ai_usage")
 
     pred_instrument = instrument_id or metadata.get("instrument_id")
     if not pred_instrument:
@@ -193,6 +199,8 @@ def run_prediction(
         data_nature = quality.get("data_nature", "unknown") if isinstance(quality, dict) else "unknown"
 
     if len(bars) < 30:
+        # Release reservation on validation failure
+        release_reservation(db, reservation.id)
         raise HTTPException(400, f"Need at least 30 bars for prediction, got {len(bars)}")
 
     bar_dicts = [
@@ -204,7 +212,12 @@ def run_prediction(
     try:
         result = predict(model_id, bar_dicts)
     except Exception as e:
+        # Release reservation on prediction failure
+        release_reservation(db, reservation.id)
         raise HTTPException(422, f"Prediction failed: {e}")
+
+    # Settle quota on success
+    settle_reservation(db, reservation.id)
 
     return {
         **result,
@@ -222,7 +235,11 @@ def run_latest_prediction(
     _scope_check=Depends(check_api_key_scope("write")),
     db: Session = Depends(get_db),
 ):
-    """Get the latest prediction from a trained model."""
+    """Get the latest prediction from a trained model.
+    
+    Quota: 1 ai_usage unit is reserved before prediction and settled on success;
+    failures release the reservation (no charge).
+    """
     try:
         _, _, metadata, _ = load_model(model_id, user_id=str(current_user.id))
     except ValueError:
@@ -232,12 +249,17 @@ def run_latest_prediction(
     except PermissionError:
         raise HTTPException(403, f"You do not have access to model {model_id}")
 
+    # Reserve quota for inference
+    reservation = reserve_quota(db, current_user.id, "ai_usage")
+
     pred_instrument = instrument_id or metadata.get("instrument_id")
     if not pred_instrument:
+        release_reservation(db, reservation.id)
         raise HTTPException(400, "instrument_id required")
 
     bars, _, data_nature = get_recent_bars_for_prediction(db, pred_instrument)
     if len(bars) < 30:
+        release_reservation(db, reservation.id)
         raise HTTPException(400, f"Need at least 30 bars, got {len(bars)}")
 
     bar_dicts = [
@@ -249,6 +271,10 @@ def run_latest_prediction(
     try:
         result = predict_latest(model_id, bar_dicts)
     except Exception as e:
+        release_reservation(db, reservation.id)
         raise HTTPException(422, f"Prediction failed: {e}")
+
+    # Settle quota on success
+    settle_reservation(db, reservation.id)
 
     return {**result, "data_nature": data_nature}
