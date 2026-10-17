@@ -1,10 +1,26 @@
 # Alethra Agent Progress
 
-Last updated: 2026-10-17T14:10+08:00
+Last updated: 2026-10-17T14:20+08:00
 Branch: auto/stored-data-backtest-integration
 Draft PR: https://github.com/TommyLam0915-LCW/alethra/pull/18
 Commits: cca606e, b9cb85f
 Status: Pushed. NOT merged. Base: auto/market-data-quality (PR #13)
+
+## Owner directive (2026-10-17): Requirement–evidence matrix
+
+**Directive**: Do NOT treat "All 5 priorities complete" as whole-project completion. Build the matrix below, then work 7 items in order, one at a time, to completion. These outrank the task-engine list. Report categories: `implemented-but-unintegrated` / `integrated-offline-E2E-verified` / `external-verification-blocked` / `not-implemented` / `insufficient-evidence`. Constraints unchanged: 不碰 operational DB、不連外收費、不連外下單、不merge main、不force-push、不部署.
+
+| # | 需求 | main 實作 | 分支實作 | 接線 | 測試證據 | 外部依賴 | 缺口 | 分類 |
+|---|------|-----------|----------|------|----------|----------|------|------|
+| 1 | ML job 走 durable worker；修 hardcoded 2024；ownership/auth/quota/restart/artifact reload | `api/ml_training.py:62,77` **sync 執行在 HTTP request 內**；`run_latest_prediction` hardcode `get_bars(pred_instrument, "2024-01-02", "2024-12-31")` | PR #12/#14 的 ML hardening 已在 stack；`workers/training_worker.py` 有 kill-switch-aware `SELECT FOR UPDATE` claiming，但 `execute_job` 只跑 `run_parameter_sweep` — **ML job 永遠不會被 worker 認領** | 無 ML→worker 接線 | 850 pass（main，sqlite 離線）；無任何 worker-driven ML 測試 | 無 | sync→worker、日期 hardcode、restart/artifact 測試 | **implemented-but-unintegrated** |
+| 2 | legacy-db-upgrade：偵測要查 revision+schema；UUID 錯誤不得 success；table_count 修正；fixture 驗證 | 不在 main | `alethra-legacy-auto` `db_upgrade.py:105` 只看 `"alembic_version" in tables` 就判 CURRENT；`:186` table_count 算的是欄位數不是表數；UUID errors 加入 list 但最終仍 `return success=True` | 無 | 46 pass（worktree 離線）；無 legacy fixture 升級+還原驗證 | Legacy DB schema docs（Scenario B 仍 blocked） | 3 個 code 缺陷 + fixture 驗證 | **implemented-but-unintegrated** |
+| 3 | billing-stripe 整合 #17 atomic webhook；驗簽 raw-body 契約；customer/subscription mapping；retry-safe usage | 不在 main | billing-stripe 分支 `billing.py:195-206` process_webhook **仍是 record-only**；PR #17 分支（alethra/alethra-billing-auto）有 atomic `_apply_webhook_event`；stripe_service.py webhook handlers 是 stub（"In production, you'd look up…"） | 兩分支同改 billing.py 不同 base；後 merge 者須帶 atomic 邏輯 | billing-stripe 41 pass、#17 763 pass（各自 worktree，sqlite，不可相加）；無真 HTTP 簽章 header/raw-body 測試 | Stripe credentials（外部驗證 blocked） | 整合、簽章契約、mapping | **implemented-but-unintegrated** |
+| 4 | 實際 IBKR transport + 平台取消流程；ad-hoc E2E 轉為可重跑測試 | FakeBrokerTransport 完整（submit/cancel/status/fills、4 fill modes）；agent 取消流程存在（`agent.py:264` `report_order_cancelled`、ibkr_client:61 cancel_order 代理 transport） | — | — | execution 測試 pass（worktree 離線） | **`IBKRBrokerTransport` class 不存在** — 僅 docstring 提及（broker_transport.py:8）；TWS/Gateway | real transport class、E2E 測試化 | real transport: **not-implemented**; cancel flow: **integrated-offline-E2E-verified** |
+| 5 | adapter→storage→backtest/ML 一致；synthetic 不得標為 real | demo/real-synthetic 有 disclaimer（instruments.py:86,206） | PR #18（本分支）：data_source auto/stored/provider、checksum、provenance（data_source_requested/used）、18 新測試 | backtest+ML training 已接 stored data | 18 pass（本分支離線） | LSEG（live 驗證 blocked） | 確認 stored-bar 來源標記（synthetic 來源的 bars 是否帶 synthetic 標記入庫） | **implemented-but-unintegrated** |
+| 6 | PostgreSQL kill-switch enum 修正整合 | `models/kill_switch.py:30` **無** `values_callable`（main 仍有缺陷：ORM 寫 `'global_'`、PG enum 只收 `'global'` → 500） | PR #16（base main，CI）已修 + PG16 live 驗證 + 2 regression tests | — | PR #16 分支 7/7 pass（PG16 live） | 無（修正已在 PR #16 完成） | merge PR #16；保留 kill-switch regression tests | **implemented-but-unintegrated** |
+| 7 | 單一 integration branch 全棧 E2E（clean disposable PG） | — | — | — | — | — | 全部未做 | **not-implemented** |
+
+Note: 測試數字不可跨分支相加（每分支各自 sqlite worktree DB）。PROGRESS 先前 "All 5 priorities complete" 指的是當時 branch 的 5 項優先工作，不代表整個 project 完成度 — 依上述矩陣為準。
 
 ## Session record: Drift audit (2026-10-17 14:00–14:10 HKT)
 
