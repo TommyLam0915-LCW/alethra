@@ -448,9 +448,17 @@ class ExecutionAgent:
     def _monitor_fills_for_known_order(
         self, intent_id: str, broker_order_id: str
     ) -> None:
-        """Monitor an order for fills and report them to the platform."""
+        """Monitor an order for fills and report them to the platform.
+        
+        Distinguishes broker terminal status from delivery completion:
+        - Broker FILLED means no more fills will come
+        - But we must deliver all fills to platform before marking complete
+        - Failed uploads remain pending and are retried on subsequent polls
+        - Intent is only marked completed after all fills are acknowledged
+        """
         max_wait_seconds = 60
         start_time = time.time()
+        pending_fills: List[tuple] = []  # (fill_key, fill_data) for failed uploads
 
         while time.time() - start_time < max_wait_seconds:
             try:
@@ -462,11 +470,18 @@ class ExecutionAgent:
 
             status_enum = BrokerOrderStatus(status_val)
 
+            # Process new fills
             fills = self.ibkr_client.get_fills(broker_order_id)
             for fill in fills:
                 fill_key = f"{broker_order_id}:{fill.fill_time.isoformat()}:{fill.quantity}"
                 if fill_key not in self._reported_fills:
+                    # Check if this fill is already in pending_fills
+                    if any(pk == fill_key for pk, _ in pending_fills):
+                        continue
+                    
+                    # Try to upload this fill
                     retries = 0
+                    uploaded = False
                     while retries < 3:
                         try:
                             self.alethra_client.report_fill(FillReport(
@@ -478,21 +493,64 @@ class ExecutionAgent:
                                 commission=fill.commission,
                             ))
                             self._reported_fills.add(fill_key)
+                            uploaded = True
                             break
                         except Exception as e:
                             retries += 1
                             if retries >= 3:
                                 logger.error(f"Failed to report fill after 3 attempts, will retry on next poll: {e}")
-                                # Do NOT add to _reported_fills — remains pending for retry
+                                # Add to pending_fills for retry
+                                pending_fills.append((fill_key, fill))
                             else:
                                 time.sleep(1)
+            
+            # Retry pending fills from previous attempts
+            still_pending = []
+            for fill_key, fill in pending_fills:
+                try:
+                    self.alethra_client.report_fill(FillReport(
+                        intent_id=intent_id,
+                        quantity=fill.quantity,
+                        price=fill.price,
+                        fill_time=fill.fill_time,
+                        broker_ref=broker_order_id,
+                        commission=fill.commission,
+                    ))
+                    self._reported_fills.add(fill_key)
+                    logger.info(f"Successfully retried fill upload {fill_key}")
+                except Exception as e:
+                    logger.warning(f"Fill {fill_key} still pending: {e}")
+                    still_pending.append((fill_key, fill))
+            pending_fills = still_pending
 
+            # Check terminal status
             if status_enum in (BrokerOrderStatus.FILLED,):
-                logger.info(f"Order {broker_order_id} fully filled")
-                self._completed_intents.add(intent_id)
-                return
+                if pending_fills:
+                    # Broker says FILLED but we have undelivered fills
+                    # Continue monitoring to retry delivery
+                    logger.warning(
+                        f"Order {broker_order_id} is FILLED but {len(pending_fills)} fill(s) "
+                        f"not yet delivered to platform; continuing retry"
+                    )
+                    time.sleep(2)
+                    continue
+                else:
+                    # All fills delivered
+                    logger.info(f"Order {broker_order_id} fully filled and delivered")
+                    self._completed_intents.add(intent_id)
+                    return
 
             if status_enum in (BrokerOrderStatus.CANCELLED, BrokerOrderStatus.REJECTED):
+                # Report any remaining fills first
+                if pending_fills:
+                    logger.warning(
+                        f"Order {broker_order_id} was {status_enum.value} but "
+                        f"{len(pending_fills)} fill(s) not yet delivered; continuing retry"
+                    )
+                    time.sleep(2)
+                    continue
+                
+                # All fills delivered (or no fills), report cancellation
                 logger.warning(f"Order {broker_order_id} was {status_enum.value}")
                 try:
                     self.alethra_client.report_order_cancelled(
@@ -501,13 +559,17 @@ class ExecutionAgent:
                     )
                 except Exception as e:
                     logger.error(f"Failed to report cancellation: {e}")
+                    # Don't mark complete if cancellation report failed
+                    time.sleep(2)
+                    continue
                 self._completed_intents.add(intent_id)
                 return
 
             time.sleep(1)
 
+        # Timeout - don't mark complete, will continue on next poll
         logger.warning(
-            f"Order {broker_order_id} did not fill within {max_wait_seconds}s, "
+            f"Order {broker_order_id} monitoring timed out after {max_wait_seconds}s, "
             f"will check on next poll"
         )
 
