@@ -450,6 +450,25 @@ class TestRestartRecovery:
         )
         assert alethra2.report_fill.call_count >= 1
 
+    def test_lost_ack_matching_normalizes_instrument_format(self):
+        """The real IBKR transport reconstructs instrument_id from the contract
+        symbol ('0700.HK' → '700', 'US:AAPL' → 'AAPL'). Lost-ack matching must
+        compare normalized forms, or a live HK order is never adopted and the
+        agent resubmits a duplicate."""
+        transport = FakeBrokerTransport(fill_mode="immediate", fill_price=150.0)
+        # Order as IBKR would have created it: contract symbol "700".
+        transport.submit_order("700", "BUY", 100)
+
+        agent, _, alethra = _make_agent(transport=transport)
+        intent = _make_intent(symbol="0700.HK", quantity=100)
+
+        agent._process_single_intent(intent)
+
+        assert transport._order_counter == 1  # adopted, not duplicated
+        alethra.report_order_uncertain.assert_not_called()
+        alethra.report_order_submitted.assert_called_once()
+        assert alethra.report_fill.call_count >= 1
+
     def test_ambiguous_state_reported_uncertain_never_resubmitted(self):
         transport = FakeBrokerTransport(fill_mode="immediate", fill_price=150.0)
         transport.connect()

@@ -53,6 +53,10 @@ class OrderIntent(Base):
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
     rejection_reason = Column(Text, nullable=True)
     broker_ref = Column(String(255), nullable=True)
+    # Set when the owner cancels a submitted intent: the execution agent
+    # cancels the live broker order and reports back; the intent then
+    # transitions to 'cancelled' via the agent's report.
+    cancel_requested = Column(Boolean, default=False, nullable=False)
 
     # Idempotency: client-supplied key to prevent duplicate submissions.
     # If a request arrives with a duplicate idempotency_key, the existing intent is returned.

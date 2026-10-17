@@ -26,6 +26,7 @@ Safety invariants:
   failures fail closed
 """
 import logging
+import os
 import time
 import signal
 import sys
@@ -35,7 +36,12 @@ from typing import Dict, List, Optional, Set
 from .config import AgentConfig, load_config_from_env
 from .ibkr_client import IBKRClient
 from .alethra_client import AlethraAPIClient, OrderIntentDTO, FillReport
-from .broker_transport import BrokerTransport, BrokerOrderStatus, BrokerOrderState
+from .broker_transport import (
+    BrokerTransport,
+    BrokerOrderStatus,
+    BrokerOrderState,
+    normalize_instrument_id,
+)
 from app.lib.timeutil import utcnow
 
 
@@ -211,7 +217,7 @@ class ExecutionAgent:
                 # A rejected order never reached the market — it must never be
                 # adopted as a lost submission.
                 continue
-            if order.instrument_id != intent.symbol:
+            if normalize_instrument_id(order.instrument_id) != normalize_instrument_id(intent.symbol):
                 continue
             if order.side.upper() != intent.side.upper():
                 continue
@@ -244,6 +250,9 @@ class ExecutionAgent:
                 f"Intent {intent.intent_id} already submitted "
                 f"(broker_ref={self._submitted_intents[intent.intent_id]}), skipping"
             )
+            if intent.cancel_requested:
+                self._cancel_submitted_order(intent)
+                return
             self._monitor_fills_for_known_order(
                 intent.intent_id,
                 self._submitted_intents[intent.intent_id],
@@ -261,6 +270,9 @@ class ExecutionAgent:
                 )
                 self._submitted_intents[intent.intent_id] = intent.broker_ref
                 self._claimed_broker_refs.add(intent.broker_ref)
+                if intent.cancel_requested:
+                    self._cancel_submitted_order(intent)
+                    return
                 self._monitor_fills_for_known_order(intent.intent_id, intent.broker_ref)
             else:
                 logger.warning(
@@ -390,6 +402,49 @@ class ExecutionAgent:
 
         self._monitor_fills_for_known_order(intent.intent_id, broker_ref)
 
+    def _cancel_submitted_order(self, intent: OrderIntentDTO) -> None:
+        """Cancel a submitted order because the owner requested it.
+
+        Requests the cancellation at the broker, then continues monitoring the
+        order: the monitor reports any fills that landed first and, once the
+        broker confirms the cancellation, reports it to the platform. If the
+        order fully filled before the cancel landed, the fills are recorded
+        and the intent becomes 'filled' — never silently dropped.
+        """
+        broker_ref = self._submitted_intents.get(intent.intent_id) or intent.broker_ref
+        if not broker_ref:
+            logger.warning(
+                f"Cancel requested for {intent.intent_id} but no broker_ref; "
+                f"marking uncertain for manual resolution"
+            )
+            self.alethra_client.report_order_uncertain(
+                intent_id=intent.intent_id,
+                reason="Cancel requested for a submitted intent with no broker_ref",
+            )
+            self._completed_intents.add(intent.intent_id)
+            return
+
+        logger.info(
+            f"Cancel requested for intent {intent.intent_id} "
+            f"(broker_ref={broker_ref}); cancelling at broker"
+        )
+        try:
+            accepted = self.ibkr_client.cancel_order(broker_ref)
+        except Exception as e:
+            # Retry on the next poll — do not report cancelled without broker
+            # confirmation, and do not report uncertain (the order state is
+            # known, only the cancel attempt failed).
+            logger.error(f"Cancel attempt failed for {intent.intent_id}: {e}")
+            return
+
+        if not accepted:
+            logger.info(
+                f"Cancel for {intent.intent_id} ({broker_ref}) not accepted — "
+                f"order likely already filled or cancelled; continuing monitoring"
+            )
+
+        self._monitor_fills_for_known_order(intent.intent_id, broker_ref)
+
     def _monitor_fills_for_known_order(
         self, intent_id: str, broker_order_id: str
     ) -> None:
@@ -511,8 +566,22 @@ def main():
         logger.error(f"Configuration error: {e}")
         sys.exit(1)
 
-    from .broker_transport import FakeBrokerTransport
-    transport = FakeBrokerTransport()
+    transport_name = os.getenv("ALETHRA_BROKER_TRANSPORT", "ibkr").strip().lower()
+    if transport_name == "fake":
+        # Explicit override for local development/tests — never used by default.
+        logger.warning("Using FakeBrokerTransport (ALETHRA_BROKER_TRANSPORT=fake)")
+        from .broker_transport import FakeBrokerTransport
+        transport = FakeBrokerTransport()
+    elif transport_name == "ibkr":
+        from .broker_transport import IBKRBrokerTransport
+        transport = IBKRBrokerTransport(
+            host=config.ib_gateway_host,
+            port=config.ib_gateway_port,
+            client_id=config.ib_client_id,
+        )
+    else:
+        logger.error(f"Unknown ALETHRA_BROKER_TRANSPORT: {transport_name!r}")
+        sys.exit(1)
     ibkr_client = IBKRClient(transport)
 
     alethra_client = AlethraAPIClient(

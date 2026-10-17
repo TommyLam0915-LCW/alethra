@@ -45,6 +45,7 @@ class OrderIntentAgentResponse(BaseModel):
     status: str
     broker_ref: Optional[str] = None
     rejection_reason: Optional[str] = None
+    cancel_requested: bool = False
     expires_at: datetime
     created_at: datetime
 

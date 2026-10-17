@@ -27,6 +27,9 @@ class OrderIntentDTO:
     # agent re-adopt the mapped broker order instead of resubmitting.
     broker_ref: Optional[str] = None
     rejection_reason: Optional[str] = None
+    # True when the owner requested cancellation of a submitted intent: the
+    # agent must cancel the live broker order and report the result.
+    cancel_requested: bool = False
 
 
 @dataclass
