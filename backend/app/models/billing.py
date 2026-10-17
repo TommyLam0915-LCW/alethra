@@ -36,6 +36,7 @@ class Subscription(Base):
     plan_id = Column(UUID(as_uuid=True), ForeignKey("plans.id"), nullable=False)
     status = Column(String(20), default=SubscriptionStatus.trialing, nullable=False)
     payment_provider_id = Column(String(255), nullable=True)
+    stripe_subscription_id = Column(String(255), nullable=True, index=True)
     current_period_start = Column(DateTime, nullable=True)
     current_period_end = Column(DateTime, nullable=True)
     cancelled_at = Column(DateTime, nullable=True)

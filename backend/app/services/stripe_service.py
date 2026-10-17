@@ -1,7 +1,9 @@
 """Stripe billing service — high-level Stripe operations.
 
 This service provides Stripe-specific operations beyond the basic payment adapter.
-It handles customer management, checkout sessions, portal sessions, and webhook processing.
+It handles customer management, checkout sessions, and portal sessions.
+Webhook events are applied through the atomic, retry-safe
+``app.services.billing.process_webhook`` path.
 
 Requires:
 - STRIPE_SECRET_KEY environment variable
@@ -11,16 +13,12 @@ Requires:
 import os
 import uuid
 from typing import Optional, Dict, Any
-from uuid import UUID
-from datetime import datetime
 
 from sqlalchemy.orm import Session
 
-from app.models.billing import Plan, Subscription, SubscriptionStatus, WebhookEventRecord
+from app.models.billing import Plan
 from app.models.user import User
 from app.providers.stripe_adapter import StripePaymentAdapter
-from app.providers.payment_adapter import TestPaymentAdapter
-from app.lib.timeutil import utcnow
 
 
 class StripeService:
@@ -58,23 +56,29 @@ class StripeService:
         self._get_adapter()
         return self._test_mode
 
-    def create_customer(self, user: User) -> str:
-        """Create a Stripe customer for the user.
+    def create_customer(self, user: User, db: Optional[Session] = None) -> str:
+        """Get or create a Stripe customer for the user.
 
-        Returns customer ID (or test customer ID in test mode).
+        Reuses the stored ``user.stripe_customer_id`` when present so repeated
+        checkout/portal calls do not create duplicate Stripe customers.
         """
+        if user.stripe_customer_id:
+            return user.stripe_customer_id
+
         adapter = self._get_adapter()
 
         if adapter is None:
             # Test mode - return mock customer ID
-            return f"test_cus_{user.id.hex[:16]}"
+            customer_id = f"test_cus_{user.id.hex[:16]}"
+        else:
+            customer_id = adapter.create_customer(
+                email=user.email,
+                name=user.display_name,
+            )
 
-        # Check if user already has a Stripe customer ID
-        # This would be stored in a user metadata table in production
-        customer_id = adapter.create_customer(
-            email=user.email,
-            name=user.display_name,
-        )
+        if db is not None:
+            user.stripe_customer_id = customer_id
+            db.commit()
         return customer_id
 
     def create_checkout_session(
@@ -83,18 +87,39 @@ class StripeService:
         plan: Plan,
         success_url: str,
         cancel_url: str,
+        db: Optional[Session] = None,
     ) -> Dict[str, Any]:
         """Create a Stripe Checkout session for subscription.
+
+        Creates (or reuses) the local trialing subscription first and embeds
+        its id as ``client_reference_id`` / ``metadata.subscription_id`` so the
+        ``checkout.session.completed`` webhook can resolve and activate it.
 
         Returns session URL and ID.
         """
         adapter = self._get_adapter()
 
+        local_sub = None
+        if db is not None:
+            from app.services.billing import create_subscription
+            local_sub = create_subscription(db, user.id, plan.id)
+
         # Get or create customer
-        customer_id = self.create_customer(user)
+        customer_id = self.create_customer(user, db=db)
 
         # Get price ID from plan features or environment
         price_id = self._get_price_id_for_plan(plan)
+
+        client_reference_id = str(local_sub.id) if local_sub is not None else None
+        metadata = (
+            {
+                "subscription_id": str(local_sub.id),
+                "user_id": str(user.id),
+                "plan_id": str(plan.id),
+            }
+            if local_sub is not None
+            else {}
+        )
 
         if adapter is None:
             # Test mode - return mock session
@@ -103,6 +128,8 @@ class StripeService:
                 "session_url": f"https://checkout.stripe.com/test/{customer_id}",
                 "customer_id": customer_id,
                 "test_mode": True,
+                "client_reference_id": client_reference_id,
+                "metadata": metadata,
             }
 
         # Create real checkout session
@@ -111,6 +138,8 @@ class StripeService:
             price_id=price_id,
             success_url=success_url,
             cancel_url=cancel_url,
+            metadata=metadata or None,
+            client_reference_id=client_reference_id,
         )
 
         return {
@@ -118,6 +147,8 @@ class StripeService:
             "session_url": session_url,
             "customer_id": customer_id,
             "test_mode": self.is_test_mode,
+            "client_reference_id": client_reference_id,
+            "metadata": metadata,
         }
 
     def create_portal_session(
@@ -184,83 +215,6 @@ class StripeService:
                 return price_id
 
         raise ValueError(f"No Stripe price ID configured for plan: {plan.name}")
-
-    def process_stripe_webhook(
-        self,
-        db: Session,
-        event_type: str,
-        event_data: Dict[str, Any],
-        event_id: str,
-    ) -> bool:
-        """Process a Stripe webhook event.
-
-        Returns True if processed, False if duplicate.
-        """
-        # Check for duplicate
-        existing = db.query(WebhookEventRecord).filter(
-            WebhookEventRecord.event_id == event_id
-        ).first()
-        if existing:
-            return False
-
-        # Process based on event type
-        if event_type == "checkout.session.completed":
-            self._handle_checkout_completed(db, event_data)
-        elif event_type == "customer.subscription.updated":
-            self._handle_subscription_updated(db, event_data)
-        elif event_type == "customer.subscription.deleted":
-            self._handle_subscription_deleted(db, event_data)
-        elif event_type == "invoice.payment_succeeded":
-            self._handle_payment_succeeded(db, event_data)
-        elif event_type == "invoice.payment_failed":
-            self._handle_payment_failed(db, event_data)
-
-        # Record event
-        record = WebhookEventRecord(
-            event_id=event_id,
-            event_type=event_type,
-            payload=event_data,
-            processed=True,
-            processed_at=utcnow(),
-        )
-        db.add(record)
-        db.commit()
-
-        return True
-
-    def _handle_checkout_completed(self, db: Session, data: Dict[str, Any]):
-        """Handle checkout.session.completed event."""
-        # Extract subscription and customer info
-        subscription_id = data.get("subscription")
-        customer_id = data.get("customer")
-        metadata = data.get("metadata", {})
-
-        # Find or create subscription
-        # In production, you'd look up by metadata or customer_id
-        # For now, we'll just record the event
-
-    def _handle_subscription_updated(self, db: Session, data: Dict[str, Any]):
-        """Handle customer.subscription.updated event."""
-        stripe_sub_id = data.get("id")
-        status = data.get("status")
-        current_period_end = data.get("current_period_end")
-
-        # Update subscription in database
-        # This would require mapping Stripe subscription ID to our subscription
-
-    def _handle_subscription_deleted(self, db: Session, data: Dict[str, Any]):
-        """Handle customer.subscription.deleted event."""
-        stripe_sub_id = data.get("id")
-
-        # Mark subscription as cancelled
-
-    def _handle_payment_succeeded(self, db: Session, data: Dict[str, Any]):
-        """Handle invoice.payment_succeeded event."""
-        # Record successful payment
-
-    def _handle_payment_failed(self, db: Session, data: Dict[str, Any]):
-        """Handle invoice.payment_failed event."""
-        # Mark subscription as past_due
 
 
 # Global instance

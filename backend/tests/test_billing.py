@@ -266,7 +266,7 @@ class TestWebhookProcessing:
             "/api/v1/webhooks/payment",
             content=b'{"type": "test"}',
         )
-        assert resp.status_code == 422
+        assert resp.status_code == 400
 
     def test_webhook_endpoint_invalid_signature(self, client):
         resp = client.post(

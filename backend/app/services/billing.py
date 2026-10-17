@@ -1,16 +1,22 @@
+import logging
+import uuid
 from datetime import datetime
 from typing import Optional, Dict, Any
 from uuid import UUID
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.billing import Plan, Subscription, PaymentRecord, WebhookEventRecord, SubscriptionStatus
 from app.models.pilot import PilotEntitlement, SupportTier
+from app.models.user import User
 from app.providers.payment_adapter import PaymentAdapter, TestPaymentAdapter
 
 
 from app.auth.entitlements import FREE_PLAN_ENTITLEMENT
 from app.lib.timeutil import utcnow
+
+logger = logging.getLogger(__name__)
 
 
 # Default entitlement limits keyed by rough price tier.
@@ -124,15 +130,25 @@ def activate_subscription(
     if not sub:
         raise ValueError(f"Subscription not found: {subscription_id}")
 
+    _activate_subscription_tx(db, sub)
+    sub.payment_provider_id = payment_intent_id
+
+    db.flush()
+    db.commit()
+    return sub
+
+
+def _activate_subscription_tx(db: Session, sub: Subscription) -> Subscription:
+    """Activate *sub* and upsert its PilotEntitlement. No commit — runs inside
+    the caller's transaction so the state change lands atomically with the
+    webhook event record."""
     plan = db.query(Plan).filter(Plan.id == sub.plan_id).first()
     if not plan:
         raise ValueError(f"Plan not found: {sub.plan_id}")
 
     sub.status = SubscriptionStatus.active
-    sub.payment_provider_id = payment_intent_id
     sub.current_period_start = utcnow()
 
-    # --- Atomic entitlement link -------------------------------------------
     limits = _limits_for_plan(plan)
     entitlement = db.query(PilotEntitlement).filter(
         PilotEntitlement.user_id == sub.user_id,
@@ -150,7 +166,6 @@ def activate_subscription(
             setattr(entitlement, key, value)
 
     db.flush()
-    db.commit()
     return sub
 
 
@@ -159,11 +174,16 @@ def cancel_subscription(db: Session, subscription_id: UUID) -> Subscription:
     if not sub:
         raise ValueError(f"Subscription not found: {subscription_id}")
 
-    sub.status = SubscriptionStatus.cancelled
-    sub.cancelled_at = utcnow()
+    _cancel_subscription_tx(db, sub)
     db.flush()
     db.commit()
     return sub
+
+
+def _cancel_subscription_tx(db: Session, sub: Subscription) -> None:
+    """Cancel *sub*. No commit — runs inside the caller's transaction."""
+    sub.status = SubscriptionStatus.cancelled
+    sub.cancelled_at = utcnow()
 
 
 def record_payment(
@@ -175,6 +195,31 @@ def record_payment(
     status: str,
     payment_intent_id: Optional[str] = None,
 ) -> PaymentRecord:
+    record = _record_payment_tx(
+        db, user_id=user_id, subscription_id=subscription_id,
+        amount=amount, currency=currency, status=status,
+        payment_intent_id=payment_intent_id,
+    )
+    db.commit()
+    return record
+
+
+def _record_payment_tx(
+    db: Session,
+    user_id: UUID,
+    subscription_id: Optional[UUID],
+    amount: int,
+    currency: str,
+    status: str,
+    payment_intent_id: Optional[str] = None,
+) -> PaymentRecord:
+    if payment_intent_id:
+        existing = db.query(PaymentRecord).filter(
+            PaymentRecord.payment_intent_id == payment_intent_id,
+        ).first()
+        if existing:
+            return existing
+
     adapter = get_payment_adapter()
     record = PaymentRecord(
         user_id=user_id,
@@ -188,11 +233,166 @@ def record_payment(
     )
     db.add(record)
     db.flush()
-    db.commit()
     return record
 
 
+# Event types that activate a subscription (idempotent: activating an active
+# subscription re-applies entitlement limits).
+_ACTIVATION_EVENT_TYPES = {
+    "checkout.session.completed",
+    "payment_intent.succeeded",
+    "invoice.paid",
+    "payment.completed",
+}
+# Payment failure puts the subscription past_due (not cancelled — the sender
+# may retry the charge).
+_PAST_DUE_EVENT_TYPES = {"invoice.payment_failed", "payment.failed"}
+_CANCELLATION_EVENT_TYPES = {"customer.subscription.deleted", "subscription.cancelled"}
+
+
+def _flatten_event_data(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge a Stripe-style envelope (``data.object``) into a flat dict.
+
+    Both envelopes are accepted: the test adapter sends flat ``data`` dicts,
+    Stripe sends ``{"object": {...}}``. Object fields win on conflicts.
+    """
+    d = dict(payload or {})
+    obj = payload.get("object") if isinstance(payload, dict) else None
+    if isinstance(obj, dict):
+        d.update(obj)
+    return d
+
+
+def _is_uuid(value: str) -> bool:
+    try:
+        uuid.UUID(str(value))
+        return True
+    except ValueError:
+        return False
+
+
+def _resolve_subscription(db: Session, data: Dict[str, Any]) -> Optional[Subscription]:
+    """Find the subscription an event refers to.
+
+    Accepted references: ``subscription_id``, ``client_reference_id``
+    (Stripe checkout convention), ``metadata.subscription_id``, or a Stripe
+    subscription id (``sub_...``) from ``subscription`` / the event object's
+    ``id`` resolved via the stored ``stripe_subscription_id`` mapping.
+    Returns None when the event carries no resolvable reference or one that
+    does not match an existing subscription.
+    """
+    candidates = [
+        data.get("subscription_id"),
+        data.get("client_reference_id"),
+    ]
+    metadata = data.get("metadata")
+    if isinstance(metadata, dict):
+        candidates.append(metadata.get("subscription_id"))
+    candidates.append(data.get("subscription"))
+    candidates.append(data.get("id"))
+
+    for value in candidates:
+        if not value:
+            continue
+        if not _is_uuid(value):
+            continue
+        sid = uuid.UUID(str(value))
+        sub = db.query(Subscription).filter(Subscription.id == sid).first()
+        if sub:
+            return sub
+
+    stripe_ids = [str(v) for v in candidates if v and not _is_uuid(v)]
+    if stripe_ids:
+        sub = db.query(Subscription).filter(
+            Subscription.stripe_subscription_id.in_(stripe_ids)
+        ).first()
+        if sub:
+            return sub
+    return None
+
+
+def _apply_webhook_event(db: Session, event_type: str, payload: Dict[str, Any]) -> None:
+    """Apply the state change for a webhook event. No commit — the caller
+    commits the event record and the state change together.
+
+    Events with no resolvable subscription reference are acknowledged without
+    state change (the sender must not retry them forever); unknown event types
+    are likewise acknowledged. Only unexpected errors propagate, which rolls
+    back the whole transaction so the sender's retry reprocesses the event.
+    """
+    data = _flatten_event_data(payload)
+
+    if event_type in _ACTIVATION_EVENT_TYPES:
+        sub = _resolve_subscription(db, data)
+        if sub is None:
+            return
+        if sub.status == SubscriptionStatus.cancelled:
+            return
+        _activate_subscription_tx(db, sub)
+
+        stripe_sub_id = data.get("subscription")
+        if isinstance(stripe_sub_id, str) and stripe_sub_id.startswith("sub_"):
+            sub.stripe_subscription_id = stripe_sub_id
+
+        customer_id = data.get("customer")
+        if isinstance(customer_id, str) and customer_id.startswith("cus_"):
+            user = db.query(User).filter(User.id == sub.user_id).first()
+            if user is not None and not user.stripe_customer_id:
+                user.stripe_customer_id = customer_id
+
+        amount = (
+            data.get("amount")
+            if data.get("amount") is not None
+            else (data.get("amount_paid") if data.get("amount_paid") is not None else data.get("amount_total"))
+        )
+        if isinstance(amount, int) and not isinstance(amount, bool):
+            payment_intent_id = (
+                data.get("payment_intent")
+                or data.get("payment_intent_id")
+                or data.get("intent_id")
+            )
+            _record_payment_tx(
+                db,
+                user_id=sub.user_id,
+                subscription_id=sub.id,
+                amount=amount,
+                currency=data.get("currency") or "USD",
+                status="succeeded",
+                payment_intent_id=payment_intent_id,
+            )
+    elif event_type in _PAST_DUE_EVENT_TYPES:
+        sub = _resolve_subscription(db, data)
+        if sub is not None:
+            sub.status = SubscriptionStatus.past_due
+    elif event_type in _CANCELLATION_EVENT_TYPES:
+        sub = _resolve_subscription(db, data)
+        if sub is not None:
+            _cancel_subscription_tx(db, sub)
+
+
 def process_webhook(db: Session, event_id: str, event_type: str, payload: Dict[str, Any]) -> bool:
+    """Record and apply a payment webhook event atomically.
+
+    Returns True if the event was applied now, False if it was already
+    recorded (duplicate delivery). The event record and the state change are
+    committed together: if application raises, the whole transaction rolls
+    back — including the event record — so the sender's retry reprocesses the
+    event instead of finding it silently marked processed (retry-safe).
+    """
+    event_created = payload.get("created") if isinstance(payload, dict) else None
+    if event_created:
+        try:
+            from datetime import timezone
+            event_time = datetime.fromtimestamp(int(event_created), tz=timezone.utc)
+            age_days = (datetime.now(timezone.utc) - event_time).days
+            if age_days > 7:
+                logger.warning(
+                    "Processing stale webhook event %s (%d days old): %s",
+                    event_id, age_days, event_type,
+                )
+        except (ValueError, TypeError, OSError):
+            pass
+
     existing = db.query(WebhookEventRecord).filter(
         WebhookEventRecord.event_id == event_id
     ).first()
@@ -203,11 +403,26 @@ def process_webhook(db: Session, event_id: str, event_type: str, payload: Dict[s
         event_id=event_id,
         event_type=event_type,
         payload=payload,
-        processed=True,
-        processed_at=utcnow(),
+        processed=False,
     )
     db.add(record)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError:
+        # Concurrent delivery of the same event_id won the unique race.
+        db.rollback()
+        return False
+
+    try:
+        _apply_webhook_event(db, event_type, payload)
+    except Exception:
+        # Application failed: roll back the event record and any partial
+        # state change so the sender's retry reprocesses the event.
+        db.rollback()
+        raise
+
+    record.processed = True
+    record.processed_at = utcnow()
     db.commit()
     return True
 

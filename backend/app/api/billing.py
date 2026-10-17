@@ -1,7 +1,6 @@
 from typing import List
 from uuid import UUID
-from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException, Request, Header, Query
+from fastapi import APIRouter, Depends, HTTPException, Request, Query
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -22,7 +21,6 @@ from app.services.billing import (
 from app.services.stripe_service import get_stripe_service
 from app.services.feature_switches import get_operational_status
 from app.config import get_settings
-from app.providers.payment_adapter import WebhookEvent
 from urllib.parse import urlparse
 
 router = APIRouter(tags=["billing"])
@@ -134,36 +132,43 @@ def create_payment_intent(
 @router.post("/webhooks/payment")
 async def handle_payment_webhook(
     request: Request,
-    x_webhook_signature: str = Header(...),
     db: Session = Depends(get_db),
 ):
-    if not x_webhook_signature:
+    # Real Stripe deliveries carry the signature in the Stripe-Signature
+    # header; the test adapter contract uses X-Webhook-Signature.
+    signature = (
+        request.headers.get("stripe-signature")
+        or request.headers.get("x-webhook-signature")
+    )
+    if not signature:
         raise HTTPException(status_code=400, detail="Missing webhook signature")
 
-    payload = (await request.body()).decode()
+    raw_body = await request.body()
+    payload_text = raw_body.decode("utf-8", errors="replace")
     adapter = get_payment_adapter()
 
-    verified_event = adapter.verify_webhook_signature(payload, x_webhook_signature)
+    verified_event = adapter.verify_webhook_signature(payload_text, signature)
     if not verified_event:
         raise HTTPException(status_code=400, detail="Invalid signature")
 
-    if hasattr(verified_event, 'type'):
-        event = WebhookEvent(
-            id=verified_event.id,
-            event_type=verified_event.type,
-            data=verified_event.data.get("object", {}) if hasattr(verified_event.data, 'get') else verified_event.data.object,
-            created_at=datetime.fromtimestamp(verified_event.created).isoformat() if hasattr(verified_event, 'created') else "",
-            signature="",
-        )
+    if hasattr(verified_event, "type"):
+        # Verified provider Event object (e.g. Stripe SDK): the object payload
+        # (data.object) is what process_webhook applies.
+        event_id = verified_event.id
+        event_type = verified_event.type
+        event_payload = verified_event.data.get("object", {}) if hasattr(verified_event.data, "get") else {}
     else:
-        event = adapter.parse_webhook_event(payload)
+        event = adapter.parse_webhook_event(payload_text)
+        event_id = event.id
+        event_type = event.event_type
+        event_payload = event.data
 
-    is_duplicate = not process_webhook(db, event.id, event.event_type, event.data)
-    db.commit()
+    # process_webhook commits the event record and its state change atomically.
+    is_duplicate = not process_webhook(db, event_id, event_type, event_payload)
 
     return {
         "received": True,
-        "event_id": event.id,
+        "event_id": event_id,
         "duplicate": is_duplicate,
         "test_mode": True,
     }
@@ -200,6 +205,7 @@ def create_checkout(
             plan=plan,
             success_url=success_url,
             cancel_url=cancel_url,
+            db=db,
         )
         return {
             "session_id": session["session_id"],
@@ -222,8 +228,8 @@ def create_portal(
 
     stripe_service = get_stripe_service()
 
-    # Get customer ID (in production, this would be stored in user metadata)
-    customer_id = stripe_service.create_customer(current_user)
+    # Get customer ID (reuses the stored per-user customer id when present)
+    customer_id = stripe_service.create_customer(current_user, db=db)
 
     # Create portal session
     portal = stripe_service.create_portal_session(
