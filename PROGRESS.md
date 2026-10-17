@@ -13,7 +13,7 @@ Status: Pushed. NOT merged. Base: auto/market-data-quality (PR #13)
 | # | 需求 | main 實作 | 分支實作 | 接線 | 測試證據 | 外部依賴 | 缺口 | 分類 |
 |---|------|-----------|----------|------|----------|----------|------|------|
 | 1 | ML job 走 durable worker；修 hardcoded 2024；ownership/auth/quota/restart/artifact reload | `api/ml_training.py:62,77` **sync 執行在 HTTP request 內**；`run_latest_prediction` hardcode `get_bars(pred_instrument, "2024-01-02", "2024-12-31")` | PR #12/#14 的 ML hardening 已在 stack；`workers/training_worker.py` 有 kill-switch-aware `SELECT FOR UPDATE` claiming，但 `execute_job` 只跑 `run_parameter_sweep` — **ML job 永遠不會被 worker 認領** | 無 ML→worker 接線 | 850 pass（main，sqlite 離線）；無任何 worker-driven ML 測試 | 無 | sync→worker、日期 hardcode、restart/artifact 測試 | **implemented-but-unintegrated** |
-| 2 | legacy-db-upgrade：偵測要查 revision+schema；UUID 錯誤不得 success；table_count 修正；fixture 驗證 | 不在 main | `alethra-legacy-auto` `db_upgrade.py:105` 只看 `"alembic_version" in tables` 就判 CURRENT；`:186` table_count 算的是欄位數不是表數；UUID errors 加入 list 但最終仍 `return success=True` | 無 | 46 pass（worktree 離線）；無 legacy fixture 升級+還原驗證 | Legacy DB schema docs（Scenario B 仍 blocked） | 3 個 code 缺陷 + fixture 驗證 | **implemented-but-unintegrated** |
+| 2 | legacy-db-upgrade：偵測要查 revision+schema；UUID 錯誤不得 success；table_count 修正；fixture 驗證 | 不在 main | `alethra-legacy-auto` @ **7d346ac 已修 3 缺陷**：偵測改為 revision==`b7c8d9e0f1a2` **且** CURRENT_MIN_TABLES ⊆ tables（否則 UNKNOWN+診斷）；UUID 錯誤改 blocking → success=False+restore；table_count 改算表數；另 `_ensure_current_tables` 補齊 v0/v1 缺表才蓋章 | — | db-upgrade 測試 53/53（含 TestUpgradeRestoreRoundtrip：代表性 v1 fixture 升級→還原、invalid-UUID blocking+restore）；worktree 全套 857 passed | Legacy DB schema docs（Scenario B 仍 blocked） | merge 分支；Scenario B 外部驗證仍 blocked | **integrated-offline-E2E-verified**（離線 fixture roundtrip） |
 | 3 | billing-stripe 整合 #17 atomic webhook；驗簽 raw-body 契約；customer/subscription mapping；retry-safe usage | 不在 main | billing-stripe 分支 `billing.py:195-206` process_webhook **仍是 record-only**；PR #17 分支（alethra/alethra-billing-auto）有 atomic `_apply_webhook_event`；stripe_service.py webhook handlers 是 stub（"In production, you'd look up…"） | 兩分支同改 billing.py 不同 base；後 merge 者須帶 atomic 邏輯 | billing-stripe 41 pass、#17 763 pass（各自 worktree，sqlite，不可相加）；無真 HTTP 簽章 header/raw-body 測試 | Stripe credentials（外部驗證 blocked） | 整合、簽章契約、mapping | **implemented-but-unintegrated** |
 | 4 | 實際 IBKR transport + 平台取消流程；ad-hoc E2E 轉為可重跑測試 | FakeBrokerTransport 完整（submit/cancel/status/fills、4 fill modes）；agent 取消流程存在（`agent.py:264` `report_order_cancelled`、ibkr_client:61 cancel_order 代理 transport） | — | — | execution 測試 pass（worktree 離線） | **`IBKRBrokerTransport` class 不存在** — 僅 docstring 提及（broker_transport.py:8）；TWS/Gateway | real transport class、E2E 測試化 | real transport: **not-implemented**; cancel flow: **integrated-offline-E2E-verified** |
 | 5 | adapter→storage→backtest/ML 一致；synthetic 不得標為 real | demo/real-synthetic 有 disclaimer（instruments.py:86,206） | PR #18（本分支）：data_source auto/stored/provider、checksum、provenance（data_source_requested/used）、18 新測試 | backtest+ML training 已接 stored data | 18 pass（本分支離線） | LSEG（live 驗證 blocked） | 確認 stored-bar 來源標記（synthetic 來源的 bars 是否帶 synthetic 標記入庫） | **implemented-but-unintegrated** |
@@ -24,19 +24,18 @@ Note: 測試數字不可跨分支相加（每分支各自 sqlite worktree DB）�
 
 ## Directive progress checkpoint (2026-10-17 15:00+08:00)
 
-**Continuation point — next run resumes at Item 2.**
+**Continuation point — next run resumes at Item 3.**
 
-### Item 1 — DONE (commit ef255e0, branch auto/stored-data-backtest-integration, suite 862 passed offline sqlite)
-- `/ml/train` enqueues pending job (no sync training in HTTP request); worker routes ML jobs via `strategy_spec_snapshot.training_type == "ml_model"` → `execute_ml_training`
-- Quota: API reserves; worker settles on success / releases on failure (`quota_reservation_id` in job spec)
-- Restart recovery: claim records `claimed_at`; `reclaim_stale_running_jobs` (TRAINING_STALE_AFTER_SECONDS, default 900s) resets orphaned running jobs → pending; fixed JSONB in-place-mutation no-op-update bug (copy before mutate)
-- `predict-latest` now enforces ownership (was missing user_id check → 403 for non-owner)
-- Hardcoded 2024 windows removed: `_latest_available_end_date` (stored last_bar_date → provider range max) drives predict/predict-latest/training default end date; `get_recent_bars_for_prediction` (380-day lookback) stored-first
-- Tests: `test_ml_worker_integration.py` (9: enqueue+reservation, settle, release-on-failure, reclaim, provider-window 380d, stored-first, worker-artifact predict-latest, artifact reload), `test_ml_pipeline.py` updated to worker flow + enqueue contract + auth + predict-latest ownership. Evidence: `ALETHRA_TEST_DB=sqlite:///./test-item1-*.db` `.venv/bin/python -m pytest backend/tests/ -q` → 862 passed @ ef255e0
-- Category: **integrated-offline-E2E-verified** (offline); matrix row 1 updated accordingly
+### Item 2 — DONE (commit 7d346ac, branch auto/legacy-db-upgrade, pushed; legacy worktree suite 857 passed offline sqlite)
+Fixed the 3 defects in `backend/app/services/db_upgrade.py` (alethra-legacy-auto worktree):
+- Defect 1 — CURRENT detection was "alembic_version table exists → CURRENT": now requires revision == `b7c8d9e0f1a2` (new `_read_alembic_revision`) AND `CURRENT_MIN_TABLES ⊆ tables`; otherwise UNKNOWN with diagnostic error listing revision + missing tables. Also fixed constant typo `experiments_versions` → `experiment_versions` (real table per app/models/experiment_version.py)
+- Defect 2 — invalid-UUID data returned success=True with warnings only: Phase-1 validation errors are now blocking → `success=False`, backup restored, pre-upgrade state verified in test
+- Defect 3 — `table_count` summed columns not tables: now `len(col_types)`
+- Plus: `_ensure_current_tables` creates all missing CURRENT_MIN_TABLES (for v0 AND v1) before stamping the revision, so `b7c8d9e0f1a2` stamp is backed by actual schema
+- Tests: `test_db_upgrade.py` 53/53 (detection ×3 new, TestUpgradeRestoreRoundtrip with representative v1 fixture: upgrade→restore roundtrip, invalid-UUID blocking+restore, table_count). Full legacy worktree suite: 857 passed in 213.66s, `ALETHRA_TEST_DB=sqlite:///./test-item2-full-*.db`, `.venv/bin/python -m pytest backend/tests/ -q` @ 7d346ac
+- Category: **integrated-offline-E2E-verified** (offline sqlite fixture roundtrip); matrix row 2 updated accordingly
 
 ### Remaining (in order)
-- Item 2: legacy-db-upgrade 3 defects + fixture validation (task #14)
 - Item 3: billing-stripe × #17 atomic webhook integration (task #15)
 - Item 4: IBKR transport class + cancel-flow tests (task #16)
 - Item 5: stored-bar synthetic labeling check (task #17)
