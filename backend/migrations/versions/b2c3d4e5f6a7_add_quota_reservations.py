@@ -13,16 +13,35 @@ from typing import Sequence, Union
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy import inspect
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision: str = "b2c3d4e5f6a7"
-down_revision: Union[str, None] = "a1b2c3d4e5f6"
+# Runs after the legacy-schema conversion: the quota_reservations FK points at
+# users.id, which on a legacy database is still VARCHAR(36) until b7c8d9e0f1a2
+# converts it — creating this table before that conversion fails on PostgreSQL.
+down_revision: Union[str, None] = "b7c8d9e0f1a2"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
+def _table_exists(name: str) -> bool:
+    return name in inspect(op.get_bind()).get_table_names()
+
+
+def _index_exists(table: str, index: str) -> bool:
+    bind = op.get_bind()
+    if table not in inspect(bind).get_table_names():
+        return False
+    return index in {i["name"] for i in inspect(bind).get_indexes(table)}
+
+
 def upgrade() -> None:
+    if _table_exists("quota_reservations"):
+        # Already created (e.g. legacy bootstrap created the full current
+        # schema from the model metadata before this migration ran).
+        return
     op.create_table(
         "quota_reservations",
         sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
@@ -35,7 +54,9 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["user_id"], ["users.id"]),
         sa.PrimaryKeyConstraint("id"),
     )
-    op.create_index("ix_quota_reservation_user_id", "quota_reservations", ["user_id"])
+    # Model-default name (ix_<table>_<column>) so alembic-created and
+    # create_all-created databases carry identical indexes.
+    op.create_index("ix_quota_reservations_user_id", "quota_reservations", ["user_id"])
     op.create_index(
         "ix_quota_reservation_user_type_status",
         "quota_reservations",
@@ -44,6 +65,11 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index("ix_quota_reservation_user_type_status", table_name="quota_reservations")
-    op.drop_index("ix_quota_reservation_user_id", table_name="quota_reservations")
+    if not _table_exists("quota_reservations"):
+        return
+    if _index_exists("quota_reservations", "ix_quota_reservation_user_type_status"):
+        op.drop_index("ix_quota_reservation_user_type_status", table_name="quota_reservations")
+    for name in ("ix_quota_reservations_user_id", "ix_quota_reservation_user_id"):
+        if _index_exists("quota_reservations", name):
+            op.drop_index(name, table_name="quota_reservations")
     op.drop_table("quota_reservations")

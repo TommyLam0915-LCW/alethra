@@ -81,6 +81,8 @@ from app.models.execution import (
 from app.models.kill_switch import KillSwitch, KillSwitchScope
 from app.models.rate_limit import RateLimitCounter
 from app.models.market_data import MarketDataBar, MarketDataMetadata
+from app.models.watchlist import Watchlist, WatchlistItem
+from app.models.user_layout import UserLayout
 
 __all__ = [
     "User",
@@ -176,4 +178,7 @@ __all__ = [
     "RateLimitCounter",
     "MarketDataBar",
     "MarketDataMetadata",
+    "Watchlist",
+    "WatchlistItem",
+    "UserLayout",
 ]

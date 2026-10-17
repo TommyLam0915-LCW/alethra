@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     enable_public_sharing: bool = False
     enable_external_notifications: bool = False
     cors_origins: str = "http://localhost:3000"
+    redis_url: str = ""
 
     @property
     def cors_origins_list(self) -> list[str]:
