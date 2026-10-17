@@ -182,7 +182,14 @@ def cancel_intent(
     intent_id: str,
     user_id: uuid.UUID,
 ) -> OrderIntent:
-    """Cancel an intent. If pending/authorized -> cancelled; if submitted -> rejected."""
+    """Cancel an intent.
+
+    pending/authorized → cancelled directly (no broker order exists).
+    submitted → the order is live at the broker: set ``cancel_requested`` so
+    the execution agent cancels it at the broker and reports back; the intent
+    transitions to 'cancelled' only via the agent's report (any fills that
+    landed first are recorded instead of lost).
+    """
     intent = db.query(OrderIntent).filter(
         OrderIntent.intent_id == intent_id,
     ).with_for_update().first()
@@ -194,8 +201,7 @@ def cancel_intent(
     if intent.status in (IntentStatus.pending, IntentStatus.authorized):
         intent.status = IntentStatus.cancelled
     elif intent.status == IntentStatus.submitted:
-        intent.status = IntentStatus.rejected
-        intent.rejection_reason = "Cancelled after submission"
+        intent.cancel_requested = True
     else:
         raise HTTPException(
             status_code=400,

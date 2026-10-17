@@ -139,7 +139,7 @@ def run_parameter_sweep(
             strategy_spec["signal_parameters"] = signal_params
 
             # Run the backtest
-            backtest_result = run_backtest(strategy_spec)
+            backtest_result = run_backtest(strategy_spec, db_session=db)
 
             metrics = backtest_result.get("metrics", {})
             errors = backtest_result.get("errors", [])
