@@ -82,7 +82,7 @@ export default function BottomTabs({
                       <Link href="/models">{m.name || (m.model_id || m.id || '').slice(0, 8)}</Link>
                     </td>
                     <td>{m.model_type || m.algorithm || '—'}</td>
-                    <td>{(m.trained_at || m.created_at) ? new Date(m.trained_at || m.created_at).toLocaleString('zh-Hant') : '—'}</td>
+                    <td>{(() => { const d = m.trained_at || m.created_at; return d ? new Date(d).toLocaleString('zh-Hant') : '—'; })()}</td>
                   </tr>
                 ))}
               </tbody>

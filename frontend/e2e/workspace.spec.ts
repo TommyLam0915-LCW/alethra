@@ -261,7 +261,7 @@ function mockWorkspaceApis(page: Page, state: WorkspaceMocks) {
           quantity: body.quantity,
           order_type: body.order_type || 'MARKET',
           limit_price: body.limit_price ?? null,
-          status: 'draft',
+          status: 'pending',
           authorization_token: 'auth-token-xyz',
           created_at: '2026-10-17T00:00:00Z',
           updated_at: '2026-10-17T00:00:00Z',
@@ -454,7 +454,7 @@ test.describe('Workspace shell', () => {
 
     await page.getByTestId('order-create-intent').click();
     await expect(page.getByTestId('order-intent-id')).toBeVisible({ timeout: 10_000 });
-    await expect(page.getByTestId('order-intent-status')).toContainText('draft');
+    await expect(page.getByTestId('order-intent-status')).toContainText('pending');
 
     await page.getByRole('button', { name: '確認授權' }).click();
     await expect(page.getByTestId('order-intent-status')).toContainText('authorized', { timeout: 10_000 });
