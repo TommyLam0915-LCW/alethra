@@ -51,9 +51,9 @@ CURRENT_MIN_TABLES = {"users", "datasets", "experiments", "workspaces",
                       "market_data_bars", "market_data_metadata"}
 
 # Alembic revision this tool stamps after upgrading a legacy database.
-# Must match the branch's migration head (f6a7b8c9d0e1 add_watchlists_and_user_layouts
-# — the linearized head on the integration branch).
-CURRENT_SCHEMA_REVISION = "f6a7b8c9d0e1"
+# Must match the branch's migration head (a8d9e0f1b2c3 add_ai_conversations
+# — the linearized head on this stack).
+CURRENT_SCHEMA_REVISION = "a8d9e0f1b2c3"
 
 # Column signatures that identify legacy schema
 LEGACY_UUID_COLUMNS = {"id", "user_id", "owner_id", "experiment_id",

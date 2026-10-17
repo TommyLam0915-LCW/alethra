@@ -83,6 +83,7 @@ from app.models.rate_limit import RateLimitCounter
 from app.models.market_data import MarketDataBar, MarketDataMetadata
 from app.models.watchlist import Watchlist, WatchlistItem
 from app.models.user_layout import UserLayout
+from app.models.ai_conversation import AIConversation, AIMessage
 
 __all__ = [
     "User",
@@ -181,4 +182,6 @@ __all__ = [
     "Watchlist",
     "WatchlistItem",
     "UserLayout",
+    "AIConversation",
+    "AIMessage",
 ]
