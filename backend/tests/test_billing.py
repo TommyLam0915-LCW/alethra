@@ -556,6 +556,33 @@ class TestUsageTracking:
         assert "used" in quota
         assert "limit" in quota
 
+    def test_quota_reports_settled_usage(self, client):
+        """Regression: the endpoint documented ``ai_usage_limit`` but quota
+        counters are stored under the mapped key ``ai_usage`` — looking the
+        counter up by the raw parameter made ``used`` always report 0."""
+        auth = _create_user_via_api(client)
+        db = _get_db()
+        user = db.query(User).filter(User.email.contains("billing-")).first()
+
+        from app.auth.entitlements import reserve_quota, settle_reservation
+        reservation = reserve_quota(db, user.id, "ai_usage")
+        settle_reservation(db, reservation.id)
+        db.commit()
+
+        resp = client.get("/api/v1/usage/quota?quota_type=ai_usage_limit&period=monthly", headers=auth)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["used"] == 1, data
+        assert data["limit"] == 10, data
+        assert data["remaining"] == 9, data
+
+        # The counter-key convention must resolve to the same counter.
+        resp = client.get("/api/v1/usage/quota?quota_type=ai_usage&period=monthly", headers=auth)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["used"] == 1, data
+        assert data["limit"] == 10, data
+
     def test_enforce_quota_exceeded(self, client):
         db = _get_db()
         user_email = f"enforce-test-{uuid.uuid4().hex[:8]}@test.io"

@@ -465,10 +465,23 @@ def check_quota(
 ) -> Dict[str, Any]:
     """Check if user has remaining quota.
 
+    ``quota_type`` is accepted either as the entitlement column name
+    (``"ai_usage_limit"``, the API convention) or as the quota counter key
+    (``"ai_usage"``). Quota counters are written under the counter key, so
+    the counter lookup must use the mapped key — using the raw parameter for
+    both made ``used`` always report 0.
+
     Returns dict with 'allowed', 'used', 'limit', 'remaining'.
     """
     from app.models.quota import QuotaCounter
     from app.models.pilot import PilotEntitlement
+    from app.auth.entitlements import QUOTA_TYPE_MAP
+
+    reverse_map = {v: k for k, v in QUOTA_TYPE_MAP.items()}
+    limit_name = quota_type if quota_type in reverse_map else QUOTA_TYPE_MAP.get(
+        quota_type, quota_type
+    )
+    counter_type = reverse_map.get(limit_name, limit_name)
 
     # Get entitlement limits
     entitlement = db.query(PilotEntitlement).filter(
@@ -477,18 +490,25 @@ def check_quota(
 
     if entitlement is None:
         # No entitlement - use free plan limits
-        limit = FREE_PLAN_ENTITLEMENT.get(quota_type, 0)
+        limit = FREE_PLAN_ENTITLEMENT.get(limit_name, 0)
     else:
-        limit = getattr(entitlement, quota_type, None)
+        limit = getattr(entitlement, limit_name, None)
         if limit is None:
             return {"allowed": True, "used": 0, "limit": None, "remaining": None}
 
-    # Get current usage
+    # Counters are written under the mapped key; reserve/settle only write
+    # period="lifetime", so fall back to it when the requested period has no row.
     counter = db.query(QuotaCounter).filter(
         QuotaCounter.user_id == user_id,
-        QuotaCounter.quota_type == quota_type,
+        QuotaCounter.quota_type == counter_type,
         QuotaCounter.period == period,
     ).first()
+    if counter is None and period != "lifetime":
+        counter = db.query(QuotaCounter).filter(
+            QuotaCounter.user_id == user_id,
+            QuotaCounter.quota_type == counter_type,
+            QuotaCounter.period == "lifetime",
+        ).first()
 
     used = counter.used if counter else 0
     remaining = max(0, limit - used)
@@ -510,20 +530,28 @@ def increment_quota(
 ) -> int:
     """Increment quota usage counter.
 
+    ``quota_type`` is normalized to the counter key used by the two-phase
+    quota flow (e.g. ``"research_run_limit"`` → ``"research_run"``) so every
+    writer shares one counter key space.
+
     Returns new used amount.
     """
     from app.models.quota import QuotaCounter
+    from app.auth.entitlements import QUOTA_TYPE_MAP
+
+    reverse_map = {v: k for k, v in QUOTA_TYPE_MAP.items()}
+    counter_type = reverse_map.get(quota_type, quota_type)
 
     counter = db.query(QuotaCounter).filter(
         QuotaCounter.user_id == user_id,
-        QuotaCounter.quota_type == quota_type,
+        QuotaCounter.quota_type == counter_type,
         QuotaCounter.period == period,
     ).first()
 
     if counter is None:
         counter = QuotaCounter(
             user_id=user_id,
-            quota_type=quota_type,
+            quota_type=counter_type,
             period=period,
             used=amount,
         )
@@ -550,23 +578,32 @@ def enforce_quota(
     """
     from fastapi import HTTPException
     from app.models.quota import QuotaCounter
+    from app.auth.entitlements import QUOTA_TYPE_MAP
+
+    # Same normalization as check_quota: limits are read from the entitlement
+    # column name, counters live under the mapped counter key.
+    reverse_map = {v: k for k, v in QUOTA_TYPE_MAP.items()}
+    limit_name = quota_type if quota_type in reverse_map else QUOTA_TYPE_MAP.get(
+        quota_type, quota_type
+    )
+    counter_type = reverse_map.get(limit_name, limit_name)
 
     entitlement = db.query(PilotEntitlement).filter(
         PilotEntitlement.user_id == user_id,
     ).first()
 
     if entitlement is None:
-        limit = FREE_PLAN_ENTITLEMENT.get(quota_type, 0)
+        limit = FREE_PLAN_ENTITLEMENT.get(limit_name, 0)
     else:
-        limit = getattr(entitlement, quota_type, None)
+        limit = getattr(entitlement, limit_name, None)
         if limit is None:
             counter = db.query(QuotaCounter).filter(
                 QuotaCounter.user_id == user_id,
-                QuotaCounter.quota_type == quota_type,
+                QuotaCounter.quota_type == counter_type,
                 QuotaCounter.period == period,
             ).first()
             if counter is None:
-                counter = QuotaCounter(user_id=user_id, quota_type=quota_type, period=period, used=1)
+                counter = QuotaCounter(user_id=user_id, quota_type=counter_type, period=period, used=1)
                 db.add(counter)
             else:
                 counter.used += 1
@@ -576,9 +613,15 @@ def enforce_quota(
 
     counter = db.query(QuotaCounter).filter(
         QuotaCounter.user_id == user_id,
-        QuotaCounter.quota_type == quota_type,
+        QuotaCounter.quota_type == counter_type,
         QuotaCounter.period == period,
     ).with_for_update().first()
+    if counter is None and period != "lifetime":
+        counter = db.query(QuotaCounter).filter(
+            QuotaCounter.user_id == user_id,
+            QuotaCounter.quota_type == counter_type,
+            QuotaCounter.period == "lifetime",
+        ).with_for_update().first()
 
     used = counter.used if counter else 0
 
@@ -594,7 +637,7 @@ def enforce_quota(
         )
 
     if counter is None:
-        counter = QuotaCounter(user_id=user_id, quota_type=quota_type, period=period, used=1)
+        counter = QuotaCounter(user_id=user_id, quota_type=counter_type, period=period, used=1)
         db.add(counter)
     else:
         counter.used += 1
