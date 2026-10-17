@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.auth.jwt import get_current_user
 from app.auth.entitlements import require_entitlement, reserve_quota
+from app.auth.api_keys import check_api_key_scope
 from app.models.user import User
 from app.services.ml_training import (
     create_ml_training_job,
@@ -29,6 +30,7 @@ def start_ml_training(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     current_user: User = Depends(require_entitlement(quota_type="ai_usage")),
+    _scope_check=Depends(check_api_key_scope("write")),
     db: Session = Depends(get_db),
 ):
     """Queue an ML training job for the durable training worker.
@@ -97,6 +99,7 @@ def start_ml_training(
 @router.get("/models")
 def list_trained_models(
     current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope("read")),
 ):
     """List all trained model artifacts owned by the current user."""
     models = list_models(user_id=str(current_user.id))
@@ -110,6 +113,7 @@ def list_trained_models(
 def get_model_detail(
     model_id: str,
     current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope("read")),
 ):
     """Get detail for a specific trained model."""
     try:
@@ -135,6 +139,7 @@ def run_prediction(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope("write")),
     db: Session = Depends(get_db),
 ):
     """Run prediction using a trained model.
@@ -190,6 +195,7 @@ def run_latest_prediction(
     model_id: str,
     instrument_id: Optional[str] = None,
     current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope("write")),
     db: Session = Depends(get_db),
 ):
     """Get the latest prediction from a trained model."""

@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.user import User
 from app.auth.jwt import get_current_user
+from app.auth.api_keys import check_api_key_scope
 from app.auth.safety import safety_control
 from app.models.kill_switch import KillSwitchScope
 from app.services.execution import (
@@ -115,6 +116,7 @@ def api_create_intent(
     payload: OrderIntentCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope("write")),
 ):
     intent = create_order_intent(
         db,
@@ -136,6 +138,7 @@ def api_authorize_intent(
     payload: AuthorizeRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope("write")),
 ):
     intent = _get_intent_or_404(db, intent_id)
     # Ownership check at route level for consistency with other routes
@@ -151,6 +154,7 @@ def api_submit_intent(
     intent_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope("write")),
     _: None = Depends(safety_control(KillSwitchScope.execution, "execution")),
 ):
     """Submit an order intent to the broker.
@@ -170,6 +174,7 @@ def api_cancel_intent(
     intent_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope("write")),
 ):
     return cancel_intent(db, intent_id=intent_id, user_id=current_user.id)
 
@@ -178,6 +183,7 @@ def api_cancel_intent(
 def api_list_intents(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope("read")),
 ):
     return (
         db.query(OrderIntent)
@@ -192,6 +198,7 @@ def api_get_intent(
     intent_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope("read")),
 ):
     intent = _get_intent_or_404(db, intent_id)
     if intent.user_id != current_user.id:
@@ -208,6 +215,7 @@ def api_reconcile_intent(
     intent_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope("write")),
 ):
     intent = _get_intent_or_404(db, intent_id)
     if intent.user_id != current_user.id:
@@ -223,6 +231,7 @@ def api_list_fill_records(
     intent_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope("read")),
 ):
     intent = _get_intent_or_404(db, intent_id)
     if intent.user_id != current_user.id:

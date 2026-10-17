@@ -33,6 +33,7 @@ from app.auth.entitlements import (
     settle_reservation,
 )
 from app.auth.jwt import get_current_user
+from app.auth.api_keys import check_api_key_scope
 from app.config import get_settings
 from app.data.real_instruments import get_instrument_by_id
 from app.database import get_db
@@ -307,7 +308,10 @@ def _build_system_prompt(db: Session, conversation: AIConversation) -> str:
 # ── Provider status / connection test ───────────────────────────────────────
 
 @router.get("/status")
-def ai_status(current_user: User = Depends(get_current_user)):
+def ai_status(
+    current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope("read")),
+):
     settings = get_settings()
     try:
         provider = get_ai_provider()
@@ -326,7 +330,10 @@ def ai_status(current_user: User = Depends(get_current_user)):
 
 
 @router.post("/test-connection")
-def ai_test_connection(current_user: User = Depends(get_current_user)):
+def ai_test_connection(
+    current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope("write")),
+):
     try:
         provider = get_ai_provider()
     except AIProviderError as exc:
@@ -347,6 +354,7 @@ def ai_test_connection(current_user: User = Depends(get_current_user)):
 def list_conversations(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope("read")),
 ):
     conversations = (
         db.query(AIConversation)
@@ -372,6 +380,7 @@ def create_conversation(
     payload: ConversationCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope("write")),
 ):
     _validate_context_ownership(db, payload.context, current_user)
     conversation = AIConversation(
@@ -390,6 +399,7 @@ def get_conversation(
     conversation_id: UUID,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope("read")),
 ):
     conversation = _get_conversation_or_404(db, conversation_id, current_user)
     return _conversation_dict(conversation, with_messages=True)
@@ -401,6 +411,7 @@ def update_conversation(
     payload: ConversationUpdate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope("write")),
 ):
     conversation = _get_conversation_or_404(db, conversation_id, current_user)
     if payload.title is not None:
@@ -418,6 +429,7 @@ def delete_conversation(
     conversation_id: UUID,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope("write")),
 ):
     conversation = _get_conversation_or_404(db, conversation_id, current_user)
     db.delete(conversation)
@@ -432,6 +444,7 @@ def send_message(
     payload: MessageCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope("write")),
 ):
     """Send a user message and persist the assistant reply.
 
@@ -525,6 +538,7 @@ def create_draft_from_conversation(
     payload: AIDraftCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope("write")),
 ):
     """Save an AI proposal as a research draft in ``pending_review``.
 
