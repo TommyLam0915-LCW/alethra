@@ -167,7 +167,7 @@ scope_val = cur.fetchone()[0]
 cur.close()
 c.close()
 
-check("chain converged to single head", revs == ["e5f6a7b8c9d0"], f"heads={revs}")
+check("chain converged to single head", revs == ["f6a7b8c9d0e1"], f"heads={revs}")
 check("users.id converted to UUID", users_id_type == "uuid", users_id_type)
 check("experiments.scope converted to JSONB", scope_type == "jsonb", scope_type)
 check("legacy conversion backup recorded", backup_tables == 1, f"backup_tables={backup_tables}")

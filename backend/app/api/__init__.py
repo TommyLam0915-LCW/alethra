@@ -21,6 +21,8 @@ from app.api.kill_switches import router as kill_switches_router
 from app.api.instruments import router as instruments_router
 from app.api.ml_training import router as ml_training_router
 from app.api.execution_agent import router as execution_agent_router
+from app.api.watchlists import router as watchlists_router
+from app.api.user_layouts import router as user_layouts_router
 
 v1_router = APIRouter(prefix="/v1")
 v1_router.include_router(brand_router)
@@ -44,6 +46,8 @@ v1_router.include_router(inference_router)
 v1_router.include_router(training_router)
 v1_router.include_router(kill_switches_router)
 v1_router.include_router(execution_agent_router)
+v1_router.include_router(watchlists_router)
+v1_router.include_router(user_layouts_router)
 
 api_router = APIRouter()
 api_router.include_router(auth_router)

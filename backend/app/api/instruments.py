@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Query
 from typing import Optional
 from datetime import date
 from sqlalchemy.orm import Session
@@ -37,12 +37,17 @@ def _provider_failure(instrument_id: str, exc: Exception) -> HTTPException:
 def list_instruments(
     market: Optional[str] = None,
     asset_type: Optional[str] = None,
+    q: Optional[str] = None,
+    limit: Optional[int] = Query(None, ge=1),
 ):
     """List all available instruments with metadata.
 
     Query params:
     - market: Filter by market (US, HK)
     - asset_type: Filter by asset type (STOCK, ETF)
+    - q: Case-insensitive substring match against symbol and name
+    - limit: Maximum number of instruments to return (>= 1), applied
+      after filtering
     """
     instruments = ALL_REAL_INSTRUMENTS
 
@@ -59,6 +64,16 @@ def list_instruments(
             i for i in instruments
             if i.asset_type.value == asset_type_upper
         ]
+
+    if q:
+        needle = q.lower()
+        instruments = [
+            i for i in instruments
+            if needle in i.symbol.lower() or needle in i.name.lower()
+        ]
+
+    if limit is not None:
+        instruments = instruments[:limit]
 
     provider = get_data_provider()
     has_data = provider.is_available()
