@@ -20,6 +20,7 @@ from app.models.experiment import Experiment, ExperimentStatus
 from app.models.experiment_version import ExperimentVersion
 from app.models.research_run import ResearchRun, RunStatus
 from app.models.user import User
+from app.lib.timeutil import utcnow
 
 
 # ============================================================================
@@ -547,7 +548,7 @@ class TestMethodReviewAPI:
                 "Zero commission selected — real trading incurs costs.",
                 "Zero slippage selected — real execution incurs slippage.",
             ],
-            completed_at=datetime.utcnow(),
+            completed_at=utcnow(),
         )
         db.add(run)
         db.commit()

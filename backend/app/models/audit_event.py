@@ -3,6 +3,7 @@ from datetime import datetime
 from sqlalchemy import Boolean, Column, String, DateTime, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from app.database import Base
+from app.lib.timeutil import utcnow
 
 
 class AuditEvent(Base):
@@ -18,4 +19,4 @@ class AuditEvent(Base):
     recorded_before_outcome = Column(Boolean, nullable=False, default=True)
     rules_locked = Column(Boolean, nullable=False, default=False)
     data_cutoff_at = Column(String(10), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    created_at = Column(DateTime, default=utcnow, nullable=False, index=True)

@@ -73,7 +73,10 @@ export default function DashboardPage() {
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
         <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
-          <Link href="/experiments/new" className="btn btn-primary">
+          <Link href="/workspace" className="btn btn-primary" data-testid="nav-workspace">
+            進入工作台
+          </Link>
+          <Link href="/experiments/new" className="btn btn-secondary">
             建立新實驗
           </Link>
           <Link href="/research-drafts" className="btn btn-secondary">

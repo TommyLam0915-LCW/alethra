@@ -5,6 +5,7 @@ from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
 from app.database import Base
 import enum
+from app.lib.timeutil import utcnow
 
 
 class SimulationStatus(str, enum.Enum):
@@ -32,8 +33,8 @@ class SimulationSession(Base):
     warnings = Column(JSONB, nullable=True)
     total_decisions = Column(Integer, default=0)
     observed_days = Column(Integer, default=0)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
     experiment_version = relationship("ExperimentVersion", foreign_keys=[experiment_version_id])
     decisions = relationship("SimulationDecision", back_populates="session", order_by="SimulationDecision.step_number")
@@ -62,6 +63,6 @@ class SimulationDecision(Base):
     paper_position = Column(JSONB, nullable=True)
     paper_equity = Column(Float, nullable=False)
     warnings = Column(JSONB, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
 
     session = relationship("SimulationSession", back_populates="decisions")

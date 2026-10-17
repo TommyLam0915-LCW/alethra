@@ -1,10 +1,11 @@
 import uuid
 from datetime import datetime, timedelta
-from sqlalchemy import Column, String, Text, DateTime, Integer, Float, ForeignKey, Enum as SAEnum, Boolean
+from sqlalchemy import Column, String, Text, DateTime, Integer, Float, ForeignKey, Enum as SAEnum, Boolean, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
 from app.database import Base
 import enum
+from app.lib.timeutil import utcnow
 
 
 class IntentSide(str, enum.Enum):
@@ -48,10 +49,14 @@ class OrderIntent(Base):
     status = Column(SAEnum(IntentStatus), default=IntentStatus.pending, nullable=False)
     authorization_token = Column(String(255), nullable=False)
     expires_at = Column(DateTime, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
     rejection_reason = Column(Text, nullable=True)
     broker_ref = Column(String(255), nullable=True)
+    # Set when the owner cancels a submitted intent: the execution agent
+    # cancels the live broker order and reports back; the intent then
+    # transitions to 'cancelled' via the agent's report.
+    cancel_requested = Column(Boolean, default=False, nullable=False)
 
     # Idempotency: client-supplied key to prevent duplicate submissions.
     # If a request arrives with a duplicate idempotency_key, the existing intent is returned.
@@ -73,7 +78,7 @@ class ExecutionAgent(Base):
     agent_type = Column(String(100), nullable=False)
     config_encrypted = Column(JSONB, nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
 
 
 class FillRecord(Base):
@@ -84,14 +89,22 @@ class FillRecord(Base):
     """
     __tablename__ = "fill_records"
 
+    # Idempotency key for broker fill reports: "<broker_ref>:<fill_time isoformat>:<quantity>".
+    # Nullable for simulated fills; unique per intent so a fill re-reported after an
+    # agent restart is deduplicated instead of double-counting filled quantity.
+    __table_args__ = (
+        UniqueConstraint("order_intent_id", "broker_fill_key", name="uq_fill_records_intent_fill_key"),
+    )
+
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     order_intent_id = Column(UUID(as_uuid=True), ForeignKey("order_intents.id"), nullable=False)
     quantity = Column(Integer, nullable=False)
     price = Column(Float, nullable=True)
     fill_source = Column(SAEnum(FillSource), nullable=False, default=FillSource.simulated)
     broker_ref = Column(String(255), nullable=True)
+    broker_fill_key = Column(String(255), nullable=True, index=True)
     broker_confirmed_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
 
     order_intent = relationship("OrderIntent", back_populates="fill_records")
 
@@ -104,6 +117,6 @@ class FillReconciliation(Base):
     expected_quantity = Column(Integer, nullable=False)
     filled_quantity = Column(Integer, nullable=False)
     discrepancy = Column(Boolean, nullable=False, default=False)
-    reconciled_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    reconciled_at = Column(DateTime, default=utcnow, nullable=False)
 
     order_intent = relationship("OrderIntent", back_populates="fill_reconciliations")
