@@ -1,10 +1,32 @@
 # Alethra Agent Progress
 
-Last updated: 2026-10-17T16:40+08:00 (machine clock; earlier 19:xx agent stamps were hours fast — use git commit times)
-Branch: auto/integration-e2e (worktree alethra-integration-auto)
-Draft PR: https://github.com/TommyLam0915-LCW/alethra/pull/20 (base main)
-Commits: fed5fb0, 6307c39, 8202611 (branch head 8202611aa3877396b07a7533557a1d689550ef43)
-Status: Pushed. NOT merged. All 7 directive items complete on this branch. **CI all green @ 8202611** (Backend Tests SUCCESS, Frontend Build SUCCESS, Browser Acceptance SUCCESS).
+Last updated: 2026-10-17T18:20+08:00 (machine clock; earlier 19:xx agent stamps were hours fast — use git commit times)
+Branch: auto/stored-data-backtest-integration (main repo worktree — PROGRESS carrier; feature branches below)
+Active feature branches: auto/workspace-backend @ 5aa3684 (**Draft PR #22**), auto/workspace-shell @ a5964dc (**Draft PR #21**, stacked on #22) — owner-directive-2 Sections 1–2, both pushed, NOT merged
+Status: Directive 2 ("Complete the Product, Not Just Individual Modules") **Section 1 (baseline) + Section 2 (workspace shell) COMPLETE** — see session record below. Sections 3–8 in progress.
+
+## Session record: directive-2 Sections 1–2 — baseline + shared workspace shell (2026-10-17 ~16:30–18:20 HKT)
+
+**Directive 2 loaded at ~16:30 HKT (8 sections, HIGHEST PRIORITY; supersedes the completed 7-item directive below). Constraints unchanged: 不碰 operational DB、不連外收費、不連外下單、不merge main、不force-push、不部署.**
+
+**Section 1 — Baseline (COMPLETE)**: main unchanged @ `dc04d95` (PR #10 already merged; no new main commits). PR #20 @ `8202611` CI 3/3 green (Backend Tests / Frontend Build / Browser Acceptance — see final-entry record below). Open-PR classification (no merges/retargets/closes performed, per directive):
+- **Integrated into #20 (git ancestors)**: #11 (config-safety), #13 (market-data-quality), #15 (execution-recovery), #19 (billing-stripe) — verified `git merge-base --is-ancestor` of each branch head in 8202611.
+- **Content-integrated (no ancestry)**: #14 (ML experiment-link validation; `api/ml_training.py:57` experiment validation present in #20).
+- **Patch-equivalent**: #16 (kill-switch enum fix) — `git cherry` empty vs 67d331a content in #20; PR kept open for its PG16 live evidence.
+- **Superseded**: #17 (billing webhook — superseded by #19/#20 atomic application), #6 (ci/browser-acceptance — superseded by main's workflow), #8 (feat/real-integrations — superseded by main market support).
+- **Docs-delta only**: #18 (stored-data-backtest) — content in #20; branch carries only PROGRESS.md deltas; also this file's carrier branch.
+- **GENUINE GAP → Section 4**: **PR #12 model-deletion lifecycle is NOT in #20** (no DELETE model route exists) — will be implemented in Section 4.
+
+**Section 2 — Shared workspace shell (COMPLETE; PRs #21/#22)**:
+- **Backend** (auto/workspace-backend @ `5aa3684`, Draft PR #22): watchlists CRUD/items/reorder + user layout persistence + instrument search (`q`, `limit`), all JWT-authenticated, ownership 404 on foreign ids; migration `f6a7b8c9d0e1` idempotent, single head verified. **62 new tests; full suite 1113 passed, 0 failed** (sqlite worktree; count not additive with other branches).
+- **Frontend** (auto/workspace-shell @ `a5964dc`, Draft PR #21): authenticated shell at `/workspace` — global symbol search (US/HK), watchlist panel, candlestick+volume chart with data-nature/stale/provider/as-of badges, right details + order-preview panels (paper-intent create→確認授權→提交執行器→取消), bottom tabs (研究/模型/持倉/訂單/成交/紀錄), operational status chips (數據/經紀/AI/用量), resizable+collapsible panels with server-persisted layouts (debounced PUT + localStorage fallback), mobile drawer <900px. Dashboard gains 進入工作台 primary button.
+- **Chart library license + capability verified before adoption**: lightweight-charts 5.2.1 (Apache-2.0) and react-resizable-panels pinned 2.1.7 (MIT; v4 changed API). Charts consume Alethra's data contract only — no external widgets faking internal data.
+- **Hardcoded 2024 ranges removed** (directive item): market-data page + experiments/new now use a rolling last-366-days window ending today; rebuilt and re-verified.
+- **Evidence**: workspace browser spec 7/7 (render/badges, symbol sync, watchlist, layout persistence incl. PUT payload + reload restore, bottom tabs, intent flow, mobile drawer); **full local e2e suite 74/74 passed** vs real backend @ 5aa3684 (fresh sqlite; CI-equivalent seeded acceptance users); live-stack integration check (register→login→watchlist CRUD→invalid symbol 404→layout PUT/GET roundtrip) over real HTTP. During this: root-caused 2 local-env artifacts (NOT product defects): browser specs require CI's pre-seeded `user_a/b_test` users (`.github/workflows/browser-acceptance.yml:69-76`) and backend `CORS_ORIGINS` must include the test origin — both fixed locally, documented in PR #21.
+- **Known gap (deferred, follow-up)**: worker-liveness chip absent — no heartbeat endpoint exists in backend (`workers/training_worker.py` has none); not fabricated. AI panel in right column deliberately not rendered yet (no dead buttons) — arrives with Section 3.
+- Fixed during hardening: panel-size persistence bug (setState key order dropped `update.panels`), malformed-bars guard (`Array.isArray`) in shell fetch.
+
+**Next (Section 3)**: Personal AI — real LLM provider adapter (config-driven, pluggable; mock as first provider), conversation persistence, usage/cost limits, connection test, AI panel in workspace right column; offline tests only (no external keys, per directive).
 
 ## ⛔ FINAL ENTRY — OWNER STOP DIRECTIVE (2026-10-17 ~16:10 HKT): ALL AGENT OPERATIONS STOPPED
 
