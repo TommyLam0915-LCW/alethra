@@ -45,6 +45,13 @@ export async function apiFetch(endpoint: string, options: RequestInit = {}) {
   return response.json();
 }
 
+export interface AIConversationContext {
+  research_draft_ids?: string[];
+  memory_ids?: string[];
+  instrument_symbols?: string[];
+  experiment_ids?: string[];
+}
+
 export const api = {
   auth: {
     register: (data: { email: string; password: string; display_name?: string }) =>
@@ -200,6 +207,23 @@ export const api = {
     auditEvents: (id: string) =>
       apiFetch(`/api/v1/research-drafts/${id}/audit-events`),
   },
+  aiAssistant: {
+    status: () => apiFetch('/api/v1/ai/status'),
+    testConnection: () => apiFetch('/api/v1/ai/test-connection', { method: 'POST' }),
+    listConversations: () => apiFetch('/api/v1/ai/conversations'),
+    createConversation: (data?: { title?: string; context?: AIConversationContext }) =>
+      apiFetch('/api/v1/ai/conversations', { method: 'POST', body: JSON.stringify(data ?? {}) }),
+    getConversation: (id: string) => apiFetch(`/api/v1/ai/conversations/${id}`),
+    updateConversation: (id: string, data: { title?: string; context?: AIConversationContext }) =>
+      apiFetch(`/api/v1/ai/conversations/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+    deleteConversation: async (id: string): Promise<void> => {
+      await apiFetch(`/api/v1/ai/conversations/${id}`, { method: 'DELETE' });
+    },
+    sendMessage: (id: string, content: string) =>
+      apiFetch(`/api/v1/ai/conversations/${id}/messages`, { method: 'POST', body: JSON.stringify({ content }) }),
+    createDraft: (id: string, data: Record<string, unknown>) =>
+      apiFetch(`/api/v1/ai/conversations/${id}/drafts`, { method: 'POST', body: JSON.stringify(data) }),
+  },
   pilot: {
     submitApplication: (data: any) =>
       apiFetch('/api/v1/pilot/applications', { method: 'POST', body: JSON.stringify(data) }),
@@ -273,12 +297,18 @@ export const api = {
     latest: (symbol: string) => apiFetch(`/api/v1/market-data/latest/${symbol}`),
   },
   instruments: {
-    list: (market?: string, assetType?: string) => {
+    list: (market?: string, assetType?: string, q?: string, limit?: number) => {
       const qs = new URLSearchParams();
       if (market) qs.set('market', market);
       if (assetType) qs.set('asset_type', assetType);
-      const q = qs.toString();
-      return apiFetch(`/api/v1/instruments${q ? `?${q}` : ''}`);
+      if (q) qs.set('q', q);
+      if (limit) qs.set('limit', String(limit));
+      const query = qs.toString();
+      return apiFetch(`/api/v1/instruments${query ? `?${query}` : ''}`);
+    },
+    search: (q: string, limit = 8) => {
+      const qs = new URLSearchParams({ q, limit: String(limit) });
+      return apiFetch(`/api/v1/instruments?${qs}`);
     },
     get: (instrumentId: string) => apiFetch(`/api/v1/instruments/${instrumentId}`),
     bars: (instrumentId: string, startDate: string, endDate: string) => {
@@ -289,6 +319,7 @@ export const api = {
     getMarket: (marketCode: string) => apiFetch(`/api/v1/markets/${marketCode}`),
   },
   execution: {
+    listFills: (intentId: string) => apiFetch(`/api/v1/execution/intents/${intentId}/fills`),
     listIntents: () => apiFetch('/api/v1/execution/intents'),
     getIntent: (intentId: string) => apiFetch(`/api/v1/execution/intents/${intentId}`),
     createIntent: (data: { portfolio_id: string; symbol: string; side: string; quantity: number; order_type?: string; limit_price?: number; idempotency_key?: string }) =>
@@ -328,6 +359,7 @@ export const api = {
     },
     listModels: () => apiFetch('/api/v1/ml/models'),
     getModel: (modelId: string) => apiFetch(`/api/v1/ml/models/${modelId}`),
+    deleteModel: (modelId: string) => apiFetch(`/api/v1/ml/models/${modelId}`, { method: 'DELETE' }),
     predict: (modelId: string, params?: { instrument_id?: string; start_date?: string; end_date?: string }) => {
       const qs = new URLSearchParams();
       if (params?.instrument_id) qs.set('instrument_id', params.instrument_id);
@@ -347,5 +379,24 @@ export const api = {
     createPaymentIntent: (data: { subscription_id: string }) =>
       apiFetch('/api/v1/payments/create-intent', { method: 'POST', body: JSON.stringify(data) }),
     getOperationalStatus: () => apiFetch('/api/v1/operational-status'),
+  },
+  watchlists: {
+    list: () => apiFetch('/api/v1/watchlists'),
+    create: (name?: string) =>
+      apiFetch('/api/v1/watchlists', { method: 'POST', body: JSON.stringify(name ? { name } : {}) }),
+    remove: async (watchlistId: string): Promise<void> => {
+      await apiFetch(`/api/v1/watchlists/${watchlistId}`, { method: 'DELETE' });
+    },
+    addItem: (watchlistId: string, symbol: string) =>
+      apiFetch(`/api/v1/watchlists/${watchlistId}/items`, { method: 'POST', body: JSON.stringify({ symbol }) }),
+    removeItem: (watchlistId: string, symbol: string) =>
+      apiFetch(`/api/v1/watchlists/${watchlistId}/items/${encodeURIComponent(symbol)}`, { method: 'DELETE' }),
+    reorder: (watchlistId: string, symbols: string[]) =>
+      apiFetch(`/api/v1/watchlists/${watchlistId}/reorder`, { method: 'POST', body: JSON.stringify({ symbols }) }),
+  },
+  layouts: {
+    getWorkspace: () => apiFetch('/api/v1/layouts/workspace'),
+    saveWorkspace: (layout: Record<string, unknown>) =>
+      apiFetch('/api/v1/layouts/workspace', { method: 'PUT', body: JSON.stringify({ layout }) }),
   },
 };
