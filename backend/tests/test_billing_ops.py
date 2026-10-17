@@ -227,14 +227,15 @@ class TestWebhookSignature:
     def _sign(self, payload: str, secret: str = "test-webhook-secret") -> str:
         return hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
 
-    def test_missing_signature_returns_422(self, client):
-        """Omitting X-Webhook-Signature entirely → 422 (required header)."""
+    def test_missing_signature_returns_400(self, client):
+        """Omitting the signature header entirely → 400 (checked explicitly
+        since the endpoint accepts both Stripe-Signature and X-Webhook-Signature)."""
         resp = client.post(
             "/api/v1/webhooks/payment",
             content=self._build_payload(),
             headers={"Content-Type": "application/json"},
         )
-        assert resp.status_code == 422
+        assert resp.status_code == 400
 
     def test_empty_signature_returns_400(self, client):
         """Sending an empty signature value → 400."""

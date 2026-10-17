@@ -28,7 +28,7 @@ from app.models.execution import (
 )
 from app.services.execution import create_order_intent, authorize_intent
 from app.services.execution_agent_api import (
-    list_authorized_intents,
+    list_agent_intents,
     agent_report_submitted,
     agent_report_fill,
     agent_report_rejected,
@@ -42,6 +42,7 @@ from app.execution_agent.broker_transport import (
 from app.execution_agent.ibkr_client import IBKRClient
 from app.execution_agent.agent import ExecutionAgent
 from app.execution_agent.config import AgentConfig
+from app.lib.timeutil import utcnow
 
 
 # ── Helpers ──
@@ -225,13 +226,13 @@ class TestIBKRClient:
 
 class TestAgentAPIService:
 
-    def test_list_authorized_intents(self, client, auth_headers):
+    def test_list_agent_intents(self, client, auth_headers):
         portfolio_id = _create_user_and_portfolio(client, auth_headers)
         intent = _create_and_authorize_intent(client, auth_headers, portfolio_id)
 
         db = _get_db()
         user = db.query(User).first()
-        intents = list_authorized_intents(db, user_id=user.id)
+        intents = list_agent_intents(db, user_id=user.id)
         assert len(intents) == 1
         assert intents[0].intent_id == intent["intent_id"]
 
@@ -251,7 +252,7 @@ class TestAgentAPIService:
 
         db = _get_db()
         db_intent = db.query(OrderIntent).filter(OrderIntent.intent_id == intent_id).first()
-        db_intent.expires_at = datetime.utcnow() - timedelta(minutes=1)
+        db_intent.expires_at = utcnow() - timedelta(minutes=1)
         db.commit()
 
         resp = client.post(
@@ -262,7 +263,7 @@ class TestAgentAPIService:
         assert resp.status_code == 400
 
         user = db.query(User).first()
-        intents = list_authorized_intents(db, user_id=user.id)
+        intents = list_agent_intents(db, user_id=user.id)
         assert len(intents) == 0
 
     def test_agent_report_submitted(self, client, auth_headers):
@@ -277,7 +278,7 @@ class TestAgentAPIService:
             intent_id=intent["intent_id"],
             user_id=user.id,
             broker_ref="IBKR-12345",
-            submitted_at=datetime.utcnow(),
+            submitted_at=utcnow(),
         )
         assert result.status == IntentStatus.submitted
         assert result.broker_ref == "IBKR-12345"
@@ -309,7 +310,7 @@ class TestAgentAPIService:
             user_id=user.id,
             quantity=10,
             price=150.0,
-            fill_time=datetime.utcnow(),
+            fill_time=utcnow(),
             broker_ref="IBKR-12345",
             commission=1.50,
         )
@@ -336,7 +337,7 @@ class TestAgentAPIService:
 
         agent_report_fill(
             db, intent["intent_id"], user.id,
-            quantity=5, price=150.0, fill_time=datetime.utcnow(),
+            quantity=5, price=150.0, fill_time=utcnow(),
             broker_ref="IBKR-12345",
         )
 
@@ -347,7 +348,7 @@ class TestAgentAPIService:
 
         agent_report_fill(
             db, intent["intent_id"], user.id,
-            quantity=5, price=150.5, fill_time=datetime.utcnow(),
+            quantity=5, price=150.5, fill_time=utcnow(),
             broker_ref="IBKR-12345",
         )
 
@@ -407,7 +408,7 @@ class TestAgentAPIEndpoints:
         resp = client.post(
             f"/api/v1/execution-agent/order-intents/{intent['intent_id']}/submitted",
             headers=auth_headers,
-            json={"broker_ref": "FAKE-000001", "submitted_at": datetime.utcnow().isoformat()},
+            json={"broker_ref": "FAKE-000001", "submitted_at": utcnow().isoformat()},
         )
         assert resp.status_code == 200
         assert resp.json()["status"] == "submitted"
@@ -429,7 +430,7 @@ class TestAgentAPIEndpoints:
             json={
                 "quantity": 10,
                 "price": 150.0,
-                "fill_time": datetime.utcnow().isoformat(),
+                "fill_time": utcnow().isoformat(),
                 "broker_ref": "FAKE-000001",
                 "commission": 1.50,
             },
@@ -529,8 +530,8 @@ class TestExecutionAgent:
             order_type="MARKET",
             limit_price=None,
             status="authorized",
-            expires_at=(datetime.utcnow() + timedelta(minutes=5)).isoformat(),
-            created_at=datetime.utcnow().isoformat(),
+            expires_at=(utcnow() + timedelta(minutes=5)).isoformat(),
+            created_at=utcnow().isoformat(),
         )
 
         agent._process_single_intent(intent)
@@ -558,8 +559,8 @@ class TestExecutionAgent:
             order_type="MARKET",
             limit_price=None,
             status="authorized",
-            expires_at=(datetime.utcnow() + timedelta(minutes=5)).isoformat(),
-            created_at=datetime.utcnow().isoformat(),
+            expires_at=(utcnow() + timedelta(minutes=5)).isoformat(),
+            created_at=utcnow().isoformat(),
         )
 
         agent._process_single_intent(intent)
@@ -585,8 +586,8 @@ class TestExecutionAgent:
             order_type="MARKET",
             limit_price=None,
             status="authorized",
-            expires_at=(datetime.utcnow() - timedelta(minutes=1)).isoformat(),
-            created_at=datetime.utcnow().isoformat(),
+            expires_at=(utcnow() - timedelta(minutes=1)).isoformat(),
+            created_at=utcnow().isoformat(),
         )
 
         agent._process_single_intent(intent)
@@ -611,8 +612,8 @@ class TestExecutionAgent:
             order_type="MARKET",
             limit_price=None,
             status="authorized",
-            expires_at=(datetime.utcnow() + timedelta(minutes=5)).isoformat(),
-            created_at=datetime.utcnow().isoformat(),
+            expires_at=(utcnow() + timedelta(minutes=5)).isoformat(),
+            created_at=utcnow().isoformat(),
         )
 
         agent._process_single_intent(intent)
@@ -636,8 +637,8 @@ class TestExecutionAgent:
             order_type="LIMIT",
             limit_price=160.0,
             status="authorized",
-            expires_at=(datetime.utcnow() + timedelta(minutes=5)).isoformat(),
-            created_at=datetime.utcnow().isoformat(),
+            expires_at=(utcnow() + timedelta(minutes=5)).isoformat(),
+            created_at=utcnow().isoformat(),
         )
 
         agent._process_single_intent(intent)
@@ -681,8 +682,8 @@ class TestExecutionAgent:
             order_type="MARKET",
             limit_price=None,
             status="authorized",
-            expires_at=(datetime.utcnow() + timedelta(minutes=5)).isoformat(),
-            created_at=datetime.utcnow().isoformat(),
+            expires_at=(utcnow() + timedelta(minutes=5)).isoformat(),
+            created_at=utcnow().isoformat(),
         )
 
         agent._process_single_intent(intent)
