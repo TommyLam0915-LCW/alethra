@@ -1,9 +1,26 @@
 # Alethra Agent Progress
 
-Last updated: 2026-10-17T18:20+08:00 (machine clock; earlier 19:xx agent stamps were hours fast — use git commit times)
+Last updated: 2026-10-17T18:45+08:00 (machine clock; earlier 19:xx agent stamps were hours fast — use git commit times)
 Branch: auto/stored-data-backtest-integration (main repo worktree — PROGRESS carrier; feature branches below)
-Active feature branches: auto/workspace-backend @ 5aa3684 (**Draft PR #22**), auto/workspace-shell @ a5964dc (**Draft PR #21**, stacked on #22) — owner-directive-2 Sections 1–2, both pushed, NOT merged
-Status: Directive 2 ("Complete the Product, Not Just Individual Modules") **Section 1 (baseline) + Section 2 (workspace shell) COMPLETE** — see session record below. Sections 3–8 in progress.
+Active feature branches: auto/workspace-backend @ 5aa3684 (**Draft PR #22**), auto/workspace-shell @ 14b230f (**Draft PR #21**, stacked on #22), auto/ai-assistant @ faf28fe (**Draft PR #23**, stacked on #22) — owner-directive-2 Sections 1–3, all pushed, NOT merged
+Status: Directive 2 ("Complete the Product, Not Just Individual Modules") **Sections 1–3 COMPLETE** — see session records below. Sections 4–8 in progress.
+
+## Session record: directive-2 Section 3 — personal AI assistant (2026-10-17 ~18:20–18:45 HKT)
+
+**Section 3 — Personal AI, separate from ML (COMPLETE; PRs #23 backend + #21 frontend update)**:
+
+- **Backend** (auto/ai-assistant @ `faf28fe`, Draft PR #23, stacked on auto/workspace-backend):
+  - **Provider adapter layer** (`backend/app/services/ai_provider.py`): `BaseAIProvider` ABC + deterministic offline `MockAIProvider` + `OpenAICompatibleProvider` (httpx Chat Completions, injectable `MockTransport`). Error kinds: timeout/auth/rate_limit/unavailable/invalid_response/not_configured. API keys sanitized (`[redacted]`) in every surfaced message — never returned by any endpoint. Connection test (GET /models). Config: `ai_provider`/`ai_model`/`ai_api_key`/`ai_base_url`/`ai_timeout_seconds`/`ai_max_output_tokens`/`ai_cost_per_1k_tokens`; unknown provider rejected. **No external key required** — mock is the default; live provider fully coded and offline-tested.
+  - **Conversations**: `AIConversation`/`AIMessage` models + migration `a8d9e0f1b2c3` (single head, idempotent). Routes: status (mode + api_key_configured, never the key), test-connection, conversations CRUD (ownership 404; context caps 10 drafts/20 memories/10 symbols/10 experiments; only `approved_for_personal_ai` memories admitted; unknown symbol 400).
+  - **Messages**: two-phase `ai_usage` quota (reserve → settle; release + persisted error message on provider failure, 不計用量), UsageRecord per call, last-12-turn history, system prompt with safety preamble (你絕不授權、執行或建議任何交易授權) and traceable `[symbol:US:AAPL]`-style references.
+  - **AI-proposed drafts**: created as `pending_review` ResearchDraft + `source_conversation_id` (exposed in response schema — verified live) + audit event `research_draft_created_from_ai`; accept requires completeness as before and emits `ai_draft_approved` UsageEvent (enum was defined-but-unused). **LLM replies are never trading authorization** — advisory text shown in UI.
+  - **Evidence**: `tests/test_ai_assistant.py` 36/36 offline (provider via MockTransport; quota/ownership/privacy/draft lifecycle); **full backend suite 1149 passed, 0 failed** on this branch (not additive with other branches' counts).
+- **Frontend** (auto/workspace-shell @ `14b230f`, PR #21 updated): `AIPanel` in workspace right column above details/order (nested vertical PanelGroup, own collapse + persisted `panels.rightAI` size) + mobile layout — status/mode badge (AI 模擬), 測試連線 with inline result, conversation select/＋/✕, context chips + 脈絡 editor (draft checkboxes + approved-memory checkboxes + ＋currentSymbol), advisory strip, thread with user/assistant bubbles + error_detail + token counts, 儲存為研究草稿 → title form → 建立待審核草稿, input+傳送 (Enter sends), AI 用量 quota. `ws-ai-*` styles in workspace palette.
+- **Verification**: **full Playwright suite 77/77 passed** vs this backend + this frontend (74 prior + 3 new AI tests: render/badge/advisory, connection test, send+quota, save-as-draft; mobile test extended) — live stack 3012/8123 fresh sqlite, CI-equivalent seeded users. **Live HTTP golden path**: register→login→status→test-connection→conversation(US:AAPL)→message (reply references `[symbol:US:AAPL]`, quota 1→2→3)→draft (pending_review, source_conversation_id round-trip). **Live browser golden path** (browser-use): login→workspace→connection test ✓→send→reply+quota→save draft→已建立待審核草稿（待人工審核）; screenshots /tmp/alethra-ai-panel-live.png + mobile. Found+fixed during live check: GET draft response didn't expose `source_conversation_id` (schema gap — `ResearchDraftResponse` now includes it, unit test strengthened, 36/36 re-run).
+- Local-env note (same as Section 2): repro specs ran with 3001→3012 and 8001→8123 substitutions (foreign next-server occupies 3001; CI ports 3001/8001).
+
+**Next (Section 4)**: Personal Model + Developer API — verify train/list/detail/evaluate/infer/version/delete connectivity; add PR #12 model-deletion lifecycle (genuine gap); API-key scopes/ownership/quota/revocation; developer settings.
+
 
 ## Session record: directive-2 Sections 1–2 — baseline + shared workspace shell (2026-10-17 ~16:30–18:20 HKT)
 
