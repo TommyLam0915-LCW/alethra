@@ -402,6 +402,16 @@ class TestMLAPIEndpoints:
         assert job["best_params"]["model_id"] is not None
         assert "test" in job["results"]["metrics"]
 
+        assert job["best_params"]["data_source"] in ("stored", "provider")
+        assert job["best_params"]["data_nature"] in (
+            "synthetic", "live", "delayed", "mixed", "unknown",
+        )
+        prov = job["results"]["data_provenance"]
+        assert prov["is_synthetic"] is True
+        assert prov["n_bars"] > 0
+        assert prov["bars_sha256"]
+        assert prov["requested_start"] == "2024-01-02"
+
     def test_train_model_invalid_type(self, client, auth_token):
         resp = client.post(
             "/api/v1/ml/train?instrument_id=US:AAPL&model_type=invalid",
@@ -420,6 +430,14 @@ class TestMLAPIEndpoints:
         assert resp.status_code == 200
         data = resp.json()
         assert data["total"] >= 1
+
+        model = next(m for m in data["models"] if m["instrument_id"] == "US:MSFT")
+        assert model["metrics"]["test"]["accuracy"] is not None
+        assert model["hyperparameters"]
+        prov = model["data_provenance"]
+        assert prov["is_synthetic"] is True
+        assert prov["provider_id"]
+        assert prov["last_bar_date"]
 
     def test_predict_api(self, client, auth_token):
         data = self._submit_train(
