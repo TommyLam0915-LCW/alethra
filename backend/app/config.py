@@ -15,7 +15,7 @@ _INSECURE_JWT_DEFAULTS = {
 _MIN_JWT_SECRET_LENGTH = 32
 
 _KNOWN_DATA_PROVIDERS = {"demo", "lseg"}
-_KNOWN_AI_PROVIDERS = {"mock"}
+_KNOWN_AI_PROVIDERS = {"mock", "openai_compatible"}
 
 
 class Settings(BaseSettings):
@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     ai_provider: str = "mock"
     ai_model: str = "mock-model"
     ai_api_key: str = "not-used-in-phase-1"
+    ai_base_url: str = ""  # empty = provider default (OpenAI API)
+    ai_timeout_seconds: float = 30.0
+    ai_max_output_tokens: int = 1024
+    ai_cost_per_1k_tokens: float = 0.0  # USD; 0 = not priced
     data_provider: str = "demo"
     app_env: str = "development"
     enable_live_payments: bool = False
