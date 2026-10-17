@@ -16,6 +16,39 @@ interface TrainingJob {
   best_params: Record<string, any>;
 }
 
+interface MLInstrument {
+  instrument_id: string;
+  name: string;
+  market: string;
+  currency: string;
+}
+
+interface MLModel {
+  model_id: string;
+  instrument_id: string;
+  model_type: string;
+  trained_at: string;
+  n_train: number;
+  n_val: number;
+  n_test: number;
+  metrics?: {
+    test?: { accuracy?: number };
+    baseline_test?: { accuracy?: number };
+  };
+  data_provenance?: {
+    is_synthetic?: boolean;
+    provider_name?: string;
+    feed_mode?: string;
+    last_bar_date?: string;
+  };
+}
+
+const ML_MODEL_TYPE_LABELS: Record<string, string> = {
+  logistic_regression: '邏輯回歸',
+  gradient_boosting: '梯度提升',
+  baseline: '基線（最常見類別）',
+};
+
 export default function TrainingPage() {
   const router = useRouter();
   const [jobs, setJobs] = useState<TrainingJob[]>([]);
@@ -28,6 +61,21 @@ export default function TrainingPage() {
     parameter_grid: '{"fast_period": [3, 5, 10], "slow_period": [20, 30]}',
   });
   const [creating, setCreating] = useState(false);
+  const [mlInstruments, setMlInstruments] = useState<MLInstrument[]>([]);
+  const [mlModels, setMlModels] = useState<MLModel[]>([]);
+  const [showMLForm, setShowMLForm] = useState(false);
+  const [mlForm, setMlForm] = useState({
+    instrument_id: 'US:AAPL',
+    model_type: 'logistic_regression',
+    start_date: '',
+    end_date: '',
+  });
+  const [mlTraining, setMlTraining] = useState(false);
+  const [mlResult, setMlResult] = useState<any>(null);
+  const [mlError, setMlError] = useState<string | null>(null);
+  const [expandedModelId, setExpandedModelId] = useState<string | null>(null);
+  const [latestPredictions, setLatestPredictions] = useState<Record<string, any>>({});
+  const [deletingModelId, setDeletingModelId] = useState<string | null>(null);
 
   useEffect(() => {
     const token = localStorage.getItem('token');
@@ -36,6 +84,7 @@ export default function TrainingPage() {
       return;
     }
     loadJobs();
+    loadMLData();
   }, [router]);
 
   const loadJobs = async () => {
@@ -82,6 +131,65 @@ export default function TrainingPage() {
     } catch (err) {
       console.error('Failed to cancel job:', err);
       alert('取消任務失敗');
+    }
+  };
+
+  const loadMLData = async () => {
+    try {
+      const [instData, modelData] = await Promise.all([
+        api.instruments.list(),
+        api.ml.listModels(),
+      ]);
+      setMlInstruments(instData.instruments || []);
+      setMlModels(modelData.models || []);
+    } catch (err) {
+      console.error('Failed to load ML data:', err);
+    }
+  };
+
+  const handleTrainML = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setMlTraining(true);
+    setMlError(null);
+    setMlResult(null);
+    try {
+      const result = await api.ml.train({
+        instrument_id: mlForm.instrument_id,
+        model_type: mlForm.model_type,
+        ...(mlForm.start_date ? { start_date: mlForm.start_date } : {}),
+        ...(mlForm.end_date ? { end_date: mlForm.end_date } : {}),
+      });
+      setMlResult(result);
+      await Promise.all([loadJobs(), loadMLData()]);
+    } catch (err: any) {
+      console.error('ML training failed:', err);
+      setMlError(err?.message || 'ML 訓練失敗');
+    } finally {
+      setMlTraining(false);
+    }
+  };
+
+  const handleLatestPrediction = async (modelId: string) => {
+    try {
+      const result = await api.ml.predictLatest(modelId);
+      setLatestPredictions((prev) => ({ ...prev, [modelId]: result }));
+    } catch (err: any) {
+      console.error('Prediction failed:', err);
+      alert(err?.message || '預測失敗');
+    }
+  };
+
+  const handleDeleteModel = async (modelId: string) => {
+    if (!confirm('確定刪除此模型？刪除後無法復原。')) return;
+    setDeletingModelId(modelId);
+    try {
+      await api.ml.deleteModel(modelId);
+      setMlModels((prev) => prev.filter((m) => m.model_id !== modelId));
+    } catch (err: any) {
+      console.error('Delete model failed:', err);
+      alert(err?.message || '刪除模型失敗');
+    } finally {
+      setDeletingModelId(null);
     }
   };
 
@@ -357,6 +465,254 @@ export default function TrainingPage() {
           ))}
         </div>
       )}
+
+      <div style={{ marginTop: '48px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+          <div>
+            <h2 style={{ margin: 0 }}>ML 模型訓練</h2>
+            <p style={{ color: '#666', margin: '8px 0 0' }}>
+              以實際機器學習分類器預測次日漲跌方向。資料依時間順序分割（訓練 / 驗證 / 測試），無未來資料洩漏。
+            </p>
+          </div>
+          <button onClick={() => setShowMLForm(!showMLForm)} className="btn btn-primary">
+            {showMLForm ? '隱藏表單' : '訓練新模型'}
+          </button>
+        </div>
+
+        <div className="disclaimer" style={{ backgroundColor: '#f8d7da', border: '1px solid #721c24', padding: '16px', borderRadius: '8px', marginBottom: '24px' }}>
+          <strong>提醒：</strong>目前資料來源為模擬數據（演示模式），即使標的代碼是真實股票，價格仍是合成資料。模型結果僅供研究流程驗證，不代表真實市場績效。
+        </div>
+
+        {showMLForm && (
+          <div className="card" style={{ marginBottom: '24px' }}>
+            <h3 style={{ marginBottom: '16px' }}>訓練新 ML 模型</h3>
+            <form onSubmit={handleTrainML}>
+              <div style={{ marginBottom: '16px' }}>
+                <label style={{ display: 'block', marginBottom: '8px', fontWeight: 500 }}>標的</label>
+                <select
+                  value={mlForm.instrument_id}
+                  onChange={(e) => setMlForm({ ...mlForm, instrument_id: e.target.value })}
+                  required
+                  style={{
+                    width: '100%',
+                    padding: '8px 12px',
+                    border: '1px solid #ddd',
+                    borderRadius: '4px',
+                    fontSize: '14px',
+                  }}
+                >
+                  {mlInstruments.map((inst) => (
+                    <option key={inst.instrument_id} value={inst.instrument_id}>
+                      {inst.instrument_id} — {inst.name}（{inst.currency}）
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div style={{ marginBottom: '16px' }}>
+                <label style={{ display: 'block', marginBottom: '8px', fontWeight: 500 }}>模型類型</label>
+                <select
+                  value={mlForm.model_type}
+                  onChange={(e) => setMlForm({ ...mlForm, model_type: e.target.value })}
+                  style={{
+                    width: '100%',
+                    padding: '8px 12px',
+                    border: '1px solid #ddd',
+                    borderRadius: '4px',
+                    fontSize: '14px',
+                  }}
+                >
+                  <option value="logistic_regression">邏輯回歸</option>
+                  <option value="gradient_boosting">梯度提升</option>
+                  <option value="baseline">基線（最常見類別）</option>
+                </select>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', marginBottom: '16px' }}>
+                <div>
+                  <label style={{ display: 'block', marginBottom: '8px', fontWeight: 500 }}>開始日期（選填）</label>
+                  <input
+                    type="date"
+                    value={mlForm.start_date}
+                    onChange={(e) => setMlForm({ ...mlForm, start_date: e.target.value })}
+                    style={{
+                      width: '100%',
+                      padding: '8px 12px',
+                      border: '1px solid #ddd',
+                      borderRadius: '4px',
+                      fontSize: '14px',
+                    }}
+                  />
+                </div>
+                <div>
+                  <label style={{ display: 'block', marginBottom: '8px', fontWeight: 500 }}>結束日期（選填）</label>
+                  <input
+                    type="date"
+                    value={mlForm.end_date}
+                    onChange={(e) => setMlForm({ ...mlForm, end_date: e.target.value })}
+                    style={{
+                      width: '100%',
+                      padding: '8px 12px',
+                      border: '1px solid #ddd',
+                      borderRadius: '4px',
+                      fontSize: '14px',
+                    }}
+                  />
+                </div>
+              </div>
+              <button type="submit" className="btn btn-primary" disabled={mlTraining}>
+                {mlTraining ? '訓練中...' : '開始訓練'}
+              </button>
+            </form>
+
+            {mlError && (
+              <div style={{ marginTop: '16px', padding: '12px', backgroundColor: '#f8d7da', border: '1px solid #721c24', borderRadius: '4px', color: '#721c24' }}>
+                {mlError}
+              </div>
+            )}
+
+            {mlResult && mlResult.job_id && (
+              <div style={{ marginTop: '24px', padding: '16px', backgroundColor: '#d4edda', border: '1px solid #c3e6cb', borderRadius: '4px' }}>
+                <h4 style={{ margin: '0 0 12px', color: '#155724' }}>訓練任務已建立</h4>
+                <div style={{ display: 'grid', gap: '8px', fontSize: '13px' }}>
+                  <div>
+                    <span style={{ color: '#666' }}>任務 ID：</span>
+                    <span style={{ fontFamily: 'monospace' }}>{truncateId(mlResult.job_id)}</span>
+                  </div>
+                  <div style={{ color: '#155724' }}>
+                    模型訓練由背景工作執行，完成後會出現在下方「我的模型」，亦可於上方任務列表查看進度。
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        <h3 style={{ marginBottom: '16px' }}>我的模型（{mlModels.length}）</h3>
+        {mlModels.length === 0 ? (
+          <div className="card" style={{ textAlign: 'center', padding: '40px' }}>
+            <p style={{ color: '#666', margin: 0 }}>尚無 ML 模型 — 點擊「訓練新模型」開始</p>
+          </div>
+        ) : (
+          <div style={{ display: 'grid', gap: '16px' }}>
+            {mlModels.map((model) => (
+              <div key={model.model_id} className="card">
+                <div
+                  onClick={() => setExpandedModelId(expandedModelId === model.model_id ? null : model.model_id)}
+                  style={{ cursor: 'pointer' }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start' }}>
+                    <div>
+                      <div style={{ display: 'flex', gap: '24px', marginBottom: '8px', fontSize: '14px' }}>
+                        <div>
+                          <span style={{ color: '#666' }}>模型 ID：</span>
+                          <span style={{ fontFamily: 'monospace' }}>{truncateId(model.model_id)}</span>
+                        </div>
+                        <div>
+                          <span style={{ color: '#666' }}>標的：</span>
+                          <span style={{ fontFamily: 'monospace' }}>{model.instrument_id}</span>
+                        </div>
+                        <div>
+                          <span style={{ color: '#666' }}>類型：</span>
+                          {ML_MODEL_TYPE_LABELS[model.model_type] || model.model_type}
+                        </div>
+                      </div>
+                      <div style={{ display: 'flex', gap: '24px', fontSize: '13px', color: '#666' }}>
+                        <div>
+                          測試準確率：
+                          <span style={{ fontFamily: 'monospace' }}>
+                            {model.metrics?.test?.accuracy != null ? model.metrics.test.accuracy : '-'}
+                          </span>
+                        </div>
+                        <div>訓練時間：{new Date(model.trained_at).toLocaleString('zh-Hant')}</div>
+                      </div>
+                      {model.data_provenance?.is_synthetic && (
+                        <span style={{
+                          display: 'inline-block',
+                          marginTop: '8px',
+                          padding: '2px 10px',
+                          borderRadius: '10px',
+                          fontSize: '12px',
+                          backgroundColor: '#f8d7da',
+                          color: '#721c24',
+                        }}>
+                          模擬數據訓練
+                        </span>
+                      )}
+                    </div>
+                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleLatestPrediction(model.model_id);
+                        }}
+                        className="btn btn-secondary"
+                        style={{ padding: '6px 14px' }}
+                      >
+                        最新預測
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleDeleteModel(model.model_id);
+                        }}
+                        disabled={deletingModelId === model.model_id}
+                        className="btn btn-secondary"
+                        style={{ padding: '6px 14px', color: '#a94442' }}
+                      >
+                        {deletingModelId === model.model_id ? '刪除中…' : '刪除'}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {latestPredictions[model.model_id] && (
+                  <div style={{
+                    marginTop: '12px',
+                    padding: '12px',
+                    backgroundColor: '#cce5ff',
+                    border: '1px solid #b8daff',
+                    borderRadius: '4px',
+                    fontSize: '13px',
+                  }}>
+                    <strong>最新預測（{latestPredictions[model.model_id].latest_prediction?.date}）：</strong>
+                    <span style={{ fontFamily: 'monospace' }}>
+                      {latestPredictions[model.model_id].latest_prediction?.signal}
+                      （信心 {latestPredictions[model.model_id].latest_prediction?.confidence}）
+                    </span>
+                    <span style={{ color: '#666' }}> — 僅供研究用途，非交易建議</span>
+                  </div>
+                )}
+
+                {expandedModelId === model.model_id && (
+                  <div style={{ marginTop: '16px', borderTop: '1px solid #eee', paddingTop: '16px' }}>
+                    <h4 style={{ marginBottom: '8px', fontSize: '14px', color: '#666' }}>評估指標</h4>
+                    <pre style={{
+                      backgroundColor: '#f8f9fa',
+                      padding: '12px',
+                      borderRadius: '4px',
+                      fontSize: '13px',
+                      overflow: 'auto',
+                      marginBottom: '16px',
+                    }}>
+                      {JSON.stringify(model.metrics, null, 2)}
+                    </pre>
+                    <h4 style={{ marginBottom: '8px', fontSize: '14px', color: '#666' }}>資料來源（Provenance）</h4>
+                    <pre style={{
+                      backgroundColor: '#f8f9fa',
+                      padding: '12px',
+                      borderRadius: '4px',
+                      fontSize: '13px',
+                      overflow: 'auto',
+                      margin: 0,
+                    }}>
+                      {JSON.stringify(model.data_provenance, null, 2)}
+                    </pre>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
