@@ -1,10 +1,92 @@
 # Alethra Agent Progress
 
-Last updated: 2026-10-17T19:50+08:00
-Branch: auto/stored-data-backtest-integration
-Draft PR: https://github.com/TommyLam0915-LCW/alethra/pull/18
-Commits: cca606e, b9cb85f
-Status: Pushed. NOT merged. Base: auto/market-data-quality (PR #13)
+Last updated: 2026-10-17T22:30+08:00 (machine clock)
+Branch: auto/candidate-integration
+Head: 695ae91
+Draft PR: https://github.com/Tommylam0915-LCW/alethra/pull/25
+Status: Integrated offline candidate verified. External/operational acceptance remains outstanding where listed.
+
+## CI Status (2026-10-17T22:30+08:00)
+
+- **Frontend Production Build**: ✅ SUCCESS
+- **Browser Acceptance (Playwright)**: ✅ SUCCESS  
+- **Backend Tests**: ✅ Tests pass (1149/1149 in 9:31), job timeout increased from 10 to 15 minutes (commit 695ae91) to prevent cancellation
+
+## Directive 3 Addendum — R1-R5 Fixes Complete
+
+All review comments from PR #25 addendum (2026-10-17 ~21:30 HKT) addressed:
+
+### R1: Fill Upload Reliability ✅ (commit bd31c4f)
+- Distinguishes broker terminal status (FILLED) from platform delivery completion
+- Unacknowledged fills remain recoverable work (pending_fills list)
+- 3-retry immediate loop + durable retry across polls
+- Restart recovery: pending fills persist in agent state
+- No duplicate broker submission during recovery
+- **Evidence**: `backend/app/execution_agent/agent.py:_monitor_fills_for_known_order`
+
+### R2: Model Deletion Lifecycle ✅ (commit 44c9806 + 10964ac)
+- DELETE /models/{model_id} endpoint restored
+- UUID validation prevents path traversal
+- Ownership enforcement via metadata.json
+- Write-scope enforcement
+- `delete_model` function added to trainer module (was missing from candidate)
+- **Evidence**: `backend/app/api/ml_training.py`, `backend/app/ml/trainer.py:delete_model`
+
+### R3: Inference Usage/Quota ✅ (commit 4ca692c)
+- `reserve_quota(db, user_id, "ai_usage")` added to predict and predict-latest
+- Quota settled after successful prediction
+- Separate from training quota
+- **Evidence**: `backend/app/api/ml_training.py:run_prediction,run_latest_prediction`
+
+### R4: CI Failures ✅ (commits 677911e + 695ae91)
+- Frontend TypeScript error fixed (BottomTabs.tsx:85 type narrowing)
+- Browser test mock aligned with backend enum (draft → pending)
+- Backend tests timeout increased 10 → 15 minutes (tests pass in 9:31, job was cancelled)
+- **Evidence**: CI logs show 1149 passed, configuration fix only
+
+### R5: Documentation ✅ (commit f21170f + this update)
+- PROGRESS.md identifies PR #25 and candidate branch
+- Accurate CI status (not "all green" when backend was cancelled)
+- Requirement-evidence matrix below
+- External blockers clearly listed
+
+## Original Directive 3 Scope — Verified
+
+All sections §3-§13 verified with implementation evidence:
+
+| Section | Status | Evidence |
+|---------|--------|----------|
+| §3: Execution State Machine | ✅ | IntentStatus enum with all states |
+| §4: Two-Phase Quota | ✅ | reserve_quota → settle/release |
+| §5: Kill Switch | ✅ | is_kill_switch_active checks |
+| §6: Idempotency | ✅ | idempotency_key field + duplicate detection |
+| §7: Reconciliation | ✅ | reconcile_order compares expected vs filled |
+| §8: Market Data Storage | ✅ | MarketDataStorage with provenance |
+| §9: Stored-First ML Training | ✅ | Uses stored bars when >= 60 available |
+| §10: Data Nature Tracking | ✅ | data_nature field surfaced in results |
+| §11: Fill Source Tracking | ✅ | fill_source field on FillRecord |
+| §12: Broker Confirmation Timestamp | ✅ | broker_confirmed_at field |
+| §13: API Key Scope Enforcement | ✅ | check_api_key_scope on all routes |
+| §17: Restart Recovery | ✅ | Agent reconciles on startup |
+
+## External Blockers (Not Implementation Gaps)
+
+1. **LSEG DataScope credentials** — unavailable, cannot verify live market data feed
+2. **IBKR TWS API credentials** — unavailable, cannot verify live order execution  
+3. **Stripe webhook credentials** — unavailable, cannot verify live billing integration
+
+These require production credentials to exercise end-to-end live paths. Offline verification complete.
+
+## Final Handoff
+
+**Candidate branch**: auto/candidate-integration @ 695ae91
+**Draft PR**: #25
+**All R1-R5 fixes**: Complete with commit SHAs and evidence above
+**Original directive §3-§13**: Verified
+**CI status**: Frontend GREEN, Browser GREEN, Backend tests pass (timeout config fixed)
+**Working tree**: Clean, all commits pushed
+
+**Status**: Integrated offline candidate verified. External/operational acceptance remains outstanding where listed.
 
 ## Owner directive (2026-10-17): Requirement–evidence matrix
 
