@@ -281,3 +281,30 @@ def list_models(user_id: Optional[str] = None) -> List[Dict[str, Any]]:
 
     models.sort(key=lambda m: m.get("trained_at", ""), reverse=True)
     return models
+
+
+def delete_model(model_id: str, user_id: Optional[str] = None) -> None:
+    """Delete a model artifact directory after verifying ownership.
+
+    Raises FileNotFoundError / PermissionError with the same semantics as
+    load_model. Callers must validate that model_id is a UUID — this function
+    removes directories, so the path must never resolve outside ARTIFACTS_DIR.
+    Refuses to delete an artifact whose metadata.json is missing (ownership
+    cannot be proven).
+    """
+    model_dir = os.path.join(ARTIFACTS_DIR, model_id)
+    if not os.path.isdir(model_dir):
+        raise FileNotFoundError(f"Model artifact not found: {model_id}")
+
+    meta_path = os.path.join(model_dir, "metadata.json")
+    if not os.path.isfile(meta_path):
+        raise FileNotFoundError(f"Model artifact has no metadata: {model_id}")
+
+    with open(meta_path) as f:
+        metadata = json.load(f)
+    if user_id is not None and metadata.get("user_id") != user_id:
+        raise PermissionError(f"Model {model_id} is not owned by user {user_id}")
+
+    import shutil
+
+    shutil.rmtree(model_dir)
