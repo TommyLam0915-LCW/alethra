@@ -6,7 +6,7 @@ scikit-learn classifiers on OHLCV data with temporal splits.
 
 import logging
 import uuid
-from datetime import datetime, date
+from datetime import date, timedelta
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -19,6 +19,32 @@ from app.ml.trainer import train_model, load_model, list_models
 from app.lib.timeutil import utcnow
 
 logger = logging.getLogger(__name__)
+
+
+def _latest_available_end_date(
+    db: Session,
+    provider: Any,
+    instrument_id: str,
+) -> date:
+    """Return the most recent date for which bars are available.
+
+    Prefers stored data (last_bar_date from storage metadata), then falls
+    back to the provider's advertised date range. Never hardcodes a year.
+    """
+    metadata = MarketDataStorage(db).get_metadata(instrument_id)
+    if metadata is not None and metadata.last_bar_date is not None:
+        return metadata.last_bar_date
+
+    date_range = provider.get_date_range()
+    real_range = date_range.get("real_instruments_range", {}) or {}
+    max_str = real_range.get("max")
+    if max_str:
+        return date.fromisoformat(max_str)
+
+    raise ValueError(
+        f"No known date range for {instrument_id}: nothing stored and "
+        f"provider reports no range."
+    )
 
 
 def _get_bars_with_storage(
@@ -78,6 +104,26 @@ def _get_bars_with_storage(
     return bars, "provider"
 
 
+def get_recent_bars_for_prediction(
+    db: Session,
+    instrument_id: str,
+    min_bars: int = 30,
+    lookback_days: int = 380,
+) -> Tuple[List[Any], str]:
+    """Fetch the most recent bars available for prediction.
+
+    Window ends at the latest stored bar (or the provider's latest date when
+    nothing is stored) — never at a hardcoded calendar date. Returns
+    (bars, data_source) using the same stored-first logic as training.
+    """
+    provider = get_data_provider()
+    end = _latest_available_end_date(db, provider, instrument_id)
+    start = end - timedelta(days=lookback_days)
+    return _get_bars_with_storage(
+        db, provider, instrument_id, start.isoformat(), end.isoformat()
+    )
+
+
 def create_ml_training_job(
     db: Session,
     user_id: uuid.UUID,
@@ -86,6 +132,7 @@ def create_ml_training_job(
     model_type: str = "logistic_regression",
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
+    quota_reservation_id: Optional[uuid.UUID] = None,
 ) -> TrainingJob:
     """Create an ML training job.
 
@@ -97,6 +144,8 @@ def create_ml_training_job(
     random experiment UUID, it violates the FK on PostgreSQL.
 
     The training_type is stored in strategy_spec_snapshot as a marker.
+    quota_reservation_id links the job to its two-phase quota reservation
+    so the worker can settle (success) or release (failure) it.
     """
     provider = get_data_provider()
 
@@ -104,7 +153,9 @@ def create_ml_training_job(
         date_range = provider.get_date_range()
         real_range = date_range.get("real_instruments_range", {})
         start_date = start_date or real_range.get("min", "2024-01-02")
-        end_date = end_date or "2024-12-31"
+        end_date = end_date or _latest_available_end_date(
+            db, provider, instrument_id
+        ).isoformat()
 
     bars, data_source = _get_bars_with_storage(db, provider, instrument_id, start_date, end_date)
     if len(bars) < 60:
@@ -113,20 +164,24 @@ def create_ml_training_job(
             f"need at least 60 for ML training."
         )
 
+    spec: Dict[str, Any] = {
+        "training_type": "ml_model",
+        "instrument_id": instrument_id,
+        "model_type": model_type,
+        "start_date": start_date,
+        "end_date": end_date,
+        "n_bars": len(bars),
+        "data_source": data_source,
+    }
+    if quota_reservation_id is not None:
+        spec["quota_reservation_id"] = str(quota_reservation_id)
+
     job = TrainingJob(
         user_id=user_id,
         experiment_id=experiment_id,
         status=TrainingJobStatus.pending,
         parameter_grid={"model_type": [model_type]},
-        strategy_spec_snapshot={
-            "training_type": "ml_model",
-            "instrument_id": instrument_id,
-            "model_type": model_type,
-            "start_date": start_date,
-            "end_date": end_date,
-            "n_bars": len(bars),
-            "data_source": data_source,
-        },
+        strategy_spec_snapshot=spec,
     )
     db.add(job)
     db.flush()

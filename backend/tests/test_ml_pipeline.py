@@ -65,6 +65,28 @@ def _make_bars(n=200, base_price=100.0, seed=42):
     return bars
 
 
+def _run_worker_until_done(max_jobs=5):
+    """Drive the training worker in-process against the test DB."""
+    from app.workers.training_worker import claim_pending_job, run_claimed_job
+    from tests.conftest import TestSession
+
+    for _ in range(max_jobs):
+        db = TestSession()
+        try:
+            job = claim_pending_job(db)
+            if job is None:
+                break
+            job_id = job.id
+        finally:
+            db.close()
+
+        db = TestSession()
+        try:
+            run_claimed_job(db, job_id)
+        finally:
+            db.close()
+
+
 class TestFeatureEngineering:
     def test_compute_returns(self):
         closes = [100, 102, 101, 103]
@@ -337,17 +359,46 @@ class TestMLAPIEndpoints:
     def _headers(self, token):
         return {"Authorization": f"Bearer {token}"}
 
-    def test_train_model_api(self, client, auth_token):
+    def _submit_train(self, client, token, qs):
         resp = client.post(
-            "/api/v1/ml/train?instrument_id=US:AAPL&model_type=logistic_regression&start_date=2024-01-02&end_date=2024-12-31",
+            f"/api/v1/ml/train?{qs}",
+            headers=self._headers(token),
+        )
+        assert resp.status_code == 200, resp.text
+        return resp.json()
+
+    def test_train_enqueues_pending_job_for_worker(self, client, auth_token):
+        data = self._submit_train(
+            client,
+            auth_token,
+            "instrument_id=US:AAPL&model_type=logistic_regression&start_date=2024-01-02&end_date=2024-12-31",
+        )
+        assert data["status"] == "pending"
+        assert data["job_id"]
+        assert data["poll_url"].endswith(data["job_id"])
+        # Training must NOT run synchronously in the request
+        assert "model_id" not in data
+        assert "metrics" not in data
+
+    def test_train_model_api(self, client, auth_token):
+        data = self._submit_train(
+            client,
+            auth_token,
+            "instrument_id=US:AAPL&model_type=logistic_regression&start_date=2024-01-02&end_date=2024-12-31",
+        )
+        job_id = data["job_id"]
+
+        _run_worker_until_done()
+
+        resp = client.get(
+            f"/api/v1/training/jobs/{job_id}",
             headers=self._headers(auth_token),
         )
         assert resp.status_code == 200
-        data = resp.json()
-        assert data["status"] == "completed"
-        assert data["model_id"] is not None
-        assert data["metrics"] is not None
-        assert "test" in data["metrics"]
+        job = resp.json()
+        assert job["status"] == "completed"
+        assert job["best_params"]["model_id"] is not None
+        assert "test" in job["results"]["metrics"]
 
     def test_train_model_invalid_type(self, client, auth_token):
         resp = client.post(
@@ -357,48 +408,68 @@ class TestMLAPIEndpoints:
         assert resp.status_code == 400
 
     def test_list_models_api(self, client, auth_token):
-        client.post(
-            "/api/v1/ml/train?instrument_id=US:MSFT&model_type=baseline&start_date=2024-01-02&end_date=2024-12-31",
-            headers=self._headers(auth_token),
+        self._submit_train(
+            client,
+            auth_token,
+            "instrument_id=US:MSFT&model_type=baseline&start_date=2024-01-02&end_date=2024-12-31",
         )
+        _run_worker_until_done()
         resp = client.get("/api/v1/ml/models", headers=self._headers(auth_token))
         assert resp.status_code == 200
         data = resp.json()
-        assert data["total"] >= 0
+        assert data["total"] >= 1
 
     def test_predict_api(self, client, auth_token):
-        train_resp = client.post(
-            "/api/v1/ml/train?instrument_id=US:AAPL&model_type=logistic_regression&start_date=2024-01-02&end_date=2024-12-31",
+        data = self._submit_train(
+            client,
+            auth_token,
+            "instrument_id=US:AAPL&model_type=logistic_regression&start_date=2024-01-02&end_date=2024-12-31",
+        )
+        _run_worker_until_done()
+
+        detail = client.get(
+            f"/api/v1/training/jobs/{data['job_id']}",
             headers=self._headers(auth_token),
         )
-        model_id = train_resp.json()["model_id"]
+        model_id = detail.json()["best_params"]["model_id"]
 
         resp = client.post(
             f"/api/v1/ml/models/{model_id}/predict?start_date=2024-06-01&end_date=2024-12-31",
             headers=self._headers(auth_token),
         )
         assert resp.status_code == 200
-        data = resp.json()
-        assert data["model_id"] == model_id
-        assert len(data["predictions"]) > 0
+        result = resp.json()
+        assert result["model_id"] == model_id
+        assert len(result["predictions"]) > 0
 
     def test_predict_latest_api(self, client, auth_token):
-        train_resp = client.post(
-            "/api/v1/ml/train?instrument_id=US:AAPL&model_type=logistic_regression&start_date=2024-01-02&end_date=2024-12-31",
+        data = self._submit_train(
+            client,
+            auth_token,
+            "instrument_id=US:AAPL&model_type=logistic_regression&start_date=2024-01-02&end_date=2024-12-31",
+        )
+        _run_worker_until_done()
+
+        detail = client.get(
+            f"/api/v1/training/jobs/{data['job_id']}",
             headers=self._headers(auth_token),
         )
-        model_id = train_resp.json()["model_id"]
+        model_id = detail.json()["best_params"]["model_id"]
 
         resp = client.post(
             f"/api/v1/ml/models/{model_id}/predict-latest",
             headers=self._headers(auth_token),
         )
         assert resp.status_code == 200
-        data = resp.json()
-        assert "latest_prediction" in data
+        result = resp.json()
+        assert "latest_prediction" in result
 
     def test_unauthenticated_access(self, client):
         resp = client.get("/api/v1/ml/models")
+        assert resp.status_code == 401
+
+    def test_train_requires_auth(self, client):
+        resp = client.post("/api/v1/ml/train?instrument_id=US:AAPL")
         assert resp.status_code == 401
 
     def test_model_not_found(self, client, auth_token):
@@ -446,14 +517,20 @@ class TestModelOwnership:
     def _headers(self, token):
         return {"Authorization": f"Bearer {token}"}
 
+    def _train_and_get_model_id(self, client, token, qs="instrument_id=US:AAPL&model_type=baseline"):
+        resp = client.post(f"/api/v1/ml/train?{qs}", headers=self._headers(token))
+        assert resp.status_code == 200, resp.text
+        job_id = resp.json()["job_id"]
+        _run_worker_until_done()
+        detail = client.get(f"/api/v1/training/jobs/{job_id}", headers=self._headers(token))
+        assert detail.status_code == 200
+        job = detail.json()
+        assert job["status"] == "completed", job.get("error_details")
+        return job["best_params"]["model_id"]
+
     def test_user_cannot_list_others_models(self, client, user1_token, user2_token):
         """User A's models should not appear in User B's list."""
-        resp1 = client.post(
-            "/api/v1/ml/train?instrument_id=US:AAPL&model_type=baseline",
-            headers=self._headers(user1_token),
-        )
-        assert resp1.status_code == 200
-        model_id = resp1.json()["model_id"]
+        model_id = self._train_and_get_model_id(client, user1_token)
 
         resp2 = client.get("/api/v1/ml/models", headers=self._headers(user2_token))
         assert resp2.status_code == 200
@@ -463,22 +540,14 @@ class TestModelOwnership:
 
     def test_user_cannot_access_others_model_detail(self, client, user1_token, user2_token):
         """User B should not be able to get details of User A's model."""
-        resp1 = client.post(
-            "/api/v1/ml/train?instrument_id=US:AAPL&model_type=baseline",
-            headers=self._headers(user1_token),
-        )
-        model_id = resp1.json()["model_id"]
+        model_id = self._train_and_get_model_id(client, user1_token)
 
         resp2 = client.get(f"/api/v1/ml/models/{model_id}", headers=self._headers(user2_token))
         assert resp2.status_code == 403
 
     def test_user_cannot_predict_with_others_model(self, client, user1_token, user2_token):
         """User B should not be able to use User A's model for prediction."""
-        resp1 = client.post(
-            "/api/v1/ml/train?instrument_id=US:AAPL&model_type=baseline",
-            headers=self._headers(user1_token),
-        )
-        model_id = resp1.json()["model_id"]
+        model_id = self._train_and_get_model_id(client, user1_token)
 
         resp2 = client.post(
             f"/api/v1/ml/models/{model_id}/predict",
@@ -486,13 +555,19 @@ class TestModelOwnership:
         )
         assert resp2.status_code == 403
 
+    def test_user_cannot_predict_latest_with_others_model(self, client, user1_token, user2_token):
+        """predict-latest must enforce model ownership too."""
+        model_id = self._train_and_get_model_id(client, user1_token)
+
+        resp2 = client.post(
+            f"/api/v1/ml/models/{model_id}/predict-latest",
+            headers=self._headers(user2_token),
+        )
+        assert resp2.status_code == 403
+
     def test_user_can_access_own_model(self, client, user1_token):
         """User A should be able to access their own model."""
-        resp = client.post(
-            "/api/v1/ml/train?instrument_id=US:AAPL&model_type=baseline",
-            headers=self._headers(user1_token),
-        )
-        model_id = resp.json()["model_id"]
+        model_id = self._train_and_get_model_id(client, user1_token)
 
         resp_detail = client.get(f"/api/v1/ml/models/{model_id}", headers=self._headers(user1_token))
         assert resp_detail.status_code == 200
