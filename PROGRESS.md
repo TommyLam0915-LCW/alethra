@@ -1,9 +1,30 @@
 # Alethra Agent Progress
 
-Last updated: 2026-10-17T19:45+08:00 (machine clock; earlier 19:xx agent stamps were hours fast — use git commit times)
+Last updated: 2026-10-17T20:30+08:00 (machine clock; earlier 19:xx agent stamps were hours fast — use git commit times)
 Branch: auto/stored-data-backtest-integration (main repo worktree — PROGRESS carrier; feature branches below)
-Active feature branches: auto/workspace-backend @ 5aa3684 (**Draft PR #22**), auto/workspace-shell @ cfa1a27 (**Draft PR #21**, stacked on #22), auto/ai-assistant @ faf28fe (**Draft PR #23**, stacked on #22), auto/model-lifecycle @ 442cc72 (**Draft PR #24**, stacked on #23) — owner-directive-2 Sections 1–4, all pushed, NOT merged
-Status: Directive 2 ("Complete the Product, Not Just Individual Modules") **ALL 8 SECTIONS COMPLETE** — see session records below. Ready for owner review.
+Active feature branches: auto/candidate-integration @ c617086 (**Draft PR #25**), auto/workspace-backend @ 5aa3684 (PR #22), auto/workspace-shell @ cfa1a27 (PR #21), auto/ai-assistant @ faf28fe (PR #23), auto/model-lifecycle @ 442cc72 (PR #24) — all pushed, NOT merged
+Status: Directive 3 "Complete the Integrated Product and Close Review Findings" **§3-§4 COMPLETE** — candidate branch established, P0 defects fixed. Continuing with §5-§17.
+
+## Session record: directive-3 §3-§4 — candidate integration + P0 fixes (2026-10-17 ~20:10–20:30 HKT)
+
+**Directive 3 §3 — Establish candidate integration branch (COMPLETE)**:
+- Created `auto/candidate-integration` from `auto/integration-e2e` @ 8202611
+- Merged: auto/workspace-backend, auto/ai-assistant, auto/model-lifecycle, auto/workspace-shell
+- Candidate HEAD: `c617086` (after P0 fixes)
+- All backend + frontend code integrated in one branch
+
+**Directive 3 §4 — P0 integration defects (COMPLETE)**:
+- **§4.1 AI routes**: Verified AI router mounted in candidate branch ✓
+- **§4.2 Model-list response**: Fixed BottomTabs to unwrap `{models, total}` response, handle both `model_id`/`id` and `trained_at`/`created_at` fields
+- **§4.3 Intent state**: Changed OrderPreviewPanel from "draft" to "pending" to match backend IntentStatus enum
+- **§4.4 AI-to-draft content**: Added hypothesis textarea to draft form, pre-fill with AI message content, send to backend
+- **§4.5 Fill upload failure**: Removed incorrect `_reported_fills.add()` after 3 failed retries — fills remain pending for retry
+- **§4.6 Lot size/currency**: Block submission when `lot_size` is null/undefined; validate instrument currency matches portfolio currency
+- **§4.7 Workspace contracts audit**: Reviewed positions average-price, cancel_requested, order status display — no critical issues found
+
+**Evidence**: 4 files changed, 34 insertions, 12 deletions. All fixes committed to `auto/candidate-integration` @ `c617086`, pushed, Draft PR #25 created.
+
+**Next (§5)**: Complete personal AI and configuration — verify provider correctness, context/privacy, conversation reliability.
 
 ## Session record: directive-2 Section 5 — other product areas connectivity (2026-10-17 ~19:20–19:35 HKT)
 
