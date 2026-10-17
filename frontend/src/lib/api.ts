@@ -45,6 +45,13 @@ export async function apiFetch(endpoint: string, options: RequestInit = {}) {
   return response.json();
 }
 
+export interface AIConversationContext {
+  research_draft_ids?: string[];
+  memory_ids?: string[];
+  instrument_symbols?: string[];
+  experiment_ids?: string[];
+}
+
 export const api = {
   auth: {
     register: (data: { email: string; password: string; display_name?: string }) =>
@@ -199,6 +206,23 @@ export const api = {
       apiFetch(`/api/v1/research-drafts/${id}/revisions`),
     auditEvents: (id: string) =>
       apiFetch(`/api/v1/research-drafts/${id}/audit-events`),
+  },
+  aiAssistant: {
+    status: () => apiFetch('/api/v1/ai/status'),
+    testConnection: () => apiFetch('/api/v1/ai/test-connection', { method: 'POST' }),
+    listConversations: () => apiFetch('/api/v1/ai/conversations'),
+    createConversation: (data?: { title?: string; context?: AIConversationContext }) =>
+      apiFetch('/api/v1/ai/conversations', { method: 'POST', body: JSON.stringify(data ?? {}) }),
+    getConversation: (id: string) => apiFetch(`/api/v1/ai/conversations/${id}`),
+    updateConversation: (id: string, data: { title?: string; context?: AIConversationContext }) =>
+      apiFetch(`/api/v1/ai/conversations/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+    deleteConversation: async (id: string): Promise<void> => {
+      await apiFetch(`/api/v1/ai/conversations/${id}`, { method: 'DELETE' });
+    },
+    sendMessage: (id: string, content: string) =>
+      apiFetch(`/api/v1/ai/conversations/${id}/messages`, { method: 'POST', body: JSON.stringify({ content }) }),
+    createDraft: (id: string, data: Record<string, unknown>) =>
+      apiFetch(`/api/v1/ai/conversations/${id}/drafts`, { method: 'POST', body: JSON.stringify(data) }),
   },
   pilot: {
     submitApplication: (data: any) =>

@@ -11,6 +11,7 @@ import PriceChart, { type RangeKey } from './PriceChart';
 import WatchlistPanel from './WatchlistPanel';
 import DetailsPanel from './DetailsPanel';
 import OrderPreviewPanel from './OrderPreviewPanel';
+import AIPanel from './AIPanel';
 import BottomTabs from './BottomTabs';
 import { useMediaQuery, useWorkspaceLayout } from './hooks';
 import { rangeToStart, todayStr, type BarsResponse, type InstrumentDetail, type Watchlist, type WorkspaceLayout } from './types';
@@ -30,6 +31,7 @@ export default function WorkspaceShell() {
   const leftPanelRef = useRef<ImperativePanelHandle>(null);
   const bottomPanelRef = useRef<ImperativePanelHandle>(null);
   const rightPanelRef = useRef<ImperativePanelHandle>(null);
+  const rightAIPanelRef = useRef<ImperativePanelHandle>(null);
 
   useEffect(() => {
     const token = localStorage.getItem('token');
@@ -175,6 +177,23 @@ export default function WorkspaceShell() {
     }
   };
 
+  const persistRightAISize = (sizes: number[]) => {
+    if (sizes.length === 2) {
+      setLayout({
+        panels: { ...layout.panels, rightAI: { ...layout.panels.rightAI, size: sizes[0] } },
+      });
+    }
+  };
+
+  const toggleAIPanel = () => {
+    const collapsed = !layout.panels.rightAI.collapsed;
+    setLayout({ panels: { ...layout.panels, rightAI: { ...layout.panels.rightAI, collapsed } } });
+    if (rightAIPanelRef.current) {
+      if (collapsed) rightAIPanelRef.current.collapse();
+      else rightAIPanelRef.current.expand();
+    }
+  };
+
   const handleLogout = () => {
     localStorage.removeItem('token');
     window.location.href = '/login';
@@ -260,6 +279,9 @@ export default function WorkspaceShell() {
         <div className="ws-main" data-testid="workspace-mobile">
           {mobileDrawer && <div style={{ borderBottom: '1px solid #2a2e39' }}>{watchlistPanel}</div>}
           <div style={{ height: 320, flexShrink: 0 }}>{chartBlock}</div>
+          <div style={{ height: 420, flexShrink: 0 }}>
+            <AIPanel currentSymbol={symbol} />
+          </div>
           {detailsAndOrder}
           {bottomTabs}
         </div>
@@ -324,17 +346,44 @@ export default function WorkspaceShell() {
               onCollapse={() => setLayout({ panels: { ...layout.panels, right: { ...layout.panels.right, collapsed: true } } })}
               onExpand={() => setLayout({ panels: { ...layout.panels, right: { ...layout.panels.right, collapsed: false } } })}
             >
-              <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-                <div className="ws-panel-header">
-                  詳情 / 下單
-                  <div className="ws-panel-header-actions">
-                    <button className="ws-icon-btn" title="收合" onClick={() => togglePanel('right')}>
-                      ⟩
-                    </button>
+              <PanelGroup direction="vertical" onLayout={persistRightAISize}>
+                <Panel
+                  defaultSize={layout.panels.rightAI.size}
+                  minSize={10}
+                  collapsible
+                  ref={rightAIPanelRef}
+                  onCollapse={() => setLayout({ panels: { ...layout.panels, rightAI: { ...layout.panels.rightAI, collapsed: true } } })}
+                  onExpand={() => setLayout({ panels: { ...layout.panels, rightAI: { ...layout.panels.rightAI, collapsed: false } } })}
+                >
+                  <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+                    <div className="ws-panel-header">
+                      AI 助手
+                      <div className="ws-panel-header-actions">
+                        <button className="ws-icon-btn" title="收合 AI 面板" onClick={toggleAIPanel}>
+                          ⌃
+                        </button>
+                      </div>
+                    </div>
+                    <div style={{ flex: 1, minHeight: 0 }}>
+                      <AIPanel currentSymbol={symbol} />
+                    </div>
                   </div>
-                </div>
-                <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>{detailsAndOrder}</div>
-              </div>
+                </Panel>
+                <PanelResizeHandle style={{ height: 4, background: '#131722', cursor: 'row-resize' }} />
+                <Panel minSize={10}>
+                  <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+                    <div className="ws-panel-header">
+                      詳情 / 下單
+                      <div className="ws-panel-header-actions">
+                        <button className="ws-icon-btn" title="收合" onClick={() => togglePanel('right')}>
+                          ⟩
+                        </button>
+                      </div>
+                    </div>
+                    <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>{detailsAndOrder}</div>
+                  </div>
+                </Panel>
+              </PanelGroup>
             </Panel>
           </PanelGroup>
         </div>

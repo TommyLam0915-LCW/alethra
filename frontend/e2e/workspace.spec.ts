@@ -142,6 +142,39 @@ const WATCHLIST_RESPONSE = {
   ],
 };
 
+const AI_STATUS_RESPONSE = {
+  provider: 'mock',
+  model: 'mock-model',
+  mode: 'mock',
+  api_key_configured: false,
+  base_url: null,
+  timeout_seconds: 30,
+  max_output_tokens: 1024,
+  advisory_notice: 'AI 回覆僅供研究參考，不構成交易授權',
+};
+
+const AI_CONVERSATION = {
+  id: '11111111-1111-1111-1111-111111111111',
+  title: '研究：AAPL 動能',
+  context: { research_draft_ids: [], memory_ids: [], instrument_symbols: ['US:AAPL'] },
+  created_at: '2026-10-17T00:00:00Z',
+  updated_at: '2026-10-17T00:00:00Z',
+};
+
+const AI_ASSISTANT_REPLY = {
+  id: '22222222-2222-2222-2222-222222222222',
+  role: 'assistant',
+  content: '（模擬 AI 助手 — 確定性回覆）就 [symbol:US:AAPL] 的動能假說而言，建議先回顧近期回撤幅度。',
+  status: 'completed',
+  error_detail: null,
+  provider: 'mock',
+  model: 'mock-model',
+  prompt_tokens: 120,
+  completion_tokens: 80,
+  quota_used: 1,
+  created_at: '2026-10-17T00:00:00Z',
+};
+
 function json(route: Route, body: unknown, status = 200) {
   route.fulfill({
     status,
@@ -159,6 +192,7 @@ async function setupAuth(page: Page) {
 
 interface WorkspaceMocks {
   savedLayout: unknown;
+  lastIntent: Record<string, unknown> | null;
 }
 
 function mockWorkspaceApis(page: Page, state: WorkspaceMocks) {
@@ -238,14 +272,46 @@ function mockWorkspaceApis(page: Page, state: WorkspaceMocks) {
       json(route, []);
     }
   });
-}
 
-// shared between route handlers in mockWorkspaceApis
-const state = { lastIntent: null as Record<string, unknown> | null };
+  page.route('**/api/v1/ai/status', (route) => json(route, AI_STATUS_RESPONSE));
+  page.route('**/api/v1/ai/test-connection', (route) =>
+    json(route, { ok: true, detail: '模擬供應商連線正常', latency_ms: 1, kind: null, provider: 'mock' })
+  );
+  page.route('**/api/v1/ai/conversations', (route) => {
+    if (route.request().method() === 'POST') {
+      json(route, AI_CONVERSATION, 201);
+    } else {
+      json(route, [AI_CONVERSATION]);
+    }
+  });
+  page.route('**/api/v1/ai/conversations/**', (route) => {
+    const url = route.request().url();
+    const method = route.request().method();
+    if (url.endsWith('/messages') && method === 'POST') {
+      json(route, AI_ASSISTANT_REPLY);
+    } else if (url.endsWith('/drafts') && method === 'POST') {
+      json(
+        route,
+        {
+          id: '33333333-3333-3333-3333-333333333333',
+          title: 'AI 提議草稿',
+          status: 'pending_review',
+          source_conversation_id: AI_CONVERSATION.id,
+          review_notice: 'AI 產生的草稿需要人工審核',
+        },
+        201
+      );
+    } else if (method === 'DELETE') {
+      json(route, {});
+    } else {
+      json(route, { ...AI_CONVERSATION, messages: [] });
+    }
+  });
+}
 
 test.describe('Workspace shell', () => {
   test('renders chart, nature badge, status chips, tabs and watchlist', async ({ page }) => {
-    const mocks: WorkspaceMocks = { savedLayout: null };
+    const mocks: WorkspaceMocks = { savedLayout: null, lastIntent: null };
     await setupAuth(page);
     mockWorkspaceApis(page, mocks);
 
@@ -261,13 +327,18 @@ test.describe('Workspace shell', () => {
     await expect(page.getByTestId('details-panel')).toContainText('Apple Inc.');
     await expect(page.getByTestId('bottom-tabs')).toBeVisible();
 
+    // AI assistant panel lives in the right column above details/order
+    await expect(page.getByTestId('ai-panel')).toBeVisible();
+    await expect(page.getByTestId('ai-mode-badge')).toHaveText('AI 模擬');
+    await expect(page.locator('.ws-ai-advisory')).toContainText('不構成交易授權');
+
     // candlestick canvas actually rendered by lightweight-charts
     const canvasCount = await page.locator('[data-testid="price-chart"] canvas').count();
     expect(canvasCount).toBeGreaterThan(0);
   });
 
   test('symbol search switches chart, legend and details panel', async ({ page }) => {
-    const mocks: WorkspaceMocks = { savedLayout: null };
+    const mocks: WorkspaceMocks = { savedLayout: null, lastIntent: null };
     await setupAuth(page);
     mockWorkspaceApis(page, mocks);
 
@@ -284,7 +355,7 @@ test.describe('Workspace shell', () => {
   });
 
   test('watchlist symbol click switches chart', async ({ page }) => {
-    const mocks: WorkspaceMocks = { savedLayout: null };
+    const mocks: WorkspaceMocks = { savedLayout: null, lastIntent: null };
     await setupAuth(page);
     mockWorkspaceApis(page, mocks);
 
@@ -297,7 +368,7 @@ test.describe('Workspace shell', () => {
   });
 
   test('layout (symbol, tab, range, panel size) persists across reload', async ({ page }) => {
-    const mocks: WorkspaceMocks = { savedLayout: null };
+    const mocks: WorkspaceMocks = { savedLayout: null, lastIntent: null };
     await setupAuth(page);
     mockWorkspaceApis(page, mocks);
 
@@ -341,7 +412,7 @@ test.describe('Workspace shell', () => {
   });
 
   test('bottom tabs switch and render data', async ({ page }) => {
-    const mocks: WorkspaceMocks = { savedLayout: null };
+    const mocks: WorkspaceMocks = { savedLayout: null, lastIntent: null };
     await setupAuth(page);
     mockWorkspaceApis(page, mocks);
     // give research tab some data
@@ -370,7 +441,7 @@ test.describe('Workspace shell', () => {
   });
 
   test('order preview panel: create → authorize → submit intent flow', async ({ page }) => {
-    const mocks: WorkspaceMocks = { savedLayout: null };
+    const mocks: WorkspaceMocks = { savedLayout: null, lastIntent: null };
     await setupAuth(page);
     mockWorkspaceApis(page, mocks);
 
@@ -393,7 +464,7 @@ test.describe('Workspace shell', () => {
   });
 
   test('mobile: hamburger opens watchlist drawer', async ({ page }) => {
-    const mocks: WorkspaceMocks = { savedLayout: null };
+    const mocks: WorkspaceMocks = { savedLayout: null, lastIntent: null };
     await setupAuth(page);
     mockWorkspaceApis(page, mocks);
 
@@ -406,5 +477,56 @@ test.describe('Workspace shell', () => {
     await page.getByTestId('mobile-watchlist-toggle').click();
     await expect(page.getByTestId('watchlist-panel')).toBeVisible();
     await expect(page.getByTestId('price-chart')).toBeVisible();
+    await expect(page.getByTestId('ai-panel')).toBeVisible();
+  });
+
+  test('AI panel: connection test reports provider status', async ({ page }) => {
+    const mocks: WorkspaceMocks = { savedLayout: null, lastIntent: null };
+    await setupAuth(page);
+    mockWorkspaceApis(page, mocks);
+
+    await page.goto(`${FRONTEND_URL}/workspace`);
+    await page.waitForLoadState('networkidle');
+
+    await expect(page.getByTestId('ai-conversation-select')).toContainText('研究：AAPL 動能');
+    await page.getByTestId('ai-test-connection').click();
+    await expect(page.locator('.ws-ai-conn')).toContainText('模擬供應商連線正常', { timeout: 10_000 });
+  });
+
+  test('AI panel: send message renders reply and quota', async ({ page }) => {
+    const mocks: WorkspaceMocks = { savedLayout: null, lastIntent: null };
+    await setupAuth(page);
+    mockWorkspaceApis(page, mocks);
+
+    await page.goto(`${FRONTEND_URL}/workspace`);
+    await page.waitForLoadState('networkidle');
+
+    await page.getByTestId('ai-input').fill('AAPL 近期動能如何？');
+    await page.getByTestId('ai-send').click();
+
+    await expect(page.getByTestId('ai-thread')).toContainText('AAPL 近期動能如何？', { timeout: 10_000 });
+    await expect(page.getByTestId('ai-thread')).toContainText('[symbol:US:AAPL]');
+    await expect(page.locator('.ws-ai-quota')).toHaveText('AI 用量：1', { timeout: 10_000 });
+  });
+
+  test('AI panel: assistant reply can be saved as pending review draft', async ({ page }) => {
+    const mocks: WorkspaceMocks = { savedLayout: null, lastIntent: null };
+    await setupAuth(page);
+    mockWorkspaceApis(page, mocks);
+
+    await page.goto(`${FRONTEND_URL}/workspace`);
+    await page.waitForLoadState('networkidle');
+
+    await page.getByTestId('ai-input').fill('請整理動能假說');
+    await page.getByTestId('ai-send').click();
+    await expect(page.getByTestId('ai-save-draft')).toBeVisible({ timeout: 10_000 });
+
+    await page.getByTestId('ai-save-draft').click();
+    await expect(page.getByTestId('ai-draft-form')).toBeVisible();
+    await page.getByTestId('ai-draft-form').locator('input').fill('AI 動能假說草稿');
+    await page.getByTestId('ai-draft-form').getByRole('button', { name: '建立待審核草稿' }).click();
+
+    await expect(page.getByTestId('ai-thread')).toContainText('已建立待審核草稿 33333333', { timeout: 10_000 });
+    await expect(page.getByTestId('ai-thread')).toContainText('待人工審核');
   });
 });

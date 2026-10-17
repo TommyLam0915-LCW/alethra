@@ -108,6 +108,7 @@ export interface WorkspaceLayout {
     left: { size: number; collapsed: boolean };
     bottom: { size: number; collapsed: boolean };
     right: { size: number; collapsed: boolean };
+    rightAI: { size: number; collapsed: boolean };
   };
 }
 
@@ -120,6 +121,7 @@ export const DEFAULT_LAYOUT: WorkspaceLayout = {
     left: { size: 16, collapsed: false },
     bottom: { size: 30, collapsed: false },
     right: { size: 24, collapsed: false },
+    rightAI: { size: 42, collapsed: false },
   },
 };
 
@@ -137,7 +139,7 @@ export function mergeLayout(saved: unknown): WorkspaceLayout {
     layout.range = s.range;
   }
   if (s.panels && typeof s.panels === 'object') {
-    for (const key of ['left', 'bottom', 'right'] as const) {
+    for (const key of ['left', 'bottom', 'right', 'rightAI'] as const) {
       const p = (s.panels as Record<string, { size?: number; collapsed?: boolean } | undefined>)[key];
       if (p && typeof p === 'object') {
         if (typeof p.size === 'number' && p.size > 3 && p.size < 90) layout.panels[key].size = p.size;
