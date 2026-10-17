@@ -51,8 +51,8 @@ export default function OrderPreviewPanel({ instrument, bars, instrumentId }: Pr
     setNotice('');
   }, [instrumentId]);
 
-  const lotSize = instrument?.lot_size || 1;
-  const quantity = Math.max(0, Math.floor((parseFloat(lots) || 0) * lotSize));
+  const lotSize = instrument?.lot_size;
+  const quantity = lotSize !== null && lotSize !== undefined ? Math.max(0, Math.floor((parseFloat(lots) || 0) * lotSize)) : 0;
   const lastClose = bars && bars.bars.length > 0 ? bars.bars[bars.bars.length - 1].close : null;
   const estimate = lastClose !== null ? quantity * lastClose : null;
 
@@ -72,6 +72,15 @@ export default function OrderPreviewPanel({ instrument, bars, instrumentId }: Pr
   const createIntent = async () => {
     if (!portfolioId) {
       setError('沒有可用的模擬投資組合，請先建立。');
+      return;
+    }
+    if (lotSize === null || lotSize === undefined) {
+      setError('此商品每手數量未知，無法下單。請先確認商品規格。');
+      return;
+    }
+    const portfolio = portfolios.find((p) => p.id === portfolioId);
+    if (portfolio && instrument?.currency && portfolio.currency !== instrument.currency) {
+      setError(`商品幣別（${instrument.currency}）與投資組合幣別（${portfolio.currency}）不符，不支援自動換匯。`);
       return;
     }
     if (quantity <= 0) {
@@ -252,7 +261,7 @@ export default function OrderPreviewPanel({ instrument, bars, instrumentId }: Pr
               </tbody>
             </table>
             <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-              {intentStatus === 'draft' && (
+              {intentStatus === 'pending' && (
                 <button className="ws-btn ws-btn-neutral" onClick={authorizeIntent} disabled={busy}>
                   確認授權
                 </button>
@@ -262,7 +271,7 @@ export default function OrderPreviewPanel({ instrument, bars, instrumentId }: Pr
                   提交執行器
                 </button>
               )}
-              {['draft', 'authorized', 'submitted'].includes(intentStatus || '') && (
+              {['pending', 'authorized', 'submitted'].includes(intentStatus || '') && (
                 <button className="ws-btn ws-btn-neutral" onClick={cancelIntent} disabled={busy}>
                   取消
                 </button>

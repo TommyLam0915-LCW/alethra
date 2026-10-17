@@ -482,8 +482,8 @@ class ExecutionAgent:
                         except Exception as e:
                             retries += 1
                             if retries >= 3:
-                                logger.error(f"Failed to report fill after 3 attempts: {e}")
-                                self._reported_fills.add(fill_key)
+                                logger.error(f"Failed to report fill after 3 attempts, will retry on next poll: {e}")
+                                # Do NOT add to _reported_fills — remains pending for retry
                             else:
                                 time.sleep(1)
 

@@ -59,6 +59,7 @@ export default function AIPanel({ currentSymbol }: { currentSymbol: string }) {
   const [memoryOptions, setMemoryOptions] = useState<MemoryOption[]>([]);
   const [draftFormFor, setDraftFormFor] = useState<string | null>(null);
   const [draftTitle, setDraftTitle] = useState('');
+  const [draftHypothesis, setDraftHypothesis] = useState('');
   const [draftSaved, setDraftSaved] = useState('');
   const threadRef = useRef<HTMLDivElement>(null);
 
@@ -233,11 +234,13 @@ export default function AIPanel({ currentSymbol }: { currentSymbol: string }) {
     try {
       const draft = await api.aiAssistant.createDraft(activeId, {
         title: draftTitle.trim(),
+        hypothesis: draftHypothesis.trim() || null,
         source_message_id: draftFormFor,
       });
       setDraftSaved(`已建立待審核草稿 ${draft.id.slice(0, 8)}…`);
       setDraftFormFor(null);
       setDraftTitle('');
+      setDraftHypothesis('');
     } catch (err) {
       setPanelError(err instanceof Error ? err.message : '儲存草稿失敗');
     }
@@ -342,6 +345,7 @@ export default function AIPanel({ currentSymbol }: { currentSymbol: string }) {
                   onClick={() => {
                     setDraftFormFor(m.id);
                     setDraftTitle(`AI 提議：${m.content.slice(0, 30)}`);
+                    setDraftHypothesis(m.content);
                     setDraftSaved('');
                   }}
                   data-testid="ai-save-draft"
@@ -360,6 +364,14 @@ export default function AIPanel({ currentSymbol }: { currentSymbol: string }) {
               value={draftTitle}
               onChange={(e) => setDraftTitle(e.target.value)}
               placeholder="草稿標題"
+            />
+            <textarea
+              className="ws-input"
+              value={draftHypothesis}
+              onChange={(e) => setDraftHypothesis(e.target.value)}
+              placeholder="研究假設／AI 提議內容"
+              rows={4}
+              style={{ marginTop: 8, resize: 'vertical' }}
             />
             <div className="ws-ai-draft-form-actions">
               <button className="btn btn-primary" onClick={saveDraft} disabled={!draftTitle.trim()}>

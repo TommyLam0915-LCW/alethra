@@ -62,10 +62,11 @@ export default function BottomTabs({
           ),
         }));
       } else if (tab === 'models') {
-        const data = await api.ml.listModels();
+        const response = await api.ml.listModels();
+        const models = response?.models || [];
         setRows((prev) => ({
           ...prev,
-          models: !data || data.length === 0 ? emptyHint('沒有模型', '到「訓練」頁開始第一次訓練。', '/training') : (
+          models: models.length === 0 ? emptyHint('沒有模型', '到「訓練」頁開始第一次訓練。', '/training') : (
             <table className="ws-table">
               <thead>
                 <tr>
@@ -75,13 +76,13 @@ export default function BottomTabs({
                 </tr>
               </thead>
               <tbody>
-                {data.slice(0, 30).map((m: { id: string; name?: string; model_type?: string; created_at?: string; algorithm?: string }) => (
-                  <tr key={m.id}>
+                {models.slice(0, 30).map((m: { model_id?: string; id?: string; name?: string; model_type?: string; created_at?: string; trained_at?: string; algorithm?: string }) => (
+                  <tr key={m.model_id || m.id}>
                     <td>
-                      <Link href="/models">{m.name || m.id.slice(0, 8)}</Link>
+                      <Link href="/models">{m.name || (m.model_id || m.id || '').slice(0, 8)}</Link>
                     </td>
                     <td>{m.model_type || m.algorithm || '—'}</td>
-                    <td>{m.created_at ? new Date(m.created_at).toLocaleString('zh-Hant') : '—'}</td>
+                    <td>{(m.trained_at || m.created_at) ? new Date(m.trained_at || m.created_at).toLocaleString('zh-Hant') : '—'}</td>
                   </tr>
                 ))}
               </tbody>
