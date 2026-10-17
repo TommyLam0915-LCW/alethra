@@ -7,17 +7,29 @@ Create Date: 2026-10-16 22:00:00.000000
 """
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy import inspect
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 
 
 # revision identifiers, used by Alembic.
 revision = 'b7d8e9f1a2c3'
-down_revision = 'a1b2c3d4e5f6'
+# Linearized chain: originally branched off a1b2c3d4e5f6; folded after
+# b2c3d4e5f6a7 so the branch has a single head (multi-parent merges trip an
+# alembic 1.14 KeyError when upgrading from a legacy stamp below the branchpoint).
+# usage_records still runs after the legacy-schema conversion either way.
+down_revision = 'b2c3d4e5f6a7'
 branch_labels = None
 depends_on = None
 
 
+def _table_exists(name: str) -> bool:
+    return name in inspect(op.get_bind()).get_table_names()
+
+
 def upgrade():
+    # Legacy bootstrap already creates usage_records from the current model.
+    if _table_exists('usage_records'):
+        return
     # Create usage_records table
     op.create_table(
         'usage_records',
@@ -38,6 +50,8 @@ def upgrade():
 
 
 def downgrade():
+    if not _table_exists('usage_records'):
+        return
     op.drop_index('ix_usage_subscription', table_name='usage_records')
     op.drop_index('ix_usage_user_date', table_name='usage_records')
     op.drop_table('usage_records')

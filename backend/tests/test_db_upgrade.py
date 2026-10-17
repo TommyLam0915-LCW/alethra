@@ -221,6 +221,7 @@ def legacy_v1_db(tmp_path):
 @pytest.fixture
 def current_db(tmp_path):
     """Create a database with current schema (alembic_version table)."""
+    from app.services.db_upgrade import CURRENT_SCHEMA_REVISION
     db_path = str(tmp_path / "current.db")
     conn = sqlite3.connect(db_path)
     try:
@@ -229,7 +230,7 @@ def current_db(tmp_path):
                 version_num TEXT NOT NULL PRIMARY KEY
             )
         """)
-        conn.execute("INSERT INTO alembic_version VALUES ('b7c8d9e0f1a2')")
+        conn.execute("INSERT INTO alembic_version VALUES (?)", (CURRENT_SCHEMA_REVISION,))
         conn.execute("""
             CREATE TABLE users (
                 id TEXT PRIMARY KEY,
@@ -300,10 +301,13 @@ class TestSchemaDetection:
         schema — not just table existence.
         """
         db_path = str(tmp_path / "alembic_only.db")
+        from app.services.db_upgrade import CURRENT_SCHEMA_REVISION
         conn = sqlite3.connect(db_path)
         try:
             conn.execute("CREATE TABLE alembic_version (version_num TEXT NOT NULL PRIMARY KEY)")
-            conn.execute("INSERT INTO alembic_version VALUES ('b7c8d9e0f1a2')")
+            conn.execute(
+                "INSERT INTO alembic_version VALUES (?)", (CURRENT_SCHEMA_REVISION,)
+            )
             conn.commit()
         finally:
             conn.close()

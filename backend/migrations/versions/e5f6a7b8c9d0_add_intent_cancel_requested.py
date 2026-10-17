@@ -12,6 +12,7 @@ Create Date: 2026-10-17 19:30:00.000000
 """
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy import inspect
 
 
 # revision identifiers, used by Alembic.
@@ -21,12 +22,26 @@ branch_labels = None
 depends_on = None
 
 
+def _column_exists(table: str, column: str) -> bool:
+    bind = op.get_bind()
+    if table not in inspect(bind).get_table_names():
+        return False
+    return column in {c["name"] for c in inspect(bind).get_columns(table)}
+
+
 def upgrade():
-    op.add_column(
-        'order_intents',
-        sa.Column('cancel_requested', sa.Boolean(), nullable=False, server_default=sa.false()),
-    )
+    # Legacy databases stamped mid-chain may not have order_intents yet (the
+    # legacy bootstrap creates it with this column), and databases bootstrapped
+    # from the current model already have it.
+    if "order_intents" not in inspect(op.get_bind()).get_table_names():
+        return
+    if not _column_exists('order_intents', 'cancel_requested'):
+        op.add_column(
+            'order_intents',
+            sa.Column('cancel_requested', sa.Boolean(), nullable=False, server_default=sa.false()),
+        )
 
 
 def downgrade():
-    op.drop_column('order_intents', 'cancel_requested')
+    if _column_exists('order_intents', 'cancel_requested'):
+        op.drop_column('order_intents', 'cancel_requested')

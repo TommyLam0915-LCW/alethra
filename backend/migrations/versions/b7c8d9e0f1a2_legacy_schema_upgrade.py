@@ -119,7 +119,10 @@ def _convert_text_to_jsonb(connection) -> list:
         for target_col in jsonb_columns[table_name]:
             if target_col in col_names:
                 ct = col_names[target_col]
-                if "JSON" in ct and "JSONB" not in ct:
+                # Legacy columns holding JSON are commonly declared TEXT
+                # (SQLite-era) or JSON; either converts to JSONB. Already
+                # JSONB means nothing to do.
+                if ("JSON" in ct or "TEXT" in ct) and "JSONB" not in ct:
                     conversions.append((table_name, target_col))
 
     return conversions
@@ -175,6 +178,10 @@ def upgrade() -> None:
         ), {"table": table_name, "col": col_name})
 
     # Phase 2: Convert column types (data is preserved via PostgreSQL casting)
+    # Legacy-internal FKs (e.g. experiments.owner_id → users.id in a legacy
+    # database that declared them) block the type conversions in both
+    # directions; constraints are not part of the restore contract.
+    _drop_fks_referencing_legacy_tables(connection)
     for table_name, col_name in uuid_conversions:
         try:
             # Drop existing indexes/constraints that reference this column first
@@ -201,9 +208,81 @@ def upgrade() -> None:
             raise
 
     # Phase 3: Ensure all expected tables exist (for v0/v1 legacy that may be missing tables)
-    if legacy_ver in (0, 1):
+    # A legacy database stamped mid-chain (alembic_version present, so version
+    # detection returns -1) still needs the bootstrap — it never ran the
+    # initial schema. has_legacy_types covers that case.
+    if legacy_ver in (0, 1) or has_legacy_types:
         # Create missing tables using raw SQL to be database-agnostic
         _ensure_missing_tables(connection, legacy_ver)
+        # The migrations this database skipped (initial schema onward, because
+        # the legacy database predates alembic and was stamped mid-chain) never
+        # ran, so every current table that the legacy schema lacks must be
+        # created here from the live model metadata. Later migrations in the
+        # chain detect their work already present and no-op.
+        _create_missing_current_tables(connection)
+        # Existing legacy tables also lack columns the current model expects
+        # (e.g. training_jobs.strategy_spec_snapshot); without them the app
+        # fails on its very first SELECT of those tables.
+        _add_missing_columns(connection)
+
+
+def _create_missing_current_tables(connection) -> None:
+    """Create every model table that does not exist yet.
+
+    On a legacy database stamped mid-chain, the initial-schema migration was
+    never applied; without this bootstrap, subsequent migrations that ALTER
+    those tables (fill_records, order_intents, ...) fail with UndefinedTable.
+    """
+    from app.database import Base
+    import app.models  # noqa: F401 — importing registers all models with Base
+
+    Base.metadata.create_all(bind=connection, checkfirst=True)
+
+
+def _add_missing_columns(connection) -> None:
+    """Add model columns that existing legacy tables lack.
+
+    Legacy v0/v1 tables predate many columns added since (quota fields,
+    strategy_spec_snapshot, stripe ids, ...). create_all skips existing
+    tables entirely, so the gap is closed here column by column. Columns are
+    added nullable (or NOT NULL with DEFAULT when the model carries a fixed
+    scalar default) so existing rows stay valid.
+    """
+    from app.database import Base
+    import app.models  # noqa: F401 — importing registers all models with Base
+
+    insp = inspect(connection)
+    existing = set(insp.get_table_names())
+    for table in Base.metadata.sorted_tables:
+        if table.name not in existing:
+            continue
+        present = {c["name"] for c in insp.get_columns(table.name)}
+        for col in table.columns:
+            if col.name in present:
+                continue
+            try:
+                col_type = col.type.compile(connection.dialect)
+                default = ""
+                not_null = ""
+                if col.default is not None and getattr(col.default, "is_scalar", False):
+                    val = col.default.arg
+                    if isinstance(val, bool):
+                        default = f" DEFAULT {'true' if val else 'false'}"
+                    elif isinstance(val, (int, float)):
+                        default = f" DEFAULT {val}"
+                    if default:
+                        not_null = " NOT NULL" if col.nullable is False else ""
+                elif col.nullable is False and col.primary_key is False:
+                    logger.warning(
+                        "Column %s.%s added as NULLABLE (model requires NOT NULL "
+                        "but has no scalar default)", table.name, col.name)
+                connection.execute(text(
+                    f'ALTER TABLE {table.name} ADD COLUMN {col.name} {col_type}{default}{not_null}'
+                ))
+            except Exception as exc:
+                logger.warning(
+                    "Could not add column %s.%s during legacy upgrade: %s",
+                    table.name, col.name, exc)
 
 
 def _ensure_missing_tables(connection, legacy_ver) -> None:
@@ -221,6 +300,25 @@ def _ensure_missing_tables(connection, legacy_ver) -> None:
             "  CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num)"
             ")"
         ))
+
+
+def _drop_fks_referencing_legacy_tables(connection) -> None:
+    """Drop FK constraints pointing at the legacy tables.
+
+    UUID-typed foreign keys created by the bootstrap (or legacy-internal
+    constraints) block converting the legacy id columns between VARCHAR(36)
+    and UUID in both directions. Constraints are not part of the restore
+    contract; column types and data are.
+    """
+    insp = inspect(connection)
+    for table_name in insp.get_table_names():
+        if table_name in ("alembic_version", "_legacy_schema_backup"):
+            continue
+        for fk in insp.get_foreign_keys(table_name):
+            if fk.get("referred_table") in _LEGACY_TABLES_V1 and fk.get("name"):
+                connection.execute(text(
+                    f'ALTER TABLE {table_name} DROP CONSTRAINT IF EXISTS {fk["name"]}'
+                ))
 
 
 def downgrade() -> None:
@@ -242,6 +340,10 @@ def downgrade() -> None:
         return
 
     # Restore original column types from backup
+    # Bootstrap-created tables (experiment_versions, subscriptions, ...)
+    # carry UUID FKs pointing at the legacy tables and block the type
+    # restoration; drop those constraints first.
+    _drop_fks_referencing_legacy_tables(connection)
     backup_rows = connection.execute(text(
         "SELECT table_name, column_name, original_type FROM _legacy_schema_backup"
     ))
