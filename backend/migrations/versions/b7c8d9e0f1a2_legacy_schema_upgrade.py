@@ -143,7 +143,7 @@ def upgrade() -> None:
 
     if legacy_ver == -1 and not has_legacy_types:
         # Already on current schema or unknown - skip
-        op.execute("-- Schema is already current or not a legacy version. No changes applied.")
+        logger.info("Schema is already current or not a legacy version. No changes applied.")
         return
 
     # Store legacy state for rollback
@@ -238,7 +238,7 @@ def downgrade() -> None:
     has_backup = result.scalar() if hasattr(result, 'scalar') else False
 
     if not has_backup:
-        op.execute("-- No legacy backup found. Downgrade skipped.")
+        logger.info("No legacy backup found. Downgrade skipped.")
         return
 
     # Restore original column types from backup
