@@ -266,7 +266,7 @@ class TestWebhookProcessing:
             "/api/v1/webhooks/payment",
             content=b'{"type": "test"}',
         )
-        assert resp.status_code == 422
+        assert resp.status_code == 400
 
     def test_webhook_endpoint_invalid_signature(self, client):
         resp = client.post(
@@ -428,3 +428,218 @@ class TestOperationalStatus:
         assert resp.status_code == 200
         data = resp.json()
         assert "billing" in data or "payments" in data or isinstance(data, dict)
+
+
+# ──────────────────────────────────────────────
+# 10. Stripe Checkout and Portal
+# ──────────────────────────────────────────────
+
+class TestStripeCheckoutPortal:
+
+    def test_create_checkout_session(self, client):
+        auth = _create_user_via_api(client)
+        db = _get_db()
+        plan = _create_plan(db, "Pro", 9900, features={"stripe_price_id": "price_test_123"})
+
+        resp = client.post(
+            f"/api/v1/checkout?plan_id={plan.id}&success_url=http://localhost:3000/success&cancel_url=http://localhost:3000/cancel",
+            headers=auth,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "session_id" in data
+        assert "session_url" in data
+        assert data["test_mode"] is True
+
+    def test_create_checkout_session_invalid_plan(self, client):
+        auth = _create_user_via_api(client)
+        fake_plan_id = uuid.uuid4()
+
+        resp = client.post(
+            f"/api/v1/checkout?plan_id={fake_plan_id}&success_url=http://localhost:3000/success&cancel_url=http://localhost:3000/cancel",
+            headers=auth,
+        )
+        assert resp.status_code == 404
+
+    def test_create_portal_session(self, client):
+        auth = _create_user_via_api(client)
+
+        resp = client.post(
+            "/api/v1/portal?return_url=http://localhost:3000/dashboard",
+            headers=auth,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "portal_url" in data
+        assert data["test_mode"] is True
+
+    def test_get_subscription_endpoint(self, client):
+        auth = _create_user_via_api(client)
+        db = _get_db()
+        plan = _create_plan(db, "Pro", 9900)
+        user = db.query(User).filter(User.email.contains("billing-")).first()
+        create_subscription(db, user.id, plan.id)
+
+        resp = client.get("/api/v1/subscription", headers=auth)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "subscription" in data
+        assert data["subscription"]["status"] == "trialing"
+
+
+# ──────────────────────────────────────────────
+# 11. Usage Tracking
+# ──────────────────────────────────────────────
+
+class TestUsageTracking:
+
+    def test_record_api_call(self, client):
+        auth = _create_user_via_api(client)
+
+        resp = client.post(
+            "/api/v1/usage/record?endpoint=/api/inference&model=gpt-4&tokens_used=150&cost=5",
+            headers=auth,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["endpoint"] == "/api/inference"
+        assert data["tokens_used"] == 150
+        assert data["cost"] == 5
+
+    def test_get_usage_summary(self, client):
+        auth = _create_user_via_api(client)
+        db = _get_db()
+        user = db.query(User).filter(User.email.contains("billing-")).first()
+
+        # Record some usage
+        from app.services.billing import record_api_call
+        record_api_call(db, user.id, "/api/inference", "gpt-4", 100, 5)
+        record_api_call(db, user.id, "/api/research", None, 50, 2)
+
+        resp = client.get("/api/v1/usage/summary?days=30", headers=auth)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "usage" in data
+        assert data["usage"]["total_api_calls"] == 2
+        assert data["usage"]["total_tokens"] == 150
+
+    def test_get_quota_status(self, client):
+        auth = _create_user_via_api(client)
+        db = _get_db()
+        user = db.query(User).filter(User.email.contains("billing-")).first()
+        plan = _create_plan(db, "Pro", 9900)
+        sub = create_subscription(db, user.id, plan.id)
+        activate_subscription(db, sub.id)
+
+        resp = client.get("/api/v1/usage/quota?quota_type=ai_usage_limit&period=monthly", headers=auth)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["quota_type"] == "ai_usage_limit"
+        assert "allowed" in data
+        assert "used" in data
+        assert "limit" in data
+
+    def test_check_quota_function(self, client):
+        db = _get_db()
+        user_email = f"quota-test-{uuid.uuid4().hex[:8]}@test.io"
+        resp = client.post("/api/auth/register", json={
+            "email": user_email,
+            "password": "testpass123",
+            "display_name": "Quota Test",
+            "user_type": "individual",
+        })
+        user = db.query(User).filter(User.email == user_email).first()
+
+        from app.services.billing import check_quota
+        quota = check_quota(db, user.id, "ai_usage_limit", "monthly")
+        assert "allowed" in quota
+        assert "used" in quota
+        assert "limit" in quota
+
+    def test_enforce_quota_exceeded(self, client):
+        db = _get_db()
+        user_email = f"enforce-test-{uuid.uuid4().hex[:8]}@test.io"
+        resp = client.post("/api/auth/register", json={
+            "email": user_email,
+            "password": "testpass123",
+            "display_name": "Enforce Test",
+            "user_type": "individual",
+        })
+        user = db.query(User).filter(User.email == user_email).first()
+
+        # Create free plan with limit of 10
+        plan = _create_plan(db, "Free", 0)
+        sub = create_subscription(db, user.id, plan.id)
+        activate_subscription(db, sub.id)
+
+        from app.services.billing import enforce_quota, increment_quota
+        from fastapi import HTTPException
+
+        # Use up quota (free plan has ai_usage_limit of 10)
+        for i in range(10):
+            increment_quota(db, user.id, "ai_usage_limit", 1, "monthly")
+
+        # Next call should fail
+        with pytest.raises(HTTPException) as exc_info:
+            enforce_quota(db, user.id, "ai_usage_limit", "monthly")
+        assert exc_info.value.status_code == 429
+
+    def test_increment_quota(self, client):
+        db = _get_db()
+        user_email = f"increment-test-{uuid.uuid4().hex[:8]}@test.io"
+        resp = client.post("/api/auth/register", json={
+            "email": user_email,
+            "password": "testpass123",
+            "display_name": "Increment Test",
+            "user_type": "individual",
+        })
+        user = db.query(User).filter(User.email == user_email).first()
+
+        from app.services.billing import increment_quota, check_quota
+
+        # Increment quota
+        used = increment_quota(db, user.id, "research_run_limit", 5, "monthly")
+        assert used == 5
+
+        # Increment again
+        used = increment_quota(db, user.id, "research_run_limit", 3, "monthly")
+        assert used == 8
+
+        # Check quota
+        quota = check_quota(db, user.id, "research_run_limit", "monthly")
+        assert quota["used"] == 8
+
+
+# ──────────────────────────────────────────────
+# 12. UsageRecord Model
+# ──────────────────────────────────────────────
+
+class TestUsageRecordModel:
+
+    def test_create_usage_record(self, client):
+        db = _get_db()
+        user_email = f"usage-record-{uuid.uuid4().hex[:8]}@test.io"
+        resp = client.post("/api/auth/register", json={
+            "email": user_email,
+            "password": "testpass123",
+            "display_name": "Usage Record Test",
+            "user_type": "individual",
+        })
+        user = db.query(User).filter(User.email == user_email).first()
+
+        from app.models.billing import UsageRecord
+        record = UsageRecord(
+            user_id=user.id,
+            endpoint="/api/test",
+            model="gpt-4",
+            tokens_used=200,
+            cost=10,
+        )
+        db.add(record)
+        db.commit()
+
+        # Verify record exists
+        fetched = db.query(UsageRecord).filter(UsageRecord.user_id == user.id).first()
+        assert fetched is not None
+        assert fetched.endpoint == "/api/test"
+        assert fetched.tokens_used == 200
