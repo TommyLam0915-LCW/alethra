@@ -120,5 +120,5 @@ def execute_ml_training(
         job.error_details = str(e)
 
     job.completed_at = utcnow()
-    db.flush()
+    db.commit()
     return job

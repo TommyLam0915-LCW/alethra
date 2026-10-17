@@ -65,7 +65,9 @@ def start_ml_training(
             end_date=end_date,
         )
         job_id = job.id
+        db.commit()
     except ValueError as e:
+        db.rollback()
         raise HTTPException(400, str(e))
 
     try:
