@@ -43,7 +43,12 @@ class FillReport:
 
 
 class AlethraAPIClient:
-    """HTTP client for the Alethra platform execution-agent API."""
+    """HTTP client for the Alethra platform execution-agent API.
+
+    ``api_url`` is the platform root (e.g. ``https://api.alethra.com`` or
+    ``http://127.0.0.1:8100``); the client appends ``/api/v1/execution-agent/...``
+    to match the FastAPI route mounting in ``app.main``.
+    """
 
     def __init__(self, api_url: str, api_token: str, timeout: int = 30):
         self.api_url = api_url.rstrip("/")
@@ -59,7 +64,7 @@ class AlethraAPIClient:
 
     def poll_order_intents(self) -> List[OrderIntentDTO]:
         resp = requests.get(
-            f"{self.api_url}/v1/execution-agent/order-intents",
+            f"{self.api_url}/api/v1/execution-agent/order-intents",
             headers=self._headers(),
             timeout=self.timeout,
         )
@@ -76,7 +81,7 @@ class AlethraAPIClient:
         if submitted_at:
             payload["submitted_at"] = submitted_at.isoformat()
         resp = requests.post(
-            f"{self.api_url}/v1/execution-agent/order-intents/{intent_id}/submitted",
+            f"{self.api_url}/api/v1/execution-agent/order-intents/{intent_id}/submitted",
             json=payload,
             headers=self._headers(),
             timeout=self.timeout,
@@ -85,7 +90,7 @@ class AlethraAPIClient:
 
     def report_fill(self, fill: FillReport) -> None:
         resp = requests.post(
-            f"{self.api_url}/v1/execution-agent/order-intents/{fill.intent_id}/fills",
+            f"{self.api_url}/api/v1/execution-agent/order-intents/{fill.intent_id}/fills",
             json={
                 "quantity": fill.quantity,
                 "price": fill.price,
@@ -100,7 +105,7 @@ class AlethraAPIClient:
 
     def report_order_rejected(self, intent_id: str, reason: str) -> None:
         resp = requests.post(
-            f"{self.api_url}/v1/execution-agent/order-intents/{intent_id}/rejected",
+            f"{self.api_url}/api/v1/execution-agent/order-intents/{intent_id}/rejected",
             json={"reason": reason},
             headers=self._headers(),
             timeout=self.timeout,
@@ -109,7 +114,7 @@ class AlethraAPIClient:
 
     def report_order_uncertain(self, intent_id: str, reason: str) -> None:
         resp = requests.post(
-            f"{self.api_url}/v1/execution-agent/order-intents/{intent_id}/uncertain",
+            f"{self.api_url}/api/v1/execution-agent/order-intents/{intent_id}/uncertain",
             json={"reason": reason},
             headers=self._headers(),
             timeout=self.timeout,
@@ -118,7 +123,7 @@ class AlethraAPIClient:
 
     def get_control_status(self) -> dict:
         resp = requests.get(
-            f"{self.api_url}/v1/execution-agent/control-status",
+            f"{self.api_url}/api/v1/execution-agent/control-status",
             headers=self._headers(),
             timeout=self.timeout,
         )
@@ -127,7 +132,7 @@ class AlethraAPIClient:
 
     def get_claimed_broker_refs(self) -> List[str]:
         resp = requests.get(
-            f"{self.api_url}/v1/execution-agent/claimed-broker-refs",
+            f"{self.api_url}/api/v1/execution-agent/claimed-broker-refs",
             headers=self._headers(),
             timeout=self.timeout,
         )
@@ -136,7 +141,7 @@ class AlethraAPIClient:
 
     def report_order_cancelled(self, intent_id: str, reason: str) -> None:
         resp = requests.post(
-            f"{self.api_url}/v1/execution-agent/order-intents/{intent_id}/cancelled",
+            f"{self.api_url}/api/v1/execution-agent/order-intents/{intent_id}/cancelled",
             json={"reason": reason},
             headers=self._headers(),
             timeout=self.timeout,
@@ -150,7 +155,7 @@ class AlethraAPIClient:
         ib_gateway_port: Optional[int] = None,
     ) -> None:
         resp = requests.post(
-            f"{self.api_url}/v1/execution-agent/heartbeat",
+            f"{self.api_url}/api/v1/execution-agent/heartbeat",
             json={
                 "connected": connected,
                 "ib_gateway_host": ib_gateway_host,
