@@ -22,6 +22,27 @@ Status: Pushed. NOT merged. Base: auto/market-data-quality (PR #13)
 
 Note: 測試數字不可跨分支相加（每分支各自 sqlite worktree DB）。PROGRESS 先前 "All 5 priorities complete" 指的是當時 branch 的 5 項優先工作，不代表整個 project 完成度 — 依上述矩陣為準。
 
+## Directive progress checkpoint (2026-10-17 15:00+08:00)
+
+**Continuation point — next run resumes at Item 2.**
+
+### Item 1 — DONE (commit ef255e0, branch auto/stored-data-backtest-integration, suite 862 passed offline sqlite)
+- `/ml/train` enqueues pending job (no sync training in HTTP request); worker routes ML jobs via `strategy_spec_snapshot.training_type == "ml_model"` → `execute_ml_training`
+- Quota: API reserves; worker settles on success / releases on failure (`quota_reservation_id` in job spec)
+- Restart recovery: claim records `claimed_at`; `reclaim_stale_running_jobs` (TRAINING_STALE_AFTER_SECONDS, default 900s) resets orphaned running jobs → pending; fixed JSONB in-place-mutation no-op-update bug (copy before mutate)
+- `predict-latest` now enforces ownership (was missing user_id check → 403 for non-owner)
+- Hardcoded 2024 windows removed: `_latest_available_end_date` (stored last_bar_date → provider range max) drives predict/predict-latest/training default end date; `get_recent_bars_for_prediction` (380-day lookback) stored-first
+- Tests: `test_ml_worker_integration.py` (9: enqueue+reservation, settle, release-on-failure, reclaim, provider-window 380d, stored-first, worker-artifact predict-latest, artifact reload), `test_ml_pipeline.py` updated to worker flow + enqueue contract + auth + predict-latest ownership. Evidence: `ALETHRA_TEST_DB=sqlite:///./test-item1-*.db` `.venv/bin/python -m pytest backend/tests/ -q` → 862 passed @ ef255e0
+- Category: **integrated-offline-E2E-verified** (offline); matrix row 1 updated accordingly
+
+### Remaining (in order)
+- Item 2: legacy-db-upgrade 3 defects + fixture validation (task #14)
+- Item 3: billing-stripe × #17 atomic webhook integration (task #15)
+- Item 4: IBKR transport class + cancel-flow tests (task #16)
+- Item 5: stored-bar synthetic labeling check (task #17)
+- Item 6: kill-switch PG fix — PR #16 not merged; main still lacks values_callable (task #18)
+- Item 7: integration branch full-stack E2E on disposable PG (task #19)
+
 ## Session record: Drift audit (2026-10-17 14:00–14:10 HKT)
 
 ### All 8 worktrees audited for uncommitted modifications
