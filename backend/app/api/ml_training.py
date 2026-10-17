@@ -156,10 +156,12 @@ def run_prediction(
         raise HTTPException(400, "instrument_id required (model has no default instrument)")
 
     if not start_date or not end_date:
-        bars, _ = get_recent_bars_for_prediction(db, pred_instrument)
+        bars, _, data_nature = get_recent_bars_for_prediction(db, pred_instrument)
     else:
         provider = get_data_provider()
         bars = provider.get_bars(pred_instrument, start_date, end_date)
+        quality = provider.get_data_quality(pred_instrument)
+        data_nature = quality.get("data_nature", "unknown") if isinstance(quality, dict) else "unknown"
 
     if len(bars) < 30:
         raise HTTPException(400, f"Need at least 30 bars for prediction, got {len(bars)}")
@@ -177,6 +179,7 @@ def run_prediction(
 
     return {
         **result,
+        "data_nature": data_nature,
         "disclaimer": "Predictions are for research purposes only. Not trading advice.",
         "disclaimer_zh": "預測僅供研究用途。非交易建議。",
     }
@@ -203,7 +206,7 @@ def run_latest_prediction(
     if not pred_instrument:
         raise HTTPException(400, "instrument_id required")
 
-    bars, _ = get_recent_bars_for_prediction(db, pred_instrument)
+    bars, _, data_nature = get_recent_bars_for_prediction(db, pred_instrument)
     if len(bars) < 30:
         raise HTTPException(400, f"Need at least 30 bars, got {len(bars)}")
 
@@ -218,4 +221,4 @@ def run_latest_prediction(
     except Exception as e:
         raise HTTPException(422, f"Prediction failed: {e}")
 
-    return result
+    return {**result, "data_nature": data_nature}

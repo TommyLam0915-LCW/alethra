@@ -282,7 +282,7 @@ class TestLatestDataWindows:
         monkeypatch.setattr("app.services.ml_training.get_data_provider", lambda: fake)
         db = TestSession()
         try:
-            bars, source = get_recent_bars_for_prediction(db, "US:NOSTORE")
+            bars, source, nature = get_recent_bars_for_prediction(db, "US:NOSTORE")
         finally:
             db.close()
 
@@ -307,11 +307,12 @@ class TestLatestDataWindows:
                 data_nature="synthetic",
                 adjustment_status="not_applicable",
             )
-            bars, source = get_recent_bars_for_prediction(db, "US:STORED")
+            bars, source, nature = get_recent_bars_for_prediction(db, "US:STORED")
         finally:
             db.close()
 
         assert source == "stored"
+        assert nature == "synthetic"
         assert len(bars) >= 30
 
     def test_predict_latest_api_uses_worker_trained_model(self, client, auth_headers, monkeypatch):

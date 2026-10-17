@@ -53,12 +53,15 @@ def _get_bars_with_storage(
     instrument_id: str,
     start_date: str,
     end_date: str,
-) -> Tuple[List[Any], str]:
+) -> Tuple[List[Any], str, str]:
     """Fetch bars with storage integration.
 
-    Returns (bars, data_source_used) where data_source_used is 'stored' or 'provider'.
-    If stored data is available and sufficient, uses it. Otherwise fetches from provider
-    and stores for future use.
+    Returns (bars, data_source_used, data_nature) where data_source_used is
+    'stored' or 'provider' and data_nature is the resolved provenance of the
+    bars actually used ("synthetic"/"live"/"delayed"/"mixed"/"unknown") —
+    synthetic-sourced bars must never be presented as real market data.
+    If stored data is available and sufficient, uses it. Otherwise fetches
+    from provider and stores for future use.
     """
     storage = MarketDataStorage(db)
     start_date_obj = date.fromisoformat(start_date)
@@ -71,6 +74,14 @@ def _get_bars_with_storage(
     )
 
     if len(stored_bars) >= 60:
+        provider_ids = {
+            getattr(b, "provider_id", None) for b in stored_bars
+        } - {None}
+        nature = MarketDataStorage.resolve_nature(
+            storage.get_nature_map([instrument_id]),
+            instrument_id,
+            provider_ids,
+        )
         bar_list = [
             SimpleNamespace(
                 date=b.bar_date.isoformat(),
@@ -82,26 +93,28 @@ def _get_bars_with_storage(
             )
             for b in stored_bars
         ]
-        return bar_list, "stored"
+        return bar_list, "stored", nature
 
     bars = provider.get_bars(instrument_id, start_date, end_date)
 
+    quality = provider.get_data_quality(instrument_id)
+    nature = quality.get("data_nature", "unknown") if isinstance(quality, dict) else "unknown"
+
     if bars:
         try:
-            quality = provider.get_data_quality(instrument_id)
             storage.store_bars(
                 instrument_id=instrument_id,
                 provider_id=provider.provider_id,
                 bars=bars,
-                data_nature=quality.get("data_nature", "unknown"),
-                adjustment_status=quality.get("adjustment"),
-                provider_note=quality.get("note"),
-                provider_note_zh=quality.get("note_zh"),
+                data_nature=nature,
+                adjustment_status=quality.get("adjustment") if isinstance(quality, dict) else None,
+                provider_note=quality.get("note") if isinstance(quality, dict) else None,
+                provider_note_zh=quality.get("note_zh") if isinstance(quality, dict) else None,
             )
         except Exception as e:
             logger.warning(f"Failed to store bars for {instrument_id}: {e}")
 
-    return bars, "provider"
+    return bars, "provider", nature
 
 
 def get_recent_bars_for_prediction(
@@ -109,12 +122,13 @@ def get_recent_bars_for_prediction(
     instrument_id: str,
     min_bars: int = 30,
     lookback_days: int = 380,
-) -> Tuple[List[Any], str]:
+) -> Tuple[List[Any], str, str]:
     """Fetch the most recent bars available for prediction.
 
     Window ends at the latest stored bar (or the provider's latest date when
     nothing is stored) — never at a hardcoded calendar date. Returns
-    (bars, data_source) using the same stored-first logic as training.
+    (bars, data_source, data_nature) using the same stored-first logic as
+    training.
     """
     provider = get_data_provider()
     end = _latest_available_end_date(db, provider, instrument_id)
@@ -157,7 +171,7 @@ def create_ml_training_job(
             db, provider, instrument_id
         ).isoformat()
 
-    bars, data_source = _get_bars_with_storage(db, provider, instrument_id, start_date, end_date)
+    bars, data_source, data_nature = _get_bars_with_storage(db, provider, instrument_id, start_date, end_date)
     if len(bars) < 60:
         raise ValueError(
             f"Insufficient data for {instrument_id}: got {len(bars)} bars, "
@@ -172,6 +186,7 @@ def create_ml_training_job(
         "end_date": end_date,
         "n_bars": len(bars),
         "data_source": data_source,
+        "data_nature": data_nature,
     }
     if quota_reservation_id is not None:
         spec["quota_reservation_id"] = str(quota_reservation_id)
@@ -215,7 +230,7 @@ def execute_ml_training(
         end_date = spec["end_date"]
 
         provider = get_data_provider()
-        bars, data_source = _get_bars_with_storage(db, provider, instrument_id, start_date, end_date)
+        bars, data_source, data_nature = _get_bars_with_storage(db, provider, instrument_id, start_date, end_date)
         bar_dicts = [
             {"date": b.date, "open": b.open, "high": b.high, "low": b.low,
              "close": b.close, "volume": b.volume}
@@ -230,7 +245,12 @@ def execute_ml_training(
         )
 
         job.results = result
-        job.best_params = {"model_id": result["model_id"], "model_type": model_type, "data_source": data_source}
+        job.best_params = {
+            "model_id": result["model_id"],
+            "model_type": model_type,
+            "data_source": data_source,
+            "data_nature": data_nature,
+        }
         job.status = TrainingJobStatus.completed
 
     except Exception as e:

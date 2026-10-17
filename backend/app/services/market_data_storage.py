@@ -208,6 +208,47 @@ class MarketDataStorage:
 
         return query.first()
 
+    def get_nature_map(
+        self,
+        instrument_ids: List[str],
+    ) -> Dict[str, Dict[str, str]]:
+        """Return {instrument_id: {provider_id: data_nature}} from metadata.
+
+        Consumers of stored bars (backtest, ML training) use this to surface
+        the provenance of the bars they actually loaded — synthetic-sourced
+        bars must never be presented as real market data.
+        """
+        if not instrument_ids:
+            return {}
+        rows = (
+            self.db.query(MarketDataMetadata)
+            .filter(MarketDataMetadata.instrument_id.in_(instrument_ids))
+            .all()
+        )
+        nature_map: Dict[str, Dict[str, str]] = {}
+        for m in rows:
+            nature_map.setdefault(m.instrument_id, {})[m.provider_id] = m.data_nature
+        return nature_map
+
+    @staticmethod
+    def resolve_nature(
+        nature_map: Dict[str, Dict[str, str]],
+        instrument_id: str,
+        provider_ids: set,
+    ) -> str:
+        """Resolve one nature string for the bars actually loaded.
+
+        Single provider → its data_nature; several providers with differing
+        natures → "mixed"; no metadata found → "unknown".
+        """
+        per_provider = nature_map.get(instrument_id, {})
+        natures = {per_provider[p] for p in provider_ids if p in per_provider}
+        if len(natures) == 1:
+            return natures.pop()
+        if len(natures) > 1:
+            return "mixed"
+        return "unknown"
+
     def mark_error(self, instrument_id: str, provider_id: str, error_msg: str):
         """Record a fetch error for an instrument."""
         metadata = self.db.query(MarketDataMetadata).filter(

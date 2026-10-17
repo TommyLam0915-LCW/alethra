@@ -2,7 +2,7 @@ import hashlib
 import json
 import uuid
 from datetime import datetime, date
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 
 import pandas as pd
 from sqlalchemy.orm import Session
@@ -67,11 +67,15 @@ def _load_stored_bars(
     start_date: str,
     end_date: str,
     provider_id: Optional[str] = None,
-) -> Dict[str, pd.DataFrame]:
-    """Load bars from database storage.
+) -> Tuple[Dict[str, pd.DataFrame], Dict[str, str]]:
+    """Load bars from database storage with per-asset data nature.
 
-    Returns a dict mapping asset_id to DataFrame.
-    Only includes assets that have stored data.
+    Returns (data, natures): a dict mapping asset_id to DataFrame (only
+    assets that have stored data), and a dict mapping asset_id to the
+    resolved data_nature ("synthetic"/"live"/"delayed"/"mixed"/"unknown")
+    of the bars actually loaded — from MarketDataMetadata for the backing
+    providers. Synthetic-sourced bars must never be presented as real
+    market data.
     """
     from app.services.market_data_storage import MarketDataStorage
 
@@ -80,6 +84,7 @@ def _load_stored_bars(
     end_date_obj = date.fromisoformat(end_date)
 
     result = {}
+    loaded_provider_ids: Dict[str, set] = {}
     for asset_id in asset_ids:
         stored_bars = storage.get_bars(
             instrument_id=asset_id,
@@ -89,8 +94,18 @@ def _load_stored_bars(
         )
         if stored_bars:
             result[asset_id] = _stored_bars_to_dataframe(stored_bars)
+            loaded_provider_ids[asset_id] = {
+                getattr(bar, "provider_id", None) for bar in stored_bars
+            } - {None}
 
-    return result
+    nature_map = storage.get_nature_map(list(loaded_provider_ids.keys()))
+    natures = {
+        asset_id: MarketDataStorage.resolve_nature(
+            nature_map, asset_id, pids
+        )
+        for asset_id, pids in loaded_provider_ids.items()
+    }
+    return result, natures
 
 
 def _fetch_ohlcv_via_provider(
@@ -151,6 +166,8 @@ def run_backtest(
         return _error_result(errors)
 
     ohlcv_data: Dict[str, pd.DataFrame] = {}
+    stored_natures: Dict[str, str] = {}
+    provider_data: Dict[str, pd.DataFrame] = {}
     provider_name: str = ""
     feed_mode: str = ""
     dataset_checksum: Optional[str] = None
@@ -160,7 +177,7 @@ def run_backtest(
         if db_session is None:
             errors.append("data_source='stored' requires a database session (db_session)")
             return _error_result(errors)
-        ohlcv_data = _load_stored_bars(db_session, all_asset_ids, start_date, end_date)
+        ohlcv_data, stored_natures = _load_stored_bars(db_session, all_asset_ids, start_date, end_date)
         for aid in asset_ids:
             if aid not in ohlcv_data or ohlcv_data[aid].empty:
                 errors.append(f"No stored data for {aid} in range {start_date} to {end_date}. Fetch from provider first.")
@@ -173,11 +190,10 @@ def run_backtest(
     elif data_source == "provider" or data_source == "auto":
         stored_data: Dict[str, pd.DataFrame] = {}
         if data_source == "auto" and db_session is not None:
-            stored_data = _load_stored_bars(db_session, all_asset_ids, start_date, end_date)
+            stored_data, stored_natures = _load_stored_bars(db_session, all_asset_ids, start_date, end_date)
 
         missing_from_storage = [aid for aid in all_asset_ids if aid not in stored_data or stored_data[aid].empty]
 
-        provider_data: Dict[str, pd.DataFrame] = {}
         if missing_from_storage or data_source == "provider":
             assets_to_fetch = missing_from_storage if data_source == "auto" else all_asset_ids
             if data_provider is not None:
@@ -222,6 +238,22 @@ def run_backtest(
             errors.append(f"No data available for {aid} in range {start_date} to {end_date}")
             return _error_result(errors)
 
+    data_nature: Dict[str, str] = {}
+    for aid in asset_ids:
+        if aid in provider_data:
+            if data_provider is not None:
+                quality_fn = getattr(data_provider, "get_data_quality", None)
+                data_nature[aid] = (
+                    quality_fn(aid).get("data_nature", "unknown")
+                    if quality_fn is not None
+                    else "unknown"
+                )
+            else:
+                # Built-in demo fallback serves deterministic synthetic data.
+                data_nature[aid] = "synthetic"
+        else:
+            data_nature[aid] = stored_natures.get(aid, "unknown")
+
     config_hash = compute_config_hash(strategy_spec)
 
     if data_source_used == "stored":
@@ -232,6 +264,12 @@ def run_backtest(
         warnings.append(f"Data source: {provider_name} — not live market data.")
     else:
         warnings.append(f"Data source: {provider_name} ({feed_mode}).")
+    synthetic_assets = sorted(a for a, n in data_nature.items() if n == "synthetic")
+    if synthetic_assets:
+        warnings.append(
+            "Synthetic data used for: " + ", ".join(synthetic_assets)
+            + " — results are not based on real market prices."
+        )
     warnings.append("Historical simulation for research purposes only.")
     if commission_rate == 0:
         warnings.append("Zero commission selected — real trading incurs costs.")
@@ -378,6 +416,7 @@ def run_backtest(
         "feed_mode": feed_mode,
         "data_source_requested": data_source,
         "data_source_used": data_source_used,
+        "data_nature": data_nature,
         "start_date": start_date,
         "end_date": end_date,
         "initial_cash": initial_cash,
@@ -515,6 +554,7 @@ def _error_result(errors: List[str]) -> Dict[str, Any]:
         "feed_mode": None,
         "data_source_requested": None,
         "data_source_used": None,
+        "data_nature": None,
         "start_date": None,
         "end_date": None,
         "initial_cash": 0,
