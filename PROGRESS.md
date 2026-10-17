@@ -1,10 +1,21 @@
 # Alethra Agent Progress
 
-Last updated: 2026-10-17T15:35+08:00 (machine clock; earlier 19:xx agent stamps were hours fast — use git commit times)
+Last updated: 2026-10-17T16:40+08:00 (machine clock; earlier 19:xx agent stamps were hours fast — use git commit times)
 Branch: auto/integration-e2e (worktree alethra-integration-auto)
 Draft PR: https://github.com/TommyLam0915-LCW/alethra/pull/20 (base main)
-Commits: fed5fb0, 6307c39 (branch head 6307c392d9e850da17d9437d565a5bda6016f016)
-Status: Pushed. NOT merged. All 7 directive items complete on this branch.
+Commits: fed5fb0, 6307c39, 8202611 (branch head 8202611aa3877396b07a7533557a1d689550ef43)
+Status: Pushed. NOT merged. All 7 directive items complete on this branch. **CI all green @ 8202611** (Backend Tests SUCCESS, Frontend Build SUCCESS, Browser Acceptance SUCCESS).
+
+## ⛔ FINAL ENTRY — OWNER STOP DIRECTIVE (2026-10-17 ~16:10 HKT): ALL AGENT OPERATIONS STOPPED
+
+The owner ordered all agent operations stopped and all work pushed to GitHub (relayed via the control session). Cron tasks are disabled — there will be no further scheduled runs. This is the final entry.
+
+**Item 7 final state — COMPLETE, nothing in progress.** All 7 directive items were already done before the stop (matrix below + session records). This final run performed only shutdown work:
+
+1. **Cleanup (own leftovers only)**: docker container `alethra-e2e-db` removed (`docker rm -f`); own uvicorn/dev-server processes verified dead (ports 8100/8110/8113/3011 have no listeners); the Item 7 deployment compose project `alethra-deploy-test` had already been torn down with `-v` during verification. **Docker Desktop engine had crashed independently** ("unable to start", hung CLI) — diagnosed as a hung `com.docker.backend` (up >1 day), force-killed it, restarted Docker Desktop; engine recovered (Docker Desktop 4.81.0 / Engine 29.6.1) and cleanup completed.
+2. **Commits/pushes**: every worktree clean (only PROGRESS.md modified in the main repo — committed in this final state and pushed with `auto/stored-data-backtest-integration`). All branches verified IN SYNC with origin by comparing tips (`git rev-parse` local vs origin after `git fetch`): auto/integration-e2e 8202611, auto/execution-recovery-reconcile 4421a0a, auto/ml-experiment-durability 2c11688, auto/billing-stripe-integration bdfde3a, auto/billing-webhook-application 1b0dfc2, auto/deployment-prep 1f988f3, auto/legacy-db-upgrade 7d346ac, auto/fix-killswitch-enum 82e0267, auto/ml-provenance-ui 1308d90, auto/config-safety-and-improvements 6a6b7dd, auto/market-data-quality f8bf4f5, auto/stored-data-backtest-integration (this commit). `auto/alignment-continuation` is purely behind origin (local 0690888 is an ancestor of remote a16666d — nothing local to push). Plain pushes only — no force, no merges, no deploys.
+3. **Not-mine leftovers deliberately left untouched** (for owner awareness): `alethra-acceptance-{backend,frontend,db}-1` + `alethra-pg-test` containers (all Exited after the engine crash; acceptance stack ~26h old, unknown branch — explicitly out of my scope per stop directive); port 3001 held by a foreign next-server from project 2026-10-11/d705b961 (never ours — do not kill); yesterday-evening session's uvicorn :8000 + main-repo next-dev :3000; `/tmp/alethra-pr12-fix` stale uncommitted twin of already-pushed ec91b5f (PR #14 — see 2026-10-17 drift audit, left as documented); `alethra-fresh_postgres_fresh_data` docker volume.
+4. **What remains (owner decisions only)**: review/merge of Draft PR #20 (auto/integration-e2e — CI green @ 8202611) and open PRs #11–#19; live external verification (LSEG/IBKR/Stripe) permanently blocked per owner decision — offline/test-mode evidence in the matrix below. No further agent work is scheduled.
 
 ## Owner directive (2026-10-17): Requirement–evidence matrix
 
@@ -22,9 +33,26 @@ Status: Pushed. NOT merged. All 7 directive items complete on this branch.
 
 Note: 測試數字不可跨分支相加（每分支各自 sqlite worktree DB）。PROGRESS 先前 "All 5 priorities complete" 指的是當時 branch 的 5 項優先工作，不代表整個 project 完成度 — 依上述矩陣為準。
 
-## Directive progress checkpoint (2026-10-17 15:35+08:00, machine clock)
+## Directive progress checkpoint (2026-10-17 16:10+08:00, machine clock; superseded by the FINAL ENTRY above)
 
-**All 7 directive items COMPLETE.** Continuation point — next run: no directive items remain. Owner decisions pending: review/merge of Draft PR #20 (auto/integration-e2e) and the other open PRs (#11–#19). External verification (LSEG/IBKR/Stripe live) remains permanently blocked per owner decision — offline/test-mode evidence is in the matrix above.
+**All 7 directive items COMPLETE.** Continuation point — next run: no directive items remain; PR #20 CI is fully green at 8202611. Owner decisions pending: review/merge of Draft PR #20 (auto/integration-e2e) and the other open PRs (#11–#19). External verification (LSEG/IBKR/Stripe live) remains permanently blocked per owner decision — offline/test-mode evidence is in the matrix above.
+
+## Session record: PR #20 Browser Acceptance failure — root-caused and fixed (2026-10-17, commit 8202611)
+
+**Symptom**: Browser Acceptance on PR #20 failed deterministically (original run + `gh run rerun --failed`, 3 attempts each, run 39014063346 @ 6307c39): only `subscription-states.spec.ts:394 › Recovery State › retry after subscription failure clears error and shows data` failed; 66 passed. Backend Tests and Frontend Build were green.
+
+**Root cause (from downloaded playwright-report trace + error-context)**: the test navigates to `/dashboard` mid-test with a fake token (`mock-test-token`). The dashboard's only API call, `GET /api/v1/experiments/`, was NOT mocked, so it hit the real acceptance backend, which returns 401 for the fake token. `apiFetch`'s global 401 handler (`frontend/src/lib/api.ts:27-32`) then removed the token and hard-redirected `window.location.href='/login'`, so the subsequent `/subscription` load landed on the login page (trace + page snapshot confirm: `401 /api/v1/experiments/` ×2 (StrictMode), aborted `/subscription`, final page = 登入). Whether the 401 or the navigation won was a sub-10ms race; CI runners consistently lost it (6/6 attempts across 2 runs).
+
+**Why not a branch regression**: the spec is byte-identical to main (empty `git diff main...HEAD -- frontend/e2e/`); main's backend also 401s the mock token (verified directly: TestClient against a temp main worktree, `GET /api/v1/experiments/` → 401 "Could not validate credentials", 1.5ms warm); sibling PRs #16/#12/#11 forked at the SAME base dc04d95 with the same spec+page and their Browser Acceptance runs passed the same test cleanly (e.g. PR #16 run 38912171896: test 67 ✓ 2.9s, "67 passed"). The failure is a latent test-isolation defect on all branches that my CI runs exposed by timing.
+
+**Fix (8202611, +10 lines, one test)**: add `page.route('**/api/v1/experiments/', … fulfill 200 [])` to the recovery test — the test already mocks plans / operational-status / subscriptions/me / pilot/entitlements/me for exactly this isolation reason; this completes the set for the dashboard page it visits. Assertions and retry policy untouched (constraint: no weakened assertions).
+
+**Verification**:
+- Local repro stack (branch backend uvicorn :8110 sqlite + frontend dev :3011): recovery test `--repeat-each=6` → **6/6 passed** with the fix (Playwright route interception is deterministic — the request never reaches the network); full `subscription-states` file → **10/10 passed**.
+- Local full-suite attempt of the other spec files (backbone/execution-fill-source/method-review) produced 31 failures — all repro-environment artifacts, NOT branch regressions: repeated runs shared one sqlite DB (fixed test emails → register→duplicate→login 401; 9 "Login failed: 401") plus uvicorn bound to 127.0.0.1 while chromium resolves localhost→IPv6 (22 timeouts). These files are green in CI at the same HEAD and the change is confined to one test's route mocks in another file (fresh browser context per test — no shared state).
+- CI @ 8202611aa3877396b07a7533557a1d689550ef43: **Backend Tests SUCCESS, Frontend Production Build SUCCESS, Browser Acceptance SUCCESS** (all 67 tests; previously-failing test now passes).
+
+**Category**: test-isolation defect fixed (integrated-offline-E2E-verified locally + CI-green). Cleanup done: repro files/specs/servers/temp worktree removed; alethra-integration-auto worktree clean except PROGRESS-unrelated state.
 
 ### Item 7 — DONE (commits fed5fb0 + 6307c39, branch auto/integration-e2e, pushed; Draft PR #20 base main)
 
