@@ -61,6 +61,7 @@ def train_model(
     train_ratio: float = 0.7,
     val_ratio: float = 0.15,
     user_id: Optional[str] = None,
+    data_provenance: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Train a model on OHLCV bar data.
 
@@ -70,6 +71,10 @@ def train_model(
         model_type: "logistic_regression" or "gradient_boosting" or "baseline".
         train_ratio: Fraction of data for training.
         val_ratio: Fraction of data for validation.
+        user_id: Owner recorded in artifact metadata.
+        data_provenance: Where the bars came from (provider, feed_mode,
+            synthetic marker, date coverage, content fingerprint). Stored in
+            the artifact metadata so training data is always traceable.
 
     Returns:
         Dict with model artifact path, evaluation metrics, and metadata.
@@ -138,6 +143,11 @@ def train_model(
     baseline_test = _evaluate(baseline_model, X_test_scaled, y_test, "test")
 
     model_id = str(uuid.uuid4())
+    provenance = data_provenance or {}
+    hyperparameters = (
+        {k: v for k, v in model.get_params().items()}
+        if hasattr(model, "get_params") else {}
+    )
     artifact_path = _save_artifact(
         model_id=model_id,
         model=model,
@@ -153,6 +163,14 @@ def train_model(
             "n_test": len(test_idx),
             "n_features": len(feature_names),
             "feature_names": feature_names,
+            "hyperparameters": hyperparameters,
+            "metrics": {
+                "train": train_metrics,
+                "val": val_metrics,
+                "test": test_metrics,
+                "baseline_test": baseline_test,
+            },
+            "data_provenance": provenance,
             "date_range": {
                 "start": valid_dates[0],
                 "end": valid_dates[-1],
@@ -169,6 +187,8 @@ def train_model(
         "instrument_id": instrument_id,
         "feature_names": feature_names,
         "n_features": len(feature_names),
+        "hyperparameters": hyperparameters,
+        "data_provenance": provenance,
         "split": {
             "train_size": len(train_idx),
             "val_size": len(val_idx),
@@ -281,3 +301,30 @@ def list_models(user_id: Optional[str] = None) -> List[Dict[str, Any]]:
 
     models.sort(key=lambda m: m.get("trained_at", ""), reverse=True)
     return models
+
+
+def delete_model(model_id: str, user_id: Optional[str] = None) -> None:
+    """Delete a model artifact directory after verifying ownership.
+
+    Raises FileNotFoundError / PermissionError with the same semantics as
+    load_model. Callers must validate that model_id is a UUID — this function
+    removes directories, so the path must never resolve outside ARTIFACTS_DIR.
+    Refuses to delete an artifact whose metadata.json is missing (ownership
+    cannot be proven).
+    """
+    model_dir = os.path.join(ARTIFACTS_DIR, model_id)
+    if not os.path.isdir(model_dir):
+        raise FileNotFoundError(f"Model artifact not found: {model_id}")
+
+    meta_path = os.path.join(model_dir, "metadata.json")
+    if not os.path.isfile(meta_path):
+        raise FileNotFoundError(f"Model artifact has no metadata: {model_id}")
+
+    with open(meta_path) as f:
+        metadata = json.load(f)
+    if user_id is not None and metadata.get("user_id") != user_id:
+        raise PermissionError(f"Model {model_id} is not owned by user {user_id}")
+
+    import shutil
+
+    shutil.rmtree(model_dir)

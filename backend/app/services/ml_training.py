@@ -4,6 +4,8 @@ Provides an alternative to parameter sweep: actual model training using
 scikit-learn classifiers on OHLCV data with temporal splits.
 """
 
+import hashlib
+import json
 import logging
 import uuid
 from datetime import date, timedelta
@@ -19,6 +21,49 @@ from app.ml.trainer import train_model, load_model, list_models
 from app.lib.timeutil import utcnow
 
 logger = logging.getLogger(__name__)
+
+
+def build_data_provenance(
+    provider: Any,
+    instrument_id: str,
+    requested_start: str,
+    requested_end: str,
+    bar_dicts: List[Dict[str, Any]],
+    data_source: Optional[str] = None,
+    data_nature: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Describe exactly where training bars came from and what they contain.
+
+    Stored with every model artifact so results stay traceable to the data
+    that produced them. is_synthetic marks demo/synthetic feeds explicitly —
+    a real ticker served by the demo provider is still synthetic data.
+    data_source/data_nature are the storage-resolved values for the bars
+    actually consumed (they override provider identity, since stored bars can
+    outlive a provider switch).
+    """
+    fingerprint_payload = json.dumps(
+        [
+            [b.get("date"), b.get("open"), b.get("high"), b.get("low"), b.get("close")]
+            for b in bar_dicts
+        ],
+        separators=(",", ":"),
+    )
+    nature = data_nature or "unknown"
+    return {
+        "provider_id": provider.provider_id,
+        "provider_name": provider.provider_name,
+        "feed_mode": provider.feed_mode,
+        "data_source": data_source or "provider",
+        "data_nature": nature,
+        "is_synthetic": nature == "synthetic" or provider.provider_id == "demo",
+        "instrument_id": instrument_id,
+        "requested_start": requested_start,
+        "requested_end": requested_end,
+        "n_bars": len(bar_dicts),
+        "first_bar_date": bar_dicts[0]["date"] if bar_dicts else None,
+        "last_bar_date": bar_dicts[-1]["date"] if bar_dicts else None,
+        "bars_sha256": hashlib.sha256(fingerprint_payload.encode()).hexdigest(),
+    }
 
 
 def _latest_available_end_date(
@@ -237,11 +282,22 @@ def execute_ml_training(
             for b in bars
         ]
 
+        provenance = build_data_provenance(
+            provider,
+            instrument_id,
+            requested_start=start_date,
+            requested_end=end_date,
+            bar_dicts=bar_dicts,
+            data_source=data_source,
+            data_nature=data_nature,
+        )
+
         result = train_model(
             bars=bar_dicts,
             instrument_id=instrument_id,
             model_type=model_type,
             user_id=str(job.user_id),
+            data_provenance=provenance,
         )
 
         job.results = result
