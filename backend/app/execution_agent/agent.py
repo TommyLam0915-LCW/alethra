@@ -3,33 +3,52 @@
 The agent bridges the Alethra platform and a broker (IBKR in production,
 FakeBrokerTransport in tests). It:
 
-1. Polls the platform for authorized order intents
+1. Polls the platform for authorized and in-flight order intents
 2. Submits orders to the broker via a pluggable transport
 3. Reports submissions, fills, rejections, and cancellations back
 4. Handles reconnection, partial fills, and intent expiry
 
 Safety invariants:
-- Never resubmits an order if the submission acknowledgement was lost
-  (checks broker_ref before submitting)
+- Never resubmits an order if the submission acknowledgement was lost:
+  before submitting, the agent matches unclaimed recent broker orders
+  against the intent and adopts an exact match instead of resubmitting
+- Ambiguous broker state (multiple matching unclaimed orders) is reported
+  as 'uncertain' for manual resolution — never guessed, never resubmitted
+- Fill reports are idempotent end to end: the platform deduplicates by
+  (broker_ref, fill_time, quantity), so re-reports after a restart
+  never double-count filled quantity
+- Restart reconciliation re-adopts the platform's durable broker_ref for
+  submitted intents and resumes fill monitoring
 - Tracks partial fills and reports each individually
-- Reconciles in-flight orders on startup after disconnect/restart
 - Skips expired intents
+- Respects the platform execution kill switch: while active, no new
+  submissions (in-flight monitoring continues); control-status fetch
+  failures fail closed
 """
 import logging
+import os
 import time
 import signal
 import sys
-from datetime import datetime
-from typing import Dict, Optional, Set
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Set
 
 from .config import AgentConfig, load_config_from_env
 from .ibkr_client import IBKRClient
 from .alethra_client import AlethraAPIClient, OrderIntentDTO, FillReport
-from .broker_transport import BrokerTransport, BrokerOrderStatus
+from .broker_transport import (
+    BrokerTransport,
+    BrokerOrderStatus,
+    BrokerOrderState,
+    normalize_instrument_id,
+)
 from app.lib.timeutil import utcnow
 
 
 logger = logging.getLogger(__name__)
+
+# Clock-skew tolerance when matching broker orders to an intent's creation time.
+_SUBMISSION_MATCH_SKEW_SECONDS = 60
 
 
 class ExecutionAgent:
@@ -50,6 +69,10 @@ class ExecutionAgent:
         self._submitted_intents: Dict[str, str] = {}
         self._reported_fills: Set[str] = set()
         self._completed_intents: Set[str] = set()
+        # Broker order ids already mapped to an intent (this process or
+        # re-adopted from the platform). Excluded from lost-ack matching so a
+        # second identical intent never adopts another intent's order.
+        self._claimed_broker_refs: Set[str] = set()
 
         signal.signal(signal.SIGINT, self._handle_shutdown)
         signal.signal(signal.SIGTERM, self._handle_shutdown)
@@ -94,11 +117,12 @@ class ExecutionAgent:
             return False
 
     def reconcile_on_startup(self) -> None:
-        """After a restart, check any intents that were submitted but not yet filled.
+        """After a restart, re-adopt the platform's durable intent→broker mapping.
 
-        For each submitted intent, check the broker for its current status
-        and report accordingly. This handles the case where the agent
-        crashed after submitting to the broker but before reporting back.
+        The poll returns submitted intents with their broker_ref, so the agent
+        resumes fill monitoring for in-flight orders without resubmitting.
+        Authorized intents are handled by _process_single_intent, which checks
+        the broker for lost-acknowledgement orders before any submission.
         """
         try:
             intents = self.alethra_client.poll_order_intents()
@@ -107,14 +131,25 @@ class ExecutionAgent:
             return
 
         for intent in intents:
-            if intent.status == "submitted" and intent.intent_id not in self._submitted_intents:
-                logger.info(f"Reconciling submitted intent {intent.intent_id}")
-                self._submitted_intents[intent.intent_id] = intent.symbol
+            if intent.status != "submitted":
+                continue
+            if intent.broker_ref:
+                self._submitted_intents[intent.intent_id] = intent.broker_ref
+                self._claimed_broker_refs.add(intent.broker_ref)
+                logger.info(
+                    f"Reconciling submitted intent {intent.intent_id} "
+                    f"(broker_ref={intent.broker_ref})"
+                )
+            else:
+                logger.warning(
+                    f"Intent {intent.intent_id} is submitted but has no broker_ref; "
+                    f"will be reported uncertain"
+                )
 
         logger.info(f"Reconciliation complete: {len(self._submitted_intents)} tracked intents")
 
-    def process_order_intents(self) -> None:
-        """Poll for and process authorized order intents."""
+    def process_order_intents(self, kill_switch_active: bool = False) -> None:
+        """Poll for and process order intents awaiting submission or monitoring."""
         try:
             intents = self.alethra_client.poll_order_intents()
         except Exception as e:
@@ -129,7 +164,7 @@ class ExecutionAgent:
 
         for intent in intents:
             try:
-                self._process_single_intent(intent)
+                self._process_single_intent(intent, kill_switch_active=kill_switch_active)
             except Exception as e:
                 logger.error(f"Error processing intent {intent.intent_id}: {e}")
                 try:
@@ -140,20 +175,71 @@ class ExecutionAgent:
                 except Exception as report_err:
                     logger.error(f"Failed to report rejection: {report_err}")
 
-    def _process_single_intent(self, intent: OrderIntentDTO) -> None:
+    def _check_kill_switch(self) -> bool:
+        """Fetch the execution kill switch state. Fails closed: if the control
+        status cannot be read, treat the kill switch as active so no new orders
+        are submitted while the platform is unreachable."""
+        try:
+            status = self.alethra_client.get_control_status()
+            return bool(status.get("kill_switch_active"))
+        except Exception as e:
+            logger.warning(
+                f"Could not fetch control status ({e}); "
+                f"assuming kill switch ACTIVE (fail-closed)"
+            )
+            return True
+
+    def _find_unclaimed_broker_orders(self, intent: OrderIntentDTO) -> List[BrokerOrderState]:
+        """Return unclaimed recent broker orders matching the intent exactly.
+
+        Used for lost-acknowledgement recovery. Matching is on instrument,
+        side, quantity, order type, limit price, and creation time (with skew
+        tolerance). Claimed orders — mapped by this process, re-adopted at
+        startup, or mapped to any platform intent (all statuses) — are
+        excluded. Fails closed: if platform claims cannot be read, no
+        matching is attempted (caller skips submission and retries).
+        """
+        try:
+            platform_claimed = set(self.alethra_client.get_claimed_broker_refs())
+        except Exception as e:
+            raise RuntimeError(f"Cannot read platform broker-ref claims: {e}") from e
+        claimed = self._claimed_broker_refs | platform_claimed
+
+        since = (
+            datetime.fromisoformat(intent.created_at)
+            - timedelta(seconds=_SUBMISSION_MATCH_SKEW_SECONDS)
+        )
+        candidates = []
+        for order in self.ibkr_client.get_recent_orders(since=since):
+            if order.order_id in claimed:
+                continue
+            if order.status == BrokerOrderStatus.REJECTED:
+                # A rejected order never reached the market — it must never be
+                # adopted as a lost submission.
+                continue
+            if normalize_instrument_id(order.instrument_id) != normalize_instrument_id(intent.symbol):
+                continue
+            if order.side.upper() != intent.side.upper():
+                continue
+            if order.quantity != intent.quantity:
+                continue
+            if order.order_type != intent.order_type:
+                continue
+            if (order.limit_price if order.limit_price is not None else None) != (
+                intent.limit_price if intent.limit_price is not None else None
+            ):
+                continue
+            candidates.append(order)
+        return candidates
+
+    def _process_single_intent(
+        self, intent: OrderIntentDTO, kill_switch_active: bool = False
+    ) -> None:
         """Process a single order intent with duplicate prevention."""
         logger.info(
             f"Processing intent {intent.intent_id}: "
             f"{intent.side} {intent.quantity} {intent.symbol}"
         )
-
-        if utcnow() > datetime.fromisoformat(intent.expires_at):
-            logger.warning(f"Intent {intent.intent_id} has expired")
-            self.alethra_client.report_order_rejected(
-                intent_id=intent.intent_id,
-                reason="Intent expired",
-            )
-            return
 
         if intent.intent_id in self._completed_intents:
             logger.debug(f"Intent {intent.intent_id} already completed, skipping")
@@ -164,10 +250,106 @@ class ExecutionAgent:
                 f"Intent {intent.intent_id} already submitted "
                 f"(broker_ref={self._submitted_intents[intent.intent_id]}), skipping"
             )
+            if intent.cancel_requested:
+                self._cancel_submitted_order(intent)
+                return
             self._monitor_fills_for_known_order(
                 intent.intent_id,
                 self._submitted_intents[intent.intent_id],
             )
+            return
+
+        if intent.status == "submitted":
+            # The platform durably mapped this intent to a broker order but
+            # this agent process has no in-memory state for it (restart, or
+            # another agent process reported it). Re-adopt the mapping.
+            if intent.broker_ref:
+                logger.info(
+                    f"Re-adopting submitted intent {intent.intent_id} "
+                    f"(broker_ref={intent.broker_ref})"
+                )
+                self._submitted_intents[intent.intent_id] = intent.broker_ref
+                self._claimed_broker_refs.add(intent.broker_ref)
+                if intent.cancel_requested:
+                    self._cancel_submitted_order(intent)
+                    return
+                self._monitor_fills_for_known_order(intent.intent_id, intent.broker_ref)
+            else:
+                logger.warning(
+                    f"Intent {intent.intent_id} is submitted without a broker_ref; "
+                    f"marking uncertain for manual resolution"
+                )
+                self.alethra_client.report_order_uncertain(
+                    intent_id=intent.intent_id,
+                    reason="Submitted intent has no broker_ref on the platform",
+                )
+                self._completed_intents.add(intent.intent_id)
+            return
+
+        # From here the intent is authorized (not yet submitted).
+
+        if utcnow() > datetime.fromisoformat(intent.expires_at):
+            logger.warning(f"Intent {intent.intent_id} has expired")
+            self.alethra_client.report_order_rejected(
+                intent_id=intent.intent_id,
+                reason="Intent expired",
+            )
+            return
+
+        if kill_switch_active:
+            logger.warning(
+                f"Execution kill switch active; not submitting {intent.intent_id}"
+            )
+            return
+
+        # Lost-acknowledgement recovery: if a matching unclaimed broker order
+        # exists, the submission acknowledgement was lost and the order is
+        # already live — adopt it instead of resubmitting.
+        try:
+            candidates = self._find_unclaimed_broker_orders(intent)
+        except Exception as e:
+            logger.warning(
+                f"Cannot verify broker state for {intent.intent_id} ({e}); "
+                f"skipping submission, will retry next poll"
+            )
+            return
+
+        if len(candidates) > 1:
+            logger.error(
+                f"Ambiguous broker state for {intent.intent_id}: "
+                f"{len(candidates)} matching unclaimed orders; "
+                f"marking uncertain for manual resolution"
+            )
+            self.alethra_client.report_order_uncertain(
+                intent_id=intent.intent_id,
+                reason=(
+                    f"Ambiguous broker state: {len(candidates)} matching "
+                    f"unclaimed broker orders"
+                ),
+            )
+            self._completed_intents.add(intent.intent_id)
+            return
+
+        if len(candidates) == 1:
+            broker_ref = candidates[0].order_id
+            logger.warning(
+                f"Lost acknowledgement recovered for {intent.intent_id}: "
+                f"adopting broker order {broker_ref} without resubmission"
+            )
+            self._submitted_intents[intent.intent_id] = broker_ref
+            self._claimed_broker_refs.add(broker_ref)
+            try:
+                self.alethra_client.report_order_submitted(
+                    intent_id=intent.intent_id,
+                    broker_ref=broker_ref,
+                    submitted_at=candidates[0].created_at,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Failed to report recovered submission for {intent.intent_id}: {e}. "
+                    f"Will reconcile on next poll."
+                )
+            self._monitor_fills_for_known_order(intent.intent_id, broker_ref)
             return
 
         if intent.order_type == "MARKET":
@@ -199,6 +381,7 @@ class ExecutionAgent:
 
         broker_ref = result.broker_order_id
         self._submitted_intents[intent.intent_id] = broker_ref
+        self._claimed_broker_refs.add(broker_ref)
 
         logger.info(
             f"Order submitted for intent {intent.intent_id}, "
@@ -215,6 +398,49 @@ class ExecutionAgent:
             logger.warning(
                 f"Failed to report submission for {intent.intent_id}: {e}. "
                 f"Will reconcile on next poll."
+            )
+
+        self._monitor_fills_for_known_order(intent.intent_id, broker_ref)
+
+    def _cancel_submitted_order(self, intent: OrderIntentDTO) -> None:
+        """Cancel a submitted order because the owner requested it.
+
+        Requests the cancellation at the broker, then continues monitoring the
+        order: the monitor reports any fills that landed first and, once the
+        broker confirms the cancellation, reports it to the platform. If the
+        order fully filled before the cancel landed, the fills are recorded
+        and the intent becomes 'filled' — never silently dropped.
+        """
+        broker_ref = self._submitted_intents.get(intent.intent_id) or intent.broker_ref
+        if not broker_ref:
+            logger.warning(
+                f"Cancel requested for {intent.intent_id} but no broker_ref; "
+                f"marking uncertain for manual resolution"
+            )
+            self.alethra_client.report_order_uncertain(
+                intent_id=intent.intent_id,
+                reason="Cancel requested for a submitted intent with no broker_ref",
+            )
+            self._completed_intents.add(intent.intent_id)
+            return
+
+        logger.info(
+            f"Cancel requested for intent {intent.intent_id} "
+            f"(broker_ref={broker_ref}); cancelling at broker"
+        )
+        try:
+            accepted = self.ibkr_client.cancel_order(broker_ref)
+        except Exception as e:
+            # Retry on the next poll — do not report cancelled without broker
+            # confirmation, and do not report uncertain (the order state is
+            # known, only the cancel attempt failed).
+            logger.error(f"Cancel attempt failed for {intent.intent_id}: {e}")
+            return
+
+        if not accepted:
+            logger.info(
+                f"Cancel for {intent.intent_id} ({broker_ref}) not accepted — "
+                f"order likely already filled or cancelled; continuing monitoring"
             )
 
         self._monitor_fills_for_known_order(intent.intent_id, broker_ref)
@@ -240,18 +466,26 @@ class ExecutionAgent:
             for fill in fills:
                 fill_key = f"{broker_order_id}:{fill.fill_time.isoformat()}:{fill.quantity}"
                 if fill_key not in self._reported_fills:
-                    try:
-                        self.alethra_client.report_fill(FillReport(
-                            intent_id=intent_id,
-                            quantity=fill.quantity,
-                            price=fill.price,
-                            fill_time=fill.fill_time,
-                            broker_ref=broker_order_id,
-                            commission=fill.commission,
-                        ))
-                        self._reported_fills.add(fill_key)
-                    except Exception as e:
-                        logger.error(f"Failed to report fill: {e}")
+                    retries = 0
+                    while retries < 3:
+                        try:
+                            self.alethra_client.report_fill(FillReport(
+                                intent_id=intent_id,
+                                quantity=fill.quantity,
+                                price=fill.price,
+                                fill_time=fill.fill_time,
+                                broker_ref=broker_order_id,
+                                commission=fill.commission,
+                            ))
+                            self._reported_fills.add(fill_key)
+                            break
+                        except Exception as e:
+                            retries += 1
+                            if retries >= 3:
+                                logger.error(f"Failed to report fill after 3 attempts: {e}")
+                                self._reported_fills.add(fill_key)
+                            else:
+                                time.sleep(1)
 
             if status_enum in (BrokerOrderStatus.FILLED,):
                 logger.info(f"Order {broker_order_id} fully filled")
@@ -295,7 +529,8 @@ class ExecutionAgent:
                         logger.error("Failed to reconnect, shutting down")
                         break
 
-                self.process_order_intents()
+                kill_switch_active = self._check_kill_switch()
+                self.process_order_intents(kill_switch_active=kill_switch_active)
 
                 if time.time() - last_heartbeat > 60:
                     try:
@@ -331,8 +566,22 @@ def main():
         logger.error(f"Configuration error: {e}")
         sys.exit(1)
 
-    from .broker_transport import FakeBrokerTransport
-    transport = FakeBrokerTransport()
+    transport_name = os.getenv("ALETHRA_BROKER_TRANSPORT", "ibkr").strip().lower()
+    if transport_name == "fake":
+        # Explicit override for local development/tests — never used by default.
+        logger.warning("Using FakeBrokerTransport (ALETHRA_BROKER_TRANSPORT=fake)")
+        from .broker_transport import FakeBrokerTransport
+        transport = FakeBrokerTransport()
+    elif transport_name == "ibkr":
+        from .broker_transport import IBKRBrokerTransport
+        transport = IBKRBrokerTransport(
+            host=config.ib_gateway_host,
+            port=config.ib_gateway_port,
+            client_id=config.ib_client_id,
+        )
+    else:
+        logger.error(f"Unknown ALETHRA_BROKER_TRANSPORT: {transport_name!r}")
+        sys.exit(1)
     ibkr_client = IBKRClient(transport)
 
     alethra_client = AlethraAPIClient(

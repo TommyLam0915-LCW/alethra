@@ -28,7 +28,7 @@ from app.models.execution import (
 )
 from app.services.execution import create_order_intent, authorize_intent
 from app.services.execution_agent_api import (
-    list_authorized_intents,
+    list_agent_intents,
     agent_report_submitted,
     agent_report_fill,
     agent_report_rejected,
@@ -226,13 +226,13 @@ class TestIBKRClient:
 
 class TestAgentAPIService:
 
-    def test_list_authorized_intents(self, client, auth_headers):
+    def test_list_agent_intents(self, client, auth_headers):
         portfolio_id = _create_user_and_portfolio(client, auth_headers)
         intent = _create_and_authorize_intent(client, auth_headers, portfolio_id)
 
         db = _get_db()
         user = db.query(User).first()
-        intents = list_authorized_intents(db, user_id=user.id)
+        intents = list_agent_intents(db, user_id=user.id)
         assert len(intents) == 1
         assert intents[0].intent_id == intent["intent_id"]
 
@@ -263,7 +263,7 @@ class TestAgentAPIService:
         assert resp.status_code == 400
 
         user = db.query(User).first()
-        intents = list_authorized_intents(db, user_id=user.id)
+        intents = list_agent_intents(db, user_id=user.id)
         assert len(intents) == 0
 
     def test_agent_report_submitted(self, client, auth_headers):
