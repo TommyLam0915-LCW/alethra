@@ -130,9 +130,12 @@ export default function MarketDataPage() {
     setDataLoading(true);
     setError(null);
     setDataQuality(null);
+    const today = new Date();
+    const yearAgo = new Date(today.getTime() - 366 * 24 * 60 * 60 * 1000);
+    const iso = (d: Date) => d.toISOString().slice(0, 10);
     try {
       if (symbol.includes(':')) {
-        const data = await api.instruments.bars(symbol, '2024-01-02', '2024-12-31');
+        const data = await api.instruments.bars(symbol, iso(yearAgo), iso(today));
         setBars(data.bars || []);
         const allBars = data.bars || [];
         setLatestBar(allBars.length > 0 ? allBars[allBars.length - 1] : null);
@@ -140,7 +143,7 @@ export default function MarketDataPage() {
       } else {
         const [latest, barsData] = await Promise.all([
           api.marketData.latest(symbol),
-          api.marketData.bars(symbol, '2024-01-02', '2024-02-13'),
+          api.marketData.bars(symbol, iso(yearAgo), iso(today)),
         ]);
         setLatestBar(latest?.bar || null);
         setBars(barsData?.bars || []);
