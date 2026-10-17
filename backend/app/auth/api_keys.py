@@ -15,6 +15,7 @@ from app.config import get_settings
 from app.database import get_db
 from app.models.api_key import ApiKey
 from app.models.user import User
+from app.lib.timeutil import utcnow
 
 settings = get_settings()
 
@@ -54,11 +55,11 @@ def authenticate_api_key(db: Session, raw_key: str) -> Optional[User]:
         return None
     if not api_key.is_active:
         return None
-    if api_key.expires_at is not None and api_key.expires_at < datetime.utcnow():
+    if api_key.expires_at is not None and api_key.expires_at < utcnow():
         return None
 
     # Update last_used_at
-    api_key.last_used_at = datetime.utcnow()
+    api_key.last_used_at = utcnow()
     db.commit()
 
     user = db.query(User).filter(User.id == api_key.user_id).first()
@@ -76,10 +77,10 @@ def authenticate_api_key_with_scopes(db: Session, raw_key: str) -> Optional[tupl
         return None
     if not api_key.is_active:
         return None
-    if api_key.expires_at is not None and api_key.expires_at < datetime.utcnow():
+    if api_key.expires_at is not None and api_key.expires_at < utcnow():
         return None
 
-    api_key.last_used_at = datetime.utcnow()
+    api_key.last_used_at = utcnow()
     db.commit()
 
     user = db.query(User).filter(User.id == api_key.user_id).first()

@@ -21,6 +21,7 @@ from app.auth.rate_limit import RateLimiter, rate_limit_dependency
 from app.models.api_key import ApiKey
 from app.models.user import User
 from app.auth.jwt import get_password_hash
+from app.lib.timeutil import utcnow
 
 
 # ---------------------------------------------------------------------------
@@ -110,7 +111,7 @@ class TestApiKeyAuthentication:
         db = TestSession()
         try:
             user = _make_user(db, "auth3@test.io")
-            past = datetime.utcnow() - timedelta(hours=1)
+            past = utcnow() - timedelta(hours=1)
             _, raw_key = generate_api_key(db, user.id, "k3", expires_at=past)
 
             result = authenticate_api_key(db, raw_key)

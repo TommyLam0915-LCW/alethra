@@ -14,13 +14,18 @@ from app.database import get_db
 from app.models.user import User
 from app.auth.jwt import get_current_user
 from app.models.execution import OrderIntent, IntentStatus
+from app.models.kill_switch import KillSwitchScope
+from app.services.kill_switch import is_kill_switch_active
 from app.services.execution_agent_api import (
-    list_authorized_intents,
+    list_agent_intents,
+    list_claimed_broker_refs,
     agent_report_submitted,
     agent_report_fill,
     agent_report_rejected,
     agent_report_cancelled,
+    agent_report_uncertain,
 )
+from app.lib.timeutil import utcnow
 
 
 router = APIRouter(prefix="/execution-agent", tags=["execution-agent"])
@@ -40,6 +45,7 @@ class OrderIntentAgentResponse(BaseModel):
     status: str
     broker_ref: Optional[str] = None
     rejection_reason: Optional[str] = None
+    cancel_requested: bool = False
     expires_at: datetime
     created_at: datetime
 
@@ -77,8 +83,37 @@ def api_agent_poll_intents(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Poll for authorized order intents awaiting submission."""
-    return list_authorized_intents(db, user_id=current_user.id)
+    """Poll for intents awaiting submission or fill monitoring.
+
+    Returns authorized (unexpired) and submitted intents. Submitted intents
+    include broker_ref so a restarted agent can resume monitoring without
+    resubmitting.
+    """
+    return list_agent_intents(db, user_id=current_user.id)
+
+
+@router.get("/control-status")
+def api_agent_control_status(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Agent control plane: kill switch state for the execution scope."""
+    return {
+        "kill_switch_active": is_kill_switch_active(db, KillSwitchScope.execution),
+    }
+
+
+@router.get("/claimed-broker-refs")
+def api_agent_claimed_broker_refs(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Broker refs already mapped to any of the user's intents (all statuses).
+
+    The agent excludes these when matching unclaimed broker orders for
+    lost-acknowledgement recovery.
+    """
+    return {"broker_refs": list_claimed_broker_refs(db, user_id=current_user.id)}
 
 
 @router.post("/order-intents/{intent_id}/submitted", response_model=OrderIntentAgentResponse)
@@ -123,6 +158,22 @@ def api_agent_report_fill(
     return {"fill_id": str(fill_record.id), "status": "recorded"}
 
 
+@router.post("/order-intents/{intent_id}/uncertain", response_model=OrderIntentAgentResponse)
+def api_agent_report_uncertain(
+    intent_id: str,
+    payload: RejectionReport,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Agent reports ambiguous broker state — intent frozen for manual resolution."""
+    return agent_report_uncertain(
+        db,
+        intent_id=intent_id,
+        user_id=current_user.id,
+        reason=payload.reason,
+    )
+
+
 @router.post("/order-intents/{intent_id}/rejected", response_model=OrderIntentAgentResponse)
 def api_agent_report_rejected(
     intent_id: str,
@@ -164,5 +215,5 @@ def api_agent_heartbeat(
     return {
         "status": "ok",
         "user_id": str(current_user.id),
-        "received_at": datetime.utcnow().isoformat(),
+        "received_at": utcnow().isoformat(),
     }

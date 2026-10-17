@@ -1,19 +1,51 @@
+import logging
+import os
 from functools import lru_cache
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from app.config import get_settings
 from app.providers.data_provider import DataProvider
 from app.providers.demo_provider import DemoDataProvider
 
+logger = logging.getLogger(__name__)
 
 _PROVIDERS: Dict[str, DataProvider] = {
     "demo": DemoDataProvider(),
 }
+_LSEG_INITIALIZED = False
+
+
+def _try_init_lseg() -> Optional[DataProvider]:
+    api_key = os.environ.get("LSEG_API_KEY")
+    client_id = os.environ.get("LSEG_CLIENT_ID")
+    client_secret = os.environ.get("LSEG_CLIENT_SECRET")
+
+    if not api_key and not (client_id and client_secret):
+        return None
+
+    from app.providers.lseg_provider import LSEGDataProvider
+    provider = LSEGDataProvider(
+        api_key=api_key,
+        client_id=client_id,
+        client_secret=client_secret,
+    )
+    if provider.connect():
+        logger.info("LSEG provider auto-registered")
+        return provider
+    logger.warning("LSEG provider failed to connect: %s", provider._last_error)
+    return None
 
 
 def get_data_provider() -> DataProvider:
+    global _LSEG_INITIALIZED
     settings = get_settings()
     provider_id = settings.data_provider
+
+    if provider_id == "lseg" and not _LSEG_INITIALIZED:
+        _LSEG_INITIALIZED = True
+        lseg = _try_init_lseg()
+        if lseg:
+            _PROVIDERS["lseg"] = lseg
 
     if provider_id not in _PROVIDERS:
         raise ValueError(

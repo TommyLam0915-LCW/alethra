@@ -15,6 +15,7 @@ from app.auth.entitlements import (
     require_entitlement,
 )
 from tests.conftest import TestSession
+from app.lib.timeutil import utcnow
 
 
 @pytest.fixture()
@@ -40,7 +41,7 @@ class TestEntitlementChecks:
             user_id=user_id,
             pilot_access=True,
             research_run_limit=10,
-            expiry_date=datetime.utcnow() + timedelta(days=30),
+            expiry_date=utcnow() + timedelta(days=30),
         )
         db.add(ent)
         db.flush()
@@ -51,7 +52,7 @@ class TestEntitlementChecks:
         ent = PilotEntitlement(
             user_id=user_id,
             pilot_access=True,
-            expiry_date=datetime.utcnow() - timedelta(days=1),
+            expiry_date=utcnow() - timedelta(days=1),
         )
         db.add(ent)
         db.flush()
@@ -218,7 +219,7 @@ class TestRequireEntitlement:
         ent = PilotEntitlement(
             user_id=user.id,
             pilot_access=True,
-            expiry_date=datetime.utcnow() - timedelta(days=1),
+            expiry_date=utcnow() - timedelta(days=1),
         )
         db.add(ent)
         db.flush()
