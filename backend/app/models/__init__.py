@@ -63,7 +63,7 @@ from app.models.research_drafts import (
     ResearchDraftRevision,
     ResearchDraftAuditEvent,
 )
-from app.models.quota import QuotaCounter
+from app.models.quota import QuotaCounter, QuotaReservation
 from app.models.billing import Plan, Subscription, PaymentRecord, WebhookEventRecord, SubscriptionStatus
 from app.models.api_key import ApiKey
 from app.models.inference import InferenceRun, InferenceRunStatus
@@ -80,6 +80,9 @@ from app.models.execution import (
 )
 from app.models.kill_switch import KillSwitch, KillSwitchScope
 from app.models.rate_limit import RateLimitCounter
+from app.models.market_data import MarketDataBar, MarketDataMetadata
+from app.models.watchlist import Watchlist, WatchlistItem
+from app.models.user_layout import UserLayout
 
 __all__ = [
     "User",
@@ -151,6 +154,7 @@ __all__ = [
     "ResearchDraftRevision",
     "ResearchDraftAuditEvent",
     "QuotaCounter",
+    "QuotaReservation",
     "InferenceRun",
     "InferenceRunStatus",
     "TrainingJob",
@@ -172,4 +176,9 @@ __all__ = [
     "KillSwitch",
     "KillSwitchScope",
     "RateLimitCounter",
+    "MarketDataBar",
+    "MarketDataMetadata",
+    "Watchlist",
+    "WatchlistItem",
+    "UserLayout",
 ]

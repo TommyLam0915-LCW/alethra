@@ -5,6 +5,7 @@ from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
 from app.database import Base
 import enum
+from app.lib.timeutil import utcnow
 
 
 class ModelStatus(str, enum.Enum):
@@ -69,8 +70,8 @@ class ModelResearchRecord(Base):
     status = Column(SAEnum(ModelStatus), default=ModelStatus.draft, nullable=False)
     allowed_asset_universe = Column(JSONB, nullable=True)
     allowed_research_actions = Column(JSONB, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
     versions = relationship("ModelVersion", back_populates="model_research_record", order_by="ModelVersion.version_number")
     evaluations = relationship("ModelEvaluation", back_populates="model_research_record")
@@ -90,7 +91,7 @@ class ModelVersion(Base):
     linked_experiment_version_ids = Column(JSONB, nullable=True)
     linked_dataset_snapshot_ids = Column(JSONB, nullable=True)
     linked_simulation_session_ids = Column(JSONB, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
     locked_at = Column(DateTime, nullable=True)
     retired_at = Column(DateTime, nullable=True)
     revoked_at = Column(DateTime, nullable=True)
@@ -117,7 +118,7 @@ class ModelEvaluation(Base):
     engine_version = Column(String(50), nullable=False)
     evaluator = Column(SAEnum(EvaluatorType), nullable=False)
     methodology_version = Column(String(50), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
 
     model_version = relationship("ModelVersion", back_populates="evaluations")
     model_research_record = relationship("ModelResearchRecord", back_populates="evaluations")
@@ -132,7 +133,7 @@ class PersonalResearchMemory(Base):
     content = Column(Text, nullable=False)
     source_entity_type = Column(String(50), nullable=True)
     source_entity_id = Column(UUID(as_uuid=True), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
     user_confirmed_at = Column(DateTime, nullable=True)
     active = Column(Boolean, default=True, nullable=False)
     privacy_scope = Column(SAEnum(PrivacyScope), default=PrivacyScope.private_only, nullable=False)
@@ -160,8 +161,8 @@ class ModelCard(Base):
     version_history = Column(JSONB, nullable=True)
     revocation_process = Column(Text, nullable=False)
     disclaimer = Column(Text, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
     versions = relationship("ModelVersion", foreign_keys=[model_version_id])
 
@@ -178,7 +179,7 @@ class ModelResearchExport(Base):
     package_json = Column(JSONB, nullable=True)
     package_checksum = Column(String(64), nullable=True)
     error_message = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
     completed_at = Column(DateTime, nullable=True)
 
     model_research_record = relationship("ModelResearchRecord")

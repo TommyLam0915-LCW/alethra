@@ -15,6 +15,7 @@ from sqlalchemy.orm import relationship
 import enum
 
 from ..database import Base
+from app.lib.timeutil import utcnow
 
 
 class DraftStatus(str, enum.Enum):
@@ -48,8 +49,8 @@ class ResearchDraft(Base):
     assistant_questions = Column(JSON, nullable=True)
     assistant_responses = Column(JSON, nullable=True)
 
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
     revisions = relationship("ResearchDraftRevision", back_populates="draft", cascade="all, delete-orphan")
     audit_events = relationship("ResearchDraftAuditEvent", back_populates="draft", cascade="all, delete-orphan")
@@ -78,7 +79,7 @@ class ResearchDraftRevision(Base):
     assistant_questions = Column(JSON, nullable=True)
     assistant_responses = Column(JSON, nullable=True)
 
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
 
     draft = relationship("ResearchDraft", back_populates="revisions")
 
@@ -93,6 +94,6 @@ class ResearchDraftAuditEvent(Base):
 
     event_type = Column(String(100), nullable=False)
     event_data = Column(JSON, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
 
     draft = relationship("ResearchDraft", back_populates="audit_events")

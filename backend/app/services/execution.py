@@ -19,6 +19,7 @@ from app.models.execution import (
 from app.models.kill_switch import KillSwitchScope
 from app.models.paper_portfolio import PaperPortfolio
 from app.services.kill_switch import is_kill_switch_active
+from app.lib.timeutil import utcnow
 
 
 INTENT_TTL_MINUTES = 5
@@ -56,7 +57,7 @@ def create_order_intent(
         if existing:
             return existing
 
-    now = datetime.utcnow()
+    now = utcnow()
     intent = OrderIntent(
         user_id=user_id,
         portfolio_id=portfolio_id,
@@ -94,11 +95,11 @@ def authorize_intent(
         raise HTTPException(status_code=403, detail="Not authorized")
     if intent.status != IntentStatus.pending:
         raise HTTPException(status_code=400, detail=f"Intent is '{intent.status.value}', cannot authorize")
-    if datetime.utcnow() > intent.expires_at:
+    if utcnow() > intent.expires_at:
         raise HTTPException(status_code=400, detail="Intent has expired")
 
     intent.status = IntentStatus.authorized
-    intent.updated_at = datetime.utcnow()
+    intent.updated_at = utcnow()
     db.commit()
     db.refresh(intent)
     return intent
@@ -125,12 +126,12 @@ def submit_intent(
         raise HTTPException(status_code=403, detail="Not authorized")
     if intent.status != IntentStatus.authorized:
         raise HTTPException(status_code=400, detail=f"Intent is '{intent.status.value}', must be 'authorized' to submit")
-    if datetime.utcnow() > intent.expires_at:
+    if utcnow() > intent.expires_at:
         raise HTTPException(status_code=400, detail="Intent has expired")
 
     intent.status = IntentStatus.submitted
     intent.broker_ref = f"OFFLINE-{uuid.uuid4().hex[:12]}"
-    intent.updated_at = datetime.utcnow()
+    intent.updated_at = utcnow()
     db.commit()
     db.refresh(intent)
 
@@ -158,7 +159,7 @@ def simulate_offline_fill(
     if intent.status != IntentStatus.submitted:
         raise HTTPException(status_code=400, detail=f"Intent is '{intent.status.value}', must be 'submitted'")
 
-    now = datetime.utcnow()
+    now = utcnow()
     intent.status = IntentStatus.filled
     intent.fill_source = FillSource.simulated
     intent.updated_at = now
@@ -181,7 +182,14 @@ def cancel_intent(
     intent_id: str,
     user_id: uuid.UUID,
 ) -> OrderIntent:
-    """Cancel an intent. If pending/authorized -> cancelled; if submitted -> rejected."""
+    """Cancel an intent.
+
+    pending/authorized → cancelled directly (no broker order exists).
+    submitted → the order is live at the broker: set ``cancel_requested`` so
+    the execution agent cancels it at the broker and reports back; the intent
+    transitions to 'cancelled' only via the agent's report (any fills that
+    landed first are recorded instead of lost).
+    """
     intent = db.query(OrderIntent).filter(
         OrderIntent.intent_id == intent_id,
     ).with_for_update().first()
@@ -193,15 +201,14 @@ def cancel_intent(
     if intent.status in (IntentStatus.pending, IntentStatus.authorized):
         intent.status = IntentStatus.cancelled
     elif intent.status == IntentStatus.submitted:
-        intent.status = IntentStatus.rejected
-        intent.rejection_reason = "Cancelled after submission"
+        intent.cancel_requested = True
     else:
         raise HTTPException(
             status_code=400,
             detail=f"Cannot cancel intent in '{intent.status.value}' status",
         )
 
-    intent.updated_at = datetime.utcnow()
+    intent.updated_at = utcnow()
     db.commit()
     db.refresh(intent)
     return intent
