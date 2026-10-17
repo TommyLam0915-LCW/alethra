@@ -55,6 +55,10 @@ services:
       context: ./backend
       dockerfile: ../Dockerfile.backend
     restart: unless-stopped
+    volumes:
+      # ML model artifacts must be shared with the worker: the worker trains
+      # and writes artifacts, the API reloads them for inference.
+      - model_artifacts:/app/app/ml/artifacts
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
@@ -88,6 +92,43 @@ services:
         limits:
           memory: 1G
 
+  # ── Training Worker ───────────────────────────────────────
+  # Same image as backend; polls training_jobs and executes them.
+  worker:
+    build:
+      context: ./backend
+      dockerfile: ../Dockerfile.backend
+    restart: unless-stopped
+    volumes:
+      - model_artifacts:/app/app/ml/artifacts
+    command: ["python", "-m", "app.workers.training_worker"]
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      JWT_ALGORITHM: ${JWT_ALGORITHM}
+      JWT_ACCESS_TOKEN_EXPIRE_MINUTES: ${JWT_ACCESS_TOKEN_EXPIRE_MINUTES}
+      AI_PROVIDER: ${AI_PROVIDER}
+      AI_MODEL: ${AI_MODEL}
+      AI_API_KEY: ${AI_API_KEY}
+      DATA_PROVIDER: ${DATA_PROVIDER}
+      APP_ENV: ${APP_ENV}
+      ENABLE_LIVE_PAYMENTS: "${ENABLE_LIVE_PAYMENTS}"
+      ENABLE_PUBLIC_SHARING: "${ENABLE_PUBLIC_SHARING}"
+      ENABLE_EXTERNAL_NOTIFICATIONS: "${ENABLE_EXTERNAL_NOTIFICATIONS}"
+    depends_on:
+      db:
+        condition: service_healthy
+    # The shared backend image carries an HTTP healthcheck (curl :8000/health);
+    # the worker runs no web server, so disable it — a dead poller exits and
+    # Docker's restart policy handles it.
+    healthcheck:
+      disable: true
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
   # ── Frontend (Next.js) ────────────────────────────────────
   frontend:
     build:
@@ -102,7 +143,7 @@ services:
       backend:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3000/"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -128,7 +169,7 @@ services:
       frontend:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:80/nginx-health"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:80/nginx-health"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -137,4 +178,6 @@ volumes:
   postgres_data:
     driver: local
   redis_data:
+    driver: local
+  model_artifacts:
     driver: local

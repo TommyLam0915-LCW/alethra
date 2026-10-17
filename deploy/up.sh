@@ -26,8 +26,30 @@ for var in POSTGRES_PASSWORD REDIS_PASSWORD JWT_SECRET_KEY; do
     fi
 done
 
-echo "==> Building and starting Alethra production stack..."
-docker compose -f "$COMPOSE_FILE" up -d --build
+echo "==> Building Alethra production images..."
+docker compose -f "$COMPOSE_FILE" build
+
+echo "==> Starting infrastructure (db, redis)..."
+docker compose -f "$COMPOSE_FILE" up -d db redis
+
+# Wait for db to accept connections before migrating.
+for i in $(seq 1 30); do
+    if docker compose -f "$COMPOSE_FILE" exec -T db pg_isready -U "$(grep '^POSTGRES_USER=' .env | cut -d= -f2)" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 2
+done
+
+# Migrations MUST run before the app starts: the backend auto-creates the
+# schema at import time (Base.metadata.create_all), which would leave the
+# database without an alembic_version — running the chain afterwards fails
+# on the unguarded create_table calls in the initial migration.
+echo "==> Running database migrations..."
+docker compose -f "$COMPOSE_FILE" run --rm backend alembic upgrade head
+docker compose -f "$COMPOSE_FILE" run --rm backend alembic current
+
+echo "==> Starting all services..."
+docker compose -f "$COMPOSE_FILE" up -d
 
 echo ""
 echo "==> Waiting for services to become healthy..."
