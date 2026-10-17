@@ -647,8 +647,14 @@ class TestMLModelDeletion:
             "/api/v1/ml/train?instrument_id=US:AAPL&model_type=baseline",
             headers=self._headers(auth_token),
         )
-        assert resp.status_code == 200
-        return resp.json()
+        assert resp.status_code == 200, resp.text
+        job_id = resp.json()["job_id"]
+        _run_worker_until_done()
+        detail = client.get(f"/api/v1/training/jobs/{job_id}", headers=self._headers(auth_token))
+        assert detail.status_code == 200
+        job = detail.json()
+        assert job["status"] == "completed", job.get("error_details")
+        return {"model_id": job["best_params"]["model_id"]}
 
     def test_owner_can_delete_own_model(self, client, user1_token):
         """Owner deletes their model: 200, then gone from list/detail/predict."""
