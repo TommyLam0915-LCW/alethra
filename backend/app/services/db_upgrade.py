@@ -47,8 +47,12 @@ LEGACY_V0_TABLES = {"users", "datasets", "experiments"}
 LEGACY_V1_TABLES = LEGACY_V0_TABLES | {"workspaces", "training_jobs"}
 
 CURRENT_MIN_TABLES = {"users", "datasets", "experiments", "workspaces",
-                      "training_jobs", "experiments_versions", "model_research_records",
+                      "training_jobs", "experiment_versions", "model_research_records",
                       "market_data_bars", "market_data_metadata"}
+
+# Alembic revision this tool stamps after upgrading a legacy database.
+# Must match the branch's migration head (b7c8d9e0f1a2 legacy_schema_upgrade).
+CURRENT_SCHEMA_REVISION = "b7c8d9e0f1a2"
 
 # Column signatures that identify legacy schema
 LEGACY_UUID_COLUMNS = {"id", "user_id", "owner_id", "experiment_id",
@@ -102,9 +106,14 @@ def detect_schema_version(db_path: str) -> SchemaVersion:
     # Remove SQLite internal tables
     tables -= {"sqlite_sequence", "sqlite_stat1"}
 
-    # Check for alembic_version indicating current schema
+    # An alembic_version table alone does NOT prove the schema is current:
+    # verify the stamped revision matches the expected head AND the actual
+    # table set covers the current minimum tables.
     if "alembic_version" in tables:
-        return SchemaVersion.CURRENT
+        revision = _read_alembic_revision(db_path)
+        if revision == CURRENT_SCHEMA_REVISION and CURRENT_MIN_TABLES.issubset(tables):
+            return SchemaVersion.CURRENT
+        return SchemaVersion.UNKNOWN
 
     # Check legacy v1 first (superset of v0: has workspaces + training_jobs)
     if LEGACY_V1_TABLES.issubset(tables) and len(tables) <= 15:
@@ -120,6 +129,23 @@ def detect_schema_version(db_path: str) -> SchemaVersion:
 
     # If tables exist but don't match any known pattern
     return SchemaVersion.UNKNOWN
+
+
+def _read_alembic_revision(db_path: str) -> Optional[str]:
+    """Read the stamped revision from alembic_version, or None if unreadable."""
+    try:
+        conn = sqlite3.connect(db_path)
+    except sqlite3.Error:
+        return None
+    try:
+        row = conn.execute(
+            "SELECT version_num FROM alembic_version LIMIT 1"
+        ).fetchone()
+        return row[0] if row else None
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
 
 
 def detect_column_types(db_path: str) -> dict[str, dict[str, str]]:
@@ -173,17 +199,25 @@ def preflight_check(db_path: str) -> dict[str, Any]:
         report["schema_version"] = version.value
         report["is_supported"] = version in SUPPORTED_LEGACY_VERSIONS
 
+        col_types = detect_column_types(db_path)
+        report["column_types"] = col_types
+        report["table_count"] = len(col_types)
+
         if version == SchemaVersion.UNKNOWN:
             report["errors"].append(
                 "Unknown schema version. Supported legacy versions: v0, v1. "
                 "Please contact support for manual migration."
             )
+            if "alembic_version" in col_types:
+                missing = CURRENT_MIN_TABLES - set(col_types.keys())
+                revision = _read_alembic_revision(db_path)
+                report["errors"].append(
+                    f"alembic_version present but schema is not current "
+                    f"(revision={revision!r}, expected={CURRENT_SCHEMA_REVISION!r}, "
+                    f"missing tables={sorted(missing)})"
+                )
         elif version == SchemaVersion.CURRENT:
             report["warnings"].append("Schema is already current. No upgrade needed.")
-
-        col_types = detect_column_types(db_path)
-        report["column_types"] = col_types
-        report["table_count"] = sum(len(cols) for cols in col_types.values())
 
         # Check for legacy UUID patterns (VARCHAR stored as TEXT)
         for table, cols in col_types.items():
@@ -378,7 +412,7 @@ def run_upgrade(db_path: str, backup_dir: Optional[str] = None,
         # Enable WAL mode for safer writes
         conn.execute("PRAGMA journal_mode=WAL")
 
-        # Phase 1: Convert column types
+        # Phase 1: Validate and record legacy UUID columns (read-only)
         col_types = detect_column_types(db_path)
         for table, cols in col_types.items():
             for col_name, col_type in cols.items():
@@ -396,14 +430,33 @@ def run_upgrade(db_path: str, backup_dir: Optional[str] = None,
                                         f"Table '{table}' column '{col_name}' has "
                                         f"non-UUID value: '{row[0]}'"
                                     )
-                    except sqlite3.Error:
-                        pass
+                    except sqlite3.Error as e:
+                        logger.warning("Could not validate UUIDs in %s.%s: %s", table, col_name, e)
                     tables_migrated.append(f"{table}.{col_name}")
 
-        # Phase 2: Add missing tables for v0 -> current
-        if version == SchemaVersion.LEGACY_V0:
-            _add_missing_tables_v0(conn)
-            tables_migrated.append("added_v1_tables")
+        # Non-UUID values in key columns are BLOCKING: the upgrade would
+        # produce a database that violates UUID constraints downstream.
+        if errors:
+            conn.rollback()
+            logger.error("Upgrade aborted: %d blocking data validation errors", len(errors))
+            # Phase 1 performed no writes; restore anyway so the database
+            # file is byte-identical to the pre-upgrade state (incl. WAL).
+            restore_backup(backup_path, db_path)
+            return UpgradeResult(
+                success=False,
+                message=(
+                    f"Upgrade aborted: {len(errors)} blocking data validation "
+                    f"errors. Database restored from backup."
+                ),
+                backup_path=backup_path,
+                tables_migrated=tables_migrated,
+                errors=errors,
+            )
+
+        # Phase 2: Ensure the current minimum table set exists (v0 and v1)
+        if version in SUPPORTED_LEGACY_VERSIONS:
+            _ensure_current_tables(conn)
+            tables_migrated.append("ensured_current_tables")
 
         # Phase 3: Add alembic_version marker
         _mark_schema_version(conn, version)
@@ -444,8 +497,16 @@ def run_upgrade(db_path: str, backup_dir: Optional[str] = None,
     )
 
 
-def _add_missing_tables_v0(conn: sqlite3.Connection) -> None:
-    """Add tables that exist in v1 but not in v0 legacy."""
+def _ensure_current_tables(conn: sqlite3.Connection) -> None:
+    """Create every table in CURRENT_MIN_TABLES that is missing.
+
+    The upgrade stamps the database with the current revision; the actual
+    table set must back that claim, otherwise post-upgrade detection
+    (revision + schema) would classify the database as unknown. The
+    workspaces/training_jobs tables get their full legacy-shape columns;
+    remaining current tables are created with a minimal id column since
+    legacy data does not reference them.
+    """
     existing = set()
     cursor = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
@@ -463,6 +524,7 @@ def _add_missing_tables_v0(conn: sqlite3.Connection) -> None:
                 FOREIGN KEY (owner_id) REFERENCES users(id)
             )
         """)
+        existing.add("workspaces")
 
     if "training_jobs" not in existing:
         conn.execute("""
@@ -478,6 +540,12 @@ def _add_missing_tables_v0(conn: sqlite3.Connection) -> None:
                 FOREIGN KEY (owner_id) REFERENCES users(id)
             )
         """)
+        existing.add("training_jobs")
+
+    for table in sorted(CURRENT_MIN_TABLES):
+        if table not in existing:
+            conn.execute(f"CREATE TABLE {table} (id TEXT PRIMARY KEY)")
+            existing.add(table)
 
 
 def _mark_schema_version(conn: sqlite3.Connection, version: SchemaVersion) -> None:
@@ -492,7 +560,7 @@ def _mark_schema_version(conn: sqlite3.Connection, version: SchemaVersion) -> No
     # Set the current migration revision
     conn.execute("DELETE FROM alembic_version")
     conn.execute("INSERT INTO alembic_version (version_num) VALUES (?)",
-                 ("b7c8d9e0f1a2",))
+                 (CURRENT_SCHEMA_REVISION,))
 
 
 # ---------------------------------------------------------------------------

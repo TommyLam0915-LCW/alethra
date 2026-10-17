@@ -229,7 +229,7 @@ def current_db(tmp_path):
                 version_num TEXT NOT NULL PRIMARY KEY
             )
         """)
-        conn.execute("INSERT INTO alembic_version VALUES ('a1b2c3d4e5f6')")
+        conn.execute("INSERT INTO alembic_version VALUES ('b7c8d9e0f1a2')")
         conn.execute("""
             CREATE TABLE users (
                 id TEXT PRIMARY KEY,
@@ -292,6 +292,49 @@ class TestSchemaDetection:
         """Empty database returns UNKNOWN."""
         version = detect_schema_version(empty_db)
         assert version == SchemaVersion.UNKNOWN
+
+    def test_alembic_table_alone_is_not_current(self, tmp_path):
+        """Regression: alembic_version table existing does NOT mean CURRENT.
+
+        The directive requires checking the stamped revision AND the actual
+        schema — not just table existence.
+        """
+        db_path = str(tmp_path / "alembic_only.db")
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute("CREATE TABLE alembic_version (version_num TEXT NOT NULL PRIMARY KEY)")
+            conn.execute("INSERT INTO alembic_version VALUES ('b7c8d9e0f1a2')")
+            conn.commit()
+        finally:
+            conn.close()
+
+        assert detect_schema_version(db_path) == SchemaVersion.UNKNOWN
+
+    def test_wrong_revision_is_not_current(self, current_db):
+        """Current tables with an unexpected stamped revision are UNKNOWN."""
+        conn = sqlite3.connect(current_db)
+        try:
+            conn.execute("UPDATE alembic_version SET version_num = 'a1b2c3d4e5f6'")
+            conn.commit()
+        finally:
+            conn.close()
+        assert detect_schema_version(current_db) == SchemaVersion.UNKNOWN
+
+    def test_preflight_reports_why_alembic_db_is_unknown(self, current_db):
+        """Preflight surfaces revision mismatch / missing tables detail."""
+        conn = sqlite3.connect(current_db)
+        try:
+            conn.execute("DROP TABLE market_data_bars")
+            conn.execute("UPDATE alembic_version SET version_num = 'deadbeef0000'")
+            conn.commit()
+        finally:
+            conn.close()
+
+        report = preflight_check(current_db)
+        assert report["schema_version"] == "unknown"
+        joined = "; ".join(report["errors"])
+        assert "revision='deadbeef0000'" in joined
+        assert "market_data_bars" in joined
 
     def test_detect_nonexistent_db_raises(self, tmp_db):
         """Non-existent database raises FileNotFoundError."""
@@ -570,6 +613,227 @@ class TestUpgradeExecution:
         assert "timestamp" in d
         assert "tables_migrated" in d
 
+    def test_upgrade_ensures_full_current_table_set(self, legacy_v1_db, backup_dir):
+        """Upgrade ensures every CURRENT_MIN_TABLES table exists before stamping.
+
+        Regression: the stamp claims the current revision; the actual table
+        set must back that claim so post-upgrade detection (revision +
+        schema) classifies the database as current, not unknown.
+        """
+        result = run_upgrade(legacy_v1_db, backup_dir)
+        assert result.success is True
+
+        conn = sqlite3.connect(legacy_v1_db)
+        try:
+            tables = {
+                row[0] for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            revision = conn.execute(
+                "SELECT version_num FROM alembic_version LIMIT 1"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+
+        from app.services.db_upgrade import CURRENT_MIN_TABLES, CURRENT_SCHEMA_REVISION
+        missing = CURRENT_MIN_TABLES - tables
+        assert not missing, f"Upgrade did not create: {sorted(missing)}"
+        assert revision == CURRENT_SCHEMA_REVISION
+        assert detect_schema_version(legacy_v1_db) == SchemaVersion.CURRENT
+
+
+# ---------------------------------------------------------------------------
+# Test: Fixture-validated upgrade + restore roundtrip (directive item 2)
+# ---------------------------------------------------------------------------
+
+class TestUpgradeRestoreRoundtrip:
+    """Full upgrade → verify → restore → verify with a representative
+    legacy fixture. Uses only temporary fixture files; never touches the
+    operational database."""
+
+    @pytest.fixture
+    def representative_v1_db(self, tmp_path):
+        """Representative legacy v1 fixture with data in all 5 tables."""
+        db_path = str(tmp_path / "representative_v1.db")
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute("""
+                CREATE TABLE users (
+                    id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE,
+                    password_hash TEXT NOT NULL, display_name TEXT,
+                    user_type TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    is_active INTEGER DEFAULT 1, is_admin INTEGER DEFAULT 0
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE datasets (
+                    id TEXT PRIMARY KEY, name TEXT NOT NULL, provider TEXT NOT NULL,
+                    source_type TEXT, license_status TEXT, description TEXT,
+                    created_at TEXT NOT NULL
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE experiments (
+                    id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, workspace_id TEXT,
+                    title TEXT NOT NULL, original_idea TEXT, research_type TEXT,
+                    hypothesis TEXT, falsification_conditions TEXT, benchmark TEXT,
+                    scope TEXT, status TEXT, visibility TEXT, current_version_id TEXT,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    FOREIGN KEY (owner_id) REFERENCES users(id)
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE workspaces (
+                    id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, name TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (owner_id) REFERENCES users(id)
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE training_jobs (
+                    id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, experiment_id TEXT,
+                    title TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+                    config_json TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    FOREIGN KEY (owner_id) REFERENCES users(id)
+                )
+            """)
+            for i in range(3):
+                uid = str(uuid.uuid4())
+                conn.execute(
+                    "INSERT INTO users (id, email, password_hash, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (uid, f"user{i}@example.com", "hashed", "2026-01-01T00:00:00",
+                     "2026-01-01T00:00:00"),
+                )
+                wid = str(uuid.uuid4())
+                conn.execute(
+                    "INSERT INTO workspaces (id, owner_id, name, created_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (wid, uid, f"Workspace {i}", "2026-01-01T00:00:00"),
+                )
+                did = str(uuid.uuid4())
+                conn.execute(
+                    "INSERT INTO datasets (id, name, provider, created_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (did, f"Dataset {i}", "demo", "2026-01-01T00:00:00"),
+                )
+                eid = str(uuid.uuid4())
+                conn.execute(
+                    "INSERT INTO experiments (id, owner_id, title, scope, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (eid, uid, f"Experiment {i}",
+                     json.dumps({"asset_universe": ["AAPL"]}),
+                     "2026-01-01T00:00:00", "2026-01-01T00:00:00"),
+                )
+                jid = str(uuid.uuid4())
+                conn.execute(
+                    "INSERT INTO training_jobs (id, owner_id, title, status, config_json, "
+                    "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (jid, uid, f"Job {i}", "completed",
+                     json.dumps({"epochs": 10 + i}),
+                     "2026-01-01T00:00:00", "2026-01-02T00:00:00"),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        return db_path
+
+    def _snapshot(self, db_path):
+        conn = sqlite3.connect(db_path)
+        try:
+            tables = sorted(
+                row[0] for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' "
+                    "AND name NOT LIKE 'sqlite_%'"
+                ).fetchall()
+            )
+            rows = {}
+            for t in tables:
+                rows[t] = sorted(
+                    conn.execute(f"SELECT * FROM {t}").fetchall(), key=repr
+                )
+            return tables, rows
+        finally:
+            conn.close()
+
+    def test_full_upgrade_then_restore_roundtrip(self, representative_v1_db, backup_dir):
+        pre_tables, pre_rows = self._snapshot(representative_v1_db)
+        assert pre_tables == sorted(["users", "datasets", "experiments",
+                                     "workspaces", "training_jobs"])
+        assert "users" in pre_rows and len(pre_rows["users"]) == 3
+
+        # Upgrade
+        result = run_upgrade(representative_v1_db, backup_dir)
+        assert result.success is True, result.errors
+
+        post_tables, post_rows = self._snapshot(representative_v1_db)
+        # Legacy data preserved row-for-row
+        for t in pre_tables:
+            assert post_rows[t] == pre_rows[t], f"Data changed in {t}"
+        # Current tables + marker present; detection now CURRENT
+        from app.services.db_upgrade import CURRENT_MIN_TABLES, CURRENT_SCHEMA_REVISION
+        assert CURRENT_MIN_TABLES.issubset(set(post_tables))
+        conn = sqlite3.connect(representative_v1_db)
+        try:
+            revision = conn.execute(
+                "SELECT version_num FROM alembic_version LIMIT 1"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert revision == CURRENT_SCHEMA_REVISION
+        assert detect_schema_version(representative_v1_db) == SchemaVersion.CURRENT
+
+        # Restore from the backup the upgrade created
+        restore_backup(result.backup_path, representative_v1_db)
+
+        restored_tables, restored_rows = self._snapshot(representative_v1_db)
+        assert restored_tables == pre_tables
+        for t in pre_tables:
+            assert restored_rows[t] == pre_rows[t], f"Restore changed data in {t}"
+        assert "alembic_version" not in restored_tables
+        assert detect_schema_version(representative_v1_db) == SchemaVersion.LEGACY_V1
+
+    def test_invalid_uuid_is_blocking_and_restores(self, representative_v1_db, backup_dir):
+        """Non-UUID values in UUID columns must fail the upgrade (not succeed
+        with errors), and the database must be restored to its pre-upgrade state."""
+        conn = sqlite3.connect(representative_v1_db)
+        try:
+            conn.execute(
+                "UPDATE users SET id = 'not-a-uuid' WHERE email = 'user1@example.com'"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        pre_tables, pre_rows = self._snapshot(representative_v1_db)
+
+        result = run_upgrade(representative_v1_db, backup_dir)
+        assert result.success is False, "Invalid UUID data must not yield success=True"
+        assert any("not-a-uuid" in e for e in result.errors)
+        assert result.backup_path is not None
+
+        # Database restored: identical to pre-upgrade state, still legacy v1
+        post_tables, post_rows = self._snapshot(representative_v1_db)
+        assert post_tables == pre_tables
+        for t in pre_tables:
+            assert post_rows[t] == pre_rows[t]
+        assert detect_schema_version(representative_v1_db) == SchemaVersion.LEGACY_V1
+
+    def test_table_count_counts_tables_not_columns(self, legacy_v1_db):
+        """Regression: preflight table_count must count TABLES."""
+        report = preflight_check(legacy_v1_db)
+        conn = sqlite3.connect(legacy_v1_db)
+        try:
+            n_tables = conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
+                "AND name NOT LIKE 'sqlite_%'"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert report["table_count"] == n_tables
+        assert report["table_count"] == 5
+
 
 # ---------------------------------------------------------------------------
 # Test: Idempotency
@@ -751,12 +1015,26 @@ class TestErrorHandling:
         finally:
             conn.close()
 
-        # Should complete upgrade but with warnings about non-UUID data
+        # Non-UUID values in key columns are BLOCKING: the upgrade must fail
+        # (not succeed with errors) and restore the pre-upgrade state.
         result = run_upgrade(db_path, backup_dir)
-        assert result.success is True
-        # Should have warnings about non-UUID values
+        assert result.success is False
         uuid_errors = [e for e in result.errors if "non-UUID" in e or "UUID" in e]
         assert len(uuid_errors) > 0
+
+        # Database restored: still legacy v0, no alembic_version stamp
+        assert detect_schema_version(db_path) == SchemaVersion.LEGACY_V0
+        conn = sqlite3.connect(db_path)
+        try:
+            tables = {
+                row[0] for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            assert "alembic_version" not in tables
+            assert "workspaces" not in tables
+        finally:
+            conn.close()
 
 
 # ---------------------------------------------------------------------------
