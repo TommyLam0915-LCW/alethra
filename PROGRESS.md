@@ -1,16 +1,44 @@
 # Alethra Agent Progress
 
-Last updated: 2026-10-18T00:30+08:00 (machine clock)
+Last updated: 2026-10-18T10:45+08:00 (machine clock)
 Branch: auto/candidate-integration
-Head: 364f907
+Head: e59807a
 Draft PR: https://github.com/Tommylam0915-LCW/alethra/pull/25
-Status: All 7 directive items complete. External/operational acceptance remains outstanding where listed.
+Status: P0 critical defects complete. P1 journey tests pending. External/operational acceptance remains outstanding where listed.
 
 ## CI Status (2026-10-17T22:30+08:00)
 
 - **Frontend Production Build**: ✅ SUCCESS
 - **Browser Acceptance (Playwright)**: ✅ SUCCESS  
 - **Backend Tests**: ✅ Tests pass (1149/1149 in 9:31), job timeout increased from 10 to 15 minutes (commit 695ae91) to prevent cancellation
+
+## 2026-10-18 Multi-Hour Sprint — P0 Critical Defects Complete
+
+All P0 items from 2026-10-18 directive addressed with implementation and test evidence:
+
+### P0-A: Inference Quota Commit Boundary ✅ (commit 629a2c9)
+- Added explicit `db.commit()` after quota operations in predict routes
+- Ensures quota reservations and settlements persist across database sessions
+- Previously used only `flush()` which does not commit transactions
+- Added cross-session persistence tests in `test_inference_quota_commit.py`
+- **Evidence**: `backend/app/api/ml_training.py:run_prediction,run_latest_prediction` with explicit commits
+- **Tests**: `backend/tests/test_inference_quota_commit.py` (3 tests verifying cross-session persistence)
+
+### P0-B: PostgreSQL Quota Concurrency ✅ (commit 8044d95)
+- Created comprehensive concurrency tests using real PostgreSQL (not SQLite)
+- Tests use disposable PostgreSQL container (alethra-e2e-db :5434) with synchronization barriers
+- Covers: concurrent reservations with limit, settlement races, settle/release races, counter creation races
+- **Evidence**: `backend/tests/test_quota_concurrency.py` (4 concurrency tests with threading.Barrier)
+- **Tests**: Use multiple connections/sessions to verify atomicity under concurrent access
+
+### P0-C: Durable Executor Fill Recovery ✅ (commit e59807a)
+- Replaced in-memory `pending_fills` list with durable file-based journal
+- Journal persists across process restarts (`/tmp/alethra-fill-delivery-journal.json`)
+- Atomic write operations (write to temp, then rename) prevent corruption
+- Fills added to journal before upload attempt, removed after successful delivery
+- Pending fills retried on each poll, including from previous runs
+- **Evidence**: `backend/app/execution_agent/fill_journal.py` (FillDeliveryJournal class)
+- **Integration**: `backend/app/execution_agent/agent.py:_try_upload_fill` uses journal for durable recovery
 
 ## Directive 3 Addendum — R1-R5 Fixes Complete
 
