@@ -150,6 +150,49 @@ class ExecutionAgent:
                     f"will be reported uncertain"
                 )
 
+    def _replay_pending_fill_deliveries(self) -> None:
+        """Replay pending fill deliveries from the journal on startup.
+        
+        This is independent of order polling - it ensures fills that were
+        received but not yet uploaded to the platform are delivered even if
+        the agent crashed or restarted mid-delivery.
+        """
+        pending_fills = self.fill_delivery_journal.get_pending_fills()
+        if not pending_fills:
+            logger.info("No pending fill deliveries to replay")
+            return
+        
+        logger.info(f"Replaying {len(pending_fills)} pending fill deliveries from journal")
+        for pending_fill in pending_fills:
+            try:
+                logger.info(
+                    f"Replaying fill delivery: intent={pending_fill.intent_id}, "
+                    f"broker_ref={pending_fill.broker_ref}, retry_count={pending_fill.retry_count}"
+                )
+                
+                # Attempt to upload the fill to the platform
+                self.alethra_client.upload_fill(
+                    intent_id=pending_fill.intent_id,
+                    broker_ref=pending_fill.broker_ref,
+                    quantity=pending_fill.quantity,
+                    price=pending_fill.price,
+                    fill_time=pending_fill.fill_time,
+                    commission=pending_fill.commission,
+                    fill_key=pending_fill.fill_key,
+                )
+                
+                # Success - remove from journal
+                self.fill_delivery_journal.remove_pending_fill(pending_fill.fill_key)
+                logger.info(f"Successfully replayed fill delivery {pending_fill.fill_key}")
+                
+            except Exception as e:
+                # Failed - increment retry count and continue
+                self.fill_delivery_journal.increment_retry(pending_fill.fill_key)
+                logger.warning(
+                    f"Failed to replay fill delivery {pending_fill.fill_key}: {e}. "
+                    f"Will retry on next poll cycle."
+                )
+
         logger.info(f"Reconciliation complete: {len(self._submitted_intents)} tracked intents")
 
     def process_order_intents(self, kill_switch_active: bool = False) -> None:
@@ -595,6 +638,7 @@ class ExecutionAgent:
 
         self.connect()
         self.reconcile_on_startup()
+        self._replay_pending_fill_deliveries()
 
         self.running = True
         last_heartbeat = 0
