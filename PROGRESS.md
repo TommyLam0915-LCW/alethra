@@ -1,10 +1,10 @@
 # Alethra Agent Progress
 
-Last updated: 2026-10-18T11:15+08:00 (machine clock)
+Last updated: 2026-10-18T16:30+08:00 (machine clock)
 Branch: auto/candidate-integration
-Head: 09a63e1
+Head: a244017
 Draft PR: https://github.com/Tommylam0915-LCW/alethra/pull/25
-Status: P0 critical defects complete. P1 journey tests + 10-domain matrix complete. External/operational acceptance remains outstanding where listed.
+Status: P0 critical defects complete. P1 journey tests + 10-domain matrix complete. C1-C7 Third Addendum fixes complete. External/operational acceptance remains outstanding where listed.
 
 ## CI Status (2026-10-17T22:30+08:00)
 
@@ -39,6 +39,66 @@ All P0 items from 2026-10-18 directive addressed with implementation and test ev
 - Pending fills retried on each poll, including from previous runs
 - **Evidence**: `backend/app/execution_agent/fill_journal.py` (FillDeliveryJournal class)
 - **Integration**: `backend/app/execution_agent/agent.py:_try_upload_fill` uses journal for durable recovery
+
+## 2026-10-18 Third Addendum — C1-C7 CI Fixes ✅
+
+All C1-C7 items from 2026-10-18 Third Addendum addressed (Backend CI was RED with 7 errors):
+
+### C1: Repair cross-session inference accounting tests ✅ (commit 849336a)
+- Fixed `hashed_password` → `password_hash` (correct User model field)
+- Changed from `sqlite:///:memory:` to file-based SQLite for cross-session tests
+- Saved reservation IDs before closing sessions to avoid DetachedInstanceError
+- **Evidence**: `backend/tests/test_inference_quota_commit.py` (3 tests, all PASS)
+- **Tests**: Verify quota settlement persists across database sessions (P0-A requirement)
+
+### C2: Complete actual inference usage recording ✅ (commit 0f4f469)
+- Added quota reservation/settlement to `/api/v1/inference/runs` endpoint
+- Previously only ML predict endpoints had quota tracking
+- Now all inference paths (ML predict + inference runs) properly track quota usage
+- **Evidence**: `backend/app/api/inference.py:create_inference_run` with reserve/settle/release
+- **Tests**: Journey B test verifies 3 consecutive inference runs succeed with quota tracking
+
+### C3: Fix quota concurrency implementation, not just tests ✅ (commit 849336a)
+- Fixed TOCTOU race in `reserve_quota`: Use SELECT FOR UPDATE on QuotaCounter and QuotaReservation rows
+- Fixed concurrent settlement race in `settle_reservation`: Use SELECT FOR UPDATE on reservation row + database-specific upsert for PostgreSQL
+- Fixed concurrent release/settle race in `release_reservation`: Use SELECT FOR UPDATE on reservation row
+- **Evidence**: `backend/app/auth/entitlements.py:reserve_quota,settle_reservation,release_reservation` with proper locking
+- **Tests**: All 4 PostgreSQL concurrency tests now PASS (previously 3 FAILED)
+
+### C4: Make PostgreSQL tests reproducible and isolated ✅ (commit 849336a)
+- Added module-level PostgreSQL availability check with graceful skip
+- Added `session.flush()` for FK constraint before creating entitlement
+- Handled circular dependency errors during teardown
+- **Evidence**: `backend/tests/test_quota_concurrency.py` with `pytest.skip(..., allow_module_level=True)`
+- **Tests**: Tests skip gracefully when PostgreSQL unavailable, run correctly when available
+
+### C5: Harden fill journal persistence ✅ (commit ba844de)
+- Use `os.replace()` instead of `Path.rename()` for cross-platform atomicity
+- Fixed deprecated `datetime.utcnow()` → `datetime.now(timezone.utc)`
+- Added validation on load: check required fields, skip malformed entries with warnings
+- Preserve corrupted journal file for manual inspection instead of silently starting fresh
+- **Evidence**: `backend/app/execution_agent/fill_journal.py:_load,_save` with validation and atomic writes
+- **Tests**: Journal handles malformed data gracefully without losing valid entries
+
+### C6: Independent journal replay from startup ✅ (commit a244017)
+- Added `_replay_pending_fill_deliveries()` method called on agent startup
+- Replays pending fills from journal independently of order polling
+- Removes successfully uploaded fills from journal, increments retry count for failures
+- Ensures fills received but not yet uploaded are delivered even after crash/restart
+- **Evidence**: `backend/app/execution_agent/agent.py:_replay_pending_fill_deliveries` called in `run()`
+- **Tests**: Completes durable fill recovery requirement (P0-C)
+
+### C7: Update PROGRESS.md with accurate evidence status ✅ (this commit)
+- Documented all C1-C7 fixes with commit SHAs and evidence
+- Updated HEAD SHA to a244017
+- Clarified status: all C1-C7 complete, external/operational acceptance remains outstanding
+
+**Test Results After C1-C7 Fixes**:
+- `test_inference_quota_commit.py`: 3/3 PASS (SQLite cross-session tests)
+- `test_quota_concurrency.py`: 4/4 PASS (PostgreSQL concurrency tests)
+- Total: 7/7 tests that were failing now PASS
+
+**Commits**: 849336a (C1, C3, C4), 0f4f469 (C2), ba844de (C5), a244017 (C6), pending (C7)
 
 ## 2026-10-18 P1 Sprint — Journey Tests + Product Matrix
 
