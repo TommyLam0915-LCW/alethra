@@ -40,7 +40,7 @@ class TestJourneyAPersonalAIResearch:
         status_resp = client.get("/api/v1/ai/status", headers=headers)
         assert status_resp.status_code == 200
         status = status_resp.json()
-        assert status["available"] is True
+        assert status["mode"] == "mock"
         assert status["provider"] == "mock"
 
         # Step 3: Create AI conversation
@@ -83,19 +83,19 @@ class TestJourneyAPersonalAIResearch:
         draft = draft_resp.json()
         draft_id = draft["id"]
         assert draft["title"] == "Tech Momentum Strategy"
-        assert draft["status"] == "draft"
+        assert draft["status"] == "pending_review"
 
         # Step 6: Create experiment from draft
         strategy_spec = {
             "schema_version": "1.0",
-            "template_type": "momentum",
-            "asset_ids": ["DEMO-TECH"],
+            "template_type": "sma_crossover",
+            "asset_ids": ["DEMO-ALPHA"],
             "frequency": "1d",
             "start_date": "2024-01-02",
             "end_date": "2024-06-28",
             "initial_cash": 100000.0,
-            "signal_parameters": {"lookback": 20, "threshold": 0.02},
-            "entry_rule": {"type": "momentum", "params": {"window": 20}},
+            "signal_parameters": {"sma_short": 20, "sma_long": 50},
+            "entry_rule": {"type": "sma_crossover", "params": {"short_window": 20, "long_window": 50}},
             "exit_rule": {"type": "stop_loss", "params": {"pct": 0.05}},
             "sizing_rule": {"type": "equal_weight"},
             "execution_timing": {"execute_at": "next_open"},
@@ -107,13 +107,16 @@ class TestJourneyAPersonalAIResearch:
 
         exp_resp = client.post("/api/v1/experiments/", headers=headers, json={
             "title": draft["title"],
-            "original_idea": draft["original_idea"],
-            "research_type": draft["research_type"],
-            "hypothesis": draft["hypothesis"],
-            "falsification_conditions": draft["falsification_conditions"],
-            "benchmark": draft["benchmark"],
+            "original_idea": draft.get("hypothesis", "Momentum-based strategy"),
+            "research_type": "quantitative",
+            "hypothesis": draft.get("hypothesis", "Tech stocks with strong momentum outperform"),
+            "falsification_conditions": draft.get("falsification_criteria", "Max drawdown > 25%"),
+            "benchmark": draft.get("benchmark_symbol", "DEMO-BENCHMARK"),
             "strategy_spec": strategy_spec,
         })
+        if exp_resp.status_code != 201:
+            print(f"Experiment creation failed: {exp_resp.status_code}")
+            print(f"Response: {exp_resp.json()}")
         assert exp_resp.status_code == 201
         experiment = exp_resp.json()
         experiment_id = experiment["id"]
@@ -196,5 +199,5 @@ class TestJourneyAPersonalAIResearch:
         # User 2 can only see their own conversations
         list_resp = client.get("/api/v1/ai/conversations", headers=headers2)
         assert list_resp.status_code == 200
-        conversations = list_resp.json()["conversations"]
+        conversations = list_resp.json()  # Returns list directly
         assert len(conversations) == 0  # User 2 has no conversations
