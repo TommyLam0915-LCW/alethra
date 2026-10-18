@@ -51,30 +51,37 @@ class TestJourneyDBillingLifecycle:
         # Step 1: Register and login
         headers = _register_and_login(client, "journey-d@test.com")
 
-        # Step 2: View available plans
-        plans_resp = client.get("/api/v1/plans")
-        assert plans_resp.status_code == 200
-        plans = plans_resp.json()["plans"]
-        assert len(plans) > 0
-
-        # Step 3: Create a test plan (or use existing)
+        # Step 2: Create a test plan (database doesn't have seeded plans)
         db = SessionLocal()
         try:
-            user = db.query(User).filter(User.email == "journey-d@test.com").first()
-            assert user is not None
-            user_id = user.id
-
-            # Create a test plan
             plan = Plan(
-                name=f"Journey D Test Plan {uuid4().hex[:8]}",
+                name="Test Pro Plan",
+                description="Test plan for journey D",
                 monthly_price=2999,
                 currency="USD",
+                features={"max_models": 10, "max_inference_per_day": 1000},
                 is_active=True,
             )
             db.add(plan)
             db.commit()
             db.refresh(plan)
             plan_id = plan.id
+        finally:
+            db.close()
+
+        # Step 3: View available plans
+        plans_resp = client.get("/api/v1/plans")
+        assert plans_resp.status_code == 200
+        plans = plans_resp.json()["plans"]
+        assert len(plans) > 0
+        assert any(p["id"] == str(plan_id) for p in plans)
+
+        # Get user_id for later assertions
+        db = SessionLocal()
+        try:
+            user = db.query(User).filter(User.email == "journey-d@test.com").first()
+            assert user is not None
+            user_id = user.id
         finally:
             db.close()
 
