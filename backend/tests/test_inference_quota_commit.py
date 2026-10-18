@@ -4,6 +4,8 @@ Verifies that quota reservations and settlements are properly committed
 and persist across database sessions (P0-A requirement).
 """
 import pytest
+import tempfile
+import os
 from uuid import uuid4
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -18,8 +20,13 @@ from app.lib.timeutil import utcnow
 
 @pytest.fixture
 def db_url():
-    """Use a fresh in-memory SQLite database for each test."""
-    return "sqlite:///:memory:"
+    """Use a fresh temporary file-based SQLite database for cross-session tests."""
+    fd, path = tempfile.mkstemp(suffix=".db", prefix="test-quota-")
+    os.close(fd)
+    yield f"sqlite:///{path}"
+    # Cleanup
+    if os.path.exists(path):
+        os.remove(path)
 
 
 @pytest.fixture
@@ -39,7 +46,7 @@ def test_user(db_session):
     user = User(
         id=uuid4(),
         email=f"test-{uuid4()}@example.com",
-        hashed_password="hashed",
+        password_hash="hashed",
         created_at=utcnow(),
     )
     db_session.add(user)
@@ -67,6 +74,7 @@ def test_quota_settlement_persists_across_sessions(db_url, test_user):
     reservation = reserve_quota(session1, test_user.id, "ai_usage")
     assert reservation.status == "reserved"
     assert reservation.amount == 1
+    reservation_id = reservation.id
 
     settle_reservation(session1, reservation.id)
     session1.refresh(reservation)
@@ -89,7 +97,7 @@ def test_quota_settlement_persists_across_sessions(db_url, test_user):
     assert counter.used == 1, f"Expected used=1, got {counter.used}"
 
     settled_reservation = session2.query(QuotaReservation).filter(
-        QuotaReservation.id == reservation.id
+        QuotaReservation.id == reservation_id
     ).first()
     assert settled_reservation is not None, "Reservation should exist"
     assert settled_reservation.status == "settled"
@@ -105,6 +113,7 @@ def test_quota_release_persists_across_sessions(db_url, test_user):
 
     reservation = reserve_quota(session1, test_user.id, "ai_usage")
     assert reservation.status == "reserved"
+    reservation_id = reservation.id
 
     release_reservation(session1, reservation.id)
     session1.refresh(reservation)
@@ -128,7 +137,7 @@ def test_quota_release_persists_across_sessions(db_url, test_user):
         assert counter.used == 0, f"Expected used=0 after release, got {counter.used}"
 
     released_reservation = session2.query(QuotaReservation).filter(
-        QuotaReservation.id == reservation.id
+        QuotaReservation.id == reservation_id
     ).first()
     assert released_reservation is not None, "Reservation should exist"
     assert released_reservation.status == "released"
@@ -142,10 +151,10 @@ def test_multiple_resets_and_settlements(db_url, test_user):
     Session1 = sessionmaker(bind=create_engine(db_url))
     session1 = Session1()
 
-    reservations = []
+    reservation_ids = []
     for i in range(3):
         reservation = reserve_quota(session1, test_user.id, "ai_usage")
-        reservations.append(reservation)
+        reservation_ids.append(reservation.id)
         settle_reservation(session1, reservation.id)
 
     session1.commit()
@@ -163,9 +172,9 @@ def test_multiple_resets_and_settlements(db_url, test_user):
     assert counter is not None, "QuotaCounter should exist"
     assert counter.used == 3, f"Expected used=3, got {counter.used}"
 
-    for reservation in reservations:
+    for reservation_id in reservation_ids:
         settled = session2.query(QuotaReservation).filter(
-            QuotaReservation.id == reservation.id
+            QuotaReservation.id == reservation_id
         ).first()
         assert settled is not None
         assert settled.status == "settled"

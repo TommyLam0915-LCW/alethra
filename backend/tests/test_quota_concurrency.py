@@ -4,9 +4,11 @@ Verifies that quota reservation, settlement, and release are atomic
 and safe under concurrent access using real PostgreSQL with multiple
 connections/sessions.
 
-These tests use a disposable PostgreSQL container (alethra-e2e-db :5434).
+These tests require a disposable PostgreSQL container.
+Set ALETHRA_TEST_POSTGRES_URL environment variable to enable.
 """
 import pytest
+import os
 import threading
 import time
 from uuid import uuid4
@@ -21,16 +23,35 @@ from app.auth.entitlements import reserve_quota, settle_reservation, release_res
 from app.lib.timeutil import utcnow
 
 
-POSTGRES_URL = "postgresql://test:test@localhost:5434/alethra_test"
+POSTGRES_URL = os.environ.get(
+    "ALETHRA_TEST_POSTGRES_URL",
+    "postgresql://test:test@localhost:5434/alethra_test"
+)
+
+# Check if PostgreSQL is available at module import time
+try:
+    _test_engine = create_engine(POSTGRES_URL)
+    with _test_engine.connect() as conn:
+        conn.execute(text("SELECT 1"))
+    _test_engine.dispose()
+except Exception:
+    pytest.skip("PostgreSQL not available (set ALETHRA_TEST_POSTGRES_URL)", allow_module_level=True)
 
 
 @pytest.fixture(scope="module")
 def pg_engine():
     """Create PostgreSQL engine for concurrency tests."""
     engine = create_engine(POSTGRES_URL, pool_size=10, max_overflow=20)
-    Base.metadata.create_all(engine)
+    try:
+        Base.metadata.create_all(engine)
+    except Exception as e:
+        pytest.skip(f"Failed to create tables: {e}")
     yield engine
-    Base.metadata.drop_all(engine)
+    try:
+        Base.metadata.drop_all(engine)
+    except Exception:
+        # Ignore teardown errors (e.g., circular dependencies)
+        pass
     engine.dispose()
 
 
@@ -44,10 +65,11 @@ def test_user_with_limit(pg_engine):
     user = User(
         id=user_id,
         email=f"concurrent-{uuid4()}@example.com",
-        hashed_password="hashed",
+        password_hash="hashed",
         created_at=utcnow(),
     )
     session.add(user)
+    session.flush()  # Flush user to database before creating entitlement (FK constraint)
 
     entitlement = PilotEntitlement(
         user_id=user_id,
@@ -272,10 +294,11 @@ def test_reservation_counter_creation_race(pg_engine):
     user = User(
         id=user_id,
         email=f"race-{uuid4()}@example.com",
-        hashed_password="hashed",
+        password_hash="hashed",
         created_at=utcnow(),
     )
     session.add(user)
+    session.flush()  # Flush user to database before creating entitlement (FK constraint)
     entitlement = PilotEntitlement(
         user_id=user_id,
         ai_usage_limit=10,

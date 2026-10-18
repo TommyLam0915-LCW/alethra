@@ -34,7 +34,8 @@ from typing import Optional
 from uuid import UUID
 
 from fastapi import Depends, HTTPException, status
-from sqlalchemy import func, update
+from sqlalchemy import func, update, insert
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -223,6 +224,9 @@ def reserve_quota(
     Checks availability (used + reserved + amount <= limit) and, if
     sufficient, creates a QuotaReservation row with status='reserved'.
 
+    Uses SELECT FOR UPDATE to serialize concurrent reservations and prevent
+    TOCTOU races where multiple transactions read the same quota state.
+
     Raises HTTPException(429) if quota is insufficient.
     Returns the QuotaReservation object (caller must settle or release).
     """
@@ -235,8 +239,34 @@ def reserve_quota(
     limit = _get_limit(entitlement, quota_type)
 
     if limit is not None:
-        used = get_quota_used(db, user_id, quota_type)
-        reserved = _get_reserved(db, user_id, quota_type)
+        # Lock the QuotaCounter row to serialize concurrent reservations.
+        # If the row doesn't exist yet, we'll create it after checking reservations.
+        counter = (
+            db.query(QuotaCounter)
+            .filter(
+                QuotaCounter.user_id == user_id,
+                QuotaCounter.quota_type == quota_type,
+                QuotaCounter.period == "lifetime",
+            )
+            .with_for_update()
+            .first()
+        )
+        used = counter.used if counter else 0
+
+        # Lock all existing reservations for this user/quota_type to prevent
+        # concurrent reads of the reserved sum from changing.
+        reservations = (
+            db.query(QuotaReservation)
+            .filter(
+                QuotaReservation.user_id == user_id,
+                QuotaReservation.quota_type == quota_type,
+                QuotaReservation.status == "reserved",
+            )
+            .with_for_update()
+            .all()
+        )
+        reserved = sum(r.amount for r in reservations)
+
         if (used + reserved + amount) > limit:
             entitlement_field = QUOTA_TYPE_MAP.get(quota_type, quota_type)
             if entitlement is not None:
@@ -269,15 +299,20 @@ def settle_reservation(db: Session, reservation_id: UUID) -> int:
     """Settle a reservation: increment used counter and mark reservation settled.
 
     Atomically:
-    1. Increments QuotaCounter.used by the reservation amount
-    2. Sets reservation status='settled' and settled_at=now
+    1. Locks the reservation row with SELECT FOR UPDATE
+    2. Increments QuotaCounter.used by the reservation amount (upsert)
+    3. Sets reservation status='settled' and settled_at=now
 
     Returns the new used total.
     Raises ValueError if reservation not found or not in 'reserved' status.
     """
-    reservation = db.query(QuotaReservation).filter(
-        QuotaReservation.id == reservation_id
-    ).first()
+    # Lock the reservation row to prevent concurrent settlements
+    reservation = (
+        db.query(QuotaReservation)
+        .filter(QuotaReservation.id == reservation_id)
+        .with_for_update()
+        .first()
+    )
     if not reservation:
         raise ValueError(f"Reservation not found: {reservation_id}")
     if reservation.status != "reserved":
@@ -290,36 +325,63 @@ def settle_reservation(db: Session, reservation_id: UUID) -> int:
     user_id = reservation.user_id
     quota_type = reservation.quota_type
 
-    rows_updated = (
+    # Check if counter exists (with lock if it does)
+    counter = (
         db.query(QuotaCounter)
         .filter(
             QuotaCounter.user_id == user_id,
             QuotaCounter.quota_type == quota_type,
             QuotaCounter.period == "lifetime",
         )
-        .update(
-            {QuotaCounter.used: QuotaCounter.used + amount},
-            synchronize_session="fetch",
-        )
+        .with_for_update()
+        .first()
     )
 
-    if not rows_updated:
-        counter = QuotaCounter(
-            user_id=user_id,
-            quota_type=quota_type,
-            period="lifetime",
-            used=amount,
-        )
-        db.add(counter)
+    if counter:
+        # Counter exists — update it
+        counter.used = counter.used + amount
         db.flush()
-        new_used = amount
-    else:
-        counter = db.query(QuotaCounter).filter(
-            QuotaCounter.user_id == user_id,
-            QuotaCounter.quota_type == quota_type,
-            QuotaCounter.period == "lifetime",
-        ).first()
         new_used = counter.used
+    else:
+        # Counter doesn't exist — try to insert.
+        # The reservation lock prevents concurrent settlements of the SAME reservation,
+        # but different reservations can race here. Use database-specific upsert if available.
+        dialect_name = db.bind.dialect.name if db.bind else None
+        
+        if dialect_name == "postgresql":
+            # PostgreSQL: use INSERT ... ON CONFLICT DO UPDATE
+            stmt = pg_insert(QuotaCounter).values(
+                user_id=user_id,
+                quota_type=quota_type,
+                period="lifetime",
+                used=amount,
+            )
+            stmt = stmt.on_conflict_do_update(
+                constraint="uq_quota_counter",
+                set_={"used": QuotaCounter.used + amount}
+            )
+            db.execute(stmt)
+            db.flush()
+            
+            # Fetch the updated counter to get the new used value
+            counter = db.query(QuotaCounter).filter(
+                QuotaCounter.user_id == user_id,
+                QuotaCounter.quota_type == quota_type,
+                QuotaCounter.period == "lifetime",
+            ).first()
+            new_used = counter.used
+        else:
+            # SQLite/other: create counter (reservation lock serializes same-reservation races,
+            # but different reservations may still race — acceptable for non-PostgreSQL)
+            counter = QuotaCounter(
+                user_id=user_id,
+                quota_type=quota_type,
+                period="lifetime",
+                used=amount,
+            )
+            db.add(counter)
+            db.flush()
+            new_used = amount
 
     reservation.status = "settled"
     reservation.settled_at = utcnow()
@@ -334,9 +396,13 @@ def release_reservation(db: Session, reservation_id: UUID) -> None:
     Marks the reservation as 'released' so the quota becomes available again.
     Raises ValueError if reservation not found or not in 'reserved' status.
     """
-    reservation = db.query(QuotaReservation).filter(
-        QuotaReservation.id == reservation_id
-    ).first()
+    # Lock the reservation row to prevent concurrent release/settle races
+    reservation = (
+        db.query(QuotaReservation)
+        .filter(QuotaReservation.id == reservation_id)
+        .with_for_update()
+        .first()
+    )
     if not reservation:
         raise ValueError(f"Reservation not found: {reservation_id}")
     if reservation.status != "reserved":
