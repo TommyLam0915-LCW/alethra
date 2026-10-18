@@ -176,12 +176,12 @@ class TestJourneyDBillingLifecycle:
             db.close()
 
         # Verify quota endpoint returns correct limits
-        quota_resp = client.get("/api/v1/usage/quota", headers=headers)
+        quota_resp = client.get("/api/v1/usage/quota?quota_type=ai_usage", headers=headers)
         assert quota_resp.status_code == 200
         quota_data = quota_resp.json()
-        assert "ai_usage" in quota_data
-        assert quota_data["ai_usage"]["limit"] == 20  # starter tier
-        assert quota_data["ai_usage"]["used"] == 0
+        assert quota_data["quota_type"] == "ai_usage"
+        assert quota_data["limit"] == 20  # starter tier
+        assert quota_data["used"] == 0
 
     def test_usage_tracking(self, client):
         """Verify usage is tracked correctly."""
