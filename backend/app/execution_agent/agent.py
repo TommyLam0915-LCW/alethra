@@ -42,6 +42,7 @@ from .broker_transport import (
     BrokerOrderState,
     normalize_instrument_id,
 )
+from .fill_journal import FillDeliveryJournal, PendingFill
 from app.lib.timeutil import utcnow
 
 
@@ -73,6 +74,9 @@ class ExecutionAgent:
         # re-adopted from the platform). Excluded from lost-ack matching so a
         # second identical intent never adopts another intent's order.
         self._claimed_broker_refs: Set[str] = set()
+        
+        # Durable journal for fill delivery recovery across restarts (P0-C)
+        self.fill_delivery_journal = FillDeliveryJournal()
 
         signal.signal(signal.SIGINT, self._handle_shutdown)
         signal.signal(signal.SIGTERM, self._handle_shutdown)
@@ -445,6 +449,29 @@ class ExecutionAgent:
 
         self._monitor_fills_for_known_order(intent.intent_id, broker_ref)
 
+    def _try_upload_fill(self, pending_fill: PendingFill) -> bool:
+        """Try to upload a fill to the platform. Returns True if successful."""
+        try:
+            fill_time = datetime.fromisoformat(pending_fill.fill_time)
+            self.alethra_client.report_fill(FillReport(
+                intent_id=pending_fill.intent_id,
+                quantity=pending_fill.quantity,
+                price=pending_fill.price,
+                fill_time=fill_time,
+                broker_ref=pending_fill.broker_ref,
+                commission=pending_fill.commission,
+            ))
+            logger.info(f"Successfully uploaded fill {pending_fill.fill_key}")
+            return True
+        except Exception as e:
+            pending_fill.retry_count += 1
+            self.fill_delivery_journal.increment_retry(pending_fill.fill_key)
+            logger.warning(
+                f"Failed to upload fill {pending_fill.fill_key} "
+                f"(attempt {pending_fill.retry_count}): {e}"
+            )
+            return False
+
     def _monitor_fills_for_known_order(
         self, intent_id: str, broker_order_id: str
     ) -> None:
@@ -453,12 +480,11 @@ class ExecutionAgent:
         Distinguishes broker terminal status from delivery completion:
         - Broker FILLED means no more fills will come
         - But we must deliver all fills to platform before marking complete
-        - Failed uploads remain pending and are retried on subsequent polls
+        - Failed uploads are persisted in durable journal and retried across restarts (P0-C)
         - Intent is only marked completed after all fills are acknowledged
         """
         max_wait_seconds = 60
         start_time = time.time()
-        pending_fills: List[tuple] = []  # (fill_key, fill_data) for failed uploads
 
         while time.time() - start_time < max_wait_seconds:
             try:
@@ -474,62 +500,47 @@ class ExecutionAgent:
             fills = self.ibkr_client.get_fills(broker_order_id)
             for fill in fills:
                 fill_key = f"{broker_order_id}:{fill.fill_time.isoformat()}:{fill.quantity}"
-                if fill_key not in self._reported_fills:
-                    # Check if this fill is already in pending_fills
-                    if any(pk == fill_key for pk, _ in pending_fills):
-                        continue
-                    
-                    # Try to upload this fill
-                    retries = 0
-                    uploaded = False
-                    while retries < 3:
-                        try:
-                            self.alethra_client.report_fill(FillReport(
-                                intent_id=intent_id,
-                                quantity=fill.quantity,
-                                price=fill.price,
-                                fill_time=fill.fill_time,
-                                broker_ref=broker_order_id,
-                                commission=fill.commission,
-                            ))
-                            self._reported_fills.add(fill_key)
-                            uploaded = True
-                            break
-                        except Exception as e:
-                            retries += 1
-                            if retries >= 3:
-                                logger.error(f"Failed to report fill after 3 attempts, will retry on next poll: {e}")
-                                # Add to pending_fills for retry
-                                pending_fills.append((fill_key, fill))
-                            else:
-                                time.sleep(1)
-            
-            # Retry pending fills from previous attempts
-            still_pending = []
-            for fill_key, fill in pending_fills:
-                try:
-                    self.alethra_client.report_fill(FillReport(
+                if fill_key not in self._reported_fills and not self.fill_delivery_journal.has_pending_fill(fill_key):
+                    # Add to durable journal before attempting upload (P0-C)
+                    pending_fill = PendingFill(
                         intent_id=intent_id,
+                        broker_ref=broker_order_id,
                         quantity=fill.quantity,
                         price=fill.price,
-                        fill_time=fill.fill_time,
-                        broker_ref=broker_order_id,
+                        fill_time=fill.fill_time.isoformat(),
                         commission=fill.commission,
-                    ))
-                    self._reported_fills.add(fill_key)
-                    logger.info(f"Successfully retried fill upload {fill_key}")
-                except Exception as e:
-                    logger.warning(f"Fill {fill_key} still pending: {e}")
-                    still_pending.append((fill_key, fill))
-            pending_fills = still_pending
+                        fill_key=fill_key,
+                        created_at=datetime.utcnow().isoformat(),
+                        retry_count=0,
+                    )
+                    self.fill_delivery_journal.add_pending_fill(pending_fill)
+                    
+                    # Try to upload this fill
+                    uploaded = self._try_upload_fill(pending_fill)
+                    if uploaded:
+                        self._reported_fills.add(fill_key)
+                        self.fill_delivery_journal.remove_pending_fill(fill_key)
+            
+            # Retry pending fills from journal (including from previous runs)
+            for pending_fill in self.fill_delivery_journal.get_pending_fills():
+                if pending_fill.broker_ref == broker_order_id:
+                    uploaded = self._try_upload_fill(pending_fill)
+                    if uploaded:
+                        self._reported_fills.add(pending_fill.fill_key)
+                        self.fill_delivery_journal.remove_pending_fill(pending_fill.fill_key)
 
             # Check terminal status
             if status_enum in (BrokerOrderStatus.FILLED,):
-                if pending_fills:
+                # Check if there are any pending fills in the journal for this order
+                pending_for_order = [
+                    pf for pf in self.fill_delivery_journal.get_pending_fills()
+                    if pf.broker_ref == broker_order_id
+                ]
+                if pending_for_order:
                     # Broker says FILLED but we have undelivered fills
                     # Continue monitoring to retry delivery
                     logger.warning(
-                        f"Order {broker_order_id} is FILLED but {len(pending_fills)} fill(s) "
+                        f"Order {broker_order_id} is FILLED but {len(pending_for_order)} fill(s) "
                         f"not yet delivered to platform; continuing retry"
                     )
                     time.sleep(2)
@@ -541,11 +552,16 @@ class ExecutionAgent:
                     return
 
             if status_enum in (BrokerOrderStatus.CANCELLED, BrokerOrderStatus.REJECTED):
+                # Check if there are any pending fills in the journal for this order
+                pending_for_order = [
+                    pf for pf in self.fill_delivery_journal.get_pending_fills()
+                    if pf.broker_ref == broker_order_id
+                ]
                 # Report any remaining fills first
-                if pending_fills:
+                if pending_for_order:
                     logger.warning(
                         f"Order {broker_order_id} was {status_enum.value} but "
-                        f"{len(pending_fills)} fill(s) not yet delivered; continuing retry"
+                        f"{len(pending_for_order)} fill(s) not yet delivered; continuing retry"
                     )
                     time.sleep(2)
                     continue
