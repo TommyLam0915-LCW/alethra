@@ -7,7 +7,7 @@ are lost even if the agent crashes or restarts mid-delivery.
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass, asdict
@@ -55,7 +55,7 @@ class FillDeliveryJournal:
         self._load()
 
     def _load(self) -> None:
-        """Load journal from disk."""
+        """Load journal from disk with validation."""
         if not self.journal_path.exists():
             logger.info(f"Fill delivery journal not found at {self.journal_path}, starting fresh")
             return
@@ -63,13 +63,41 @@ class FillDeliveryJournal:
         try:
             with open(self.journal_path, "r") as f:
                 data = json.load(f)
-                for fill_data in data.get("pending_fills", []):
+            
+            pending_fills_data = data.get("pending_fills", [])
+            if not isinstance(pending_fills_data, list):
+                logger.error(f"Journal has invalid pending_fills format: {type(pending_fills_data)}")
+                self.pending_fills = {}
+                return
+            
+            loaded_count = 0
+            for i, fill_data in enumerate(pending_fills_data):
+                try:
+                    if not isinstance(fill_data, dict):
+                        logger.warning(f"Skipping malformed fill entry at index {i}: not a dict")
+                        continue
+                    
+                    # Validate required fields
+                    required_fields = ["intent_id", "broker_ref", "quantity", "price", "fill_time", "fill_key", "created_at"]
+                    missing_fields = [f for f in required_fields if f not in fill_data]
+                    if missing_fields:
+                        logger.warning(f"Skipping malformed fill entry at index {i}: missing fields {missing_fields}")
+                        continue
+                    
                     fill = PendingFill.from_dict(fill_data)
                     self.pending_fills[fill.fill_key] = fill
-            logger.info(f"Loaded {len(self.pending_fills)} pending fills from journal")
+                    loaded_count += 1
+                except Exception as e:
+                    logger.warning(f"Skipping malformed fill entry at index {i}: {e}")
+                    continue
+            
+            logger.info(f"Loaded {loaded_count} pending fills from journal ({len(pending_fills_data) - loaded_count} malformed entries skipped)")
+        except json.JSONDecodeError as e:
+            logger.error(f"Fill delivery journal is corrupted (invalid JSON): {e}")
+            # Don't start fresh - preserve the corrupted file for manual inspection
+            self.pending_fills = {}
         except Exception as e:
             logger.error(f"Failed to load fill delivery journal: {e}")
-            # Start fresh if journal is corrupted
             self.pending_fills = {}
 
     def _save(self) -> None:
@@ -77,13 +105,13 @@ class FillDeliveryJournal:
         try:
             data = {
                 "pending_fills": [fill.to_dict() for fill in self.pending_fills.values()],
-                "updated_at": datetime.utcnow().isoformat(),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
             }
-            # Write to temp file first, then rename for atomicity
+            # Write to temp file first, then replace for atomicity (cross-platform)
             temp_path = self.journal_path.with_suffix(".tmp")
             with open(temp_path, "w") as f:
                 json.dump(data, f, indent=2)
-            temp_path.rename(self.journal_path)
+            os.replace(temp_path, self.journal_path)
         except Exception as e:
             logger.error(f"Failed to save fill delivery journal: {e}")
 
