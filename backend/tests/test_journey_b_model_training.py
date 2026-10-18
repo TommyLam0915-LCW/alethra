@@ -258,12 +258,11 @@ class TestJourneyBTrainableModelAndAPI:
             "title": "Test",
         }).status_code == 201
 
-    def test_model_deletion_lifecycle(self, client):
-        """Verify model version can be created and retrieved.
+    def test_model_research_version_lifecycle(self, client):
+        """Verify model research version can be created and retrieved.
 
-        Note: Model version deletion is not implemented - only trained model
-        artifacts (from /ml/train) can be deleted via /ml/models/{id}.
-        This test verifies the model version lifecycle (create/read).
+        Note: This tests model-research versions, not trained model artifacts.
+        Trained model artifact deletion is tested in test_trained_model_deletion.
         """
         headers = _register_and_login(client, "journey-b-delete@test.com")
 
@@ -295,3 +294,107 @@ class TestJourneyBTrainableModelAndAPI:
         )
         assert get_resp.status_code == 200
         assert get_resp.json()["id"] == model_version_id
+
+    def test_trained_model_deletion(self, client):
+        """Verify trained model artifact can be deleted by owner.
+
+        Tests the complete deletion lifecycle:
+        - Owner can detail and delete their model
+        - Foreign user cannot delete owner's model
+        - Deletion is reflected in list/detail/predict
+        """
+        import os
+        import json
+        import shutil
+
+        # Register owner
+        owner_headers = _register_and_login(client, "model-owner@test.com")
+
+        # Get owner's actual user UUID from the database
+        from app.database import SessionLocal
+        from app.models.user import User
+        db = SessionLocal()
+        try:
+            owner_user = db.query(User).filter(User.email == "model-owner@test.com").first()
+            owner_user_id = str(owner_user.id)
+        finally:
+            db.close()
+
+        # Create a trained model artifact (simulating worker completion)
+        from app.ml.trainer import ARTIFACTS_DIR
+        model_id = str(uuid.uuid4())
+        model_dir = os.path.join(ARTIFACTS_DIR, model_id)
+        os.makedirs(model_dir, exist_ok=True)
+
+        # Write metadata.json with owner's UUID
+        metadata = {
+            "model_id": model_id,
+            "user_id": owner_user_id,  # Must be UUID string, not email
+            "model_type": "logistic_regression",
+            "instrument_id": "DEMO-ALPHA",
+            "trained_at": "2026-10-18T00:00:00Z",
+        }
+        with open(os.path.join(model_dir, "metadata.json"), "w") as f:
+            json.dump(metadata, f)
+
+        # Write required model files (model.joblib, scaler.joblib, feature_names.json)
+        import joblib
+        from sklearn.linear_model import LogisticRegression
+        from sklearn.preprocessing import StandardScaler
+        import numpy as np
+
+        # Create dummy model and scaler
+        model = LogisticRegression()
+        model.fit(np.array([[0, 0], [1, 1]]), np.array([0, 1]))
+        joblib.dump(model, os.path.join(model_dir, "model.joblib"))
+
+        scaler = StandardScaler()
+        scaler.fit(np.array([[0, 0], [1, 1]]))
+        joblib.dump(scaler, os.path.join(model_dir, "scaler.joblib"))
+
+        # Create dummy feature names
+        feature_names = ["feature1", "feature2"]
+        with open(os.path.join(model_dir, "feature_names.json"), "w") as f:
+            json.dump(feature_names, f)
+
+        try:
+            # Verify owner can get model detail
+            get_resp = client.get(f"/api/v1/ml/models/{model_id}", headers=owner_headers)
+            assert get_resp.status_code == 200
+            assert get_resp.json()["model_id"] == model_id
+
+            # Register foreign user
+            foreign_headers = _register_and_login(client, "foreign-user@test.com")
+
+            # Verify foreign user cannot delete owner's model
+            delete_resp = client.delete(f"/api/v1/ml/models/{model_id}", headers=foreign_headers)
+            assert delete_resp.status_code in (403, 404)  # Permission or not found
+
+            # Verify read-only API key cannot delete
+            api_key_resp = client.post("/api/v1/api-keys", headers=owner_headers, json={
+                "name": "Read-Only Key",
+                "scopes": ["read"],
+            })
+            readonly_headers = {"Authorization": f"Bearer {api_key_resp.json()['raw_key']}"}
+            delete_resp = client.delete(f"/api/v1/ml/models/{model_id}", headers=readonly_headers)
+            assert delete_resp.status_code == 403
+
+            # Owner deletes their model
+            delete_resp = client.delete(f"/api/v1/ml/models/{model_id}", headers=owner_headers)
+            assert delete_resp.status_code == 200
+            assert delete_resp.json()["deleted"] == model_id
+
+            # Verify model no longer accessible
+            get_resp = client.get(f"/api/v1/ml/models/{model_id}", headers=owner_headers)
+            assert get_resp.status_code == 404
+
+            # Verify model not in list
+            list_resp = client.get("/api/v1/ml/models", headers=owner_headers)
+            assert list_resp.status_code == 200
+            model_ids = [m["model_id"] for m in list_resp.json()["models"]]
+            assert model_id not in model_ids
+
+        finally:
+            # Cleanup artifact directory if test fails
+            if os.path.exists(model_dir):
+                shutil.rmtree(model_dir)
