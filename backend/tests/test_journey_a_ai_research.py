@@ -129,6 +129,9 @@ class TestJourneyAPersonalAIResearch:
             headers=headers,
             json={},
         )
+        if backtest_resp.status_code != 200:
+            print(f"Backtest failed with status {backtest_resp.status_code}")
+            print(f"Response: {backtest_resp.text}")
         assert backtest_resp.status_code == 200
         backtest = backtest_resp.json()
         assert backtest["status"] == "completed"

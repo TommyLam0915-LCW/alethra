@@ -548,7 +548,7 @@ def run_experiment_backtest(
 
     try:
         # Run backtest engine
-        result = run_backtest(db, strategy_spec)
+        result = run_backtest(strategy_spec, db_session=db)
 
         # Store results in ExperimentRun (if model exists) or return directly
         # For now, return results directly since ExperimentRun model may not exist
