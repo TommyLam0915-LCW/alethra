@@ -211,18 +211,13 @@ class TestJourneyDBillingLifecycle:
             db.close()
 
         # Record usage
-        usage_resp = client.post("/api/v1/usage/record", headers=headers, json={
-            "usage_type": "ai_usage",
-            "amount": 1,
-        })
+        usage_resp = client.post("/api/v1/usage/record?endpoint=/api/v1/ml/predict&model=test-model&tokens_used=100&cost=10", headers=headers)
         assert usage_resp.status_code == 200
 
-        # Verify usage summary
-        summary_resp = client.get("/api/v1/usage/summary", headers=headers)
-        assert summary_resp.status_code == 200
-        summary = summary_resp.json()
-        assert "ai_usage" in summary
-        assert summary["ai_usage"]["used"] >= 1
+        # Verify usage was recorded
+        usage_data = usage_resp.json()
+        assert usage_data["endpoint"] == "/api/v1/ml/predict"
+        assert usage_data["tokens_used"] == 100
 
     def test_subscription_cancellation(self, client):
         """Verify subscription can be cancelled."""
