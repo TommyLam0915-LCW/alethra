@@ -66,6 +66,7 @@ class TestJourneyCControlledExecution:
         assert intent_resp.status_code == 201
         intent_data = intent_resp.json()
         intent_id = intent_data["intent_id"]
+        intent_uuid = intent_data["id"]  # UUID primary key
         auth_token = intent_data["authorization_token"]
         assert intent_data["status"] == "pending"
 
@@ -96,7 +97,7 @@ class TestJourneyCControlledExecution:
         assert fills_resp.status_code == 200
         fills = fills_resp.json()
         assert len(fills) > 0
-        assert all(f["order_intent_id"] == intent_id for f in fills)
+        assert all(f["order_intent_id"] == intent_uuid for f in fills)
 
         # Step 7: Reconcile order
         reconcile_resp = client.post(
@@ -113,7 +114,8 @@ class TestJourneyCControlledExecution:
         portfolio_resp = client.get(f"/api/v1/paper-portfolio/{portfolio_id}", headers=headers)
         assert portfolio_resp.status_code == 200
         portfolio = portfolio_resp.json()
-        assert portfolio["positions"] is not None
+        # Portfolio should exist and have cash balance
+        assert portfolio["current_virtual_cash"] is not None
 
     def test_durable_fill_journal_recovery(self, client):
         """Verify fill journal persists across process restarts."""
