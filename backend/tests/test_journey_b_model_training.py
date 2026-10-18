@@ -220,7 +220,7 @@ class TestJourneyBTrainableModelAndAPI:
         # Verify all inference runs completed
         list_resp = client.get("/api/v1/inference/runs", headers=headers)
         assert list_resp.status_code == 200
-        runs = list_resp.json()["runs"]
+        runs = list_resp.json()
         assert len(runs) == 3
         assert all(run["status"] == "completed" for run in runs)
 
@@ -234,7 +234,7 @@ class TestJourneyBTrainableModelAndAPI:
             "scopes": ["read"],
         })
         api_key = api_key_resp.json()
-        api_headers = {"Authorization": f"Bearer {api_key['key']}"}
+        api_headers = {"Authorization": f"Bearer {api_key['raw_key']}"}
 
         # Read operations should succeed
         assert client.get("/api/v1/ml/models", headers=api_headers).status_code == 200
