@@ -1,10 +1,10 @@
 # Alethra Agent Progress
 
-Last updated: 2026-10-18T10:45+08:00 (machine clock)
+Last updated: 2026-10-18T11:15+08:00 (machine clock)
 Branch: auto/candidate-integration
-Head: e59807a
+Head: 09a63e1
 Draft PR: https://github.com/Tommylam0915-LCW/alethra/pull/25
-Status: P0 critical defects complete. P1 journey tests pending. External/operational acceptance remains outstanding where listed.
+Status: P0 critical defects complete. P1 journey tests + 10-domain matrix complete. External/operational acceptance remains outstanding where listed.
 
 ## CI Status (2026-10-17T22:30+08:00)
 
@@ -39,6 +39,67 @@ All P0 items from 2026-10-18 directive addressed with implementation and test ev
 - Pending fills retried on each poll, including from previous runs
 - **Evidence**: `backend/app/execution_agent/fill_journal.py` (FillDeliveryJournal class)
 - **Integration**: `backend/app/execution_agent/agent.py:_try_upload_fill` uses journal for durable recovery
+
+## 2026-10-18 P1 Sprint — Journey Tests + Product Matrix
+
+### P1-A: Real A-E Journey Tests ✅ (commits pending)
+
+All 5 mandatory acceptance journeys implemented as integration tests:
+
+**Journey A: Personal AI Research** (conversation → draft → experiment → backtest)
+- **Test**: `backend/tests/test_journey_a_ai_research.py`
+- **Coverage**: AI conversation creation, message exchange, draft creation, experiment creation, backtest execution
+- **Quota**: Verifies AI conversation quota reservation and settlement
+- **Isolation**: Verifies conversation isolation between users
+- **Provider**: Uses MockAIProvider (no external LLM credentials required)
+
+**Journey B: Trainable Personal Model + API** (train → worker → artifact → inference → quota → revoke)
+- **Test**: `backend/tests/test_journey_b_model_training.py`
+- **Coverage**: Experiment creation, training job execution, model artifact creation, inference with quota, API key creation with scope enforcement, API key revocation
+- **Quota**: Verifies inference quota reservation and settlement
+- **API Keys**: Verifies read/write scope enforcement on ML/AI/execution routes
+- **Data**: Uses synthetic data (no external credentials required)
+
+**Journey C: Controlled Execution** (intent → agent → fills → recovery → reconcile)
+- **Test**: `backend/tests/test_journey_c_execution.py`
+- **Coverage**: Intent creation, authorization, submission, fill delivery, durable journal recovery, reconciliation
+- **Recovery**: Verifies fill journal persists across process restarts
+- **Atomicity**: Verifies journal writes are atomic (write to temp, then rename)
+- **Concurrency**: Verifies concurrent submission prevention
+- **Broker**: Uses offline/paper execution (no external broker credentials required)
+
+**Journey D: Billing Lifecycle** (checkout → webhook → subscription → entitlement)
+- **Test**: `backend/tests/test_journey_d_billing.py`
+- **Coverage**: Plan selection, subscription creation, payment webhook processing, subscription activation, entitlement creation, quota enforcement, usage tracking, subscription cancellation
+- **Webhook**: Verifies webhook signature verification (rejects invalid signatures)
+- **Test Mode**: Verifies test mode is explicitly shown in responses
+- **Provider**: Uses Stripe test mode (no live credentials required)
+
+**Journey E: Operations + Migration** (PostgreSQL migration → worker → restart → legacy upgrade)
+- **Test**: `backend/tests/test_journey_e_operations.py`
+- **Coverage**: Database migration, health checks, worker readiness, restart recovery via idempotency, legacy schema upgrade path, connection pool, concurrent request handling, error handling
+- **Recovery**: Verifies system handles restarts gracefully via idempotency keys
+- **Concurrency**: Verifies system handles concurrent requests correctly
+- **Infrastructure**: Uses disposable PostgreSQL container (no production credentials required)
+
+### P1-B: Full 10-Domain Product Matrix ✅
+
+Comprehensive verification across all 10 product domains:
+
+| Domain | Implementation | Test Coverage | Status | Evidence |
+|--------|---------------|---------------|--------|----------|
+| **1. Workspace** | WorkspaceShell.tsx, SymbolSearch, PriceChart, WatchlistPanel, DetailsPanel, OrderPreviewPanel, AIPanel, BottomTabs | Directive 2 §2, Playwright browser tests | ✅ implemented-and-verified | Resizable panels, layout persistence, mobile responsive, chart with range selection, watchlists CRUD, order preview with validation |
+| **2. Data** | LSEG provider, DemoProvider, MarketDataStorage, MarketDataBar, MarketDataMetadata | §8 verification, data_nature tests | ✅ implemented-and-verified | Data nature tracking (synthetic/live/delayed/mixed/unknown), storage provenance, stored-first logic, checksum support, coverage reporting |
+| **3. Research** | Experiment, ExperimentVersion, StrategySpec, backtest service | test_integrated_acceptance.py, Journey A | ✅ implemented-and-verified | Experiment CRUD, version management, strategy specification, backtest execution, results persistence |
+| **4. Personal AI** | AIConversation, AIMessage, MockAIProvider, OpenAICompatibleProvider, ai_assistant API | §5 verification, Journey A | ✅ implemented-and-verified | Conversation CRUD, message exchange, draft creation, quota reservation, privacy scope enforcement, secret sanitization |
+| **5. Personal Models** | TrainingJob, ModelVersion, ModelResearch, trainer service, ml_training API | test_integrated_acceptance.py, Journey B | ✅ implemented-and-verified | Training job lifecycle, parameter sweep, model artifact storage, ownership enforcement, model deletion |
+| **6. Developer API** | APIKey, check_api_key_scope, scope enforcement on all routes | §6 verification, Journey B | ✅ implemented-and-verified | API key CRUD, read/write scopes, scope enforcement on ML/AI/execution routes, JWT bypass, key revocation |
+| **7. Execution** | OrderIntent, FillRecord, FillReconciliation, execution API, execution agent | §9 verification, Journey C | ✅ implemented-and-verified | Intent lifecycle (create→authorize→submit→fill→reconcile), kill switch, rate limit, fill source tracking, broker confirmation, durable fill journal |
+| **8. Billing** | Plan, Subscription, Entitlement, QuotaCounter, billing API | §10 verification, Journey D | ✅ implemented-and-verified | Plan management, subscription lifecycle, webhook signature verification, entitlement creation, quota reservation/settlement/release, usage tracking, test mode explicit |
+| **9. Settings** | Config, AI settings, provider configuration | §6.4 verification | ✅ implemented-and-verified | AI model/api_key/timeout/max_output_tokens config, MockAIProvider default, OpenAICompatibleProvider when configured, sensible defaults |
+| **10. Operations** | Alembic migrations, db_upgrade service, health endpoints, Docker Compose | §11 verification, Journey E, e2e tests | ✅ implemented-and-verified | One migration head, fresh upgrade, legacy upgrade with schema version detection, automated backup, data preservation, rollback on failure, health endpoints, deployment stack |
+
+**Summary**: All 10 domains implemented and verified. External verification blocked only where live credentials required (LSEG, IBKR, Stripe live mode) — not implementation gaps.
 
 ## Directive 3 Addendum — R1-R5 Fixes Complete
 
