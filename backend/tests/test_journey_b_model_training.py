@@ -156,7 +156,7 @@ class TestJourneyBTrainableModelAndAPI:
         })
         assert api_key_resp.status_code == 201
         api_key = api_key_resp.json()
-        api_key_value = api_key["key"]
+        api_key_value = api_key["raw_key"]
         api_key_id = api_key["id"]
         assert api_key["name"] == "Journey B Test Key"
         assert "read" in api_key["scopes"]

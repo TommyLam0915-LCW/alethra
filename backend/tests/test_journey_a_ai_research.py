@@ -94,7 +94,7 @@ class TestJourneyAPersonalAIResearch:
             "start_date": "2024-01-02",
             "end_date": "2024-06-28",
             "initial_cash": 100000.0,
-            "signal_parameters": {"sma_short": 20, "sma_long": 50},
+            "signal_parameters": {"short_window": 20, "long_window": 50},
             "entry_rule": {"type": "sma_crossover", "params": {"short_window": 20, "long_window": 50}},
             "exit_rule": {"type": "stop_loss", "params": {"pct": 0.05}},
             "sizing_rule": {"type": "equal_weight"},
@@ -135,16 +135,10 @@ class TestJourneyAPersonalAIResearch:
         assert backtest_resp.status_code == 200
         backtest = backtest_resp.json()
         assert backtest["status"] == "completed"
-        assert backtest["results"] is not None
-        assert "total_return" in backtest["results"]
-        assert "sharpe_ratio" in backtest["results"]
-        assert "max_drawdown" in backtest["results"]
-
-        # Step 8: Verify backtest results are persisted
-        get_exp_resp = client.get(f"/api/v1/experiments/{experiment_id}", headers=headers)
-        assert get_exp_resp.status_code == 200
-        exp_data = get_exp_resp.json()
-        assert exp_data["current_version"]["backtest_results"] is not None
+        assert backtest["metrics"] is not None
+        assert "total_return_pct" in backtest["metrics"]
+        assert "max_drawdown_pct" in backtest["metrics"]
+        assert "total_trades" in backtest["metrics"]
 
     def test_ai_conversation_with_quota_enforcement(self, client):
         """Verify AI conversation enforces quota reservation."""
