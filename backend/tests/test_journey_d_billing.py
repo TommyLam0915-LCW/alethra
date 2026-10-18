@@ -335,12 +335,14 @@ class TestJourneyDBillingLifecycle:
         # Verify test_mode is shown
         my_sub_resp = client.get("/api/v1/subscriptions/me", headers=headers)
         assert my_sub_resp.status_code == 200
-        sub_data = my_sub_resp.json()["subscription"]
-        assert "test_mode" in sub_data
-        assert sub_data["test_mode"] is True
+        response_data = my_sub_resp.json()
+        assert "test_mode" in response_data
+        assert response_data["test_mode"] is True
+        assert response_data["subscription"] is not None
 
         # Verify operational status shows test mode
         ops_resp = client.get("/api/v1/operational-status")
         assert ops_resp.status_code == 200
         ops_data = ops_resp.json()
-        assert "test_mode" in ops_data or "payment_mode" in ops_data
+        assert "mode" in ops_data
+        assert ops_data["mode"] == "test"
