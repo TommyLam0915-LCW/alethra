@@ -291,7 +291,7 @@ class TestJourneyDBillingLifecycle:
         payload = json.dumps({
             "id": f"evt_{uuid4().hex[:12]}",
             "type": "payment.completed",
-            "data": {"subscription_id": sub_id, "amount": 999},
+            "data": {"subscription_id": str(sub_id), "amount": 999},
         })
         invalid_sig = "invalid-signature"
 
