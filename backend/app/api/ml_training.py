@@ -201,6 +201,7 @@ def run_prediction(
     if len(bars) < 30:
         # Release reservation on validation failure
         release_reservation(db, reservation.id)
+        db.commit()
         raise HTTPException(400, f"Need at least 30 bars for prediction, got {len(bars)}")
 
     bar_dicts = [
@@ -214,10 +215,12 @@ def run_prediction(
     except Exception as e:
         # Release reservation on prediction failure
         release_reservation(db, reservation.id)
+        db.commit()
         raise HTTPException(422, f"Prediction failed: {e}")
 
     # Settle quota on success
     settle_reservation(db, reservation.id)
+    db.commit()
 
     return {
         **result,
@@ -255,11 +258,13 @@ def run_latest_prediction(
     pred_instrument = instrument_id or metadata.get("instrument_id")
     if not pred_instrument:
         release_reservation(db, reservation.id)
+        db.commit()
         raise HTTPException(400, "instrument_id required")
 
     bars, _, data_nature = get_recent_bars_for_prediction(db, pred_instrument)
     if len(bars) < 30:
         release_reservation(db, reservation.id)
+        db.commit()
         raise HTTPException(400, f"Need at least 30 bars, got {len(bars)}")
 
     bar_dicts = [
@@ -272,9 +277,11 @@ def run_latest_prediction(
         result = predict_latest(model_id, bar_dicts)
     except Exception as e:
         release_reservation(db, reservation.id)
+        db.commit()
         raise HTTPException(422, f"Prediction failed: {e}")
 
     # Settle quota on success
     settle_reservation(db, reservation.id)
+    db.commit()
 
     return {**result, "data_nature": data_nature}
