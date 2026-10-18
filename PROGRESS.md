@@ -1,10 +1,10 @@
 # Alethra Agent Progress
 
-Last updated: 2026-10-18T16:30+08:00 (machine clock)
+Last updated: 2026-10-18T16:45+08:00 (machine clock)
 Branch: auto/candidate-integration
-Head: a244017
+Head: a8c9d6a
 Draft PR: https://github.com/Tommylam0915-LCW/alethra/pull/25
-Status: P0 critical defects complete. P1 journey tests + 10-domain matrix complete. C1-C7 Third Addendum fixes complete. External/operational acceptance remains outstanding where listed.
+Status: P0 critical defects complete. P1 journey tests + 10-domain matrix complete. C1-C7 Third Addendum fixes complete. Backtest endpoint fixed. External/operational acceptance remains outstanding where listed.
 
 ## CI Status (2026-10-17T22:30+08:00)
 
@@ -97,6 +97,13 @@ All C1-C7 items from 2026-10-18 Third Addendum addressed (Backend CI was RED wit
 - `test_inference_quota_commit.py`: 3/3 PASS (SQLite cross-session tests)
 - `test_quota_concurrency.py`: 4/4 PASS (PostgreSQL concurrency tests)
 - Total: 7/7 tests that were failing now PASS
+
+### Backtest Endpoint Fix ✅ (commit a8c9d6a)
+- Fixed argument order in `run_backtest()` call in Journey A backtest endpoint
+- Changed from `run_backtest(db, strategy_spec)` to `run_backtest(strategy_spec, db_session=db)`
+- Resolved 500 error: "Session.get() missing 1 required positional argument: 'ident'"
+- **Evidence**: `backend/app/api/experiments.py:run_experiment_backtest` with correct signature
+- **Tests**: Journey A test now executes backtest endpoint successfully
 
 **Commits**: 849336a (C1, C3, C4), 0f4f469 (C2), ba844de (C5), a244017 (C6), pending (C7)
 
