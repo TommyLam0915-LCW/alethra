@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import uuid
+from app.lib.timeutil import utcnow
 
 
 @dataclass(frozen=True)
@@ -89,7 +90,7 @@ class TestPaymentAdapter(PaymentAdapter):
             status="created",
             customer_id=customer_id,
             metadata=metadata or {},
-            created_at=datetime.utcnow().isoformat(),
+            created_at=utcnow().isoformat(),
         )
         self._intents[intent.id] = intent
         return intent
@@ -124,6 +125,6 @@ class TestPaymentAdapter(PaymentAdapter):
             id=data.get("id", f"evt_{uuid.uuid4().hex[:12]}"),
             event_type=data.get("type", "unknown"),
             data=data.get("data", {}),
-            created_at=data.get("created_at", datetime.utcnow().isoformat()),
+            created_at=data.get("created_at", utcnow().isoformat()),
             signature=data.get("signature", ""),
         )

@@ -405,6 +405,128 @@ class TestLSEGAdapterOffline:
         assert provider.is_available() is False
 
 
+class TestLSEGOAuth2Flow:
+    def test_oauth2_connect_acquires_token(self):
+        from unittest.mock import patch, MagicMock
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "access_token": "test-oauth2-token",
+            "expires_in": 300,
+        }
+        mock_resp.raise_for_status = MagicMock()
+
+        provider = LSEGDataProvider(
+            client_id="test-client-id",
+            client_secret="test-client-secret",
+            token_url="https://mock-token-url/oauth2/token",
+        )
+
+        with patch("requests.post", return_value=mock_resp) as mock_post:
+            result = provider.connect()
+
+        assert result is True
+        assert provider._access_token == "test-oauth2-token"
+        assert provider._token_expires_at > 0
+        mock_post.assert_called_once()
+        call_kwargs = mock_post.call_args
+        assert call_kwargs.kwargs["data"]["grant_type"] == "client_credentials"
+        assert call_kwargs.kwargs["data"]["client_id"] == "test-client-id"
+
+        provider.disconnect()
+
+    def test_oauth2_disconnect_clears_token(self):
+        from unittest.mock import patch, MagicMock
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "access_token": "test-token",
+            "expires_in": 300,
+        }
+        mock_resp.raise_for_status = MagicMock()
+
+        provider = LSEGDataProvider(
+            client_id="test-id",
+            client_secret="test-secret",
+        )
+
+        with patch("requests.post", return_value=mock_resp):
+            provider.connect()
+
+        assert provider._access_token is not None
+        provider.disconnect()
+        assert provider._access_token is None
+        assert provider._token_expires_at == 0.0
+
+    def test_oauth2_token_refresh_when_expired(self):
+        import time
+        from unittest.mock import patch, MagicMock
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "access_token": "fresh-token",
+            "expires_in": 300,
+        }
+        mock_resp.raise_for_status = MagicMock()
+
+        provider = LSEGDataProvider(
+            client_id="test-id",
+            client_secret="test-secret",
+        )
+        provider._access_token = "expired-token"
+        provider._token_expires_at = time.monotonic() - 10
+
+        with patch("requests.post", return_value=mock_resp):
+            provider._ensure_valid_token()
+
+        assert provider._access_token == "fresh-token"
+        assert provider._token_expires_at > time.monotonic()
+
+    def test_oauth2_token_not_refreshed_when_valid(self):
+        import time
+        from unittest.mock import patch
+
+        provider = LSEGDataProvider(
+            client_id="test-id",
+            client_secret="test-secret",
+        )
+        provider._access_token = "still-valid-token"
+        provider._token_expires_at = time.monotonic() + 600
+
+        with patch("requests.post") as mock_post:
+            provider._ensure_valid_token()
+
+        mock_post.assert_not_called()
+        assert provider._access_token == "still-valid-token"
+
+    def test_api_key_mode_skips_oauth2(self):
+        import time
+        from unittest.mock import patch
+
+        provider = LSEGDataProvider(api_key="static-api-key")
+        provider._token_expires_at = 0
+
+        with patch("requests.post") as mock_post:
+            provider._ensure_valid_token()
+
+        mock_post.assert_not_called()
+
+    def test_oauth2_connect_failure_returns_false(self):
+        from unittest.mock import patch
+
+        provider = LSEGDataProvider(
+            client_id="test-id",
+            client_secret="test-secret",
+        )
+
+        with patch("requests.post", side_effect=Exception("Network error")):
+            result = provider.connect()
+
+        assert result is False
+        assert "Network error" in (provider._last_error or "")
+        assert provider.is_available() is False
+
+
 class TestInstrumentAPIEndpoints:
     @pytest.fixture
     def client(self):
