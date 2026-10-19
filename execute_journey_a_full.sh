@@ -83,15 +83,34 @@ APPROVE_RESP=$(curl -s -X POST "$BASE_URL/api/v1/research-drafts/$DRAFT_ID/appro
 DRAFT_STATUS=$(echo "$APPROVE_RESP" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('status','unknown'))")
 echo "Draft status after approval: $DRAFT_STATUS"
 
-# Step 7: Create experiment from approved draft content
-echo "7. Creating experiment from approved draft..."
+# Step 6c: Read back accepted draft and verify fields
+echo "6c. Reading back accepted draft..."
+DRAFT_READBACK=$(curl -s "$BASE_URL/api/v1/research-drafts/$DRAFT_ID" \
+  -H "Authorization: Bearer $TOKEN")
+DRAFT_TITLE=$(echo "$DRAFT_READBACK" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('title',''))")
+DRAFT_HYPOTHESIS=$(echo "$DRAFT_READBACK" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('hypothesis',''))")
+DRAFT_STATUS_READBACK=$(echo "$DRAFT_READBACK" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('status',''))")
+echo "Draft title: $DRAFT_TITLE"
+echo "Draft hypothesis: ${DRAFT_HYPOTHESIS:0:60}..."
+echo "Draft status: $DRAFT_STATUS_READBACK"
+
+if [ "$DRAFT_STATUS_READBACK" != "accepted" ]; then
+  echo "FAIL: Draft status is not accepted ($DRAFT_STATUS_READBACK)"
+  exit 1
+fi
+
+# Step 7: Create experiment from accepted draft content (use draft's actual fields)
+echo "7. Creating experiment from accepted draft fields..."
 EXP_BODY=$(python3 -c "
 import json
+# Use draft's actual fields, not hard-coded values
+draft_title = '$DRAFT_TITLE'
+draft_hypothesis = '$DRAFT_HYPOTHESIS'
 body = {
-    'title': 'Tech Momentum Strategy',
-    'original_idea': 'Momentum-based strategy for tech stocks derived from AI consultation',
+    'title': draft_title,
+    'original_idea': f'Derived from accepted draft: {draft_title}',
     'research_type': 'quantitative',
-    'hypothesis': 'Tech stocks with strong momentum outperform the benchmark',
+    'hypothesis': draft_hypothesis,
     'falsification_conditions': 'Max drawdown exceeds 25% or Sharpe ratio below 0.5',
     'benchmark': 'DEMO-BENCHMARK',
     'strategy_spec': {
@@ -122,6 +141,35 @@ EXP_RESP=$(curl -s -X POST "$BASE_URL/api/v1/experiments/" \
 EXP_ID=$(echo "$EXP_RESP" | python3 -c "import sys, json; print(json.load(sys.stdin)['id'])")
 VERSION_ID=$(echo "$EXP_RESP" | python3 -c "import sys, json; print(json.load(sys.stdin)['current_version_id'])")
 echo "Experiment ID: $EXP_ID, Version ID: $VERSION_ID"
+
+# Step 7a: Verify experiment content matches accepted draft
+echo "7a. Verifying experiment content matches accepted draft..."
+EXP_READBACK=$(curl -s "$BASE_URL/api/v1/experiments/$EXP_ID" \
+  -H "Authorization: Bearer $TOKEN")
+EXP_TITLE=$(echo "$EXP_READBACK" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('title',''))")
+EXP_HYPOTHESIS=$(echo "$EXP_READBACK" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('hypothesis',''))")
+echo "Experiment title: $EXP_TITLE"
+echo "Experiment hypothesis: ${EXP_HYPOTHESIS:0:60}..."
+
+PASS_CONTENT=true
+if [ "$EXP_TITLE" == "$DRAFT_TITLE" ]; then
+  echo "PASS: Experiment title matches draft title"
+else
+  echo "FAIL: Experiment title does not match draft ($EXP_TITLE != $DRAFT_TITLE)"
+  PASS_CONTENT=false
+fi
+
+if [ "$EXP_HYPOTHESIS" == "$DRAFT_HYPOTHESIS" ]; then
+  echo "PASS: Experiment hypothesis matches draft hypothesis"
+else
+  echo "FAIL: Experiment hypothesis does not match draft"
+  PASS_CONTENT=false
+fi
+
+if [ "$PASS_CONTENT" != "true" ]; then
+  echo "FAIL: Content transfer from draft to experiment failed"
+  exit 1
+fi
 
 # Step 7b: Link experiment back to draft
 echo "7b. Linking experiment to draft..."

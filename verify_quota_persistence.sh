@@ -24,12 +24,31 @@ TOKEN1=$(curl -s -X POST "$BASE_URL/api/auth/login" \
   -H "Content-Type: application/json" \
   -d "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\"}" | python3 -c "import sys, json; print(json.load(sys.stdin)['access_token'])")
 
-# Step 3: Check initial quota (parse JSON directly, no prefix text)
+# Step 3: Check initial quota (validate JSON keys exist)
 echo "3. Check initial quota (Session 1)..."
 QUOTA1=$(curl -s "$BASE_URL/api/v1/usage/quota?quota_type=ai_usage" \
   -H "Authorization: Bearer $TOKEN1")
-USED_INITIAL=$(echo "$QUOTA1" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('used', 0))")
-LIMIT_INITIAL=$(echo "$QUOTA1" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('limit', 'N/A'))")
+# Validate JSON structure and extract values
+QUOTA1_VALID=$(echo "$QUOTA1" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    if 'used' not in d:
+        print('MISSING_USED')
+        sys.exit(0)
+    if 'limit' not in d:
+        print('MISSING_LIMIT')
+        sys.exit(0)
+    print(f\"{d['used']}|{d['limit']}\")
+except:
+    print('INVALID_JSON')
+")
+if [ "$QUOTA1_VALID" = "INVALID_JSON" ] || [ "$QUOTA1_VALID" = "MISSING_USED" ] || [ "$QUOTA1_VALID" = "MISSING_LIMIT" ]; then
+  echo "FAIL: Invalid quota response: $QUOTA1"
+  exit 1
+fi
+USED_INITIAL=$(echo "$QUOTA1_VALID" | cut -d'|' -f1)
+LIMIT_INITIAL=$(echo "$QUOTA1_VALID" | cut -d'|' -f2)
 echo "Initial quota: used=$USED_INITIAL, limit=$LIMIT_INITIAL"
 
 # Step 4: Create AI conversation (uses quota)
@@ -50,21 +69,37 @@ MSG_RESP=$(curl -s -X POST "$BASE_URL/api/v1/ai/conversations/$CONV_ID/messages"
 MSG_ID=$(echo "$MSG_RESP" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('id','unknown'))")
 echo "Message sent: $MSG_ID"
 
-# Step 6: Check quota after usage (Session 1)
+# Step 6: Check quota after usage (Session 1) — validate and assert exact increment
 echo ""
 echo "6. Check quota after usage (Session 1)..."
 QUOTA2=$(curl -s "$BASE_URL/api/v1/usage/quota?quota_type=ai_usage" \
   -H "Authorization: Bearer $TOKEN1")
-USED_AFTER_USAGE=$(echo "$QUOTA2" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('used', 0))")
+QUOTA2_VALID=$(echo "$QUOTA2" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    if 'used' not in d:
+        print('MISSING_USED')
+        sys.exit(0)
+    print(str(d['used']))
+except:
+    print('INVALID_JSON')
+")
+if [ "$QUOTA2_VALID" = "INVALID_JSON" ] || [ "$QUOTA2_VALID" = "MISSING_USED" ]; then
+  echo "FAIL: Invalid quota response after usage: $QUOTA2"
+  exit 1
+fi
+USED_AFTER_USAGE=$QUOTA2_VALID
 echo "Quota after usage: used=$USED_AFTER_USAGE"
 
-# Step 7: Verify quota actually increased
+# Step 7: Verify quota increased by exactly 1 (documented amount for AI message)
 echo ""
-echo "7. Verifying quota increased after usage..."
-if [ "$USED_AFTER_USAGE" -gt "$USED_INITIAL" ] 2>/dev/null; then
-  echo "PASS: Quota increased ($USED_INITIAL -> $USED_AFTER_USAGE)"
+echo "7. Verifying quota increased by exactly 1 after AI message..."
+EXPECTED_USAGE=$((USED_INITIAL + 1))
+if [ "$USED_AFTER_USAGE" -eq "$EXPECTED_USAGE" ] 2>/dev/null; then
+  echo "PASS: Quota increased by exactly 1 ($USED_INITIAL -> $USED_AFTER_USAGE)"
 else
-  echo "FAIL: Quota did not increase after AI message ($USED_INITIAL -> $USED_AFTER_USAGE)"
+  echo "FAIL: Quota did not increase by exactly 1 (expected $EXPECTED_USAGE, got $USED_AFTER_USAGE)"
   exit 1
 fi
 
@@ -119,11 +154,26 @@ TOKEN2=$(curl -s -X POST "$BASE_URL/api/auth/login" \
   -H "Content-Type: application/json" \
   -d "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\"}" | python3 -c "import sys, json; print(json.load(sys.stdin)['access_token'])")
 
-# Step 11: Check quota in new session
-echo "11. Check quota in Session 2 (should match post-usage)..."
+# Step 11: Check quota in new session — validate and assert exact persistence
+echo "11. Check quota in Session 2 (should match post-usage exactly)..."
 QUOTA3=$(curl -s "$BASE_URL/api/v1/usage/quota?quota_type=ai_usage" \
   -H "Authorization: Bearer $TOKEN2")
-USED_AFTER_RESTART=$(echo "$QUOTA3" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('used', 0))")
+QUOTA3_VALID=$(echo "$QUOTA3" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    if 'used' not in d:
+        print('MISSING_USED')
+        sys.exit(0)
+    print(str(d['used']))
+except:
+    print('INVALID_JSON')
+")
+if [ "$QUOTA3_VALID" = "INVALID_JSON" ] || [ "$QUOTA3_VALID" = "MISSING_USED" ]; then
+  echo "FAIL: Invalid quota response after restart: $QUOTA3"
+  exit 1
+fi
+USED_AFTER_RESTART=$QUOTA3_VALID
 echo "Quota after restart: used=$USED_AFTER_RESTART"
 
 # Step 12: Final assertions
@@ -133,8 +183,8 @@ PASS=true
 
 echo "Quota progression: $USED_INITIAL -> $USED_AFTER_USAGE -> $USED_AFTER_RESTART"
 
-if [ "$USED_AFTER_RESTART" == "$USED_AFTER_USAGE" ]; then
-  echo "PASS: Quota persisted across restart ($USED_AFTER_USAGE == $USED_AFTER_RESTART)"
+if [ "$USED_AFTER_RESTART" -eq "$USED_AFTER_USAGE" ] 2>/dev/null; then
+  echo "PASS: Quota persisted exactly across restart ($USED_AFTER_USAGE == $USED_AFTER_RESTART)"
 else
   echo "FAIL: Quota changed after restart ($USED_AFTER_USAGE != $USED_AFTER_RESTART)"
   PASS=false
