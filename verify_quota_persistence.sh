@@ -4,7 +4,8 @@
 set -e
 
 BASE_URL="http://localhost:8001"
-EMAIL="quota-persistence@example.com"
+TIMESTAMP=$(date +%s)
+EMAIL="quota-persistence-${TIMESTAMP}@example.com"
 PASSWORD="testpass123"
 WORKTREE="/Users/tommylam0915/Documents/Qoder/2026-10-08/alethra-integration-auto"
 
@@ -63,8 +64,8 @@ echo "7. Verifying quota increased after usage..."
 if [ "$USED_AFTER_USAGE" -gt "$USED_INITIAL" ] 2>/dev/null; then
   echo "PASS: Quota increased ($USED_INITIAL -> $USED_AFTER_USAGE)"
 else
-  echo "WARNING: Quota did not increase ($USED_INITIAL -> $USED_AFTER_USAGE)"
-  echo "This may be expected if quota tracking is not implemented for this endpoint"
+  echo "FAIL: Quota did not increase after AI message ($USED_INITIAL -> $USED_AFTER_USAGE)"
+  exit 1
 fi
 
 # Step 8: Record backend PID and restart
