@@ -49,6 +49,11 @@ echo "AI response role: $(echo "$AI_RESPONSE" | python3 -c "import sys, json; d=
 echo "AI message ID: $AI_MESSAGE_ID"
 echo "AI content length: ${#AI_CONTENT}"
 
+if [ "${#AI_CONTENT}" -eq 0 ]; then
+  echo "FAIL: AI assistant returned empty content"
+  exit 1
+fi
+
 # Step 6: Create draft from AI response
 echo "6. Creating draft experiment from AI response..."
 DRAFT_BODY=$(python3 -c "
@@ -90,14 +95,38 @@ DRAFT_READBACK=$(curl -s "$BASE_URL/api/v1/research-drafts/$DRAFT_ID" \
 DRAFT_TITLE=$(echo "$DRAFT_READBACK" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('title',''))")
 DRAFT_HYPOTHESIS=$(echo "$DRAFT_READBACK" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('hypothesis',''))")
 DRAFT_STATUS_READBACK=$(echo "$DRAFT_READBACK" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('status',''))")
+DRAFT_SOURCE_CONV=$(echo "$DRAFT_READBACK" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('source_conversation_id',''))")
 echo "Draft title: $DRAFT_TITLE"
 echo "Draft hypothesis: ${DRAFT_HYPOTHESIS:0:60}..."
 echo "Draft status: $DRAFT_STATUS_READBACK"
+echo "Draft source_conversation_id: $DRAFT_SOURCE_CONV"
 
 if [ "$DRAFT_STATUS_READBACK" != "accepted" ]; then
   echo "FAIL: Draft status is not accepted ($DRAFT_STATUS_READBACK)"
   exit 1
 fi
+
+if [ "$DRAFT_SOURCE_CONV" != "$CONV_ID" ]; then
+  echo "FAIL: source_conversation_id not persisted correctly ($DRAFT_SOURCE_CONV != $CONV_ID)"
+  exit 1
+fi
+echo "PASS: source_conversation_id matches"
+
+AUDIT_RESP=$(curl -s "$BASE_URL/api/v1/research-drafts/$DRAFT_ID/audit-events" \
+  -H "Authorization: Bearer $TOKEN")
+SOURCE_MSG_IN_AUDIT=$(echo "$AUDIT_RESP" | python3 -c "
+import sys, json
+events = json.load(sys.stdin)
+for e in events:
+    if e.get('event_type') == 'research_draft_created_from_ai':
+        print(e.get('event_data',{}).get('source_message_id',''))
+        break
+")
+if [ "$SOURCE_MSG_IN_AUDIT" != "$AI_MESSAGE_ID" ]; then
+  echo "FAIL: source_message_id not in audit event ($SOURCE_MSG_IN_AUDIT != $AI_MESSAGE_ID)"
+  exit 1
+fi
+echo "PASS: source_message_id verified in audit trail"
 
 # Step 7: Create experiment from accepted draft content (use draft's actual fields)
 echo "7. Creating experiment from accepted draft fields..."
@@ -173,10 +202,24 @@ fi
 
 # Step 7b: Link experiment back to draft
 echo "7b. Linking experiment to draft..."
-curl -s -X PATCH "$BASE_URL/api/v1/research-drafts/$DRAFT_ID" \
+LINK_RESP=$(curl -s -w "\n%{http_code}" -X PATCH "$BASE_URL/api/v1/research-drafts/$DRAFT_ID" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d "{\"experiment_id\":\"$EXP_ID\"}" | python3 -c "import sys, json; d=json.load(sys.stdin); print(f'Draft experiment_id linked: {d.get(\"experiment_id\")}')"
+  -d "{\"experiment_id\":\"$EXP_ID\"}")
+LINK_HTTP=$(echo "$LINK_RESP" | tail -1)
+LINK_BODY=$(echo "$LINK_RESP" | sed '$d')
+LINKED_EXP=$(echo "$LINK_BODY" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('experiment_id',''))")
+echo "Draft experiment_id linked: $LINKED_EXP"
+
+if [ "$LINK_HTTP" != "200" ]; then
+  echo "FAIL: Draft linking returned HTTP $LINK_HTTP"
+  exit 1
+fi
+if [ "$LINKED_EXP" != "$EXP_ID" ]; then
+  echo "FAIL: experiment_id not persisted ($LINKED_EXP != $EXP_ID)"
+  exit 1
+fi
+echo "PASS: Experiment linked to draft"
 
 # Step 8: Run backtest
 echo "8. Running backtest..."

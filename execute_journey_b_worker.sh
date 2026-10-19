@@ -55,33 +55,19 @@ echo "Quota before training: $QUOTA_BEFORE"
 # Step 4: Submit ML training job (uses query parameters, not JSON body)
 echo ""
 echo "4. Submitting ML training job..."
-TRAIN_RESP=$(curl -s -X POST "$BASE_URL/api/v1/ml/train?instrument_id=DEMO-ALPHA&model_type=logistic_regression" \
+TRAIN_RESP=$(curl -s -X POST "$BASE_URL/api/v1/ml/train?instrument_id=US:AAPL&model_type=logistic_regression" \
   -H "Authorization: Bearer $TOKEN")
 
 # Check if submission failed due to insufficient data
 if echo "$TRAIN_RESP" | grep -q "Insufficient data"; then
-  echo "BLOCKED: Demo data limitation"
+  echo "BLOCKED: Insufficient data for training"
   echo "$TRAIN_RESP" | python3 -c "import sys, json; d=json.load(sys.stdin); print(f'Detail: {d.get(\"detail\",\"\")}')"
   echo ""
-  echo "The demo data provider generates only 29 bars for DEMO-ALPHA."
   echo "ML training requires at least 60 bars for feature engineering and train/val/test split."
+  echo "This should not occur with US:AAPL (750+ synthetic bars). Check data provider configuration."
   echo ""
-  echo "What IS verified:"
-  echo "  - Worker process running: PID $WORKER_PID"
-  echo "  - Job submission endpoint accessible"
-  echo "  - Data validation enforced (rejects insufficient data)"
-  echo "  - Quota reservation attempted"
-  echo ""
-  echo "What is BLOCKED:"
-  echo "  - Actual ML training (requires 60+ bars)"
-  echo "  - Model artifact creation"
-  echo "  - Prediction/inference"
-  echo ""
-  echo "This is a demo data limitation, not a system defect."
-  echo "With real market data (LSEG provider) or extended demo data, the full flow would execute."
-  echo ""
-  echo "=== Journey B Partial (Demo Data Limitation) ==="
-  exit 0
+  echo "=== Journey B BLOCKED (Insufficient Data) ==="
+  exit 1
 fi
 
 JOB_ID=$(echo "$TRAIN_RESP" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('job_id',''))")
@@ -134,7 +120,7 @@ echo ""
 echo "7. Verifying model artifact..."
 MODEL_DETAIL=$(curl -s "$BASE_URL/api/v1/ml/models/$MODEL_ID" \
   -H "Authorization: Bearer $TOKEN")
-MODEL_TYPE=$(echo "$MODEL_DETAIL" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('model_type',''))")
+MODEL_TYPE=$(echo "$MODEL_DETAIL" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('metadata',{}).get('model_type',''))")
 INSTRUMENT_ID=$(echo "$MODEL_DETAIL" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('metadata',{}).get('instrument_id',''))")
 echo "Model type: $MODEL_TYPE"
 echo "Instrument: $INSTRUMENT_ID"
