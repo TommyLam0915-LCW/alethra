@@ -200,10 +200,32 @@ def update_research_draft(
 ):
     """Update a research draft."""
     draft = _get_draft_or_404(db, draft_id, current_user)
-    if draft.status in [DraftStatus.ACCEPTED, DraftStatus.REJECTED]:
-        raise HTTPException(status_code=400, detail="Cannot modify a finalized draft")
-
     update_data = payload.model_dump(exclude_unset=True)
+
+    if not update_data:
+        return draft
+
+    is_finalized = draft.status in [DraftStatus.ACCEPTED, DraftStatus.REJECTED]
+    content_fields = {k: v for k, v in update_data.items() if k != "experiment_id"}
+    has_ref_change = "experiment_id" in update_data
+
+    if is_finalized:
+        if content_fields:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot modify content of a finalized draft",
+            )
+        if draft.status == DraftStatus.REJECTED:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot modify a rejected draft",
+            )
+        if not has_ref_change:
+            raise HTTPException(status_code=400, detail="No changes supplied")
+
+    if has_ref_change:
+        _validate_experiment_link(db, update_data["experiment_id"], current_user)
+
     for field, value in update_data.items():
         setattr(draft, field, value)
 

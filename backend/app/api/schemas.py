@@ -1056,6 +1056,7 @@ class ResearchDraftUpdate(BaseModel):
     commission_rate: Optional[str] = Field(None, max_length=50)
     slippage_rate: Optional[str] = Field(None, max_length=50)
     research_rules: Optional[Dict[str, Any]] = None
+    experiment_id: Optional[UUID] = None
 
     @field_validator("asset_symbol", "benchmark_symbol")
     @classmethod
