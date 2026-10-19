@@ -457,6 +457,34 @@ def record_api_call(
     return record
 
 
+def record_api_call_no_commit(
+    db: Session,
+    user_id: UUID,
+    endpoint: str,
+    model: Optional[str] = None,
+    tokens_used: int = 0,
+    cost: int = 0,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> "UsageRecord":
+    """Record an API call without committing (for use in caller-managed transactions)."""
+    from app.models.billing import UsageRecord
+
+    sub = db.query(Subscription).filter(Subscription.user_id == user_id).first()
+
+    record = UsageRecord(
+        user_id=user_id,
+        subscription_id=sub.id if sub else None,
+        endpoint=endpoint,
+        model=model,
+        tokens_used=tokens_used,
+        cost=cost,
+        metadata_json=metadata,
+    )
+    db.add(record)
+    db.flush()
+    return record
+
+
 def check_quota(
     db: Session,
     user_id: UUID,

@@ -601,3 +601,314 @@ class TestModelOwnership:
         for bad_id in invalid_ids:
             resp = client.get(f"/api/v1/ml/models/{bad_id}", headers=self._headers(user1_token))
             assert resp.status_code == 404
+
+
+class TestInferenceUsageTracking:
+    """Regression tests for automatic inference usage recording."""
+
+    @pytest.fixture
+    def client(self):
+        from app.main import app
+        return TestClient(app)
+
+    @pytest.fixture
+    def auth_token(self, client):
+        client.post("/api/auth/register", json={
+            "email": "usage_test@example.com",
+            "password": "testpassword123",
+            "display_name": "Usage Test User",
+        })
+        resp = client.post("/api/auth/login", json={
+            "email": "usage_test@example.com",
+            "password": "testpassword123",
+        })
+        return resp.json()["access_token"]
+
+    def _headers(self, token):
+        return {"Authorization": f"Bearer {token}"}
+
+    def _train_and_get_model_id(self, client, auth_token):
+        """Helper to train a model and return its ID."""
+        resp = client.post(
+            "/api/v1/ml/train?instrument_id=US:AAPL&model_type=baseline&start_date=2024-01-02&end_date=2024-12-31",
+            headers=self._headers(auth_token),
+        )
+        assert resp.status_code in (200, 202)
+        job_id = resp.json()["job_id"]
+        _run_worker_until_done()
+
+        detail = client.get(
+            f"/api/v1/training/jobs/{job_id}",
+            headers=self._headers(auth_token),
+        )
+        return detail.json()["best_params"]["model_id"]
+
+    def _count_usage_records(self, user_id):
+        """Count usage records for a user using an independent DB session."""
+        from tests.conftest import TestSession
+        from app.models.billing import UsageRecord
+        from uuid import UUID
+
+        db = TestSession()
+        try:
+            count = db.query(UsageRecord).filter(UsageRecord.user_id == UUID(user_id)).count()
+            return count
+        finally:
+            db.close()
+
+    def _get_user_id_from_token(self, client, auth_token):
+        """Extract user_id from JWT token."""
+        from jose import jwt
+        from app.config import get_settings
+        settings = get_settings()
+        payload = jwt.decode(auth_token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm])
+        return payload["sub"]
+
+    def test_predict_creates_usage_record(self, client, auth_token):
+        """A. Successful predict must create a usage record."""
+        model_id = self._train_and_get_model_id(client, auth_token)
+        user_id = self._get_user_id_from_token(client, auth_token)
+
+        before_count = self._count_usage_records(user_id)
+
+        resp = client.post(
+            f"/api/v1/ml/models/{model_id}/predict?start_date=2024-06-01&end_date=2024-12-31",
+            headers=self._headers(auth_token),
+        )
+        assert resp.status_code == 200
+
+        after_count = self._count_usage_records(user_id)
+        assert after_count == before_count + 1, "predict must create exactly one usage record"
+
+    def test_predict_latest_creates_usage_record(self, client, auth_token):
+        """B. Successful predict-latest must create a usage record."""
+        model_id = self._train_and_get_model_id(client, auth_token)
+        user_id = self._get_user_id_from_token(client, auth_token)
+
+        before_count = self._count_usage_records(user_id)
+
+        resp = client.post(
+            f"/api/v1/ml/models/{model_id}/predict-latest",
+            headers=self._headers(auth_token),
+        )
+        assert resp.status_code == 200
+
+        after_count = self._count_usage_records(user_id)
+        assert after_count == before_count + 1, "predict-latest must create exactly one usage record"
+
+    def test_usage_record_persists_after_session(self, client, auth_token):
+        """C. Usage record must persist after HTTP request completes."""
+        model_id = self._train_and_get_model_id(client, auth_token)
+        user_id = self._get_user_id_from_token(client, auth_token)
+
+        resp = client.post(
+            f"/api/v1/ml/models/{model_id}/predict-latest",
+            headers=self._headers(auth_token),
+        )
+        assert resp.status_code == 200
+
+        # Independent session should see the record
+        count = self._count_usage_records(user_id)
+        assert count >= 1, "Usage record must persist after request"
+
+    def test_usage_record_metadata(self, client, auth_token):
+        """G. Usage record must contain correct metadata."""
+        model_id = self._train_and_get_model_id(client, auth_token)
+        user_id = self._get_user_id_from_token(client, auth_token)
+
+        resp = client.post(
+            f"/api/v1/ml/models/{model_id}/predict-latest",
+            headers=self._headers(auth_token),
+        )
+        assert resp.status_code == 200
+
+        from tests.conftest import TestSession
+        from app.models.billing import UsageRecord
+        from uuid import UUID
+
+        db = TestSession()
+        try:
+            record = db.query(UsageRecord).filter(
+                UsageRecord.user_id == UUID(user_id)
+            ).order_by(UsageRecord.created_at.desc()).first()
+
+            assert record is not None
+            assert record.endpoint == "/api/v1/ml/models/{model_id}/predict-latest"
+            assert record.model == model_id
+            assert record.tokens_used == 0, "sklearn inference has no token count"
+            assert record.cost == 0, "local inference has no provider charge"
+            assert record.metadata_json is not None
+            assert record.metadata_json.get("prediction_type") == "predict-latest"
+            assert "instrument_id" in record.metadata_json
+            assert "bars_count" in record.metadata_json
+        finally:
+            db.close()
+
+    def test_foreign_model_no_usage_record(self, client, auth_token):
+        """D. Accessing another user's model must not create a usage record."""
+        # Train as user1
+        client.post("/api/auth/register", json={
+            "email": "user1_usage@example.com",
+            "password": "testpassword123",
+            "display_name": "User 1",
+        })
+        resp = client.post("/api/auth/login", json={
+            "email": "user1_usage@example.com",
+            "password": "testpassword123",
+        })
+        user1_token = resp.json()["access_token"]
+        model_id = self._train_and_get_model_id(client, user1_token)
+
+        # Try to predict as user2 (auth_token)
+        user2_id = self._get_user_id_from_token(client, auth_token)
+        before_count = self._count_usage_records(user2_id)
+
+        resp = client.post(
+            f"/api/v1/ml/models/{model_id}/predict-latest",
+            headers=self._headers(auth_token),
+        )
+        assert resp.status_code == 403
+
+        after_count = self._count_usage_records(user2_id)
+        assert after_count == before_count, "Foreign model access must not create usage record"
+
+    def test_prediction_failure_no_usage_record(self, client, auth_token):
+        """E. Prediction failure must not create a usage record (quota released)."""
+        model_id = self._train_and_get_model_id(client, auth_token)
+        user_id = self._get_user_id_from_token(client, auth_token)
+
+        before_count = self._count_usage_records(user_id)
+
+        # Request with insufficient bars should fail
+        resp = client.post(
+            f"/api/v1/ml/models/{model_id}/predict?start_date=2024-01-01&end_date=2024-01-05",
+            headers=self._headers(auth_token),
+        )
+        # Should fail (either 400 for too few bars or 422 for prediction error)
+        assert resp.status_code in (400, 422)
+
+        after_count = self._count_usage_records(user_id)
+        assert after_count == before_count, "Prediction failure must not create usage record"
+
+    def test_quota_increment_on_success(self, client, auth_token):
+        """A/B. Quota counter must increment on successful inference."""
+        model_id = self._train_and_get_model_id(client, auth_token)
+        user_id = self._get_user_id_from_token(client, auth_token)
+
+        from tests.conftest import TestSession
+        from app.auth.entitlements import QuotaCounter
+        from uuid import UUID
+
+        db = TestSession()
+        try:
+            counter_before = db.query(QuotaCounter).filter(
+                QuotaCounter.user_id == UUID(user_id),
+                QuotaCounter.quota_type == "ai_usage",
+            ).first()
+            used_before = counter_before.used if counter_before else 0
+        finally:
+            db.close()
+
+        resp = client.post(
+            f"/api/v1/ml/models/{model_id}/predict-latest",
+            headers=self._headers(auth_token),
+        )
+        assert resp.status_code == 200
+
+        db = TestSession()
+        try:
+            counter_after = db.query(QuotaCounter).filter(
+                QuotaCounter.user_id == UUID(user_id),
+                QuotaCounter.quota_type == "ai_usage",
+            ).first()
+            used_after = counter_after.used if counter_after else 0
+            assert used_after == used_before + 1, "Quota must increment by 1"
+        finally:
+            db.close()
+
+    @pytest.mark.parametrize("endpoint_suffix", ["predict", "predict-latest"])
+    def test_usage_write_failure_rolls_back_transaction(self, client, auth_token, monkeypatch, endpoint_suffix):
+        """F. Usage-write failure must roll back entire transaction for both endpoints."""
+        from unittest.mock import patch
+        from sqlalchemy.exc import SQLAlchemyError
+
+        model_id = self._train_and_get_model_id(client, auth_token)
+        user_id = self._get_user_id_from_token(client, auth_token)
+
+        before_count = self._count_usage_records(user_id)
+
+        from tests.conftest import TestSession
+        from app.auth.entitlements import QuotaCounter, QuotaReservation
+        from uuid import UUID
+
+        db = TestSession()
+        try:
+            counter_before = db.query(QuotaCounter).filter(
+                QuotaCounter.user_id == UUID(user_id),
+                QuotaCounter.quota_type == "ai_usage",
+            ).first()
+            used_before = counter_before.used if counter_before else 0
+
+            reservations_before = db.query(QuotaReservation).filter(
+                QuotaReservation.user_id == UUID(user_id),
+                QuotaReservation.quota_type == "ai_usage",
+                QuotaReservation.status == "reserved",
+            ).count()
+        finally:
+            db.close()
+
+        def failing_record_api_call(*args, **kwargs):
+            raise SQLAlchemyError("Simulated usage write failure")
+
+        exception_raised = False
+        try:
+            with patch("app.services.billing.record_api_call_no_commit", side_effect=failing_record_api_call):
+                if endpoint_suffix == "predict":
+                    resp = client.post(
+                        f"/api/v1/ml/models/{model_id}/predict?start_date=2024-06-01&end_date=2024-12-31",
+                        headers=self._headers(auth_token),
+                    )
+                else:
+                    resp = client.post(
+                        f"/api/v1/ml/models/{model_id}/predict-latest",
+                        headers=self._headers(auth_token),
+                    )
+                assert resp.status_code == 500, f"Usage write failure on {endpoint_suffix} must return 500, not 200"
+        except SQLAlchemyError:
+            exception_raised = True
+
+        assert exception_raised or resp.status_code == 500, f"Usage write failure on {endpoint_suffix} must not return 200"
+
+        after_count = self._count_usage_records(user_id)
+        assert after_count == before_count, f"Usage write failure on {endpoint_suffix} must not create usage record"
+
+        db = TestSession()
+        try:
+            counter_after = db.query(QuotaCounter).filter(
+                QuotaCounter.user_id == UUID(user_id),
+                QuotaCounter.quota_type == "ai_usage",
+            ).first()
+            used_after = counter_after.used if counter_after else 0
+            assert used_after == used_before, f"Quota must not increment on {endpoint_suffix} usage write failure"
+
+            reservations_after = db.query(QuotaReservation).filter(
+                QuotaReservation.user_id == UUID(user_id),
+                QuotaReservation.quota_type == "ai_usage",
+                QuotaReservation.status == "reserved",
+            ).count()
+            assert reservations_after == reservations_before, f"No stranded reservations after {endpoint_suffix} rollback"
+        finally:
+            db.close()
+
+        # Subsequent valid request must succeed
+        if endpoint_suffix == "predict":
+            resp2 = client.post(
+                f"/api/v1/ml/models/{model_id}/predict?start_date=2024-06-01&end_date=2024-12-31",
+                headers=self._headers(auth_token),
+            )
+        else:
+            resp2 = client.post(
+                f"/api/v1/ml/models/{model_id}/predict-latest",
+                headers=self._headers(auth_token),
+            )
+        assert resp2.status_code == 200, f"Subsequent valid {endpoint_suffix} request must succeed after rollback"

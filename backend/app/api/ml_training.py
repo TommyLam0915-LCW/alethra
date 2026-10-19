@@ -220,6 +220,24 @@ def run_prediction(
 
     # Settle quota on success
     settle_reservation(db, reservation.id)
+
+    # Record inference usage (no commit - will be committed with quota settlement)
+    from app.services.billing import record_api_call_no_commit
+    record_api_call_no_commit(
+        db,
+        user_id=current_user.id,
+        endpoint="/api/v1/ml/models/{model_id}/predict",
+        model=model_id,
+        tokens_used=0,  # sklearn inference - no token counting
+        cost=0,  # No provider charge for local inference
+        metadata={
+            "instrument_id": pred_instrument,
+            "data_nature": data_nature,
+            "bars_count": len(bars),
+            "prediction_type": "predict",
+        },
+    )
+
     db.commit()
 
     return {
@@ -282,6 +300,24 @@ def run_latest_prediction(
 
     # Settle quota on success
     settle_reservation(db, reservation.id)
+
+    # Record inference usage (no commit - will be committed with quota settlement)
+    from app.services.billing import record_api_call_no_commit
+    record_api_call_no_commit(
+        db,
+        user_id=current_user.id,
+        endpoint="/api/v1/ml/models/{model_id}/predict-latest",
+        model=model_id,
+        tokens_used=0,  # sklearn inference - no token counting
+        cost=0,  # No provider charge for local inference
+        metadata={
+            "instrument_id": pred_instrument,
+            "data_nature": data_nature,
+            "bars_count": len(bars),
+            "prediction_type": "predict-latest",
+        },
+    )
+
     db.commit()
 
     return {**result, "data_nature": data_nature}
