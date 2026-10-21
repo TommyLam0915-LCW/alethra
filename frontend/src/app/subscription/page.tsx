@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { api, ApiError } from '@/lib/api';
 import { brand } from '@/lib/brand';
+import { clearCachedLayout } from '@/components/workspace/types';
 
 interface Plan {
   id: string;
@@ -104,6 +105,7 @@ export default function SubscriptionPage() {
   };
 
   const handleLogout = () => {
+    clearCachedLayout();
     localStorage.removeItem('token');
     router.push('/');
   };

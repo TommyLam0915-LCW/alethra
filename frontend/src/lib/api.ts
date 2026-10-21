@@ -379,6 +379,7 @@ export const api = {
     createPaymentIntent: (data: { subscription_id: string }) =>
       apiFetch('/api/v1/payments/create-intent', { method: 'POST', body: JSON.stringify(data) }),
     getOperationalStatus: () => apiFetch('/api/v1/operational-status'),
+    getUsageSummary: (days: number = 30) => apiFetch(`/api/v1/usage/summary?days=${days}`),
   },
   watchlists: {
     list: () => apiFetch('/api/v1/watchlists'),
@@ -398,5 +399,11 @@ export const api = {
     getWorkspace: () => apiFetch('/api/v1/layouts/workspace'),
     saveWorkspace: (layout: Record<string, unknown>) =>
       apiFetch('/api/v1/layouts/workspace', { method: 'PUT', body: JSON.stringify({ layout }) }),
+    getWorkspacePreferences: () => apiFetch('/api/v1/layouts/workspace_preferences'),
+    putWorkspacePreferences: (preferences: any) =>
+      apiFetch('/api/v1/layouts/workspace_preferences', {
+        method: 'PUT',
+        body: JSON.stringify({ layout: preferences }),
+      }),
   },
 };

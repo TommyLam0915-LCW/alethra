@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import { brand } from '@/lib/brand';
+import { clearCachedLayout } from '@/components/workspace/types';
 
 interface Experiment {
   id: string;
@@ -41,6 +42,7 @@ export default function DashboardPage() {
   };
 
   const handleLogout = () => {
+    clearCachedLayout();
     localStorage.removeItem('token');
     router.push('/');
   };

@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import { brand } from '@/lib/brand';
+import { clearCachedLayout } from '@/components/workspace/types';
 
 interface Instrument {
   instrument_id: string;
@@ -175,6 +176,7 @@ export default function MarketDataPage() {
   };
 
   const handleLogout = () => {
+    clearCachedLayout();
     localStorage.removeItem('token');
     router.push('/');
   };
