@@ -7,6 +7,8 @@ without a live IBKR connection.
 - ``FakeBrokerTransport`` — deterministic in-memory transport for tests
 - ``IBKRBrokerTransport`` — real IBKR transport (requires ib_insync)
 """
+import json
+import logging
 import random
 import uuid
 from abc import ABC, abstractmethod
@@ -15,6 +17,8 @@ from datetime import datetime
 from enum import Enum
 from typing import Dict, List, Optional
 from app.lib.timeutil import utcnow
+
+logger = logging.getLogger(__name__)
 
 
 class BrokerOrderStatus(str, Enum):
@@ -40,7 +44,7 @@ class BrokerFill:
     quantity: int
     price: float
     fill_time: datetime
-    commission: float = 0.0
+    commission: Optional[float] = None
 
 
 @dataclass
@@ -110,10 +114,11 @@ class FakeBrokerTransport(BrokerTransport):
     """Deterministic in-memory broker transport for testing.
 
     Configurable behaviors:
-    - fill_mode: "immediate" | "delayed" | "partial" | "reject"
+    - fill_mode: "immediate" | "delayed" | "partial" | "reject" | "pending"
     - fill_price_offset: deviation from a reference price (default 0)
     - partial_fill_pct: fraction filled per poll in "partial" mode
     - reject_after_submit: if True, order is submitted then rejected on next status check
+    - state_path: optional path to persist broker state across restarts
     """
 
     def __init__(
@@ -123,6 +128,8 @@ class FakeBrokerTransport(BrokerTransport):
         partial_fill_pct: float = 0.5,
         reject_message: str = "Order rejected by exchange",
         seed: Optional[int] = None,
+        submission_log_path: Optional[str] = None,
+        state_path: Optional[str] = None,
     ):
         self.fill_mode = fill_mode
         self.fill_price = fill_price
@@ -132,6 +139,106 @@ class FakeBrokerTransport(BrokerTransport):
         self._orders: Dict[str, BrokerOrderState] = {}
         self._order_counter = 0
         self._rng = random.Random(seed)
+        self.submission_log_path = submission_log_path
+        self.state_path = state_path
+        # Load existing submission count if log exists
+        self._submission_count = self._load_submission_count()
+        # Load existing broker state if state file exists
+        self._load_state()
+
+    def _load_state(self):
+        """Load broker state from persistent file."""
+        if not self.state_path:
+            return
+        try:
+            with open(self.state_path, 'r') as f:
+                data = json.load(f)
+                self._order_counter = data.get('order_counter', 0)
+                # Reconstruct orders from saved state
+                for order_data in data.get('orders', []):
+                    order = BrokerOrderState(
+                        order_id=order_data['order_id'],
+                        instrument_id=order_data['instrument_id'],
+                        side=order_data['side'],
+                        quantity=order_data['quantity'],
+                        order_type=order_data['order_type'],
+                        limit_price=order_data.get('limit_price'),
+                        status=BrokerOrderStatus(order_data['status']),
+                        filled_quantity=order_data.get('filled_quantity', 0),
+                    )
+                    # Reconstruct fills
+                    for fill_data in order_data.get('fills', []):
+                        fill = BrokerFill(
+                            broker_order_id=fill_data['broker_order_id'],
+                            quantity=fill_data['quantity'],
+                            price=fill_data['price'],
+                            fill_time=datetime.fromisoformat(fill_data['fill_time']),
+                            commission=fill_data.get('commission'),
+                        )
+                        order.fills.append(fill)
+                    self._orders[order.order_id] = order
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            logger.warning(f"Failed to load broker state: {e}")
+
+    def _save_state(self):
+        """Save broker state to persistent file."""
+        if not self.state_path:
+            return
+        try:
+            data = {
+                'order_counter': self._order_counter,
+                'orders': [],
+            }
+            for order in self._orders.values():
+                order_data = {
+                    'order_id': order.order_id,
+                    'instrument_id': order.instrument_id,
+                    'side': order.side,
+                    'quantity': order.quantity,
+                    'order_type': order.order_type,
+                    'limit_price': order.limit_price,
+                    'status': order.status.value,
+                    'filled_quantity': order.filled_quantity,
+                    'fills': [],
+                }
+                for fill in order.fills:
+                    fill_data = {
+                        'broker_order_id': fill.broker_order_id,
+                        'quantity': fill.quantity,
+                        'price': fill.price,
+                        'fill_time': fill.fill_time.isoformat(),
+                        'commission': fill.commission,
+                    }
+                    order_data['fills'].append(fill_data)
+                data['orders'].append(order_data)
+            with open(self.state_path, 'w') as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            logger.warning(f"Failed to save broker state: {e}")
+
+    def _load_submission_count(self) -> int:
+        """Load submission count from durable log file."""
+        if not self.submission_log_path:
+            return 0
+        try:
+            with open(self.submission_log_path, 'r') as f:
+                lines = f.readlines()
+                return len(lines)
+        except FileNotFoundError:
+            return 0
+
+    def _log_submission(self, order_id: str, instrument_id: str, side: str, quantity: int):
+        """Log a submission to durable file."""
+        if not self.submission_log_path:
+            return
+        with open(self.submission_log_path, 'a') as f:
+            f.write(f"{utcnow().isoformat()}|{order_id}|{instrument_id}|{side}|{quantity}\n")
+
+    def get_submission_count(self) -> int:
+        """Get the total number of submissions (survives restart)."""
+        return self._submission_count
 
     def connect(self) -> None:
         self._connected = True
@@ -159,6 +266,10 @@ class FakeBrokerTransport(BrokerTransport):
         self._order_counter += 1
         order_id = f"FAKE-{self._order_counter:06d}"
         now = utcnow()
+
+        # Log submission to durable file
+        self._log_submission(order_id, instrument_id, side, quantity)
+        self._submission_count += 1
 
         if self.fill_mode == "reject":
             order = BrokerOrderState(
@@ -188,6 +299,7 @@ class FakeBrokerTransport(BrokerTransport):
             status=BrokerOrderStatus.SUBMITTED,
         )
         self._orders[order_id] = order
+        self._save_state()
 
         if self.fill_mode == "immediate":
             fill = BrokerFill(
@@ -200,6 +312,9 @@ class FakeBrokerTransport(BrokerTransport):
             order.fills.append(fill)
             order.filled_quantity = quantity
             order.status = BrokerOrderStatus.FILLED
+        elif self.fill_mode == "pending":
+            # Order stays in SUBMITTED state, no fills
+            pass
 
         return BrokerOrderResult(
             success=True,
@@ -214,6 +329,7 @@ class FakeBrokerTransport(BrokerTransport):
         if order.status in (BrokerOrderStatus.FILLED, BrokerOrderStatus.CANCELLED, BrokerOrderStatus.REJECTED):
             return False
         order.status = BrokerOrderStatus.CANCELLED
+        self._save_state()
         return True
 
     def get_order_status(self, broker_order_id: str) -> BrokerOrderStatus:
@@ -478,7 +594,7 @@ class IBKRBrokerTransport(BrokerTransport):
             exec_details = getattr(fill, "execution", None)
             if exec_details is None:
                 continue
-            commission = 0.0
+            commission = None
             report = getattr(fill, "commissionReport", None)
             if report is not None and getattr(report, "commission", None) is not None:
                 commission = float(report.commission)

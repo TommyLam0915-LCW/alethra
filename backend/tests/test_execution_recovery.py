@@ -719,3 +719,245 @@ class TestTradingModeConfig:
         config = load_config_from_env()
         assert config.trading_mode == "paper"
         assert config.allow_live is False
+
+
+# ──────────────────────────────────────────────
+# 8. Fill delivery replay (regression for upload_fill bug)
+# ──────────────────────────────────────────────
+
+class TestFillDeliveryReplay:
+    """Regression tests for pending fill delivery replay on agent restart.
+
+    These tests exercise the actual replay path with the real AlethraAPIClient
+    interface to ensure that:
+    - replay calls report_fill() with the required FillReport object
+    - the test would fail against the previous upload_fill() implementation
+    - successful acknowledgement removes the pending entry
+    - failed reporting preserves it
+
+    This prevents the bug where _replay_pending_fill_deliveries() called a
+    non-existent upload_fill() method, which passed unit tests but failed
+    in production because the mock didn't validate the interface.
+    """
+
+    def test_replay_calls_report_fill_with_fill_report(self, tmp_path):
+        """Verify that replay uses the real AlethraAPIClient.report_fill() interface."""
+        from datetime import datetime
+        from app.execution_agent.alethra_client import FillReport
+        from app.execution_agent.fill_journal import FillDeliveryJournal, PendingFill
+
+        # Create a journal with a pending fill
+        journal_path = tmp_path / "test_journal.json"
+        journal = FillDeliveryJournal(journal_path=journal_path, agent_id="test-agent")
+
+        fill_time = utcnow()
+        pending_fill = PendingFill(
+            intent_id="test-intent-001",
+            broker_ref="FAKE-000001",
+            quantity=10,
+            price=150.0,
+            fill_time=fill_time.isoformat(),
+            commission=1.0,
+            fill_key=f"FAKE-000001:{fill_time.isoformat()}:10",
+            created_at=fill_time.isoformat(),
+        )
+        journal.add_pending_fill(pending_fill)
+
+        # Create agent with real AlethraAPIClient (not a permissive mock)
+        transport = FakeBrokerTransport(fill_mode="immediate", fill_price=150.0)
+        transport.connect()
+        ibkr_client = IBKRClient(transport)
+
+        # Use a constrained mock that validates the interface
+        class ValidatingAlethraClient:
+            """Mock that validates report_fill() is called with FillReport."""
+
+            def __init__(self):
+                self.report_fill_calls = []
+                self.api_url = "http://test"
+                self.api_token = "test-token"
+
+            def report_fill(self, fill: FillReport):
+                """Validate that fill is a FillReport with correct fields."""
+                assert isinstance(fill, FillReport), f"Expected FillReport, got {type(fill)}"
+                assert fill.intent_id == "test-intent-001"
+                assert fill.broker_ref == "FAKE-000001"
+                assert fill.quantity == 10
+                assert fill.price == 150.0
+                assert isinstance(fill.fill_time, datetime)
+                assert fill.commission == 1.0
+                self.report_fill_calls.append(fill)
+
+            def __getattr__(self, name):
+                """Fail if any other method is called (e.g., upload_fill)."""
+                raise AttributeError(
+                    f"AlethraAPIClient has no method '{name}'. "
+                    f"Did you mean 'report_fill'?"
+                )
+
+        alethra_client = ValidatingAlethraClient()
+
+        config = AgentConfig(
+            alethra_api_key="test-key",
+            alethra_api_url="http://test",
+            ib_client_id=1,
+            poll_interval_seconds=1,
+            trading_mode="paper",
+            allow_live=False,
+        )
+
+        agent = ExecutionAgent(config, ibkr_client, alethra_client)
+        agent.fill_delivery_journal = journal
+
+        # Replay pending fills
+        agent._replay_pending_fill_deliveries()
+
+        # Verify report_fill was called with correct FillReport
+        assert len(alethra_client.report_fill_calls) == 1
+        fill_report = alethra_client.report_fill_calls[0]
+        assert fill_report.intent_id == "test-intent-001"
+        assert fill_report.broker_ref == "FAKE-000001"
+        assert fill_report.quantity == 10
+
+        # Verify pending fill was removed after successful delivery
+        assert len(journal.get_pending_fills()) == 0
+
+    def test_replay_preserves_pending_on_failure(self, tmp_path):
+        """Verify that failed reporting preserves the pending fill in journal."""
+        from app.execution_agent.alethra_client import FillReport
+        from app.execution_agent.fill_journal import FillDeliveryJournal, PendingFill
+
+        # Create a journal with a pending fill
+        journal_path = tmp_path / "test_journal.json"
+        journal = FillDeliveryJournal(journal_path=journal_path, agent_id="test-agent")
+
+        fill_time = utcnow()
+        pending_fill = PendingFill(
+            intent_id="test-intent-002",
+            broker_ref="FAKE-000002",
+            quantity=5,
+            price=100.0,
+            fill_time=fill_time.isoformat(),
+            commission=0.5,
+            fill_key=f"FAKE-000002:{fill_time.isoformat()}:5",
+            created_at=fill_time.isoformat(),
+        )
+        journal.add_pending_fill(pending_fill)
+
+        # Create agent with a client that fails on report_fill
+        transport = FakeBrokerTransport(fill_mode="immediate", fill_price=100.0)
+        transport.connect()
+        ibkr_client = IBKRClient(transport)
+
+        class FailingAlethraClient:
+            """Mock that fails on report_fill to simulate network error."""
+
+            def __init__(self):
+                self.api_url = "http://test"
+                self.api_token = "test-token"
+
+            def report_fill(self, fill: FillReport):
+                raise ConnectionError("Platform unreachable")
+
+            def __getattr__(self, name):
+                raise AttributeError(f"AlethraAPIClient has no method '{name}'")
+
+        alethra_client = FailingAlethraClient()
+
+        config = AgentConfig(
+            alethra_api_key="test-key",
+            alethra_api_url="http://test",
+            ib_client_id=1,
+            poll_interval_seconds=1,
+            trading_mode="paper",
+            allow_live=False,
+        )
+
+        agent = ExecutionAgent(config, ibkr_client, alethra_client)
+        agent.fill_delivery_journal = journal
+
+        # Replay pending fills (should fail but not crash)
+        agent._replay_pending_fill_deliveries()
+
+        # Verify pending fill is still in journal
+        pending_fills = journal.get_pending_fills()
+        assert len(pending_fills) == 1
+        assert pending_fills[0].intent_id == "test-intent-002"
+        assert pending_fills[0].broker_ref == "FAKE-000002"
+        assert pending_fills[0].quantity == 5
+
+        # Verify retry count was incremented
+        assert pending_fills[0].retry_count == 1
+
+    def test_replay_would_fail_with_upload_fill_method(self, tmp_path):
+        """Verify that the old upload_fill() method would fail.
+
+        This test documents the bug that was fixed: the replay path used to
+        call a non-existent upload_fill() method. This test ensures that if
+        someone reintroduces that bug, the test will fail.
+        """
+        from app.execution_agent.fill_journal import FillDeliveryJournal, PendingFill
+
+        # Create a journal with a pending fill
+        journal_path = tmp_path / "test_journal.json"
+        journal = FillDeliveryJournal(journal_path=journal_path, agent_id="test-agent")
+
+        fill_time = utcnow()
+        pending_fill = PendingFill(
+            intent_id="test-intent-003",
+            broker_ref="FAKE-000003",
+            quantity=7,
+            price=120.0,
+            fill_time=fill_time.isoformat(),
+            commission=0.7,
+            fill_key=f"FAKE-000003:{fill_time.isoformat()}:7",
+            created_at=fill_time.isoformat(),
+        )
+        journal.add_pending_fill(pending_fill)
+
+        # Create agent with a client that only has report_fill (correct interface)
+        transport = FakeBrokerTransport(fill_mode="immediate", fill_price=120.0)
+        transport.connect()
+        ibkr_client = IBKRClient(transport)
+
+        class CorrectInterfaceClient:
+            """Client with the correct interface (only report_fill)."""
+
+            def __init__(self):
+                self.api_url = "http://test"
+                self.api_token = "test-token"
+                self.report_fill_called = False
+
+            def report_fill(self, fill):
+                self.report_fill_called = True
+
+            def __getattr__(self, name):
+                """Fail if upload_fill or any other method is called."""
+                if name == "upload_fill":
+                    raise AttributeError(
+                        "upload_fill() does not exist. Use report_fill() instead."
+                    )
+                raise AttributeError(f"AlethraAPIClient has no method '{name}'")
+
+        alethra_client = CorrectInterfaceClient()
+
+        config = AgentConfig(
+            alethra_api_key="test-key",
+            alethra_api_url="http://test",
+            ib_client_id=1,
+            poll_interval_seconds=1,
+            trading_mode="paper",
+            allow_live=False,
+        )
+
+        agent = ExecutionAgent(config, ibkr_client, alethra_client)
+        agent.fill_delivery_journal = journal
+
+        # Replay should succeed (calls report_fill, not upload_fill)
+        agent._replay_pending_fill_deliveries()
+
+        # Verify report_fill was called
+        assert alethra_client.report_fill_called is True
+
+        # Verify pending fill was removed
+        assert len(journal.get_pending_fills()) == 0

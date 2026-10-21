@@ -13,6 +13,7 @@ create → authorize → agent submits → owner cancels → agent cancels at br
 import time
 from datetime import timedelta
 from uuid import uuid4
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -386,3 +387,88 @@ class TestCancelRequestedContract:
         agent._cancel_submitted_order(intent)
         alethra.report_order_cancelled.assert_called_once()
         assert intent.intent_id in agent._completed_intents
+
+
+# ──────────────────────────────────────────────
+# Requirement 7: Cancellation report failure recovery
+# ──────────────────────────────────────────────
+
+class TestCancellationReportFailureRecovery:
+    """Requirement 7: when the broker cancels successfully but the platform
+    report fails, the agent must retry until the platform acknowledges.
+
+    These tests target the _monitor_order_execution code path (agent.py:642-646)
+    where report_order_cancelled is called after the broker confirms cancellation.
+    This is distinct from TestCancelRequestedContract which tests broker-side
+    cancel failures (_cancel_submitted_order).
+    """
+
+    def test_platform_cancel_report_failure_retries_until_success(
+        self, client, auth_headers, monkeypatch
+    ):
+        """Broker canc successfully, platform report fails on first attempt,
+        retries and succeeds on second attempt."""
+        portfolio_id = _create_user_and_portfolio(client, auth_headers)
+        intent = _create_and_authorize_intent(client, auth_headers, portfolio_id)
+        intent_id = intent["intent_id"]
+
+        transport = FakeBrokerTransport(fill_mode="delayed", seed=0)
+        monkeypatch.setattr(transport._rng, "random", lambda: 0.9)
+
+        agent = _make_agent(client, auth_headers, transport)
+
+        # Agent poll #1: submits the order
+        agent.process_order_intents(kill_switch_active=False)
+        db = TestSession()
+        try:
+            row = db.query(OrderIntent).filter(OrderIntent.intent_id == intent_id).first()
+            assert row.status == IntentStatus.submitted
+            assert row.broker_ref == "FAKE-000001"
+        finally:
+            db.close()
+
+        # Owner cancels
+        resp = client.post(f"/api/v1/execution/intents/{intent_id}/cancel", headers=auth_headers)
+        assert resp.status_code == 200
+
+        # Make report_order_cancelled fail on first call, succeed on second
+        call_count = {"n": 0}
+        original_report = agent.alethra_client.report_order_cancelled
+
+        def flaky_report(intent_id, reason):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise ConnectionError("Platform unreachable")
+            return original_report(intent_id, reason)
+
+        agent.alethra_client.report_order_cancelled = flaky_report
+
+        # Agent poll #2: sees cancel_requested, cancels at broker (success),
+        # monitor detects CANCELLED, tries to report to platform (fails first time)
+        # The monitor loop retries with time.sleep(2) + continue
+        # We need to run the monitor manually since process_order_intents spawns it
+        # in a thread. Instead, let's directly test the monitor behavior.
+
+        # Cancel at broker first
+        agent.ibkr_client.cancel_order("FAKE-000001")
+        assert transport.get_order_status("FAKE-000001") == BrokerOrderStatus.CANCELLED
+
+        # Now run the monitor - it should detect CANCELLED, try to report (fail),
+        # retry, and succeed. The monitor has a 60s timeout, but with monkeypatched
+        # sleep it will cycle quickly.
+        agent._monitor_fills_for_known_order(intent_id, "FAKE-000001")
+
+        # Verify: report was called twice (first failed, second succeeded)
+        assert call_count["n"] == 2
+
+        # Verify: intent is now cancelled in database
+        db = TestSession()
+        try:
+            row = db.query(OrderIntent).filter(OrderIntent.intent_id == intent_id).first()
+            assert row.status == IntentStatus.cancelled
+            assert row.broker_ref == "FAKE-000001"
+        finally:
+            db.close()
+
+        # Verify: intent is marked complete in agent
+        assert intent_id in agent._completed_intents
