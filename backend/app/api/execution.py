@@ -1,9 +1,25 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 from pydantic import BaseModel, ConfigDict, Field
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
+
+
+def _normalize_to_naive_utc(dt: Optional[datetime]) -> Optional[datetime]:
+    """Normalize datetime to naive UTC for database comparison.
+
+    - Timezone-aware: convert to UTC, strip tzinfo
+    - Naive: treat as UTC, return as-is
+    - None: return None
+
+    This matches the project convention where database stores naive UTC datetimes.
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
 
 from app.database import get_db
 from app.models.user import User
@@ -92,10 +108,23 @@ class FillRecordResponse(BaseModel):
     order_intent_id: uuid.UUID
     quantity: int
     price: Optional[float]
+    commission: Optional[float] = Field(
+        None,
+        description="Agent-reported commission. NULL means unknown/not reported, distinct from 0."
+    )
     fill_source: str
     broker_ref: Optional[str]
     broker_confirmed_at: Optional[datetime]
     created_at: datetime
+
+
+class OrderIntentWithFillsResponse(OrderIntentResponse):
+    """Intent response with embedded fill records for execution history."""
+    fills: List[FillRecordResponse] = []
+    total_filled_quantity: int = Field(
+        0,
+        description="Sum of all fill quantities for this intent."
+    )
 
 
 # ── Router ──
@@ -181,16 +210,190 @@ def api_cancel_intent(
 
 @router.get("/intents", response_model=List[OrderIntentResponse])
 def api_list_intents(
+    portfolio_id: Optional[uuid.UUID] = None,
+    status: Optional[str] = None,
+    start_date: Optional[datetime] = Query(
+        None,
+        description="Filter intents created at or after this time. "
+                    "Timezone-aware datetimes are converted to UTC. "
+                    "Naive datetimes are treated as UTC. "
+                    "Filters intent creation time, not fill execution time."
+    ),
+    end_date: Optional[datetime] = Query(
+        None,
+        description="Filter intents created at or before this time (inclusive). "
+                    "Timezone-aware datetimes are converted to UTC. "
+                    "Naive datetimes are treated as UTC. "
+                    "Filters intent creation time, not fill execution time."
+    ),
+    limit: Optional[int] = Query(None, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     _scope_check=Depends(check_api_key_scope("read")),
 ):
-    return (
-        db.query(OrderIntent)
-        .filter(OrderIntent.user_id == current_user.id)
-        .order_by(OrderIntent.created_at.desc())
-        .all()
-    )
+    """List order intents for the current user with optional filters.
+
+    Filters:
+    - portfolio_id: Only intents for this portfolio
+    - status: Only intents with this status
+    - start_date/end_date: Only intents created in this range (inclusive on both boundaries).
+      Timezone-aware datetimes are converted to UTC. Naive datetimes are treated as UTC.
+      These filter intent creation time, not fill execution time.
+
+    Pagination:
+    - limit: Max results (optional, max 1000). If not specified, returns all results.
+    - offset: Skip this many results
+
+    Results are ordered by created_at DESC, then intent_id DESC for stable pagination.
+    """
+    start_utc = _normalize_to_naive_utc(start_date)
+    end_utc = _normalize_to_naive_utc(end_date)
+
+    if start_utc is not None and end_utc is not None and start_utc > end_utc:
+        raise HTTPException(
+            status_code=400,
+            detail="start_date must not be later than end_date"
+        )
+
+    query = db.query(OrderIntent).filter(OrderIntent.user_id == current_user.id)
+
+    if portfolio_id is not None:
+        query = query.filter(OrderIntent.portfolio_id == portfolio_id)
+
+    if status is not None:
+        try:
+            status_enum = IntentStatus(status)
+            query = query.filter(OrderIntent.status == status_enum)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid status: {status}")
+
+    if start_utc is not None:
+        query = query.filter(OrderIntent.created_at >= start_utc)
+
+    if end_utc is not None:
+        query = query.filter(OrderIntent.created_at <= end_utc)
+
+    query = query.order_by(
+        OrderIntent.created_at.desc(),
+        OrderIntent.intent_id.desc(),
+    ).offset(offset)
+
+    if limit is not None:
+        query = query.limit(limit)
+
+    return query.all()
+
+
+@router.get("/history", response_model=List[OrderIntentWithFillsResponse])
+def api_execution_history(
+    portfolio_id: Optional[uuid.UUID] = None,
+    status: Optional[str] = None,
+    start_date: Optional[datetime] = Query(
+        None,
+        description="Filter intents created at or after this time. "
+                    "Timezone-aware datetimes are converted to UTC. "
+                    "Naive datetimes are treated as UTC. "
+                    "Filters intent creation time, not fill execution time."
+    ),
+    end_date: Optional[datetime] = Query(
+        None,
+        description="Filter intents created at or before this time (inclusive). "
+                    "Timezone-aware datetimes are converted to UTC. "
+                    "Naive datetimes are treated as UTC. "
+                    "Filters intent creation time, not fill execution time."
+    ),
+    limit: int = 100,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope("read")),
+):
+    """Execution history: intents with embedded fill records.
+
+    Returns agent-reported execution records. Fills are NOT verified against
+    broker statements; they represent what the execution agent reported.
+
+    Filters and pagination work the same as GET /intents:
+    - start_date/end_date: Inclusive range, timezone-aware converted to UTC, naive treated as UTC.
+      These filter intent creation time, not fill execution time.
+    - Results ordered by created_at DESC, then intent_id DESC for stable pagination.
+
+    Each intent includes:
+    - fills: List of all FillRecords for this intent
+    - total_filled_quantity: Sum of fill quantities
+
+    Commission semantics:
+    - commission: NULL means unknown/not reported by agent (distinct from 0.0)
+    - commission: 0.0 means explicitly reported as zero
+    """
+    if limit > 1000:
+        raise HTTPException(status_code=400, detail="Limit cannot exceed 1000")
+
+    start_utc = _normalize_to_naive_utc(start_date)
+    end_utc = _normalize_to_naive_utc(end_date)
+
+    if start_utc is not None and end_utc is not None and start_utc > end_utc:
+        raise HTTPException(
+            status_code=400,
+            detail="start_date must not be later than end_date"
+        )
+
+    query = db.query(OrderIntent).filter(OrderIntent.user_id == current_user.id)
+
+    if portfolio_id is not None:
+        query = query.filter(OrderIntent.portfolio_id == portfolio_id)
+
+    if status is not None:
+        try:
+            status_enum = IntentStatus(status)
+            query = query.filter(OrderIntent.status == status_enum)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid status: {status}")
+
+    if start_utc is not None:
+        query = query.filter(OrderIntent.created_at >= start_utc)
+
+    if end_utc is not None:
+        query = query.filter(OrderIntent.created_at <= end_utc)
+
+    intents = query.order_by(
+        OrderIntent.created_at.desc(),
+        OrderIntent.intent_id.desc(),
+    ).offset(offset).limit(limit).all()
+
+    result = []
+    for intent in intents:
+        fills = get_fill_records(db, intent_id=intent.intent_id)
+        total_filled = sum(f.quantity for f in fills)
+
+        intent_dict = {
+            "id": intent.id,
+            "user_id": intent.user_id,
+            "portfolio_id": intent.portfolio_id,
+            "intent_id": intent.intent_id,
+            "symbol": intent.symbol,
+            "side": intent.side.value,
+            "quantity": intent.quantity,
+            "order_type": intent.order_type.value,
+            "limit_price": intent.limit_price,
+            "status": intent.status.value,
+            "authorization_token": intent.authorization_token,
+            "expires_at": intent.expires_at,
+            "created_at": intent.created_at,
+            "updated_at": intent.updated_at,
+            "rejection_reason": intent.rejection_reason,
+            "broker_ref": intent.broker_ref,
+            "cancel_requested": intent.cancel_requested,
+            "idempotency_key": intent.idempotency_key,
+            "fill_source": intent.fill_source.value if intent.fill_source else None,
+            "broker_confirmed_at": intent.broker_confirmed_at,
+            "fills": fills,
+            "total_filled_quantity": total_filled,
+        }
+        result.append(intent_dict)
+
+    return result
 
 
 @router.get("/intents/{intent_id}", response_model=OrderIntentResponse)
