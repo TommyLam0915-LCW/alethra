@@ -13,6 +13,7 @@ _PROVIDERS: Dict[str, DataProvider] = {
     "demo": DemoDataProvider(),
 }
 _LSEG_INITIALIZED = False
+_TWELVEDATA_INITIALIZED = False
 
 
 def _try_init_lseg() -> Optional[DataProvider]:
@@ -36,8 +37,22 @@ def _try_init_lseg() -> Optional[DataProvider]:
     return None
 
 
+def _try_init_twelvedata() -> Optional[DataProvider]:
+    api_key = os.environ.get("TWELVEDATA_API_KEY")
+    if not api_key:
+        return None
+
+    from app.providers.twelvedata_provider import TwelveDataProvider
+    provider = TwelveDataProvider(api_key=api_key)
+    if provider.connect():
+        logger.info("Twelve Data provider auto-registered")
+        return provider
+    logger.warning("Twelve Data provider failed to connect: %s", provider._last_error)
+    return None
+
+
 def get_data_provider() -> DataProvider:
-    global _LSEG_INITIALIZED
+    global _LSEG_INITIALIZED, _TWELVEDATA_INITIALIZED
     settings = get_settings()
     provider_id = settings.data_provider
 
@@ -46,6 +61,12 @@ def get_data_provider() -> DataProvider:
         lseg = _try_init_lseg()
         if lseg:
             _PROVIDERS["lseg"] = lseg
+
+    if provider_id == "twelvedata" and not _TWELVEDATA_INITIALIZED:
+        _TWELVEDATA_INITIALIZED = True
+        td = _try_init_twelvedata()
+        if td:
+            _PROVIDERS["twelvedata"] = td
 
     if provider_id not in _PROVIDERS:
         raise ValueError(

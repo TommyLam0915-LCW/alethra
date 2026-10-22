@@ -14,9 +14,22 @@ interface Experiment {
   updated_at: string;
 }
 
+interface DashboardStats {
+  totalExperiments: number;
+  activeExperiments: number;
+  lockedExperiments: number;
+  draftExperiments: number;
+}
+
 export default function DashboardPage() {
   const router = useRouter();
   const [experiments, setExperiments] = useState<Experiment[]>([]);
+  const [stats, setStats] = useState<DashboardStats>({
+    totalExperiments: 0,
+    activeExperiments: 0,
+    lockedExperiments: 0,
+    draftExperiments: 0,
+  });
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -26,15 +39,28 @@ export default function DashboardPage() {
       return;
     }
 
-    loadExperiments();
+    loadDashboard();
   }, [router]);
 
-  const loadExperiments = async () => {
+  const loadDashboard = async () => {
     try {
       const data = await api.experiments.list();
       setExperiments(data);
+
+      // Calculate stats
+      const totalExperiments = data.length;
+      const activeExperiments = data.filter((e: Experiment) => e.status === 'exploring').length;
+      const lockedExperiments = data.filter((e: Experiment) => e.status === 'locked').length;
+      const draftExperiments = data.filter((e: Experiment) => e.status === 'draft').length;
+
+      setStats({
+        totalExperiments,
+        activeExperiments,
+        lockedExperiments,
+        draftExperiments,
+      });
     } catch (err) {
-      console.error('Failed to load experiments:', err);
+      console.error('Failed to load dashboard:', err);
     } finally {
       setLoading(false);
     }
@@ -62,126 +88,217 @@ export default function DashboardPage() {
     return { label: '查看詳情', href: `/experiments/${exp.id}` };
   };
 
-  return (
-    <div className="container" style={{ paddingTop: '40px', paddingBottom: '40px' }}>
-      <div style={{ marginBottom: '30px' }}>
-        <h1 style={{ marginBottom: '8px' }}>{brand.ui.dashboard.titleZh}</h1>
-        <p style={{ color: '#666', fontSize: '14px', margin: 0 }}>
-          你的投資想法，值得被認真檢驗。
-        </p>
-      </div>
+  const getRecentExperiments = () => {
+    return [...experiments]
+      .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())
+      .slice(0, 5);
+  };
 
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-        <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
+  if (loading) {
+    return (
+      <div className="dash-root">
+        <div style={{ textAlign: 'center', padding: '60px', color: 'var(--text-muted)' }}>
+          載入中...
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="dash-root">
+      {/* Header */}
+      <div className="dash-header">
+        <div className="dash-header-left">
+          <h1>{brand.ui.dashboard.titleZh}</h1>
+          <p>你的投資想法，值得被認真檢驗。</p>
+        </div>
+        <div className="dash-header-right">
           <Link href="/workspace" className="btn btn-primary" data-testid="nav-workspace">
             進入工作台
           </Link>
           <Link href="/experiments/new" className="btn btn-secondary">
             建立新實驗
           </Link>
-          <Link href="/research-drafts" className="btn btn-secondary">
-            研究草稿
-          </Link>
+          <button onClick={handleLogout} className="btn btn-secondary">
+            {brand.ui.auth.logoutZh}
+          </button>
         </div>
-        <button onClick={handleLogout} className="btn btn-secondary">
-          {brand.ui.auth.logoutZh}
-        </button>
       </div>
 
-      <div className="disclaimer" style={{ marginBottom: '24px' }}>
+      {/* Disclaimer */}
+      <div className="dash-disclaimer">
         <strong>提醒：</strong>本系統是研究工具，所有結果僅供研究參考，不代表未來績效，不構成投資建議。
       </div>
 
-      {loading ? (
-        <div className="card" style={{ textAlign: 'center', padding: '40px' }}>
-          載入中...
+      {/* Stats Grid */}
+      <div className="dash-stats-grid">
+        <div className="dash-stat-card">
+          <div className="dash-stat-label">總實驗數</div>
+          <div className="dash-stat-value">{stats.totalExperiments}</div>
+          <div className="dash-stat-change neutral">All experiments</div>
         </div>
-      ) : experiments.length === 0 ? (
-        <div className="card" style={{ textAlign: 'center', padding: '60px' }}>
-          <h3 style={{ marginBottom: '16px', color: '#333' }}>還沒有任何實驗</h3>
-          <p style={{ color: '#666', marginBottom: '12px', lineHeight: '1.6' }}>
-            建立第一個實驗，記錄你的投資假設，<br />
-            追蹤測試結果，保存研究證據。
-          </p>
-          <p style={{ color: '#888', fontSize: '14px', marginBottom: '24px' }}>
-            你可以隨時暫停、修改或停止研究。<br />
-            「證據不足」和「不需要修改」都是有效的結果。
-          </p>
-          <Link href="/experiments/new" className="btn btn-primary">
-            建立第一個實驗
-          </Link>
-        </div>
-      ) : (
-        <div style={{ display: 'grid', gap: '16px', marginBottom: '32px' }}>
-          {experiments.map((exp) => {
-            const nextAction = getNextAction(exp);
-            return (
-              <Link
-                key={exp.id}
-                href={`/experiments/${exp.id}`}
-                style={{ textDecoration: 'none', color: 'inherit' }}
-              >
-                <div className="card" style={{ cursor: 'pointer', transition: 'transform 0.2s' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start', marginBottom: '12px' }}>
-                    <div style={{ flex: 1 }}>
-                      <h3 style={{ marginBottom: '8px' }}>{exp.title}</h3>
-                      <p style={{ color: '#666', fontSize: '14px', margin: 0 }}>
-                        建立於 {new Date(exp.created_at).toLocaleDateString('zh-Hant')}
-                        {exp.updated_at !== exp.created_at && (
-                          <> · 最後活動 {new Date(exp.updated_at).toLocaleDateString('zh-Hant')}</>
-                        )}
-                      </p>
-                    </div>
-                    <span
-                      style={{
-                        padding: '4px 12px',
-                        borderRadius: '12px',
-                        fontSize: '12px',
-                        backgroundColor: exp.status === 'locked' ? '#d1ecf1' : '#eaeaea',
-                        color: exp.status === 'locked' ? '#0c5460' : '#666',
-                      }}
-                    >
-                      {getStatusLabel(exp.status)}
-                    </span>
-                  </div>
-                  <div style={{ borderTop: '1px solid #eaeaea', paddingTop: '12px' }}>
-                    <span style={{ color: '#0070f3', fontSize: '14px' }}>
-                      {nextAction.label} →
-                    </span>
-                  </div>
-                </div>
-              </Link>
-            );
-          })}
-        </div>
-      )}
 
-      <div style={{ borderTop: '1px solid #eaeaea', paddingTop: '24px', marginBottom: '32px' }}>
-        <h4 style={{ marginBottom: '16px', color: '#666', fontSize: '14px' }}>其他功能</h4>
-        <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
-          <Link href="/models" className="btn btn-secondary">
-            模型研究
-          </Link>
-          <Link href="/training" className="btn btn-secondary">
-            訓練任務
-          </Link>
-          <Link href="/inference" className="btn btn-secondary">
-            推論執行
-          </Link>
-          <Link href="/execution" className="btn btn-secondary">
-            執行意向
-          </Link>
-          <Link href="/market-data" className="btn btn-secondary">
-            市場數據
-          </Link>
-          <Link href="/api-keys" className="btn btn-secondary">
-            API 金鑰
-          </Link>
-          <Link href="/subscription" className="btn btn-secondary">
-            訂閱方案
-          </Link>
+        <div className="dash-stat-card">
+          <div className="dash-stat-label">進行中</div>
+          <div className="dash-stat-value">{stats.activeExperiments}</div>
+          <div className="dash-stat-change positive">
+            {stats.activeExperiments > 0 ? '↑ Active' : '— No active'}
+          </div>
+        </div>
+
+        <div className="dash-stat-card">
+          <div className="dash-stat-label">已鎖定</div>
+          <div className="dash-stat-value">{stats.lockedExperiments}</div>
+          <div className="dash-stat-change neutral">
+            {stats.lockedExperiments > 0 ? '✓ Locked' : '— None'}
+          </div>
+        </div>
+
+        <div className="dash-stat-card">
+          <div className="dash-stat-label">草稿</div>
+          <div className="dash-stat-value">{stats.draftExperiments}</div>
+          <div className="dash-stat-change neutral">
+            {stats.draftExperiments > 0 ? '✎ Drafts' : '— None'}
+          </div>
         </div>
       </div>
+
+      {/* Quick Actions */}
+      <div className="dash-quick-actions">
+        <Link href="/experiments/new" className="dash-quick-action-btn">
+          <div className="dash-quick-action-icon">➕</div>
+          <div className="dash-quick-action-label">建立新實驗</div>
+        </Link>
+
+        <Link href="/workspace" className="dash-quick-action-btn">
+          <div className="dash-quick-action-icon">🔬</div>
+          <div className="dash-quick-action-label">進入工作台</div>
+        </Link>
+
+        <Link href="/research-drafts" className="dash-quick-action-btn">
+          <div className="dash-quick-action-icon">📝</div>
+          <div className="dash-quick-action-label">研究草稿</div>
+        </Link>
+
+        <Link href="/market-data" className="dash-quick-action-btn">
+          <div className="dash-quick-action-icon">📊</div>
+          <div className="dash-quick-action-label">市場數據</div>
+        </Link>
+
+        <Link href="/models" className="dash-quick-action-btn">
+          <div className="dash-quick-action-icon">🤖</div>
+          <div className="dash-quick-action-label">模型研究</div>
+        </Link>
+
+        <Link href="/api-keys" className="dash-quick-action-btn">
+          <div className="dash-quick-action-icon">🔑</div>
+          <div className="dash-quick-action-label">API 金鑰</div>
+        </Link>
+      </div>
+
+      {/* Main Grid */}
+      <div className="dash-main-grid">
+        {/* Recent Experiments Panel */}
+        <div className="dash-panel">
+          <div className="dash-panel-header">
+            <div className="dash-panel-title">最近實驗</div>
+            <div className="dash-panel-actions">
+              <Link href="/experiments/new" className="btn btn-primary" style={{ padding: '6px 12px', fontSize: '12px' }}>
+                建立新實驗
+              </Link>
+            </div>
+          </div>
+          <div className="dash-panel-body">
+            {experiments.length === 0 ? (
+              <div className="dash-empty-state">
+                <h3>還沒有任何實驗</h3>
+                <p>
+                  建立第一個實驗，記錄你的投資假設，<br />
+                  追蹤測試結果，保存研究證據。
+                </p>
+                <Link href="/experiments/new" className="btn btn-primary">
+                  建立第一個實驗
+                </Link>
+              </div>
+            ) : (
+              <div className="dash-experiment-list">
+                {getRecentExperiments().map((exp) => {
+                  const nextAction = getNextAction(exp);
+                  return (
+                    <Link
+                      key={exp.id}
+                      href={nextAction.href}
+                      className="dash-experiment-item"
+                    >
+                      <div className="dash-experiment-info">
+                        <div className="dash-experiment-title">{exp.title}</div>
+                        <div className="dash-experiment-meta">
+                          <span>建立於 {new Date(exp.created_at).toLocaleDateString('zh-Hant')}</span>
+                          {exp.updated_at !== exp.created_at && (
+                            <>
+                              <span>·</span>
+                              <span>最後活動 {new Date(exp.updated_at).toLocaleDateString('zh-Hant')}</span>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                      <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+                        <span className={`dash-experiment-status ${exp.status}`}>
+                          {getStatusLabel(exp.status)}
+                        </span>
+                        <span style={{ color: 'var(--accent-blue)', fontSize: '13px' }}>
+                          {nextAction.label} →
+                        </span>
+                      </div>
+                    </Link>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Activity Feed Panel */}
+        <div className="dash-panel">
+          <div className="dash-panel-header">
+            <div className="dash-panel-title">最近活動</div>
+          </div>
+          <div className="dash-panel-body">
+            {experiments.length === 0 ? (
+              <div style={{ textAlign: 'center', padding: '40px 20px', color: 'var(--text-muted)' }}>
+                尚無活動
+              </div>
+            ) : (
+              <div className="dash-activity-feed">
+                {getRecentExperiments().slice(0, 5).map((exp) => (
+                  <div key={exp.id} className="dash-activity-item">
+                    <div className="dash-activity-icon">
+                      {exp.status === 'draft' ? '✎' : exp.status === 'exploring' ? '🔬' : '✓'}
+                    </div>
+                    <div className="dash-activity-content">
+                      <div className="dash-activity-title">
+                        {exp.title}
+                      </div>
+                      <div className="dash-activity-time">
+                        {new Date(exp.updated_at).toLocaleDateString('zh-Hant')} · {getStatusLabel(exp.status)}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* All Experiments Link */}
+      {experiments.length > 5 && (
+        <div style={{ textAlign: 'center', marginTop: '24px' }}>
+          <Link href="/experiments" className="btn btn-secondary" style={{ padding: '12px 32px' }}>
+            查看所有實驗 ({experiments.length})
+          </Link>
+        </div>
+      )}
     </div>
   );
 }

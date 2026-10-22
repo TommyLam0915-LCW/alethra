@@ -7,6 +7,8 @@ Board lot sizes are per-instrument for HK stocks (sourced from HKEX).
 Where the exact lot size is unconfirmed, lot_size is marked None (unknown).
 """
 
+from __future__ import annotations
+
 from app.providers.instruments import (
     Instrument,
     Market,
@@ -103,6 +105,30 @@ IBKR_MAPPINGS = {
 }
 
 
+# Provider symbol mappings for Twelve Data
+TWELVEDATA_MAPPINGS = {
+    "US:AAPL": ProviderSymbolMapping("twelvedata", "US:AAPL", "AAPL"),
+    "US:MSFT": ProviderSymbolMapping("twelvedata", "US:MSFT", "MSFT"),
+    "US:GOOGL": ProviderSymbolMapping("twelvedata", "US:GOOGL", "GOOGL"),
+    "US:AMZN": ProviderSymbolMapping("twelvedata", "US:AMZN", "AMZN"),
+    "US:NVDA": ProviderSymbolMapping("twelvedata", "US:NVDA", "NVDA"),
+    "US:META": ProviderSymbolMapping("twelvedata", "US:META", "META"),
+    "US:TSLA": ProviderSymbolMapping("twelvedata", "US:TSLA", "TSLA"),
+    "US:SPY": ProviderSymbolMapping("twelvedata", "US:SPY", "SPY"),
+    "US:QQQ": ProviderSymbolMapping("twelvedata", "US:QQQ", "QQQ"),
+    "US:VTI": ProviderSymbolMapping("twelvedata", "US:VTI", "VTI"),
+    "HK:0700": ProviderSymbolMapping("twelvedata", "HK:0700", "0700/HKG"),
+    "HK:9988": ProviderSymbolMapping("twelvedata", "HK:9988", "9988/HKG"),
+    "HK:0005": ProviderSymbolMapping("twelvedata", "HK:0005", "0005/HKG"),
+    "HK:2318": ProviderSymbolMapping("twelvedata", "HK:2318", "2318/HKG"),
+    "HK:0941": ProviderSymbolMapping("twelvedata", "HK:0941", "0941/HKG"),
+    "HK:1299": ProviderSymbolMapping("twelvedata", "HK:1299", "1299/HKG"),
+    "HK:3690": ProviderSymbolMapping("twelvedata", "HK:3690", "3690/HKG"),
+    "HK:2800": ProviderSymbolMapping("twelvedata", "HK:2800", "2800/HKG"),
+    "HK:3067": ProviderSymbolMapping("twelvedata", "HK:3067", "3067/HKG"),
+}
+
+
 def get_all_instruments() -> list[Instrument]:
     """Get all supported real-market instruments."""
     return ALL_REAL_INSTRUMENTS
@@ -121,6 +147,7 @@ def get_provider_mapping(provider_id: str, instrument_id: str) -> ProviderSymbol
     mappings = {
         "lseg": LSEG_MAPPINGS,
         "ibkr": IBKR_MAPPINGS,
+        "twelvedata": TWELVEDATA_MAPPINGS,
     }
     provider_map = mappings.get(provider_id, {})
     return provider_map.get(instrument_id)

@@ -12,6 +12,14 @@ const TEMPLATES = [
   { value: 'price_change_fixed_hold', label: 'Price Change', labelZh: '跌幅定持' },
 ];
 
+interface InstrumentOption {
+  instrument_id: string;
+  symbol: string;
+  name: string;
+  market: string;
+  asset_type: string;
+}
+
 interface ResearchDraft {
   id: string;
   title: string;
@@ -59,8 +67,8 @@ function NewExperimentForm() {
   const [title, setTitle] = useState('');
   const [hypothesis, setHypothesis] = useState('');
   const [templateType, setTemplateType] = useState('buy_and_hold');
-  const [assetId, setAssetId] = useState('DEMO-ALPHA');
-  const [benchmarkId, setBenchmarkId] = useState('DEMO-BENCHMARK');
+  const [assetId, setAssetId] = useState('US:AAPL');
+  const [benchmarkId, setBenchmarkId] = useState('');
   const [startDate, setStartDate] = useState(() => {
     const yearAgo = new Date(Date.now() - 366 * 24 * 60 * 60 * 1000);
     return yearAgo.toISOString().slice(0, 10);
@@ -80,11 +88,20 @@ function NewExperimentForm() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
+  const [instruments, setInstruments] = useState<InstrumentOption[]>([]);
+  const [assetTab, setAssetTab] = useState<'real' | 'demo'>('real');
+
   const [draft, setDraft] = useState<ResearchDraft | null>(null);
   const [draftLoading, setDraftLoading] = useState(false);
   const [draftError, setDraftError] = useState('');
   const [showPreview, setShowPreview] = useState(false);
   const [appliedFields, setAppliedFields] = useState<string[]>([]);
+
+  useEffect(() => {
+    api.instruments.list().then((data: any) => {
+      setInstruments(data.instruments || []);
+    }).catch(() => {});
+  }, []);
 
   useEffect(() => {
     if (!draftId || requestedFields.length === 0) return;
@@ -299,14 +316,47 @@ function NewExperimentForm() {
 
           <div className="form-group">
             <label>資產 *</label>
+            <div style={{ display: 'flex', gap: '8px', marginBottom: '8px' }}>
+              <button type="button" className="btn" style={{ fontSize: '12px', padding: '4px 12px', background: assetTab === 'real' ? '#0070f3' : '#e0e0e0', color: assetTab === 'real' ? '#fff' : '#333' }} onClick={() => setAssetTab('real')}>
+                真實產品 (US/HK)
+              </button>
+              <button type="button" className="btn" style={{ fontSize: '12px', padding: '4px 12px', background: assetTab === 'demo' ? '#0070f3' : '#e0e0e0', color: assetTab === 'demo' ? '#fff' : '#333' }} onClick={() => setAssetTab('demo')}>
+                示範產品
+              </button>
+            </div>
             <select
               className="input"
               value={assetId}
               onChange={(e) => setAssetId(e.target.value)}
             >
-              {DEMO_ASSETS.filter(a => a !== 'DEMO-BENCHMARK').map(a => (
-                <option key={a} value={a}>{a}</option>
-              ))}
+              {assetTab === 'real' ? (
+                <>
+                  <optgroup label="US Stocks">
+                    {instruments.filter(i => i.market === 'US' && i.asset_type === 'STOCK').map(i => (
+                      <option key={i.instrument_id} value={i.instrument_id}>{i.instrument_id} — {i.name}</option>
+                    ))}
+                  </optgroup>
+                  <optgroup label="US ETFs">
+                    {instruments.filter(i => i.market === 'US' && i.asset_type === 'ETF').map(i => (
+                      <option key={i.instrument_id} value={i.instrument_id}>{i.instrument_id} — {i.name}</option>
+                    ))}
+                  </optgroup>
+                  <optgroup label="HK Stocks">
+                    {instruments.filter(i => i.market === 'HK' && i.asset_type === 'STOCK').map(i => (
+                      <option key={i.instrument_id} value={i.instrument_id}>{i.instrument_id} — {i.name}</option>
+                    ))}
+                  </optgroup>
+                  <optgroup label="HK ETFs">
+                    {instruments.filter(i => i.market === 'HK' && i.asset_type === 'ETF').map(i => (
+                      <option key={i.instrument_id} value={i.instrument_id}>{i.instrument_id} — {i.name}</option>
+                    ))}
+                  </optgroup>
+                </>
+              ) : (
+                DEMO_ASSETS.filter(a => a !== 'DEMO-BENCHMARK').map(a => (
+                  <option key={a} value={a}>{a}</option>
+                ))
+              )}
             </select>
           </div>
 
@@ -318,9 +368,15 @@ function NewExperimentForm() {
               onChange={(e) => setBenchmarkId(e.target.value)}
             >
               <option value="">無</option>
-              {DEMO_ASSETS.map(a => (
-                <option key={a} value={a}>{a}</option>
-              ))}
+              {assetTab === 'real' ? (
+                instruments.filter(i => i.instrument_id !== assetId).map(i => (
+                  <option key={i.instrument_id} value={i.instrument_id}>{i.instrument_id} — {i.name}</option>
+                ))
+              ) : (
+                DEMO_ASSETS.map(a => (
+                  <option key={a} value={a}>{a}</option>
+                ))
+              )}
             </select>
           </div>
 

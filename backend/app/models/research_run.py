@@ -27,6 +27,7 @@ class ResearchRun(Base):
     metrics = Column(JSONB, nullable=True)
     warnings = Column(JSONB, nullable=True)
     methodology_json = Column(JSONB, nullable=True)
+    result_json = Column(JSONB, nullable=True)
     error_details = Column(Text, nullable=True)
     started_at = Column(DateTime, nullable=True)
     completed_at = Column(DateTime, nullable=True)

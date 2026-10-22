@@ -7,6 +7,13 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 ALLOWED_TEMPLATES = ("buy_and_hold", "sma_crossover", "price_change_fixed_hold")
 ALLOWED_DEMO_ASSETS = ("DEMO-ALPHA", "DEMO-BETA", "DEMO-BENCHMARK")
 
+import re
+_INSTRUMENT_RE = re.compile(r"^[A-Z]{2,4}:[A-Za-z0-9.\-]{1,20}$")
+
+
+def _is_valid_asset_id(aid: str) -> bool:
+    return aid in ALLOWED_DEMO_ASSETS or bool(_INSTRUMENT_RE.match(aid))
+
 
 class StrategySpec(BaseModel):
     schema_version: str = "1.0"
@@ -31,15 +38,15 @@ class StrategySpec(BaseModel):
     @classmethod
     def validate_asset_ids(cls, v):
         for aid in v:
-            if aid not in ALLOWED_DEMO_ASSETS:
-                raise ValueError(f"Unknown asset_id: {aid}. Allowed: {ALLOWED_DEMO_ASSETS}")
+            if not _is_valid_asset_id(aid):
+                raise ValueError(f"Unknown asset_id: {aid}. Allowed: demo assets or MARKET:SYMBOL format")
         return v
 
     @field_validator("benchmark_id")
     @classmethod
     def validate_benchmark_id(cls, v):
-        if v is not None and v not in ALLOWED_DEMO_ASSETS:
-            raise ValueError(f"Unknown benchmark_id: {v}. Allowed: {ALLOWED_DEMO_ASSETS}")
+        if v is not None and v != "" and not _is_valid_asset_id(v):
+            raise ValueError(f"Unknown benchmark_id: {v}. Allowed: demo assets or MARKET:SYMBOL format")
         return v
 
     @field_validator("end_date")
@@ -119,6 +126,7 @@ class ResearchRunResponse(BaseModel):
     metrics: Optional[dict]
     warnings: Optional[list]
     methodology_json: Optional[dict]
+    result_json: Optional[dict]
     error_details: Optional[str]
     started_at: Optional[datetime]
     completed_at: Optional[datetime]
@@ -174,6 +182,7 @@ class VersionDiffResponse(BaseModel):
 
 class SimulationSessionCreate(BaseModel):
     initial_virtual_cash: float = Field(..., gt=0)
+    provider_id: Optional[str] = Field(None, max_length=50)
 
 
 class SimulationSessionResponse(BaseModel):
@@ -186,6 +195,8 @@ class SimulationSessionResponse(BaseModel):
     current_snapshot_date: Optional[str]
     status: str
     simulation_policy_version: str
+    provider_id: Optional[str]
+    provider_confirmed: bool
     paper_equity: Optional[float]
     current_position_json: Optional[dict]
     warnings: Optional[list]
@@ -217,6 +228,30 @@ class SimulationDecisionResponse(BaseModel):
 
 class SimulationAdvanceResponse(BaseModel):
     session: SimulationSessionResponse
+    decision: SimulationDecisionResponse
+
+
+class ManualDecisionRequest(BaseModel):
+    action: str = Field(..., pattern="^(buy|sell|hold)$")
+    quantity: Optional[int] = Field(None, ge=1)
+    idempotency_key: str = Field(..., min_length=1, max_length=100)
+    rationale: Optional[str] = Field(None, max_length=1000)
+    reflection: Optional[str] = Field(None, max_length=2000)
+    expected_version: Optional[int] = Field(None, ge=0, description="Expected state version for optimistic locking")
+
+
+class ManualDecisionResponse(BaseModel):
+    session: SimulationSessionResponse
+    decision: SimulationDecisionResponse
+    fill: Optional[dict] = None
+    rejection: Optional[dict] = None
+
+
+class ReflectionUpdateRequest(BaseModel):
+    reflection: str = Field(..., min_length=1, max_length=2000)
+
+
+class ReflectionUpdateResponse(BaseModel):
     decision: SimulationDecisionResponse
 
 
@@ -461,8 +496,8 @@ class ModelResearchRecordCreate(BaseModel):
     def validate_asset_universe(cls, v):
         if v is not None:
             for aid in v:
-                if aid not in ALLOWED_DEMO_ASSETS:
-                    raise ValueError(f"Unknown asset_id: {aid}. Allowed: {ALLOWED_DEMO_ASSETS}")
+                if not _is_valid_asset_id(aid):
+                    raise ValueError(f"Unknown asset_id: {aid}. Allowed: demo assets or MARKET:SYMBOL format")
         return v
 
 
@@ -479,8 +514,8 @@ class ModelResearchRecordUpdate(BaseModel):
     def validate_asset_universe(cls, v):
         if v is not None:
             for aid in v:
-                if aid not in ALLOWED_DEMO_ASSETS:
-                    raise ValueError(f"Unknown asset_id: {aid}. Allowed: {ALLOWED_DEMO_ASSETS}")
+                if not _is_valid_asset_id(aid):
+                    raise ValueError(f"Unknown asset_id: {aid}. Allowed: demo assets or MARKET:SYMBOL format")
         return v
 
 

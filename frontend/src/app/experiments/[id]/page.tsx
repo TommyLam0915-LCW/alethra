@@ -24,6 +24,7 @@ interface Run {
   config_hash: string;
   dataset_checksum: string | null;
   methodology_json: any;
+  result_json: any;
   started_at: string | null;
   completed_at: string | null;
 }
@@ -83,6 +84,9 @@ interface MethodReview {
   generated_at: string;
   checks: CheckResult[];
 }
+
+const thStyle: React.CSSProperties = { padding: '6px 10px', textAlign: 'right' as const, borderBottom: '2px solid #ddd', whiteSpace: 'nowrap' as const };
+const tdStyle: React.CSSProperties = { padding: '5px 10px', textAlign: 'right' as const, borderBottom: '1px solid #eee', whiteSpace: 'nowrap' as const };
 
 const EVENT_LABELS: Record<string, string> = {
   experiment_created: '實驗建立',
@@ -416,6 +420,62 @@ export default function ExperimentDetailPage() {
               <div style={{ marginTop: '8px', fontSize: '12px', color: '#999' }}>
                 config_hash: {latestRun.config_hash.slice(0, 16)}...
                 {latestRun.dataset_checksum && <> | dataset: {latestRun.dataset_checksum.slice(0, 16)}...</>}
+              </div>
+            )}
+
+            {latestRun.result_json?.data_provider && (
+              <div style={{ marginTop: '12px', padding: '10px', backgroundColor: '#e8f5e9', borderRadius: '6px', fontSize: '13px' }}>
+                <strong>資料來源：</strong>
+                <span style={{ marginLeft: '8px' }}>
+                  {latestRun.result_json.data_provider}
+                  {latestRun.result_json.feed_mode && ` (${latestRun.result_json.feed_mode})`}
+                  {latestRun.result_json.data_source_used && ` — ${latestRun.result_json.data_source_used}`}
+                </span>
+                {latestRun.result_json.data_nature && (
+                  <div style={{ marginTop: '4px', fontSize: '12px', color: '#555' }}>
+                    數據性質：{Object.entries(latestRun.result_json.data_nature).map(([k, v]) => `${k}=${v}`).join(', ')}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {latestRun.result_json?.daily_accounting?.length > 0 && (
+              <div style={{ marginTop: '16px' }}>
+                <h3 style={{ fontSize: '16px', marginBottom: '8px' }}>每日帳務明細</h3>
+                <div style={{ maxHeight: '400px', overflow: 'auto', border: '1px solid #e0e0e0', borderRadius: '6px' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+                    <thead style={{ position: 'sticky', top: 0, backgroundColor: '#f5f5f5', zIndex: 1 }}>
+                      <tr>
+                        <th style={thStyle}>日期</th>
+                        <th style={thStyle}>現金</th>
+                        <th style={thStyle}>持股</th>
+                        <th style={thStyle}>收盤價</th>
+                        <th style={thStyle}>部位價值</th>
+                        <th style={thStyle}>淨值</th>
+                        <th style={thStyle}>交易</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {latestRun.result_json.daily_accounting.map((day: any, i: number) => (
+                        <tr key={i} style={{ backgroundColor: i % 2 === 0 ? '#fff' : '#fafafa' }}>
+                          <td style={tdStyle}>{day.date}</td>
+                          <td style={tdStyle}>${day.cash.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}</td>
+                          <td style={tdStyle}>{day.shares}</td>
+                          <td style={tdStyle}>${day.close_price.toFixed(2)}</td>
+                          <td style={tdStyle}>${day.position_value.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}</td>
+                          <td style={{ ...tdStyle, fontWeight: 'bold' }}>${day.equity.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}</td>
+                          <td style={tdStyle}>
+                            {day.transactions?.map((t: any, j: number) => (
+                              <span key={j} style={{ display: 'inline-block', padding: '1px 6px', borderRadius: '3px', fontSize: '11px', marginRight: '4px', backgroundColor: t.side === 'BUY' ? '#e8f5e9' : '#ffebee', color: t.side === 'BUY' ? '#2e7d32' : '#c62828' }}>
+                                {t.side === 'BUY' ? '買' : '賣'} {t.quantity}@${t.execution_price.toFixed(2)}
+                              </span>
+                            ))}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             )}
 

@@ -17,7 +17,17 @@ interface SimulationSession {
   warnings: string[] | null;
   total_decisions: number;
   observed_days: number;
+  provider_id: string | null;
   created_at: string;
+}
+
+interface AvailableProvider {
+  provider_id: string;
+  bar_count: number;
+  min_date: string;
+  max_date: string;
+  requested_start: string;
+  requested_end: string;
 }
 
 interface Decision {
@@ -72,6 +82,18 @@ export default function SimulationPage() {
   const [cashInput, setCashInput] = useState('10000');
   const [creating, setCreating] = useState(false);
   const [showDetail, setShowDetail] = useState<number | null>(null);
+  const [manualMode, setManualMode] = useState(false);
+  const [manualAction, setManualAction] = useState<'buy' | 'sell' | 'hold'>('hold');
+  const [manualQuantity, setManualQuantity] = useState('100');
+  const [manualRationale, setManualRationale] = useState('');
+  const [manualReflection, setManualReflection] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [availableProviders, setAvailableProviders] = useState<AvailableProvider[]>([]);
+  const [selectedProvider, setSelectedProvider] = useState<string>('');
+  const [loadingProviders, setLoadingProviders] = useState(false);
+  const [editingReflection, setEditingReflection] = useState<string | null>(null);
+  const [reflectionInput, setReflectionInput] = useState('');
+  const [updatingReflection, setUpdatingReflection] = useState(false);
 
   useEffect(() => {
     const token = localStorage.getItem('token');
@@ -89,10 +111,30 @@ export default function SimulationPage() {
       if (exp.status !== 'locked') {
         setError('實驗必須鎖定後才能進行前進模擬');
       }
+      // Fetch available providers for this version
+      if (exp.current_version_id) {
+        loadAvailableProviders(exp.current_version_id);
+      }
     } catch (err: any) {
       setError(err.message || '載入失敗');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loadAvailableProviders = async (versionId: string) => {
+    setLoadingProviders(true);
+    try {
+      const result = await api.simulations.getAvailableProviders(versionId);
+      setAvailableProviders(result.available_providers || []);
+      // Auto-select if only one provider available
+      if (result.available_providers?.length === 1) {
+        setSelectedProvider(result.available_providers[0].provider_id);
+      }
+    } catch (err: any) {
+      console.error('Failed to load providers:', err);
+    } finally {
+      setLoadingProviders(false);
     }
   };
 
@@ -117,11 +159,16 @@ export default function SimulationPage() {
       setError('請輸入有效的虛擬資金');
       return;
     }
+    if (!selectedProvider) {
+      setError('請選擇資料來源');
+      return;
+    }
     setCreating(true);
     setError('');
     try {
       const s = await api.simulations.create(experiment.current_version_id, {
         initial_virtual_cash: cash,
+        provider_id: selectedProvider,
       });
       setSession(s);
       setDecisions([]);
@@ -179,6 +226,57 @@ export default function SimulationPage() {
     }
   };
 
+  const handleManualDecision = async () => {
+    if (!session?.id) return;
+    setSubmitting(true);
+    setError('');
+    try {
+      const idempotencyKey = `manual-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+      const payload: any = {
+        action: manualAction,
+        idempotency_key: idempotencyKey,
+        rationale: manualRationale || undefined,
+        reflection: manualReflection || undefined,
+      };
+      if (manualAction === 'buy') {
+        const qty = parseInt(manualQuantity);
+        if (isNaN(qty) || qty <= 0) {
+          setError('請輸入有效的數量');
+          setSubmitting(false);
+          return;
+        }
+        payload.quantity = qty;
+      }
+      const result = await api.simulations.manualDecision(session.id, payload);
+      setSession(result.session);
+      const d = await api.simulations.decisions(session.id);
+      setDecisions(d);
+      setManualRationale('');
+      setManualReflection('');
+    } catch (err: any) {
+      setError(err.message || '決策提交失敗');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleUpdateReflection = async (decisionId: string) => {
+    if (!session || !reflectionInput.trim()) return;
+    
+    setUpdatingReflection(true);
+    try {
+      await api.simulations.updateReflection(session.id, decisionId, reflectionInput.trim());
+      const d = await api.simulations.decisions(session.id);
+      setDecisions(d);
+      setEditingReflection(null);
+      setReflectionInput('');
+    } catch (err: any) {
+      setError(err.message || '反思更新失敗');
+    } finally {
+      setUpdatingReflection(false);
+    }
+  };
+
   if (loading) {
     return <div className="container" style={{ paddingTop: '40px' }}>載入中...</div>;
   }
@@ -220,10 +318,75 @@ export default function SimulationPage() {
               step="100"
             />
           </div>
+          
+          {loadingProviders ? (
+            <div style={{ padding: '12px', color: '#666' }}>載入資料來源中...</div>
+          ) : availableProviders.length === 0 ? (
+            <div className="alert alert-warning" style={{ marginTop: '12px' }}>
+              此實驗標的無可用儲存資料
+            </div>
+          ) : (
+            <div className="form-group" style={{ marginTop: '16px' }}>
+              <label style={{ display: 'block', marginBottom: '6px', fontWeight: 600 }}>
+                資料來源
+              </label>
+              {availableProviders.length === 1 ? (
+                <div style={{ padding: '10px', background: '#f8f9fa', borderRadius: '4px', border: '1px solid #dee2e6' }}>
+                  <div style={{ fontWeight: 600 }}>{availableProviders[0].provider_id}</div>
+                  <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+                    {availableProviders[0].bar_count} 筆資料 | 
+                    覆蓋區間: {availableProviders[0].min_date} 至 {availableProviders[0].max_date}
+                  </div>
+                  {availableProviders[0].min_date > availableProviders[0].requested_start || 
+                   availableProviders[0].max_date < availableProviders[0].requested_end ? (
+                    <div style={{ fontSize: '12px', color: '#856404', marginTop: '4px' }}>
+                      ⚠️ 部分覆蓋：請求區間 {availableProviders[0].requested_start} 至 {availableProviders[0].requested_end}
+                    </div>
+                  ) : null}
+                </div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  {availableProviders.map((p) => (
+                    <label key={p.provider_id} style={{ 
+                      display: 'flex', 
+                      alignItems: 'flex-start', 
+                      padding: '10px', 
+                      background: selectedProvider === p.provider_id ? '#e7f3ff' : '#f8f9fa',
+                      borderRadius: '4px', 
+                      border: selectedProvider === p.provider_id ? '2px solid #007bff' : '1px solid #dee2e6',
+                      cursor: 'pointer',
+                    }}>
+                      <input
+                        type="radio"
+                        name="provider"
+                        value={p.provider_id}
+                        checked={selectedProvider === p.provider_id}
+                        onChange={(e) => setSelectedProvider(e.target.value)}
+                        style={{ marginTop: '2px', marginRight: '8px' }}
+                      />
+                      <div>
+                        <div style={{ fontWeight: 600 }}>{p.provider_id}</div>
+                        <div style={{ fontSize: '12px', color: '#666', marginTop: '2px' }}>
+                          {p.bar_count} 筆資料 | 
+                          覆蓋區間: {p.min_date} 至 {p.max_date}
+                        </div>
+                        {p.min_date > p.requested_start || p.max_date < p.requested_end ? (
+                          <div style={{ fontSize: '12px', color: '#856404', marginTop: '2px' }}>
+                            ⚠️ 部分覆蓋：請求區間 {p.requested_start} 至 {p.requested_end}
+                          </div>
+                        ) : null}
+                      </div>
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+          
           <button
             className="btn btn-primary"
             onClick={handleCreate}
-            disabled={creating}
+            disabled={creating || !selectedProvider || availableProviders.length === 0}
             style={{ marginTop: '12px' }}
           >
             {creating ? '建立中...' : '開始模擬'}
@@ -263,6 +426,13 @@ export default function SimulationPage() {
               <div style={{ fontSize: '12px', color: '#666', marginBottom: '4px' }}>決策次數</div>
               <div style={{ fontSize: '20px', fontWeight: 700 }}>{session.total_decisions}</div>
             </div>
+            {session.provider_id && (
+              <div className="card" style={{ padding: '16px' }}>
+                <div style={{ fontSize: '12px', color: '#666', marginBottom: '4px' }}>資料來源</div>
+                <div style={{ fontSize: '16px', fontWeight: 700 }}>{session.provider_id}</div>
+                <div style={{ fontSize: '11px', color: '#888', marginTop: '2px' }}>儲存資料</div>
+              </div>
+            )}
           </div>
 
           {session.current_position_json && (
@@ -302,13 +472,22 @@ export default function SimulationPage() {
 
           <div style={{ display: 'flex', gap: '8px', marginBottom: '24px', flexWrap: 'wrap' }}>
             {(session.status === 'pending' || session.status === 'active') && (
-              <button
-                className="btn btn-primary"
-                onClick={handleAdvance}
-                disabled={advancing}
-              >
-                {advancing ? '推進中...' : '推進一日'}
-              </button>
+              <>
+                <button
+                  className="btn btn-primary"
+                  onClick={handleAdvance}
+                  disabled={advancing || manualMode}
+                >
+                  {advancing ? '推進中...' : '自動推進一日'}
+                </button>
+                <button
+                  className="btn"
+                  style={{ backgroundColor: manualMode ? '#0070f3' : '#eaeaea', color: manualMode ? '#fff' : '#000' }}
+                  onClick={() => setManualMode(!manualMode)}
+                >
+                  {manualMode ? '切換至自動模式' : '切換至手動模式'}
+                </button>
+              </>
             )}
             {session.status === 'active' && (
               <button className="btn" style={{ backgroundColor: '#eaeaea' }} onClick={handlePause}>
@@ -330,6 +509,99 @@ export default function SimulationPage() {
               </button>
             )}
           </div>
+
+          {manualMode && (session.status === 'pending' || session.status === 'active') && (
+            <div className="card" style={{ marginBottom: '24px', borderLeft: '4px solid #0070f3' }}>
+              <h3 style={{ marginBottom: '16px' }}>手動決策</h3>
+              <div className="alert alert-info" style={{ marginBottom: '16px', fontSize: '13px' }}>
+                <strong>執行時序規則：</strong>決策於觀察日收盤後做出，成交於下一可用交易日開盤。
+                買入與賣出均採用相同規則，確保無前瞻偏差。
+              </div>
+              <div style={{ display: 'flex', gap: '12px', marginBottom: '16px', flexWrap: 'wrap' }}>
+                <button
+                  className="btn"
+                  style={{
+                    backgroundColor: manualAction === 'buy' ? '#28a745' : '#eaeaea',
+                    color: manualAction === 'buy' ? '#fff' : '#000',
+                    minWidth: '100px',
+                  }}
+                  onClick={() => setManualAction('buy')}
+                >
+                  買入 (BUY)
+                </button>
+                <button
+                  className="btn"
+                  style={{
+                    backgroundColor: manualAction === 'sell' ? '#dc3545' : '#eaeaea',
+                    color: manualAction === 'sell' ? '#fff' : '#000',
+                    minWidth: '100px',
+                  }}
+                  onClick={() => setManualAction('sell')}
+                >
+                  賣出 (SELL)
+                </button>
+                <button
+                  className="btn"
+                  style={{
+                    backgroundColor: manualAction === 'hold' ? '#6c757d' : '#eaeaea',
+                    color: manualAction === 'hold' ? '#fff' : '#000',
+                    minWidth: '100px',
+                  }}
+                  onClick={() => setManualAction('hold')}
+                >
+                  持有 (HOLD)
+                </button>
+              </div>
+              {manualAction === 'buy' && (
+                <div className="form-group" style={{ marginBottom: '16px' }}>
+                  <label style={{ display: 'block', marginBottom: '6px', fontWeight: 600 }}>
+                    數量 (股)
+                  </label>
+                  <input
+                    type="number"
+                    className="input"
+                    value={manualQuantity}
+                    onChange={(e) => setManualQuantity(e.target.value)}
+                    min="1"
+                    step="1"
+                  />
+                </div>
+              )}
+              <div className="form-group" style={{ marginBottom: '16px' }}>
+                <label style={{ display: 'block', marginBottom: '6px', fontWeight: 600 }}>
+                  決策理由 (可選)
+                </label>
+                <textarea
+                  className="input"
+                  value={manualRationale}
+                  onChange={(e) => setManualRationale(e.target.value)}
+                  placeholder="說明您做出此決策的原因..."
+                  rows={2}
+                  style={{ resize: 'vertical' }}
+                />
+              </div>
+              <div className="form-group" style={{ marginBottom: '16px' }}>
+                <label style={{ display: 'block', marginBottom: '6px', fontWeight: 600 }}>
+                  事後反思 (可選，可稍後填寫)
+                </label>
+                <textarea
+                  className="input"
+                  value={manualReflection}
+                  onChange={(e) => setManualReflection(e.target.value)}
+                  placeholder="決策後的反思與學習..."
+                  rows={2}
+                  style={{ resize: 'vertical' }}
+                />
+              </div>
+              <button
+                className="btn btn-primary"
+                onClick={handleManualDecision}
+                disabled={submitting}
+              >
+                {submitting ? '提交中...' : '提交決策'}
+              </button>
+            </div>
+          )}
 
           {session.warnings && session.warnings.length > 0 && (
             <div className="alert alert-warning" style={{ marginBottom: '24px' }}>
@@ -399,17 +671,158 @@ export default function SimulationPage() {
                             {d.decision_detail.symbol && (
                               <div><span style={{ color: '#999' }}>標的:</span> {d.decision_detail.symbol}</div>
                             )}
-                            {d.decision_detail.quantity && (
-                              <div><span style={{ color: '#999' }}>數量:</span> {d.decision_detail.quantity}</div>
+                            {d.decision_detail.action && (
+                              <div><span style={{ color: '#999' }}>操作:</span> {d.decision_detail.action.toUpperCase()}</div>
                             )}
-                            {d.decision_detail.execution_price && (
-                              <div><span style={{ color: '#999' }}>成交價:</span> ${d.decision_detail.execution_price?.toFixed(2)}</div>
+                            {d.decision_detail.fill?.quantity && (
+                              <div><span style={{ color: '#999' }}>數量:</span> {d.decision_detail.fill.quantity}</div>
                             )}
-                            {d.decision_detail.commission !== undefined && (
-                              <div><span style={{ color: '#999' }}>佣金:</span> ${d.decision_detail.commission?.toFixed(4)}</div>
+                            {d.decision_detail.fill?.observed_date && (
+                              <div><span style={{ color: '#999' }}>觀察日:</span> {d.decision_detail.fill.observed_date}</div>
+                            )}
+                            {d.decision_detail.fill?.observed_close && (
+                              <div><span style={{ color: '#999' }}>觀察收盤價:</span> ${d.decision_detail.fill.observed_close?.toFixed(2)}</div>
+                            )}
+                            {d.decision_detail.fill?.execution_date && (
+                              <div><span style={{ color: '#999' }}>成交日:</span> {d.decision_detail.fill.execution_date}</div>
+                            )}
+                            {d.decision_detail.fill?.price && (
+                              <div><span style={{ color: '#999' }}>成交價:</span> ${d.decision_detail.fill.price?.toFixed(2)}</div>
+                            )}
+                            {d.decision_detail.fill?.execution_rule && (
+                              <div><span style={{ color: '#999' }}>執行規則:</span> {d.decision_detail.fill.execution_rule}</div>
+                            )}
+                            {d.decision_detail.fill?.commission !== undefined && (
+                              <div><span style={{ color: '#999' }}>佣金:</span> ${d.decision_detail.fill.commission?.toFixed(4)}</div>
+                            )}
+                            {d.decision_detail.fill?.slippage !== undefined && (
+                              <div><span style={{ color: '#999' }}>滑價:</span> ${d.decision_detail.fill.slippage?.toFixed(4)}</div>
+                            )}
+                            {d.decision_detail.fill?.total_cost && (
+                              <div><span style={{ color: '#999' }}>總成本:</span> ${d.decision_detail.fill.total_cost?.toFixed(2)}</div>
+                            )}
+                            {d.decision_detail.fill?.net_proceeds && (
+                              <div><span style={{ color: '#999' }}>淨收入:</span> ${d.decision_detail.fill.net_proceeds?.toFixed(2)}</div>
+                            )}
+                            {(d.decision_detail.fill?.gross_pnl !== undefined || d.decision_detail.fill?.realized_pnl !== undefined) && (
+                              <div>
+                                <span style={{ color: '#999' }}>價差損益:</span> 
+                                <span style={{ 
+                                  color: (d.decision_detail.fill.gross_pnl ?? d.decision_detail.fill.realized_pnl) >= 0 ? '#155724' : '#721c24', 
+                                  fontWeight: 600 
+                                }}>
+                                  {' '}${(d.decision_detail.fill.gross_pnl ?? d.decision_detail.fill.realized_pnl)?.toFixed(2)}
+                                </span>
+                              </div>
+                            )}
+                            {d.decision_detail.rejection && (
+                              <div style={{ gridColumn: '1 / -1', padding: '8px', backgroundColor: '#fff3cd', borderRadius: '4px' }}>
+                                <span style={{ color: '#856404', fontWeight: 600 }}>拒絕:</span> {d.decision_detail.rejection.reason}
+                                {d.decision_detail.rejection.required && (
+                                  <span> (需要: ${d.decision_detail.rejection.required.toFixed(2)}, 可用: ${d.decision_detail.rejection.available.toFixed(2)})</span>
+                                )}
+                              </div>
                             )}
                             {d.decision_detail.rationale && (
-                              <div style={{ gridColumn: '1 / -1' }}><span style={{ color: '#999' }}>原因:</span> {d.decision_detail.rationale}</div>
+                              <div style={{ gridColumn: '1 / -1' }}><span style={{ color: '#999' }}>決策理由:</span> {d.decision_detail.rationale}</div>
+                            )}
+                            {d.decision_detail.reflection && (
+                              <div style={{ gridColumn: '1 / -1' }}>
+                                <span style={{ color: '#999' }}>事後反思:</span> {d.decision_detail.reflection}
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setEditingReflection(d.id);
+                                    setReflectionInput(d.decision_detail.reflection || '');
+                                  }}
+                                  style={{
+                                    marginLeft: '8px',
+                                    padding: '2px 8px',
+                                    fontSize: '11px',
+                                    border: '1px solid #ccc',
+                                    borderRadius: '3px',
+                                    backgroundColor: '#fff',
+                                    cursor: 'pointer',
+                                  }}
+                                >
+                                  編輯
+                                </button>
+                              </div>
+                            )}
+                            {!d.decision_detail.reflection && (
+                              <div style={{ gridColumn: '1 / -1' }}>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setEditingReflection(d.id);
+                                    setReflectionInput('');
+                                  }}
+                                  style={{
+                                    padding: '4px 12px',
+                                    fontSize: '12px',
+                                    border: '1px solid #0070f3',
+                                    borderRadius: '4px',
+                                    backgroundColor: '#fff',
+                                    color: '#0070f3',
+                                    cursor: 'pointer',
+                                  }}
+                                >
+                                  新增事後反思
+                                </button>
+                              </div>
+                            )}
+                            {editingReflection === d.id && (
+                              <div style={{ gridColumn: '1 / -1', marginTop: '8px' }} onClick={(e) => e.stopPropagation()}>
+                                <textarea
+                                  value={reflectionInput}
+                                  onChange={(e) => setReflectionInput(e.target.value)}
+                                  placeholder="輸入事後反思..."
+                                  style={{
+                                    width: '100%',
+                                    minHeight: '80px',
+                                    padding: '8px',
+                                    border: '1px solid #ccc',
+                                    borderRadius: '4px',
+                                    fontSize: '13px',
+                                    fontFamily: 'inherit',
+                                    resize: 'vertical',
+                                  }}
+                                />
+                                <div style={{ marginTop: '8px', display: 'flex', gap: '8px' }}>
+                                  <button
+                                    onClick={() => handleUpdateReflection(d.id)}
+                                    disabled={updatingReflection || !reflectionInput.trim()}
+                                    style={{
+                                      padding: '6px 16px',
+                                      fontSize: '12px',
+                                      border: 'none',
+                                      borderRadius: '4px',
+                                      backgroundColor: '#0070f3',
+                                      color: '#fff',
+                                      cursor: updatingReflection || !reflectionInput.trim() ? 'not-allowed' : 'pointer',
+                                      opacity: updatingReflection || !reflectionInput.trim() ? 0.6 : 1,
+                                    }}
+                                  >
+                                    {updatingReflection ? '保存中...' : '保存'}
+                                  </button>
+                                  <button
+                                    onClick={() => {
+                                      setEditingReflection(null);
+                                      setReflectionInput('');
+                                    }}
+                                    style={{
+                                      padding: '6px 16px',
+                                      fontSize: '12px',
+                                      border: '1px solid #ccc',
+                                      borderRadius: '4px',
+                                      backgroundColor: '#fff',
+                                      cursor: 'pointer',
+                                    }}
+                                  >
+                                    取消
+                                  </button>
+                                </div>
+                              </div>
                             )}
                           </div>
                           <div style={{ marginTop: '8px', fontSize: '12px', color: '#999' }}>
@@ -432,11 +845,18 @@ export default function SimulationPage() {
 
           <div style={{ marginTop: '24px', padding: '16px', backgroundColor: '#f8f9fa', borderRadius: '8px', fontSize: '12px', color: '#666' }}>
             <strong>方法論狀態：</strong>
-            {session.status === 'completed' ? ' historical_test_complete' :
-             session.status === 'retired' ? ' retired' :
-             ' historical_replay'}
-            {' '}&mdash; 此模擬使用預先存在的示範數據進行歷史重播，僅供研究用途，不構成投資建議。
+            {manualMode ? 'manual_replay' :
+             session.status === 'completed' ? 'historical_test_complete' :
+             session.status === 'retired' ? 'retired' :
+             'historical_replay'}
+            {' '}&mdash; 
+            {manualMode ? '人工程回放模式，每步由使用者決定買入／賣出／持有。' :
+             '自動策略回放模式，由引擎根據策略規則自動決策。'}
+            {' '}資料來源：保存的歷史數據（零即時API請求）。
             資料截止日：{session.data_cutoff_at}。
+            <br />
+            <strong>執行時序：</strong>
+            決策於觀察日收盤後做出，成交於下一可用交易日開盤（買入與賣出均採用相同規則）。
           </div>
         </>
       )}

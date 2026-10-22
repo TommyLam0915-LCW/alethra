@@ -97,7 +97,9 @@ export const api = {
       apiFetch(`/api/v1/versions/compare?v1=${v1Id}&v2=${v2Id}`),
   },
   simulations: {
-    create: (versionId: string, data: { initial_virtual_cash: number }) =>
+    getAvailableProviders: (versionId: string) =>
+      apiFetch(`/api/v1/simulations/versions/${versionId}/available-providers`),
+    create: (versionId: string, data: { initial_virtual_cash: number; provider_id?: string }) =>
       apiFetch(`/api/v1/simulations/versions/${versionId}`, { method: 'POST', body: JSON.stringify(data) }),
     get: (sessionId: string) =>
       apiFetch(`/api/v1/simulations/${sessionId}`),
@@ -111,6 +113,19 @@ export const api = {
       apiFetch(`/api/v1/simulations/${sessionId}/resume`, { method: 'POST' }),
     retire: (sessionId: string) =>
       apiFetch(`/api/v1/simulations/${sessionId}/retire`, { method: 'POST' }),
+    manualDecision: (sessionId: string, data: {
+      action: 'buy' | 'sell' | 'hold';
+      idempotency_key: string;
+      quantity?: number;
+      rationale?: string;
+      reflection?: string;
+    }) =>
+      apiFetch(`/api/v1/simulations/${sessionId}/manual-decision`, { method: 'POST', body: JSON.stringify(data) }),
+    updateReflection: (sessionId: string, decisionId: string, reflection: string) =>
+      apiFetch(`/api/v1/simulations/${sessionId}/decisions/${decisionId}/reflection`, { 
+        method: 'PATCH', 
+        body: JSON.stringify({ reflection }) 
+      }),
   },
   paperPortfolio: {
     list: () => apiFetch('/api/v1/paper-portfolio'),

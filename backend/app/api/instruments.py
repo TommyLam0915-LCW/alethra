@@ -484,7 +484,7 @@ def get_market(market_code: str):
 
 def _get_provider_mappings(instrument_id: str):
     mappings = []
-    for provider_id in ["lseg", "ibkr"]:
+    for provider_id in ["lseg", "ibkr", "twelvedata"]:
         mapping = get_provider_mapping(provider_id, instrument_id)
         if mapping:
             mappings.append({

@@ -14,7 +14,7 @@ _INSECURE_JWT_DEFAULTS = {
 
 _MIN_JWT_SECRET_LENGTH = 32
 
-_KNOWN_DATA_PROVIDERS = {"demo", "lseg"}
+_KNOWN_DATA_PROVIDERS = {"demo", "lseg", "twelvedata"}
 _KNOWN_AI_PROVIDERS = {"mock", "openai_compatible"}
 
 
