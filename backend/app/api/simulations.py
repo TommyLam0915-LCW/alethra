@@ -621,25 +621,8 @@ def manual_decision(
     """Execute manual BUY/SELL/HOLD decision with stored data."""
     session = _get_session_with_ownership(session_id, db, current_user)
 
-    if session.status not in (SimulationStatus.pending, SimulationStatus.active):
-        raise HTTPException(status_code=400, detail=f"Cannot make decisions on '{session.status}' session")
-
-    # Check provider confirmation
-    if not session.provider_confirmed:
-        raise HTTPException(
-            status_code=400,
-            detail="Session provider not confirmed. Please create a new session with explicit provider selection."
-        )
-
-    # Optimistic locking: check expected_version if provided
-    if payload.expected_version is not None:
-        if payload.expected_version != session.state_version:
-            raise HTTPException(
-                status_code=409,
-                detail=f"State version conflict: expected {payload.expected_version}, current {session.state_version}. Session has been modified."
-            )
-
-    # Idempotency check with conflict detection
+    # Idempotency check FIRST - before mutable state checks
+    # This allows replays of historical decisions even if session state has changed
     existing_decision = db.query(SimulationDecision).filter(
         SimulationDecision.idempotency_key == payload.idempotency_key,
     ).first()
@@ -671,13 +654,32 @@ def manual_decision(
                 detail="Idempotency key conflict: same key with different payload"
             )
         
-        # Same key, same payload: return original decision
+        # Same key, same payload: return original decision (idempotent replay)
         return ManualDecisionResponse(
             session=session,
             decision=existing_decision,
             fill=existing_decision.decision_detail.get('fill') if existing_decision.decision_detail else None,
             rejection=existing_decision.decision_detail.get('rejection') if existing_decision.decision_detail else None,
         )
+
+    # For NEW decisions: check mutable session state
+    if session.status not in (SimulationStatus.pending, SimulationStatus.active):
+        raise HTTPException(status_code=400, detail=f"Cannot make decisions on '{session.status}' session")
+
+    # Check provider confirmation
+    if not session.provider_confirmed:
+        raise HTTPException(
+            status_code=400,
+            detail="Session provider not confirmed. Please create a new session with explicit provider selection."
+        )
+
+    # Optimistic locking: check expected_version if provided
+    if payload.expected_version is not None:
+        if payload.expected_version != session.state_version:
+            raise HTTPException(
+                status_code=409,
+                detail=f"State version conflict: expected {payload.expected_version}, current {session.state_version}. Session has been modified."
+            )
 
     version = db.query(ExperimentVersion).filter(
         ExperimentVersion.id == session.experiment_version_id
