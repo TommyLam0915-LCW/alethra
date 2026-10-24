@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import Link from 'next/link';
-import { api } from '@/lib/api';
+import { api, ApiError } from '@/lib/api';
 
 interface SimulationSession {
   id: string;
@@ -17,6 +17,7 @@ interface SimulationSession {
   warnings: string[] | null;
   total_decisions: number;
   observed_days: number;
+  state_version: number;
   provider_id: string | null;
   created_at: string;
 }
@@ -94,6 +95,14 @@ export default function SimulationPage() {
   const [editingReflection, setEditingReflection] = useState<string | null>(null);
   const [reflectionInput, setReflectionInput] = useState('');
   const [updatingReflection, setUpdatingReflection] = useState(false);
+  const [pendingDecision, setPendingDecision] = useState<{
+    idempotency_key: string;
+    action: 'buy' | 'sell' | 'hold';
+    quantity?: number;
+    rationale?: string;
+    reflection?: string;
+    expected_version: number;
+  } | null>(null);
 
   useEffect(() => {
     const token = localStorage.getItem('token');
@@ -230,11 +239,24 @@ export default function SimulationPage() {
     if (!session?.id) return;
     setSubmitting(true);
     setError('');
-    try {
-      const idempotencyKey = `manual-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-      const payload: any = {
+
+    let payload: {
+      idempotency_key: string;
+      action: 'buy' | 'sell' | 'hold';
+      quantity?: number;
+      rationale?: string;
+      reflection?: string;
+      expected_version: number;
+    };
+
+    if (pendingDecision) {
+      payload = pendingDecision;
+    } else {
+      const key = `manual-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+      const p: typeof payload = {
         action: manualAction,
-        idempotency_key: idempotencyKey,
+        idempotency_key: key,
+        expected_version: session.state_version,
         rationale: manualRationale || undefined,
         reflection: manualReflection || undefined,
       };
@@ -245,19 +267,56 @@ export default function SimulationPage() {
           setSubmitting(false);
           return;
         }
-        payload.quantity = qty;
+        p.quantity = qty;
       }
+      payload = p;
+      setPendingDecision(payload);
+    }
+
+    try {
       const result = await api.simulations.manualDecision(session.id, payload);
       setSession(result.session);
       const d = await api.simulations.decisions(session.id);
       setDecisions(d);
+      setPendingDecision(null);
       setManualRationale('');
       setManualReflection('');
     } catch (err: any) {
-      setError(err.message || '決策提交失敗');
+      if (err instanceof ApiError && err.status === 409) {
+        const detail = err.message || '';
+        if (detail.includes('State version conflict')) {
+          // Stale-version conflict: reload state, preserve form, require explicit new submit
+          setPendingDecision(null);
+          try {
+            const [s, d] = await Promise.all([
+              api.simulations.get(session.id),
+              api.simulations.decisions(session.id),
+            ]);
+            setSession(s);
+            setDecisions(d);
+          } catch { /* refresh best-effort */ }
+          setError('狀態版本衝突：其他操作已變更狀態，請檢查後重新提交。');
+        } else if (detail.includes('Idempotency key conflict') && detail.includes('different payload')) {
+          // Payload conflict: same key but different payload - show specific error
+          setPendingDecision(null);
+          setError('冪等鍵衝突：相同 key 但 payload 不同。請使用新嘅決策或取消待重試。');
+        } else {
+          // Other 409: clear pending, show generic
+          setPendingDecision(null);
+          setError(`衝突（409）：${detail}`);
+        }
+      } else {
+        // Network failure or other error: preserve pendingDecision for retry
+        setError(err.message || '決策提交失敗（可點擊「重試」使用相同 payload 再送）');
+      }
     } finally {
       setSubmitting(false);
     }
+  };
+
+  const handleRetryDecision = async () => {
+    if (!pendingDecision) return;
+    await handleManualDecision();
   };
 
   const handleUpdateReflection = async (decisionId: string) => {
@@ -593,13 +652,51 @@ export default function SimulationPage() {
                   style={{ resize: 'vertical' }}
                 />
               </div>
-              <button
-                className="btn btn-primary"
-                onClick={handleManualDecision}
-                disabled={submitting}
-              >
-                {submitting ? '提交中...' : '提交決策'}
-              </button>
+              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                <button
+                  className="btn btn-primary"
+                  onClick={handleManualDecision}
+                  disabled={submitting || !!pendingDecision}
+                >
+                  {submitting ? '提交中...' : '提交決策'}
+                </button>
+                {pendingDecision && (
+                  <button
+                    className="btn"
+                    style={{ backgroundColor: '#ffc107', color: '#000' }}
+                    onClick={handleRetryDecision}
+                    disabled={submitting}
+                  >
+                    {submitting ? '重試中...' : '重試（相同 payload）'}
+                  </button>
+                )}
+                {pendingDecision && (
+                  <button
+                    className="btn"
+                    style={{ backgroundColor: '#eaeaea', color: '#000' }}
+                    onClick={() => {
+                      if (confirm('放棄重試唔等於取消後端交易。如果決策已提交成功，佢仍然有效。確定要放棄重試並重新整理狀態？')) {
+                        setPendingDecision(null);
+                        setError('');
+                        // Refresh state to reconcile
+                        loadSession();
+                      }
+                    }}
+                    disabled={submitting}
+                  >
+                    放棄重試
+                  </button>
+                )}
+              </div>
+              {pendingDecision && (
+                <div className="alert" style={{ marginTop: '12px', fontSize: '12px', background: '#fff3cd', border: '1px solid #ffc107' }}>
+                  <strong>待重試決策：</strong>
+                  idempotency_key=<code>{pendingDecision.idempotency_key}</code>,
+                  action={pendingDecision.action},
+                  expected_version={pendingDecision.expected_version}
+                  {pendingDecision.quantity != null && `, quantity=${pendingDecision.quantity}`}
+                </div>
+              )}
             </div>
           )}
 
