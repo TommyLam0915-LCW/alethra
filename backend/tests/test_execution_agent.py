@@ -316,6 +316,7 @@ class TestAgentAPIService:
         )
         assert fill.quantity == 10
         assert fill.price == 150.0
+        assert fill.commission == 1.50
         assert fill.fill_source == FillSource.broker
 
         db.refresh(db.query(OrderIntent).filter(
@@ -325,6 +326,59 @@ class TestAgentAPIService:
             OrderIntent.intent_id == intent["intent_id"]
         ).first()
         assert updated_intent.status == IntentStatus.filled
+
+
+    def test_agent_report_fill_null_commission(self, client, auth_headers):
+        """Test that omitted commission remains NULL, not converted to 0.0"""
+        portfolio_id = _create_user_and_portfolio(client, auth_headers)
+        intent = _create_and_authorize_intent(client, auth_headers, portfolio_id)
+
+        db = _get_db()
+        user = db.query(User).first()
+
+        agent_report_submitted(db, intent["intent_id"], user.id, "IBKR-12345")
+
+        # Report fill WITHOUT commission parameter
+        fill = agent_report_fill(
+            db,
+            intent_id=intent["intent_id"],
+            user_id=user.id,
+            quantity=10,
+            price=150.0,
+            fill_time=utcnow(),
+            broker_ref="IBKR-12345",
+            # commission intentionally omitted
+        )
+        assert fill.quantity == 10
+        assert fill.price == 150.0
+        assert fill.commission is None  # Should be NULL, not 0.0
+        assert fill.fill_source == FillSource.broker
+
+    def test_agent_report_fill_explicit_zero_commission(self, client, auth_headers):
+        """Test that explicit zero commission is preserved as 0.0, not NULL"""
+        portfolio_id = _create_user_and_portfolio(client, auth_headers)
+        intent = _create_and_authorize_intent(client, auth_headers, portfolio_id)
+
+        db = _get_db()
+        user = db.query(User).first()
+
+        agent_report_submitted(db, intent["intent_id"], user.id, "IBKR-12345")
+
+        # Report fill WITH explicit zero commission
+        fill = agent_report_fill(
+            db,
+            intent_id=intent["intent_id"],
+            user_id=user.id,
+            quantity=10,
+            price=150.0,
+            fill_time=utcnow(),
+            broker_ref="IBKR-12345",
+            commission=0.0,  # Explicit zero
+        )
+        assert fill.quantity == 10
+        assert fill.price == 150.0
+        assert fill.commission == 0.0  # Should be 0.0, not NULL
+        assert fill.fill_source == FillSource.broker
 
     def test_agent_report_partial_fills(self, client, auth_headers):
         portfolio_id = _create_user_and_portfolio(client, auth_headers)

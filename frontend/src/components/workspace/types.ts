@@ -125,7 +125,30 @@ export const DEFAULT_LAYOUT: WorkspaceLayout = {
   },
 };
 
-const LAYOUT_STORAGE_KEY = 'workspace-layout-cache';
+const LAYOUT_STORAGE_KEY_PREFIX = 'workspace-layout-cache';
+
+function getUserIdFromToken(): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const token = window.localStorage.getItem('token');
+    if (!token) return null;
+    // JWT format: header.payload.signature
+    const parts = token.split('.');
+    if (parts.length !== 3) return null;
+    // Decode payload (base64url -> base64 -> JSON)
+    const payload = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const decoded = JSON.parse(atob(payload));
+    // Standard JWT claim for user ID
+    return decoded.sub || decoded.user_id || null;
+  } catch {
+    return null;
+  }
+}
+
+function getLayoutCacheKey(): string {
+  const userId = getUserIdFromToken();
+  return userId ? `${LAYOUT_STORAGE_KEY_PREFIX}-${userId}` : LAYOUT_STORAGE_KEY_PREFIX;
+}
 
 export function mergeLayout(saved: unknown): WorkspaceLayout {
   const layout: WorkspaceLayout = { ...DEFAULT_LAYOUT, panels: { ...DEFAULT_LAYOUT.panels } };
@@ -153,7 +176,8 @@ export function mergeLayout(saved: unknown): WorkspaceLayout {
 export function readCachedLayout(): WorkspaceLayout | null {
   if (typeof window === 'undefined') return null;
   try {
-    const raw = window.localStorage.getItem(LAYOUT_STORAGE_KEY);
+    const cacheKey = getLayoutCacheKey();
+    const raw = window.localStorage.getItem(cacheKey);
     if (!raw) return null;
     return mergeLayout(JSON.parse(raw));
   } catch {
@@ -164,9 +188,20 @@ export function readCachedLayout(): WorkspaceLayout | null {
 export function writeCachedLayout(layout: WorkspaceLayout) {
   if (typeof window === 'undefined') return;
   try {
-    window.localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify(layout));
+    const cacheKey = getLayoutCacheKey();
+    window.localStorage.setItem(cacheKey, JSON.stringify(layout));
   } catch {
     // storage full/unavailable — server persistence still applies
+  }
+}
+
+export function clearCachedLayout() {
+  if (typeof window === 'undefined') return;
+  try {
+    const cacheKey = getLayoutCacheKey();
+    window.localStorage.removeItem(cacheKey);
+  } catch {
+    // ignore
   }
 }
 

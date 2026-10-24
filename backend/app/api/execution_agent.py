@@ -60,7 +60,7 @@ class FillReport(BaseModel):
     price: float = Field(..., gt=0)
     fill_time: str
     broker_ref: str
-    commission: float = 0.0
+    commission: Optional[float] = None
 
 
 class RejectionReport(BaseModel):

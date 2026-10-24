@@ -52,6 +52,84 @@ export interface AIConversationContext {
   experiment_ids?: string[];
 }
 
+export interface SimulationSession {
+  id: string;
+  experiment_version_id: string;
+  owner_id: string;
+  initial_virtual_cash: number;
+  started_at?: string;
+  data_cutoff_at: string;
+  current_snapshot_date?: string;
+  status: string;
+  simulation_policy_version: string;
+  paper_equity?: number;
+  current_position_json?: any;
+  warnings?: any[];
+  total_decisions: number;
+  observed_days: number;
+  state_version: number;
+  provider_id?: string;
+  provider_confirmed: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SimulationDecision {
+  id: string;
+  session_id: string;
+  step_number: number;
+  snapshot_date: string;
+  data_cutoff_at: string;
+  engine_version: string;
+  decision_type: string;
+  decision_detail?: any;
+  paper_cash: number;
+  paper_position?: any;
+  paper_equity: number;
+  warnings?: any[];
+  created_at: string;
+}
+
+export interface ManualDecisionRequest {
+  action: 'buy' | 'sell' | 'hold';
+  quantity?: number;
+  idempotency_key: string;
+  rationale?: string;
+  reflection?: string;
+  expected_version: number;
+}
+
+export interface ManualDecisionResponse {
+  session: SimulationSession;
+  decision: SimulationDecision;
+  fill?: any;
+  rejection?: any;
+}
+
+export interface ReflectionUpdateRequest {
+  reflection: string;
+}
+
+export interface ReflectionUpdateResponse {
+  decision: SimulationDecision;
+}
+
+export function generateIdempotencyKey(): string {
+  return `manual_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`;
+}
+
+export function isStateVersionConflict(error: any): boolean {
+  return error instanceof ApiError && 
+         error.status === 409 && 
+         error.message.toLowerCase().includes('state version');
+}
+
+export function isIdempotencyConflict(error: any): boolean {
+  return error instanceof ApiError && 
+         error.status === 409 && 
+         error.message.toLowerCase().includes('idempotency key');
+}
+
 export const api = {
   auth: {
     register: (data: { email: string; password: string; display_name?: string }) =>
@@ -77,6 +155,14 @@ export const api = {
     export: (id: string) => apiFetch(`/api/v1/experiments/${id}/export`),
     methodReview: (id: string) => apiFetch(`/api/v1/experiments/${id}/method-review`),
   },
+  datasets: {
+    list: () => apiFetch('/api/v1/datasets'),
+    get: (id: string) => apiFetch(`/api/v1/datasets/${id}`),
+    create: (data: any) =>
+      apiFetch('/api/v1/datasets', { method: 'POST', body: JSON.stringify(data) }),
+    createSnapshot: (id: string, data: any) =>
+      apiFetch(`/api/v1/datasets/${id}/snapshots`, { method: 'POST', body: JSON.stringify(data) }),
+  },
   runs: {
     create: (versionId: string) =>
       apiFetch(`/api/v1/versions/${versionId}/runs`, { method: 'POST' }),
@@ -97,7 +183,7 @@ export const api = {
       apiFetch(`/api/v1/versions/compare?v1=${v1Id}&v2=${v2Id}`),
   },
   simulations: {
-    create: (versionId: string, data: { initial_virtual_cash: number }) =>
+    create: (versionId: string, data: { initial_virtual_cash: number; provider_id?: string }) =>
       apiFetch(`/api/v1/simulations/versions/${versionId}`, { method: 'POST', body: JSON.stringify(data) }),
     get: (sessionId: string) =>
       apiFetch(`/api/v1/simulations/${sessionId}`),
@@ -105,6 +191,12 @@ export const api = {
       apiFetch(`/api/v1/simulations/${sessionId}/advance`, { method: 'POST' }),
     decisions: (sessionId: string) =>
       apiFetch(`/api/v1/simulations/${sessionId}/decisions`),
+    availableProviders: (versionId: string) =>
+      apiFetch(`/api/v1/simulations/versions/${versionId}/available-providers`),
+    manualDecision: (sessionId: string, data: ManualDecisionRequest): Promise<ManualDecisionResponse> =>
+      apiFetch(`/api/v1/simulations/${sessionId}/manual-decision`, { method: 'POST', body: JSON.stringify(data) }),
+    updateReflection: (sessionId: string, decisionId: string, data: ReflectionUpdateRequest): Promise<ReflectionUpdateResponse> =>
+      apiFetch(`/api/v1/simulations/${sessionId}/decisions/${decisionId}/reflection`, { method: 'PATCH', body: JSON.stringify(data) }),
     pause: (sessionId: string) =>
       apiFetch(`/api/v1/simulations/${sessionId}/pause`, { method: 'POST' }),
     resume: (sessionId: string) =>
@@ -379,6 +471,7 @@ export const api = {
     createPaymentIntent: (data: { subscription_id: string }) =>
       apiFetch('/api/v1/payments/create-intent', { method: 'POST', body: JSON.stringify(data) }),
     getOperationalStatus: () => apiFetch('/api/v1/operational-status'),
+    getUsageSummary: (days: number = 30) => apiFetch(`/api/v1/usage/summary?days=${days}`),
   },
   watchlists: {
     list: () => apiFetch('/api/v1/watchlists'),
@@ -398,5 +491,11 @@ export const api = {
     getWorkspace: () => apiFetch('/api/v1/layouts/workspace'),
     saveWorkspace: (layout: Record<string, unknown>) =>
       apiFetch('/api/v1/layouts/workspace', { method: 'PUT', body: JSON.stringify({ layout }) }),
+    getWorkspacePreferences: () => apiFetch('/api/v1/layouts/workspace_preferences'),
+    putWorkspacePreferences: (preferences: any) =>
+      apiFetch('/api/v1/layouts/workspace_preferences', {
+        method: 'PUT',
+        body: JSON.stringify({ layout: preferences }),
+      }),
   },
 };

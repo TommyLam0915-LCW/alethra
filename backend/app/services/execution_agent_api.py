@@ -126,7 +126,7 @@ def agent_report_fill(
     price: float,
     fill_time: datetime,
     broker_ref: str,
-    commission: float = 0.0,
+    commission: Optional[float] = None,
 ) -> FillRecord:
     """Agent reports a fill event from the broker.
 
@@ -188,6 +188,7 @@ def agent_report_fill(
         order_intent_id=intent.id,
         quantity=quantity,
         price=price,
+        commission=commission,
         fill_source=FillSource.broker,
         broker_ref=broker_ref,
         broker_fill_key=key,

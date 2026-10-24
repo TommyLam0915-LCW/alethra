@@ -76,7 +76,8 @@ class ExecutionAgent:
         self._claimed_broker_refs: Set[str] = set()
         
         # Durable journal for fill delivery recovery across restarts (P0-C)
-        self.fill_delivery_journal = FillDeliveryJournal()
+        # Use ib_client_id as agent_id for path isolation
+        self.fill_delivery_journal = FillDeliveryJournal(agent_id=str(self.config.ib_client_id))
 
         signal.signal(signal.SIGINT, self._handle_shutdown)
         signal.signal(signal.SIGTERM, self._handle_shutdown)
@@ -171,23 +172,36 @@ class ExecutionAgent:
                 )
                 
                 # Attempt to upload the fill to the platform
-                self.alethra_client.upload_fill(
+                # Convert fill_time from ISO string to datetime
+                from datetime import datetime
+                fill_time_dt = datetime.fromisoformat(pending_fill.fill_time)
+
+                fill_report = FillReport(
                     intent_id=pending_fill.intent_id,
                     broker_ref=pending_fill.broker_ref,
                     quantity=pending_fill.quantity,
                     price=pending_fill.price,
-                    fill_time=pending_fill.fill_time,
+                    fill_time=fill_time_dt,
                     commission=pending_fill.commission,
-                    fill_key=pending_fill.fill_key,
                 )
+                self.alethra_client.report_fill(fill_report)
                 
                 # Success - remove from journal
-                self.fill_delivery_journal.remove_pending_fill(pending_fill.fill_key)
-                logger.info(f"Successfully replayed fill delivery {pending_fill.fill_key}")
-                
+                if not self.fill_delivery_journal.remove_pending_fill(pending_fill.fill_key):
+                    logger.error(
+                        f"Failed to remove fill {pending_fill.fill_key} from journal after replay; "
+                        f"will retry removal on next cycle"
+                    )
+                else:
+                    logger.info(f"Successfully replayed fill delivery {pending_fill.fill_key}")
+
             except Exception as e:
                 # Failed - increment retry count and continue
-                self.fill_delivery_journal.increment_retry(pending_fill.fill_key)
+                if not self.fill_delivery_journal.increment_retry(pending_fill.fill_key):
+                    logger.error(
+                        f"Failed to increment retry count for fill {pending_fill.fill_key}; "
+                        f"in-memory state updated but not durable"
+                    )
                 logger.warning(
                     f"Failed to replay fill delivery {pending_fill.fill_key}: {e}. "
                     f"Will retry on next poll cycle."
@@ -556,13 +570,22 @@ class ExecutionAgent:
                         created_at=datetime.utcnow().isoformat(),
                         retry_count=0,
                     )
-                    self.fill_delivery_journal.add_pending_fill(pending_fill)
-                    
+                    if not self.fill_delivery_journal.add_pending_fill(pending_fill):
+                        logger.error(
+                            f"Failed to persist fill {fill_key} to journal; "
+                            f"skipping upload to avoid loss of durable tracking"
+                        )
+                        continue
+
                     # Try to upload this fill
                     uploaded = self._try_upload_fill(pending_fill)
                     if uploaded:
                         self._reported_fills.add(fill_key)
-                        self.fill_delivery_journal.remove_pending_fill(fill_key)
+                        if not self.fill_delivery_journal.remove_pending_fill(fill_key):
+                            logger.error(
+                                f"Failed to remove fill {fill_key} from journal after upload; "
+                                f"will retry removal on next cycle"
+                            )
             
             # Retry pending fills from journal (including from previous runs)
             for pending_fill in self.fill_delivery_journal.get_pending_fills():
@@ -570,7 +593,11 @@ class ExecutionAgent:
                     uploaded = self._try_upload_fill(pending_fill)
                     if uploaded:
                         self._reported_fills.add(pending_fill.fill_key)
-                        self.fill_delivery_journal.remove_pending_fill(pending_fill.fill_key)
+                        if not self.fill_delivery_journal.remove_pending_fill(pending_fill.fill_key):
+                            logger.error(
+                                f"Failed to remove fill {pending_fill.fill_key} from journal after retry upload; "
+                                f"will retry removal on next cycle"
+                            )
 
             # Check terminal status
             if status_enum in (BrokerOrderStatus.FILLED,):

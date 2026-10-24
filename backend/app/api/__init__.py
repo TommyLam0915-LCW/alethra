@@ -24,12 +24,15 @@ from app.api.execution_agent import router as execution_agent_router
 from app.api.watchlists import router as watchlists_router
 from app.api.user_layouts import router as user_layouts_router
 from app.api.ai_assistant import router as ai_assistant_router
+from app.api.human_decisions import router as human_decisions_router
+from app.api.datasets import router as datasets_router
 
 v1_router = APIRouter(prefix="/v1")
 v1_router.include_router(brand_router)
 v1_router.include_router(demo_assets_router)
 v1_router.include_router(instruments_router)
 v1_router.include_router(ml_training_router)
+v1_router.include_router(datasets_router)
 v1_router.include_router(experiments_router)
 v1_router.include_router(runs_router)
 v1_router.include_router(simulations_router)
@@ -50,6 +53,7 @@ v1_router.include_router(execution_agent_router)
 v1_router.include_router(watchlists_router)
 v1_router.include_router(user_layouts_router)
 v1_router.include_router(ai_assistant_router)
+v1_router.include_router(human_decisions_router)
 
 api_router = APIRouter()
 api_router.include_router(auth_router)

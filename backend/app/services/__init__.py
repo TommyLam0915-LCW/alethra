@@ -28,6 +28,8 @@ EVENTS_AFTER_OUTCOME = {
     "export_generated",
     "simulation_completed",
     "simulation_retired",
+    "human_decision_created",
+    "human_decision_corrected",
 }
 
 

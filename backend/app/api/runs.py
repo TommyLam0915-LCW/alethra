@@ -84,6 +84,8 @@ def create_run(
         run.warnings = result.get("warnings", [])
         run.dataset_checksum = result.get("dataset_checksum")
         run.methodology_json = result.get("methodology_summary")
+        run.daily_equity_curve = result.get("daily_equity_curve")
+        run.transactions = result.get("transactions")
         run.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
         settle_reservation(db, reservation.id)

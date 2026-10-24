@@ -263,6 +263,11 @@ export default function ExperimentDetailPage() {
           </p>
         </div>
         <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+          <Link href={`/experiments/${experimentId}/data`}>
+            <button className="btn" style={{ backgroundColor: '#eaeaea', fontSize: '13px' }}>
+              管理資料
+            </button>
+          </Link>
           {experiment.status === 'locked' && (
             <Link href={`/experiments/${experimentId}/simulation`}>
               <button className="btn btn-primary" style={{ fontSize: '13px' }}>
@@ -418,6 +423,13 @@ export default function ExperimentDetailPage() {
                 {latestRun.dataset_checksum && <> | dataset: {latestRun.dataset_checksum.slice(0, 16)}...</>}
               </div>
             )}
+
+            <Link
+              href={`/experiments/${experimentId}/runs/${latestRun.id}`}
+              style={{ display: 'inline-block', marginTop: '16px', color: '#0070f3', textDecoration: 'none', fontSize: '14px' }}
+            >
+              查看詳細每日帳務與交易明細 →
+            </Link>
 
             <div style={{ marginTop: '16px', padding: '12px', backgroundColor: '#fff3cd', borderRadius: '6px', fontSize: '14px' }}>
               <strong>提醒：</strong>以上結果基於歷史示範資料，不代表未來績效。本系統是研究工具，不構成投資建議。
@@ -751,31 +763,40 @@ export default function ExperimentDetailPage() {
           <h3 style={{ marginBottom: '16px' }}>執行歷史</h3>
           <div style={{ display: 'grid', gap: '8px' }}>
             {runs.map((run) => (
-              <div
+              <Link
                 key={run.id}
-                style={{
-                  padding: '12px',
-                  backgroundColor: '#f5f5f5',
-                  borderRadius: '6px',
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                }}
+                href={`/experiments/${experimentId}/runs/${run.id}`}
+                style={{ textDecoration: 'none', color: 'inherit' }}
               >
-                <div>
-                  <div style={{ fontSize: '14px', fontWeight: '500' }}>
-                    {run.status === 'completed' ? '已完成' : run.status === 'failed' ? '失敗' : '執行中'}
+                <div
+                  style={{
+                    padding: '12px',
+                    backgroundColor: '#f5f5f5',
+                    borderRadius: '6px',
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    cursor: 'pointer',
+                    transition: 'background-color 0.2s',
+                  }}
+                  onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#eaeaea'}
+                  onMouseLeave={(e) => e.currentTarget.style.backgroundColor = '#f5f5f5'}
+                >
+                  <div>
+                    <div style={{ fontSize: '14px', fontWeight: '500' }}>
+                      {run.status === 'completed' ? '已完成' : run.status === 'failed' ? '失敗' : '執行中'}
+                    </div>
+                    <div style={{ fontSize: '12px', color: '#666' }}>
+                      {run.started_at && new Date(run.started_at).toLocaleString('zh-Hant')}
+                    </div>
                   </div>
-                  <div style={{ fontSize: '12px', color: '#666' }}>
-                    {run.started_at && new Date(run.started_at).toLocaleString('zh-Hant')}
-                  </div>
+                  {run.metrics?.total_return_pct != null && (
+                    <div style={{ fontSize: '14px', fontWeight: 'bold' }}>
+                      {run.metrics.total_return_pct.toFixed(2)}%
+                    </div>
+                  )}
                 </div>
-                {run.metrics?.total_return_pct != null && (
-                  <div style={{ fontSize: '14px', fontWeight: 'bold' }}>
-                    {run.metrics.total_return_pct.toFixed(2)}%
-                  </div>
-                )}
-              </div>
+              </Link>
             ))}
           </div>
         </div>

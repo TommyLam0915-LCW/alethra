@@ -100,6 +100,7 @@ class FillRecord(Base):
     order_intent_id = Column(UUID(as_uuid=True), ForeignKey("order_intents.id"), nullable=False)
     quantity = Column(Integer, nullable=False)
     price = Column(Float, nullable=True)
+    commission = Column(Float, nullable=True)
     fill_source = Column(SAEnum(FillSource), nullable=False, default=FillSource.simulated)
     broker_ref = Column(String(255), nullable=True)
     broker_fill_key = Column(String(255), nullable=True, index=True)

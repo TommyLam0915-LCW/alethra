@@ -39,7 +39,7 @@ class FillReport:
     price: float
     fill_time: datetime
     broker_ref: str
-    commission: float = 0.0
+    commission: Optional[float] = None
 
 
 class AlethraAPIClient:

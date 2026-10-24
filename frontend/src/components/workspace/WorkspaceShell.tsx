@@ -13,11 +13,12 @@ import DetailsPanel from './DetailsPanel';
 import OrderPreviewPanel from './OrderPreviewPanel';
 import AIPanel from './AIPanel';
 import BottomTabs from './BottomTabs';
-import { useMediaQuery, useWorkspaceLayout } from './hooks';
+import { useMediaQuery, useWorkspaceLayout, useWorkspacePreferences } from './hooks';
 import { rangeToStart, todayStr, type BarsResponse, type InstrumentDetail, type Watchlist, type WorkspaceLayout } from './types';
 
 export default function WorkspaceShell() {
-  const { layout, setLayout, ready } = useWorkspaceLayout();
+  const { layout, setLayout, ready, hasSavedState } = useWorkspaceLayout();
+  useWorkspacePreferences(ready, hasSavedState, setLayout);
   const isMobile = useMediaQuery('(max-width: 900px)');
   const [authed, setAuthed] = useState(false);
   const [bars, setBars] = useState<BarsResponse | null>(null);
@@ -269,7 +270,12 @@ export default function WorkspaceShell() {
             ☰
           </button>
           <Link href="/dashboard">主頁</Link>
+          <Link href="/research-drafts">研究</Link>
           <Link href="/training">訓練</Link>
+          <Link href="/models">模型</Link>
+          <Link href="/experiments">實驗</Link>
+          <Link href="/api-keys">API</Link>
+          <Link href="/settings">設定</Link>
           <Link href="/subscription">訂閱</Link>
           <button onClick={handleLogout}>登出</button>
         </div>

@@ -49,8 +49,9 @@ export default function LoginPage() {
         <form onSubmit={handleSubmit}>
           {!isLogin && (
             <div className="form-group">
-              <label>顯示名稱</label>
+              <label htmlFor="display-name">顯示名稱</label>
               <input
+                id="display-name"
                 type="text"
                 className="input"
                 value={displayName}
@@ -61,8 +62,9 @@ export default function LoginPage() {
           )}
 
           <div className="form-group">
-            <label>電子郵件</label>
+            <label htmlFor="email">電子郵件</label>
             <input
+              id="email"
               type="email"
               className="input"
               value={email}
@@ -72,8 +74,9 @@ export default function LoginPage() {
           </div>
 
           <div className="form-group">
-            <label>密碼</label>
+            <label htmlFor="password">密碼</label>
             <input
+              id="password"
               type="password"
               className="input"
               value={password}

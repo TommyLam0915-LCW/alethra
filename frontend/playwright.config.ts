@@ -1,5 +1,8 @@
 import { defineConfig, devices } from '@playwright/test';
 
+const port = process.env.FRONTEND_PORT || '3001';
+const baseURL = `http://localhost:${port}`;
+
 export default defineConfig({
   testDir: './e2e',
   fullyParallel: false,
@@ -11,7 +14,7 @@ export default defineConfig({
     ['list']
   ],
   use: {
-    baseURL: 'http://localhost:3001',
+    baseURL,
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',
@@ -24,7 +27,7 @@ export default defineConfig({
   ],
   webServer: {
     command: 'echo "Using existing acceptance stack"',
-    url: 'http://localhost:3001',
+    url: baseURL,
     reuseExistingServer: true,
   },
 });
