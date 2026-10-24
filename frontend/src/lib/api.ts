@@ -83,6 +83,23 @@ export const api = {
     get: (runId: string) =>
       apiFetch(`/api/v1/runs/${runId}`),
     list: (experimentId: string) => apiFetch(`/api/v1/experiments/${experimentId}/runs`),
+    compare: (runA: string, runB: string) =>
+      apiFetch(`/api/v1/runs/compare?run_a=${runA}&run_b=${runB}`),
+  },
+  savedComparisons: {
+    create: (data: {
+      experiment_id: string;
+      run_a_id: string;
+      run_b_id: string;
+      purpose: string;
+      notes?: string | null;
+    }) => apiFetch('/api/v1/saved-comparisons', { method: 'POST', body: JSON.stringify(data) }),
+    list: (experimentId: string) =>
+      apiFetch(`/api/v1/experiments/${experimentId}/saved-comparisons`),
+    get: (comparisonId: string) =>
+      apiFetch(`/api/v1/saved-comparisons/${comparisonId}`),
+    update: (comparisonId: string, data: { purpose: string; notes?: string | null }) =>
+      apiFetch(`/api/v1/saved-comparisons/${comparisonId}`, { method: 'PATCH', body: JSON.stringify(data) }),
   },
   timeline: {
     get: (experimentId: string) => apiFetch(`/api/v1/experiments/${experimentId}/timeline`),
@@ -119,6 +136,7 @@ export const api = {
       quantity?: number;
       rationale?: string;
       reflection?: string;
+      expected_version?: number;
     }) =>
       apiFetch(`/api/v1/simulations/${sessionId}/manual-decision`, { method: 'POST', body: JSON.stringify(data) }),
     updateReflection: (sessionId: string, decisionId: string, reflection: string) =>

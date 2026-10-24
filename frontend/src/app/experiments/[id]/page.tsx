@@ -125,6 +125,8 @@ export default function ExperimentDetailPage() {
   const [diffLoading, setDiffLoading] = useState(false);
   const [methodReview, setMethodReview] = useState<MethodReview | null>(null);
   const [methodReviewLoading, setMethodReviewLoading] = useState(false);
+  const [selectedRuns, setSelectedRuns] = useState<string[]>([]);
+  const [savedComparisons, setSavedComparisons] = useState<any[]>([]);
 
   useEffect(() => {
     const token = localStorage.getItem('token');
@@ -137,13 +139,14 @@ export default function ExperimentDetailPage() {
 
   const loadData = async () => {
     try {
-      const [exp, runsData, versionsData, timelineData, notesData, reviewData] = await Promise.all([
+      const [exp, runsData, versionsData, timelineData, notesData, reviewData, savedComparisonsData] = await Promise.all([
         api.experiments.get(experimentId),
         api.runs.list(experimentId),
         api.experiments.versions(experimentId),
         api.timeline.get(experimentId),
         api.notes.list(experimentId),
         api.experiments.methodReview(experimentId).catch(() => null),
+        api.savedComparisons.list(experimentId).catch(() => []),
       ]);
       setExperiment(exp);
       setRuns(runsData);
@@ -151,6 +154,7 @@ export default function ExperimentDetailPage() {
       setTimeline(timelineData);
       setNotes(notesData);
       setMethodReview(reviewData);
+      setSavedComparisons(savedComparisonsData);
     } catch (err) {
       setError('載入失敗');
     } finally {
@@ -805,39 +809,119 @@ export default function ExperimentDetailPage() {
         )}
       </div>
 
+      {/* Saved Comparisons */}
+      {savedComparisons.length > 0 && (
+        <div className="card">
+          <h3 style={{ marginTop: 0, marginBottom: '16px' }}>已儲存嘅比較</h3>
+          <div style={{ display: 'grid', gap: '8px' }}>
+            {savedComparisons.map((saved) => (
+              <Link
+                key={saved.id}
+                href={`/experiments/${experimentId}/runs/compare?saved_comparison_id=${saved.id}`}
+                style={{
+                  padding: '12px',
+                  backgroundColor: '#f8f9fa',
+                  borderRadius: '6px',
+                  textDecoration: 'none',
+                  color: 'inherit',
+                  border: '1px solid #dee2e6',
+                }}
+              >
+                <div style={{ fontSize: '14px', fontWeight: 500, marginBottom: '4px' }}>
+                  {saved.purpose}
+                </div>
+                <div style={{ fontSize: '12px', color: '#666' }}>
+                  Run A: {saved.run_a_id.slice(0, 8)}... → Run B: {saved.run_b_id.slice(0, 8)}...
+                </div>
+                <div style={{ fontSize: '11px', color: '#999', marginTop: '4px' }}>
+                  更新於 {new Date(saved.updated_at).toLocaleString('zh-Hant')}
+                </div>
+              </Link>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Run History */}
       {runs.length > 0 && (
         <div className="card">
-          <h3 style={{ marginBottom: '16px' }}>執行歷史</h3>
-          <div style={{ display: 'grid', gap: '8px' }}>
-            {runs.map((run) => (
-              <div
-                key={run.id}
-                style={{
-                  padding: '12px',
-                  backgroundColor: '#f5f5f5',
-                  borderRadius: '6px',
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                }}
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+            <h3 style={{ margin: 0 }}>執行歷史</h3>
+            {selectedRuns.length === 2 && (
+              <Link
+                href={`/experiments/${experimentId}/runs/compare?run_a=${selectedRuns[0]}&run_b=${selectedRuns[1]}`}
+                className="btn btn-primary"
+                style={{ fontSize: '13px', textDecoration: 'none' }}
               >
-                <div>
-                  <div style={{ fontSize: '14px', fontWeight: '500' }}>
-                    {run.status === 'completed' ? '已完成' : run.status === 'failed' ? '失敗' : '執行中'}
-                  </div>
-                  <div style={{ fontSize: '12px', color: '#666' }}>
-                    {run.started_at && new Date(run.started_at).toLocaleString('zh-Hant')}
-                  </div>
-                </div>
-                {run.metrics?.total_return_pct != null && (
-                  <div style={{ fontSize: '14px', fontWeight: 'bold' }}>
-                    {run.metrics.total_return_pct.toFixed(2)}%
-                  </div>
-                )}
-              </div>
-            ))}
+                比較選取嘅兩個 runs
+              </Link>
+            )}
+            {selectedRuns.length > 0 && selectedRuns.length !== 2 && (
+              <button
+                className="btn"
+                style={{ backgroundColor: '#eaeaea', fontSize: '13px' }}
+                onClick={() => setSelectedRuns([])}
+              >
+                清除選取 ({selectedRuns.length}/2)
+              </button>
+            )}
           </div>
+          <div style={{ display: 'grid', gap: '8px' }}>
+            {runs.map((run) => {
+              const isSelected = selectedRuns.includes(run.id);
+              return (
+                <div
+                  key={run.id}
+                  style={{
+                    padding: '12px',
+                    backgroundColor: isSelected ? '#e7f3ff' : '#f5f5f5',
+                    borderRadius: '6px',
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    border: isSelected ? '2px solid #007bff' : '2px solid transparent',
+                    cursor: 'pointer',
+                  }}
+                  onClick={() => {
+                    if (isSelected) {
+                      setSelectedRuns(selectedRuns.filter(id => id !== run.id));
+                    } else {
+                      if (selectedRuns.length < 2) {
+                        setSelectedRuns([...selectedRuns, run.id]);
+                      }
+                    }
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                    <input
+                      type="checkbox"
+                      checked={isSelected}
+                      onChange={() => {}}
+                      style={{ cursor: 'pointer' }}
+                    />
+                    <div>
+                      <div style={{ fontSize: '14px', fontWeight: 500 }}>
+                        {run.status === 'completed' ? '已完成' : run.status === 'failed' ? '失敗' : '執行中'}
+                      </div>
+                      <div style={{ fontSize: '12px', color: '#666' }}>
+                        {run.started_at && new Date(run.started_at).toLocaleString('zh-Hant')}
+                      </div>
+                    </div>
+                  </div>
+                  {run.metrics?.total_return_pct != null && (
+                    <div style={{ fontSize: '14px', fontWeight: 'bold' }}>
+                      {run.metrics.total_return_pct.toFixed(2)}%
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          {selectedRuns.length === 2 && (
+            <p style={{ marginTop: '12px', fontSize: '13px', color: '#007bff' }}>
+              已選取 2 個 runs，點擊上方按鈕進行比較
+            </p>
+          )}
         </div>
       )}
     </div>
