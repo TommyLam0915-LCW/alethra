@@ -4,7 +4,7 @@ Enables persistence of market data fetched from providers (demo, LSEG, etc.)
 to avoid repeated API calls and enable historical analysis. Tracks data
 quality, provenance, and staleness per instrument.
 
-Revision ID: a1b2c3d4e5f6
+Revision ID: m1a2b3c4d5e6
 Revises: 3f9c2d81b7a4
 Create Date: 2026-10-16
 
@@ -16,7 +16,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
-revision: str = "a1b2c3d4e5f6"
+revision: str = "m1a2b3c4d5e6"
 down_revision: Union[str, None] = "3f9c2d81b7a4"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None

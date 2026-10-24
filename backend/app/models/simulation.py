@@ -33,6 +33,9 @@ class SimulationSession(Base):
     warnings = Column(JSONB, nullable=True)
     total_decisions = Column(Integer, default=0)
     observed_days = Column(Integer, default=0)
+    state_version = Column(Integer, default=0, nullable=False)
+    provider_id = Column(String(50), nullable=True)
+    provider_confirmed = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, default=utcnow, nullable=False)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
@@ -63,6 +66,7 @@ class SimulationDecision(Base):
     paper_position = Column(JSONB, nullable=True)
     paper_equity = Column(Float, nullable=False)
     warnings = Column(JSONB, nullable=True)
+    idempotency_key = Column(String(100), unique=True, nullable=True, index=True)
     created_at = Column(DateTime, default=utcnow, nullable=False)
 
     session = relationship("SimulationSession", back_populates="decisions")

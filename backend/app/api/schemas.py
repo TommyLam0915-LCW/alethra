@@ -1,3 +1,4 @@
+import math
 from datetime import datetime
 from typing import Any, Optional, List
 from uuid import UUID
@@ -70,6 +71,12 @@ class ExperimentUpdate(BaseModel):
     scope: Optional[dict] = None
     strategy_spec: Optional[StrategySpec] = None
     change_reason: Optional[str] = None
+    # Dataset binding fields
+    dataset_id: Optional[UUID] = None
+    data_source: Optional[str] = Field(None, max_length=255)
+    data_fetch_date_range: Optional[dict] = None
+    data_gaps_notes: Optional[str] = None
+    data_timezone: Optional[str] = Field(None, max_length=50)
 
 
 class ExperimentResponse(BaseModel):
@@ -104,6 +111,12 @@ class ExperimentVersionResponse(BaseModel):
     user_approved_at: Optional[datetime]
     config_hash: Optional[str]
     locked_at: Optional[datetime]
+    # Dataset binding fields
+    dataset_id: Optional[UUID] = None
+    data_source: Optional[str] = None
+    data_fetch_date_range: Optional[dict] = None
+    data_gaps_notes: Optional[str] = None
+    data_timezone: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -119,6 +132,8 @@ class ResearchRunResponse(BaseModel):
     metrics: Optional[dict]
     warnings: Optional[list]
     methodology_json: Optional[dict]
+    daily_equity_curve: Optional[list]
+    transactions: Optional[list]
     error_details: Optional[str]
     started_at: Optional[datetime]
     completed_at: Optional[datetime]
@@ -174,6 +189,7 @@ class VersionDiffResponse(BaseModel):
 
 class SimulationSessionCreate(BaseModel):
     initial_virtual_cash: float = Field(..., gt=0)
+    provider_id: Optional[str] = Field(None, description="Explicit provider selection (e.g., 'twelvedata', 'demo')")
 
 
 class SimulationSessionResponse(BaseModel):
@@ -191,6 +207,9 @@ class SimulationSessionResponse(BaseModel):
     warnings: Optional[list]
     total_decisions: int
     observed_days: int
+    state_version: int = 0
+    provider_id: Optional[str] = None
+    provider_confirmed: bool = False
     created_at: datetime
     updated_at: datetime
 
@@ -218,6 +237,32 @@ class SimulationDecisionResponse(BaseModel):
 class SimulationAdvanceResponse(BaseModel):
     session: SimulationSessionResponse
     decision: SimulationDecisionResponse
+
+
+class ManualDecisionRequest(BaseModel):
+    action: str = Field(..., pattern="^(buy|sell|hold)$")
+    quantity: Optional[int] = Field(None, ge=1)
+    idempotency_key: str = Field(..., min_length=1, max_length=100)
+    rationale: Optional[str] = Field(None, max_length=1000)
+    reflection: Optional[str] = Field(None, max_length=2000)
+    expected_version: Optional[int] = Field(None, ge=0, description="Expected state version for optimistic locking")
+
+
+class ManualDecisionResponse(BaseModel):
+    session: SimulationSessionResponse
+    decision: SimulationDecisionResponse
+    fill: Optional[dict] = None
+    rejection: Optional[dict] = None
+
+
+class ReflectionUpdateRequest(BaseModel):
+    reflection: str = Field(..., min_length=1, max_length=2000)
+
+
+class ReflectionUpdateResponse(BaseModel):
+    decision: SimulationDecisionResponse
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 class PaperPortfolioCreate(BaseModel):
@@ -1142,3 +1187,70 @@ class MockAssistantProviderRequest(BaseModel):
     """Schema for mock assistant provider request."""
     draft_fields: Dict[str, Any]
     context: Optional[Dict[str, Any]] = None
+
+
+class HumanDecisionCreate(BaseModel):
+    simulation_session_id: UUID
+    idempotency_key: str = Field(..., min_length=1, max_length=128)
+    action: str = Field(..., pattern="^(buy|sell|hold)$")
+    quantity: Optional[float] = None
+    rationale: Optional[str] = Field(None, max_length=5000)
+    metadata: Optional[Dict[str, Any]] = None
+
+    @field_validator("quantity")
+    @classmethod
+    def validate_quantity(cls, v, info):
+        action = info.data.get("action")
+        if v is not None and not math.isfinite(v):
+            raise ValueError("quantity must be finite")
+        if action in ("buy", "sell"):
+            if v is None or v <= 0:
+                raise ValueError("quantity must be positive finite for buy/sell")
+        elif action == "hold":
+            if v is not None:
+                raise ValueError("quantity must be null for hold")
+        return v
+
+
+class HumanDecisionCorrect(BaseModel):
+    action: str = Field(..., pattern="^(buy|sell|hold)$")
+    quantity: Optional[float] = None
+    rationale: Optional[str] = Field(None, max_length=5000)
+    correction_reason: str = Field(..., min_length=1, max_length=5000)
+    metadata: Optional[Dict[str, Any]] = None
+
+    @field_validator("quantity")
+    @classmethod
+    def validate_quantity(cls, v, info):
+        action = info.data.get("action")
+        if v is not None and not math.isfinite(v):
+            raise ValueError("quantity must be finite")
+        if action in ("buy", "sell"):
+            if v is None or v <= 0:
+                raise ValueError("quantity must be positive finite for buy/sell")
+        elif action == "hold":
+            if v is not None:
+                raise ValueError("quantity must be null for hold")
+        return v
+
+
+class HumanDecisionResponse(BaseModel):
+    id: UUID
+    owner_id: UUID
+    simulation_session_id: UUID
+    idempotency_key: str
+    action: str
+    quantity: Optional[float]
+    rationale: Optional[str]
+    server_strategy_version_id: UUID
+    server_instrument_id: str
+    server_step_number: int
+    server_snapshot_date: str
+    server_data_cutoff_at: str
+    execution_status: str
+    supersedes_event_id: Optional[UUID]
+    metadata_json: Optional[Dict[str, Any]]
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)

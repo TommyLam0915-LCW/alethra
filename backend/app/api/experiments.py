@@ -178,7 +178,13 @@ def update_experiment(
             change_reason=experiment_data.change_reason,
             config_hash=compute_config_hash(spec_dict),
             user_approved_at=datetime.now(timezone.utc).replace(tzinfo=None) if experiment_data.strategy_spec.user_approved_at else None,
-            created_by=current_user.id
+            created_by=current_user.id,
+            # Dataset binding fields
+            dataset_id=experiment_data.dataset_id,
+            data_source=experiment_data.data_source,
+            data_fetch_date_range=experiment_data.data_fetch_date_range,
+            data_gaps_notes=experiment_data.data_gaps_notes,
+            data_timezone=experiment_data.data_timezone,
         )
         db.add(new_version)
         db.flush()

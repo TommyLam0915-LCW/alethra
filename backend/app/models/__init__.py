@@ -84,6 +84,11 @@ from app.models.market_data import MarketDataBar, MarketDataMetadata
 from app.models.watchlist import Watchlist, WatchlistItem
 from app.models.user_layout import UserLayout
 from app.models.ai_conversation import AIConversation, AIMessage
+from app.models.human_decision import (
+    HumanDecisionEvent,
+    HumanDecisionAction,
+    HumanDecisionExecutionStatus,
+)
 
 __all__ = [
     "User",
@@ -184,4 +189,7 @@ __all__ = [
     "UserLayout",
     "AIConversation",
     "AIMessage",
+    "HumanDecisionEvent",
+    "HumanDecisionAction",
+    "HumanDecisionExecutionStatus",
 ]
