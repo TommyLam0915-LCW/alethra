@@ -5,6 +5,7 @@ from app.models.experiment_version import ExperimentVersion, VersionStatus
 from app.models.research_run import ResearchRun, RunStatus
 from app.models.dataset import Dataset, DatasetSnapshot, SourceType
 from app.models.research_note import ResearchNote
+from app.models.saved_comparison import SavedComparison
 from app.models.audit_event import AuditEvent
 from app.models.simulation import SimulationSession, SimulationStatus, SimulationDecision, DecisionType
 from app.models.paper_portfolio import (
@@ -101,6 +102,7 @@ __all__ = [
     "DatasetSnapshot",
     "SourceType",
     "ResearchNote",
+    "SavedComparison",
     "AuditEvent",
     "SimulationSession",
     "SimulationStatus",

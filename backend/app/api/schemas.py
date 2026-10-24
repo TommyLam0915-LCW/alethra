@@ -134,6 +134,33 @@ class ResearchRunResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class RunComparisonField(BaseModel):
+    field: str
+    value_a: Any
+    value_b: Any
+    comparison_status: str  # "match", "differ", "insufficient"
+    provenance_a: str  # "captured", "current", "absent", "unavailable", "derived"
+    provenance_b: str
+    evidence_source: Optional[str] = None
+    evidence_detail: Optional[dict] = None  # source_category, record_id, field_path, derivation
+
+
+class RunComparisonResponse(BaseModel):
+    run_a_id: UUID
+    run_b_id: UUID
+    experiment_id: UUID
+    experiment_version_a_id: UUID
+    experiment_version_b_id: UUID
+    status_a: str
+    status_b: str
+    metrics_comparison: List[RunComparisonField]
+    conditions_comparison: List[RunComparisonField]
+    limitations: List[str]
+    period_overlap: Optional[dict] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class ResearchNoteCreate(BaseModel):
     content: str = Field(..., min_length=1)
     version_id: Optional[UUID] = None
@@ -202,6 +229,7 @@ class SimulationSessionResponse(BaseModel):
     warnings: Optional[list]
     total_decisions: int
     observed_days: int
+    state_version: int
     created_at: datetime
     updated_at: datetime
 

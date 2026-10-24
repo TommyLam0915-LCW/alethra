@@ -4,6 +4,7 @@ from app.api.brand import router as brand_router
 from app.api.demo_assets import router as demo_assets_router
 from app.api.experiments import router as experiments_router
 from app.api.runs import router as runs_router
+from app.api.saved_comparisons import router as saved_comparisons_router
 from app.api.simulations import router as simulations_router
 from app.api.paper_portfolio import router as paper_portfolio_router
 from app.api.model_research import router as model_research_router
@@ -32,6 +33,7 @@ v1_router.include_router(instruments_router)
 v1_router.include_router(ml_training_router)
 v1_router.include_router(experiments_router)
 v1_router.include_router(runs_router)
+v1_router.include_router(saved_comparisons_router)
 v1_router.include_router(simulations_router)
 v1_router.include_router(paper_portfolio_router)
 v1_router.include_router(model_research_router)
