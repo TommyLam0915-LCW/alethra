@@ -1,0 +1,70 @@
+# Setup:
+#   1. Generate a unique local key OUTSIDE git, e.g.:
+#        export JWT_SECRET_KEY="$(openssl rand -hex 32)"
+#   2. Keep it only in your shell / local .env (gitignored).
+#   3. Do NOT reuse any key literal that has appeared in git history —
+#      those values are permanently public.
+version: '3.8'
+
+name: alethra-fresh
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: ai_investment_lab_fresh
+    ports:
+      - "5434:5432"
+    volumes:
+      - postgres_fresh_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8002:8000"
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/ai_investment_lab_fresh
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY to a fresh local value, e.g. openssl rand -hex 32}
+      JWT_ALGORITHM: HS256
+      JWT_ACCESS_TOKEN_EXPIRE_MINUTES: 1440
+      AI_PROVIDER: mock
+      DATA_PROVIDER: demo
+      APP_ENV: development
+      ENABLE_LIVE_PAYMENTS: "false"
+      ENABLE_PUBLIC_SHARING: "false"
+      ENABLE_EXTERNAL_NOTIFICATIONS: "false"
+      CORS_ORIGINS: http://localhost:3002
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3002:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8002
+    depends_on:
+      - backend
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+    command: npm run dev
+
+volumes:
+  postgres_fresh_data:
