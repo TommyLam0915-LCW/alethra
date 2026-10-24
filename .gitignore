@@ -18,6 +18,12 @@ out/
 # Databases
 *.db
 *.sqlite3
+# Local DB snapshots (never commit real data backups)
+*.db.backup-*
+
+# Build / runtime artifacts
+*.tsbuildinfo
+backend/uvicorn*.log
 
 # IDE
 .idea/
