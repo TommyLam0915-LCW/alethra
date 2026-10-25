@@ -1,5 +1,51 @@
 import pytest
-from datetime import datetime
+from datetime import date, datetime
+
+from tests.conftest import TestSession
+
+
+_DEMO_ALPHA_TRADING_DAYS = [
+    date(2024, 1, d) for d in (
+        2, 3, 4, 5,
+        8, 9, 10, 11, 12,
+        15, 16, 17, 18, 19,
+        22, 23, 24, 25, 26,
+        29, 30, 31,
+    )
+] + [
+    date(2024, 2, d) for d in (1, 2, 5, 6, 7, 8, 9, 12, 13)
+]
+
+
+@pytest.fixture(autouse=True)
+def _seed_demo_market_data(setup_db):
+    """Insert deterministic synthetic MarketDataBar rows for DEMO-ALPHA.
+
+    Simulation session creation queries MarketDataBar and 400s if no stored
+    bars exist in the version range. Advance steps then walk this series.
+    Values are derived from a fixed linear ramp — no live provider calls.
+    """
+    from app.models.market_data import MarketDataBar
+
+    db = TestSession()
+    try:
+        for i, d in enumerate(_DEMO_ALPHA_TRADING_DAYS):
+            price = 50.0 + float(i % 20)  # deterministic cyclic ramp
+            db.add(MarketDataBar(
+                instrument_id="DEMO-ALPHA",
+                provider_id="demo",
+                bar_date=d,
+                bar_timestamp=datetime.combine(d, datetime.min.time()),
+                open=price,
+                high=price + 1.0,
+                low=price - 1.0,
+                close=price + 0.5,
+                volume=1_000_000,
+            ))
+        db.commit()
+    finally:
+        db.close()
+    yield
 
 
 class TestLockImmutability:

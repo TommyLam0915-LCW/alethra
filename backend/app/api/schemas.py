@@ -1,6 +1,7 @@
 from datetime import datetime
-from typing import Any, Optional, List
+from typing import Any, Optional, List, Dict
 from uuid import UUID
+import math
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
@@ -1205,3 +1206,70 @@ class MockAssistantProviderRequest(BaseModel):
     """Schema for mock assistant provider request."""
     draft_fields: Dict[str, Any]
     context: Optional[Dict[str, Any]] = None
+
+
+class HumanDecisionCreate(BaseModel):
+    simulation_session_id: UUID
+    idempotency_key: str = Field(..., min_length=1, max_length=128)
+    action: str = Field(..., pattern="^(buy|sell|hold)$")
+    quantity: Optional[float] = None
+    rationale: Optional[str] = Field(None, max_length=5000)
+    metadata: Optional[Dict[str, Any]] = None
+
+    @field_validator("quantity")
+    @classmethod
+    def validate_quantity(cls, v, info):
+        action = info.data.get("action")
+        if v is not None and not math.isfinite(v):
+            raise ValueError("quantity must be finite")
+        if action in ("buy", "sell"):
+            if v is None or v <= 0:
+                raise ValueError("quantity must be positive finite for buy/sell")
+        elif action == "hold":
+            if v is not None:
+                raise ValueError("quantity must be null for hold")
+        return v
+
+
+class HumanDecisionCorrect(BaseModel):
+    action: str = Field(..., pattern="^(buy|sell|hold)$")
+    quantity: Optional[float] = None
+    rationale: Optional[str] = Field(None, max_length=5000)
+    correction_reason: str = Field(..., min_length=1, max_length=5000)
+    metadata: Optional[Dict[str, Any]] = None
+
+    @field_validator("quantity")
+    @classmethod
+    def validate_quantity(cls, v, info):
+        action = info.data.get("action")
+        if v is not None and not math.isfinite(v):
+            raise ValueError("quantity must be finite")
+        if action in ("buy", "sell"):
+            if v is None or v <= 0:
+                raise ValueError("quantity must be positive finite for buy/sell")
+        elif action == "hold":
+            if v is not None:
+                raise ValueError("quantity must be null for hold")
+        return v
+
+
+class HumanDecisionResponse(BaseModel):
+    id: UUID
+    owner_id: UUID
+    simulation_session_id: UUID
+    idempotency_key: str
+    action: str
+    quantity: Optional[float]
+    rationale: Optional[str]
+    server_strategy_version_id: UUID
+    server_instrument_id: str
+    server_step_number: int
+    server_snapshot_date: str
+    server_data_cutoff_at: str
+    execution_status: str
+    supersedes_event_id: Optional[UUID]
+    metadata_json: Optional[Dict[str, Any]]
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)

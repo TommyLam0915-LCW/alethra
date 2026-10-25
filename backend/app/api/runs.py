@@ -201,38 +201,79 @@ CONDITION_FIELDS = [
 ]
 
 
-def _get_provenance(run: ResearchRun, field: str, result_json: Optional[dict]) -> str:
-    """Determine provenance status for a field."""
-    if field in ("start_date", "end_date", "initial_cash", "final_equity"):
-        if result_json and field in result_json:
-            return "captured"
-        return "absent"
-    if field in ("template_type", "asset_ids", "commission_rate", "slippage_rate", "benchmark_id"):
-        return "captured"
+def _resolve_field(
+    field: str,
+    run: ResearchRun,
+    spec: dict,
+    result: Optional[dict],
+) -> tuple:
+    """Resolve a field's value for one side, independently.
+
+    Returns (value, source_kind, field_path). Priority:
+    1. run column (engine_version, config_hash, dataset_checksum)
+    2. run.result_json (run-captured execution window and totals)
+    3. run.metrics (derived metrics)
+    4. version.strategy_spec (version metadata, may have drifted from run-captured)
+    5. absent
+    """
     if field == "engine_version":
-        return "captured"
-    if field in ("total_return_pct", "max_drawdown_pct", "total_trades", "sharpe_ratio"):
-        # Check if the value actually exists in metrics
-        if run.metrics and field in run.metrics:
-            return "derived"
-        return "absent"
-    return "absent"
+        return run.engine_version, "run_column", "research_runs.engine_version"
+    if field == "config_hash":
+        return run.config_hash, "run_column", "research_runs.config_hash"
+    if field == "dataset_checksum":
+        # Prefer the durable run column; fall back to result_json mirror for older rows
+        if run.dataset_checksum is not None:
+            return run.dataset_checksum, "run_column", "research_runs.dataset_checksum"
+        if result and field in result:
+            return result[field], "run_result", f"result_json.{field}"
+        return None, "absent", None
+    if result and field in result:
+        return result[field], "run_result", f"result_json.{field}"
+    if run.metrics and field in run.metrics:
+        return run.metrics[field], "run_metrics", f"metrics.{field}"
+    if field in spec:
+        return spec[field], "version_spec", f"strategy_spec.{field}"
+    return None, "absent", None
 
 
-def _get_evidence_detail(field: str, run: ResearchRun, version: ExperimentVersion, result_json: Optional[dict], provenance: str) -> Optional[dict]:
-    """Build evidence detail for a field."""
-    if provenance == "absent":
+_PROVENANCE_BY_KIND = {
+    "run_column": "captured",
+    "run_result": "captured",
+    "run_metrics": "derived",
+    "version_spec": "current",
+    "absent": "absent",
+}
+
+_SOURCE_CATEGORY_BY_KIND = {
+    "run_column": "run_record",
+    "run_result": "run_record",
+    "run_metrics": "run_record",
+    "version_spec": "version_metadata",
+}
+
+
+def _provenance_from_kind(kind: str) -> str:
+    return _PROVENANCE_BY_KIND.get(kind, "absent")
+
+
+def _get_evidence_detail(
+    run: ResearchRun,
+    version: ExperimentVersion,
+    kind: str,
+    path: Optional[str],
+) -> Optional[dict]:
+    if kind == "absent":
         return None
-
+    record_id = str(version.id) if kind == "version_spec" else str(run.id)
     detail = {
-        "source_category": "run_record" if provenance in ("captured", "derived") else "version_metadata",
-        "record_id": str(run.id),
-        "field_path": f"research_runs.{field}" if field in ("engine_version", "config_hash", "dataset_checksum") else f"result_json.{field}" if result_json and field in result_json else f"metrics.{field}" if run.metrics and field in run.metrics else f"strategy_spec.{field}",
+        "source_category": _SOURCE_CATEGORY_BY_KIND.get(kind, "run_record"),
+        "record_id": record_id,
+        "field_path": path,
     }
-
-    if provenance == "derived":
+    if kind == "run_metrics":
         detail["derivation"] = f"Computed from run {run.id} execution data"
-
+    if kind == "version_spec":
+        detail["note"] = "Read from current ExperimentVersion.strategy_spec; may not equal the spec at run execution time if the version was never locked."
     return detail
 
 
@@ -247,39 +288,24 @@ def _compare_field(
     result_a: Optional[dict],
     result_b: Optional[dict],
 ) -> RunComparisonField:
-    """Compare a single field between two runs."""
-    # Get values from strategy spec, result_json, or metrics
-    if field in spec_a or field in spec_b:
-        val_a = spec_a.get(field)
-        val_b = spec_b.get(field)
-    elif result_a and field in result_a:
-        val_a = result_a.get(field)
-        val_b = result_b.get(field) if result_b else None
-    elif run_a.metrics and field in run_a.metrics:
-        val_a = run_a.metrics.get(field)
-        val_b = run_b.metrics.get(field) if run_b.metrics else None
-    else:
-        val_a = None
-        val_b = None
+    val_a, kind_a, path_a = _resolve_field(field, run_a, spec_a, result_a)
+    val_b, kind_b, path_b = _resolve_field(field, run_b, spec_b, result_b)
 
-    # Determine comparison status
     if val_a is None and val_b is None:
         comparison_status = "insufficient"
     elif val_a is None or val_b is None:
-        # One side missing: not a meaningful difference
+        # One-sided missing: not a meaningful difference
         comparison_status = "insufficient"
     elif val_a == val_b:
         comparison_status = "match"
     else:
         comparison_status = "differ"
 
-    # Get provenance
-    prov_a = _get_provenance(run_a, field, result_a)
-    prov_b = _get_provenance(run_b, field, result_b)
+    prov_a = _provenance_from_kind(kind_a)
+    prov_b = _provenance_from_kind(kind_b)
 
-    # Get evidence details
-    evidence_a = _get_evidence_detail(field, run_a, version_a, result_a, prov_a)
-    evidence_b = _get_evidence_detail(field, run_b, version_b, result_b, prov_b)
+    evidence_a = _get_evidence_detail(run_a, version_a, kind_a, path_a)
+    evidence_b = _get_evidence_detail(run_b, version_b, kind_b, path_b)
 
     return RunComparisonField(
         field=field,
@@ -290,6 +316,15 @@ def _compare_field(
         provenance_b=prov_b,
         evidence_detail={"run_a": evidence_a, "run_b": evidence_b},
     )
+
+
+def _effective_period(run: ResearchRun, result: Optional[dict], spec: dict) -> tuple:
+    """Return (start, end, source) preferring run-captured result_json dates."""
+    if result and result.get("start_date") and result.get("end_date"):
+        return result["start_date"], result["end_date"], "run_captured"
+    if spec.get("start_date") and spec.get("end_date"):
+        return spec["start_date"], spec["end_date"], "version_spec"
+    return None, None, "unknown"
 
 
 @router.get("/runs/compare", response_model=RunComparisonResponse)
@@ -336,6 +371,15 @@ def compare_runs(
     if run_a == run_b:
         raise HTTPException(status_code=400, detail="Cannot compare a run with itself")
 
+    # Only completed runs may be compared — pending/running/failed lack the
+    # result_json/metrics needed for a meaningful comparison and would
+    # silently produce empty or misleading field rows.
+    if run_a_obj.status != RunStatus.completed or run_b_obj.status != RunStatus.completed:
+        raise HTTPException(
+            status_code=400,
+            detail="Only completed runs can be compared",
+        )
+
     # Get strategy specs
     spec_a = version_a.strategy_spec or {}
     spec_b = version_b.strategy_spec or {}
@@ -356,39 +400,52 @@ def compare_runs(
 
     # Check period overlap
     period_overlap = None
-    start_a = result_a.get("start_date") or spec_a.get("start_date")
-    end_a = result_a.get("end_date") or spec_a.get("end_date")
-    start_b = result_b.get("start_date") or spec_b.get("start_date")
-    end_b = result_b.get("end_date") or spec_b.get("end_date")
-    periods_differ = (start_a != start_b) or (end_a != end_b)
+    start_a, end_a, src_a = _effective_period(run_a_obj, result_a, spec_a)
+    start_b, end_b, src_b = _effective_period(run_b_obj, result_b, spec_b)
+    periods_known = start_a is not None and end_a is not None and start_b is not None and end_b is not None
+    periods_differ = periods_known and (start_a != start_b or end_a != end_b)
+    # If either side's period cannot be established (unknown), we cannot
+    # claim the two runs covered comparable windows.
+    periods_incomplete = not periods_known
 
-    if start_a and end_a and start_b and end_b:
+    if periods_known:
         overlap_start = max(start_a, start_b)
         overlap_end = min(end_a, end_b)
         if overlap_start <= overlap_end:
             period_overlap = {
-                "run_a_period": {"start": start_a, "end": end_a},
-                "run_b_period": {"start": start_b, "end": end_b},
+                "run_a_period": {"start": start_a, "end": end_a, "source": src_a},
+                "run_b_period": {"start": start_b, "end": end_b, "source": src_b},
                 "overlap": {"start": overlap_start, "end": overlap_end},
             }
 
     # Build limitations
     limitations = []
+    suppress_return_delta = False
     if periods_differ:
         limitations.append("兩個 runs 日期範圍唔同，完整期間嘅累計回報唔可以直接比較")
-        # Suppress return delta when periods differ, but preserve recorded values
+        suppress_return_delta = True
+    if periods_incomplete:
+        limitations.append("無法確定其中一個或多個 run 嘅完整日期範圍，累計回報唔可以直接比較")
+        suppress_return_delta = True
+
+    if suppress_return_delta:
+        # Suppress return delta when periods differ or are unknown, but preserve recorded values
         for field_comp in metrics_comparison:
             if field_comp.field == "total_return_pct":
                 field_comp.comparison_status = "insufficient"
                 # Keep value_a and value_b as recorded; frontend will not show delta
 
-    # Check for missing critical fields
+    # Check for missing critical fields (dataset_checksum resolved from run column,
+    # data_provider resolved from result_json — provider_id column does not exist here)
     missing_fields = []
-    for field in ["dataset_checksum", "provider_id"]:
-        val_a = result_a.get(field) if result_a else None
-        val_b = result_b.get(field) if result_b else None
-        if not val_a or not val_b:
-            missing_fields.append(field)
+    checksum_a, _, _ = _resolve_field("dataset_checksum", run_a_obj, spec_a, result_a)
+    checksum_b, _, _ = _resolve_field("dataset_checksum", run_b_obj, spec_b, result_b)
+    if not checksum_a or not checksum_b:
+        missing_fields.append("dataset_checksum")
+    provider_a = (result_a or {}).get("data_provider")
+    provider_b = (result_b or {}).get("data_provider")
+    if not provider_a or not provider_b:
+        missing_fields.append("data_provider")
 
     if missing_fields:
         limitations.append(f"部分資料來源資訊缺失：{', '.join(missing_fields)}")

@@ -33,5 +33,13 @@ class ExperimentVersion(Base):
     dataset_cutoff_at = Column(String(10), nullable=True)
     engine_version = Column(String(50), nullable=True)
 
+    # Dataset binding fields
+    dataset_id = Column(UUID(as_uuid=True), ForeignKey("datasets.id", ondelete="SET NULL"), nullable=True)
+    data_source = Column(String(255), nullable=True)
+    data_fetch_date_range = Column(JSONB, nullable=True)
+    data_gaps_notes = Column(Text, nullable=True)
+    data_timezone = Column(String(50), nullable=True)
+
     experiment = relationship("Experiment", back_populates="versions", foreign_keys=[experiment_id])
     runs = relationship("ResearchRun", back_populates="experiment_version")
+    dataset = relationship("Dataset", foreign_keys=[dataset_id])
