@@ -58,15 +58,71 @@ Status: implemented, **owner acceptance of the live browser flow pending**.
 - Backend: Python venv from `backend/requirements.txt` (project uses
   `backend/.venv/bin/python` for tests); `cp` a local `.env` with your own
   values (never committed).
-- Frontend: install from the lockfile; `NEXT_PUBLIC_API_URL` points at the
-  backend.
+- Frontend: `npm ci` in `frontend/` (install from the lockfile, no pin changes);
+  `NEXT_PUBLIC_API_URL` points at the backend. For the Playwright regression,
+  browsers come from `npx playwright install chromium`.
 - Schema: this project's live acquisition path is `Base.metadata.create_all`
-  at app startup (`backend/app/main.py`), not Alembic. The full Alembic history
-  is not proven to replay cleanly on SQLite, so do NOT run `alembic upgrade
-  head` against an existing database without separate verification.
+  at app startup (`backend/app/main.py`). On **PostgreSQL** the Alembic chain has
+  since been replayed in disposable databases two ways — from empty to head
+  `h8i9j0k1l2m3`, and from the `h2b3c4d5e6f7` predecessor schema with synthetic
+  predecessor rows (`backend/scripts/verify_upgrade_with_predecessor_data.py`).
+  The full Alembic history is still **not** proven to replay cleanly on SQLite,
+  so do NOT run `alembic upgrade head` against an existing SQLite database
+  without separate verification.
 - Rebuild synthetic review fixtures without real data:
   `DATABASE_URL="sqlite:////tmp/review.db" python scripts/seed_review_fixtures.py`
   (a test password is generated at runtime; nothing sensitive is stored).
+
+## First run on a new laptop (branch `work/unified-research-flow`)
+
+Both runtime images build from tracked files only. The review stack's recipes
+live at the repository root, alongside `Dockerfile.backend` / `Dockerfile.frontend`:
+
+- `Dockerfile.backend.unified` — review/E2E-style backend (deps + `COPY . .`)
+- `Dockerfile.frontend.unified` — multi-stage **production** frontend build;
+  `NEXT_PUBLIC_API_URL` is a build arg (a value baked into the client bundle,
+  so it must be set at build time, not at run time)
+
+`docker-compose.unified-dev.yml` references them as `../Dockerfile.<name>` because
+Compose resolves `dockerfile` relative to the build `context`, same as
+`docker-compose.prod.yml` does.
+
+1. Review stack (production frontend on `127.0.0.1:3011`, backend on `127.0.0.1:8011`,
+   unpublished PostgreSQL on a named volume). Create your own git-ignored,
+   mode-600 env file with values of your choosing — only these variable NAMES are
+   required: `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `JWT_SECRET_KEY`
+   (plus `SEED_EMAIL`, `SEED_PASSWORD` if you seed a login yourself). Never put
+   values in CLI arguments or commit the file.
+   ```bash
+   docker compose -p alethra-unified-dev -f docker-compose.unified-dev.yml \
+     --env-file .local/unified-dev-credentials.env up -d --build
+   ```
+   Note: seeding the review database's synthetic experiment/runs currently uses a
+   local-only script; a fresh volume gives you a schema-complete but empty app.
+2. Disposable E2E runtime + regression (its own compose project, ports, ephemeral
+   volume, database, generated credentials and backend image — it builds that
+   image from `docker-compose.e2e.yml` if absent, and never touches the review DB):
+   ```bash
+   ./start_e2e_research_flow.sh          # http://localhost:3099 (next dev), :8099 backend
+   cd frontend && E2E_FRONTEND_BASE=http://localhost:3099 \
+     E2E_CRED_FILE=../.local/e2e-credentials.env \
+     npx playwright test --config playwright.research-flow.config.ts
+   ./stop_e2e_research_flow.sh           # task-owned resources only (--purge also drops creds)
+   ```
+   `:3099` is a `next dev` **development server** on the working tree, so it proves
+   source behaviour, not production-image behaviour; the production image is the
+   `:3011` service built in step 1.
+   To run a second, fully isolated instance alongside the first (e.g. from another
+   checkout), override `E2E_COMPOSE_PROJECT`, `E2E_FRONTEND_PORT`, `E2E_BACKEND_PORT`,
+   `E2E_POSTGRES_DB` (must start with `alethra_e2e`), `E2E_ENV_FILE`, `E2E_LOG_DIR`, and
+   pass the same values to the stop script. For the review stack, `UNIFIED_BACKEND_IMAGE`
+   and `UNIFIED_FRONTEND_IMAGE` let you build without retagging a running stack's images.
+3. Migration chain check (disposable databases only, never the review DB):
+   ```bash
+   docker compose -p alethra-e2e -f docker-compose.e2e.yml \
+     --env-file .local/e2e-credentials.env exec backend \
+     python scripts/verify_upgrade_with_predecessor_data.py
+   ```
 
 ## Excluded from version control (left on local disk)
 `*.db`, `*.db.backup-*` (real DB snapshots), `.env`, uvicorn logs,

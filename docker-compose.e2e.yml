@@ -29,12 +29,12 @@ services:
       retries: 12
 
   backend:
-    image: alethra-unified-dev/backend:local
+    image: ${E2E_BACKEND_IMAGE:-alethra-e2e/backend:local}
     build:
       context: ./backend
       dockerfile: Dockerfile
     ports:
-      - "127.0.0.1:8099:8000"
+      - "127.0.0.1:${E2E_BACKEND_PORT:-8099}:8000"
     environment:
       DATABASE_URL: postgresql://${E2E_POSTGRES_USER}:${E2E_POSTGRES_PASSWORD}@db:5432/${E2E_POSTGRES_DB}
       JWT_SECRET_KEY: ${E2E_JWT_SECRET_KEY}
@@ -46,7 +46,7 @@ services:
       ENABLE_LIVE_PAYMENTS: "false"
       ENABLE_PUBLIC_SHARING: "false"
       ENABLE_EXTERNAL_NOTIFICATIONS: "false"
-      CORS_ORIGINS: http://localhost:3099
+      CORS_ORIGINS: http://localhost:${E2E_FRONTEND_PORT:-3099}
       E2E_EMAIL: ${E2E_EMAIL}
       E2E_PASSWORD: ${E2E_PASSWORD}
     volumes:

@@ -20,8 +20,8 @@ services:
   backend:
     build:
       context: ./backend
-      dockerfile: ../.local/Dockerfile.backend.unified
-    image: alethra-unified-dev/backend:local
+      dockerfile: ../Dockerfile.backend.unified
+    image: ${UNIFIED_BACKEND_IMAGE:-alethra-unified-dev/backend:local}
     ports:
       - "127.0.0.1:8011:8000"
     environment:
@@ -44,10 +44,10 @@ services:
   frontend:
     build:
       context: ./frontend
-      dockerfile: ../.local/Dockerfile.frontend.prod
+      dockerfile: ../Dockerfile.frontend.unified
       args:
         NEXT_PUBLIC_API_URL: http://localhost:8011
-    image: alethra-unified-dev/frontend:local
+    image: ${UNIFIED_FRONTEND_IMAGE:-alethra-unified-dev/frontend:local}
     ports:
       - "127.0.0.1:3011:3000"
     depends_on:

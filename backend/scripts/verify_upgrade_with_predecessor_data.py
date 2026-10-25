@@ -16,7 +16,8 @@ import uuid
 from datetime import datetime
 
 DB = os.environ.get("DATABASE_URL", "")
-CHECK_DB = "alethra_e2e_upgrade_check"
+DB_NAME = DB.rsplit("/", 1)[-1]
+CHECK_DB = f"{DB_NAME}_upgrade_check"
 PREDECESSOR_HEAD = "h2b3c4d5e6f7"
 EXPECTED_HEAD = "h8i9j0k1l2m3"
 # Two indexes from the revision, plus the index PostgreSQL builds for the
@@ -41,7 +42,7 @@ import app.models  # noqa: F401  registers every model
 from app.auth.jwt import get_password_hash
 from app.models.experiment_version import ExperimentVersion
 
-MAINTENANCE_URL = DB.rsplit("/", 1)[0] + "/alethra_e2e"
+MAINTENANCE_URL = DB
 CHECK_URL = DB.rsplit("/", 1)[0] + f"/{CHECK_DB}"
 PREDECESSOR_PURPOSE = "Predecessor saved comparison (synthetic)"
 
