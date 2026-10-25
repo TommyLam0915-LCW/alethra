@@ -13,7 +13,7 @@ const MOCK_TOKEN = 'mock-test-token';
 
 async function setupMockedPage(page: any, intents: any[]) {
   await page.goto(FRONTEND_URL);
-  await page.evaluate((token) => {
+  await page.evaluate((token: string) => {
     localStorage.setItem('token', token);
   }, MOCK_TOKEN);
 

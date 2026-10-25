@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 
 const API_BASE = 'http://localhost:8001';
 const FRONTEND_BASE = 'http://localhost:3001';
@@ -8,7 +8,7 @@ const USER_A = {
   password: process.env.ACCEPTANCE_PASSWORD_A || 'TestPassword123!@#',
 };
 
-async function login(page, email, password) {
+async function login(page: Page, email: string, password: string) {
   await page.goto(`${FRONTEND_BASE}/login`);
   await page.fill('input[type="email"]', email);
   await page.fill('input[type="password"]', password);
@@ -16,7 +16,7 @@ async function login(page, email, password) {
   await page.waitForURL('**/dashboard');
 }
 
-async function getAuthToken(email, password) {
+async function getAuthToken(email: string, password: string) {
   const response = await fetch(`${API_BASE}/api/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -29,7 +29,7 @@ async function getAuthToken(email, password) {
   return data.access_token;
 }
 
-async function createExperiment(token, title, hypothesis = 'Test hypothesis') {
+async function createExperiment(token: string, title: string, hypothesis = 'Test hypothesis') {
   const response = await fetch(`${API_BASE}/api/v1/experiments/`, {
     method: 'POST',
     headers: {
@@ -58,7 +58,7 @@ async function createExperiment(token, title, hypothesis = 'Test hypothesis') {
   return response.json();
 }
 
-async function getFirstVersionId(token, experimentId) {
+async function getFirstVersionId(token: string, experimentId: string) {
   const response = await fetch(`${API_BASE}/api/v1/experiments/${experimentId}/versions`, {
     headers: {
       'Authorization': `Bearer ${token}`,
@@ -74,7 +74,7 @@ async function getFirstVersionId(token, experimentId) {
   return versions[0].id;
 }
 
-async function createRun(token, versionId) {
+async function createRun(token: string, versionId: string) {
   const response = await fetch(`${API_BASE}/api/v1/versions/${versionId}/runs`, {
     method: 'POST',
     headers: {
@@ -88,7 +88,7 @@ async function createRun(token, versionId) {
   return response.json();
 }
 
-async function getMethodReview(token, experimentId) {
+async function getMethodReview(token: string, experimentId: string) {
   const response = await fetch(`${API_BASE}/api/v1/experiments/${experimentId}/method-review`, {
     headers: {
       'Authorization': `Bearer ${token}`,

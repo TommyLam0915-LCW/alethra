@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 
 const API_BASE = 'http://localhost:8001';
 const FRONTEND_BASE = 'http://localhost:3001';
@@ -13,7 +13,7 @@ const USER_B = {
   password: process.env.ACCEPTANCE_PASSWORD_B || 'TestPassword456!@#',
 };
 
-async function login(page, email, password) {
+async function login(page: Page, email: string, password: string) {
   await page.goto(`${FRONTEND_BASE}/login`);
   await page.fill('input[type="email"]', email);
   await page.fill('input[type="password"]', password);
@@ -21,7 +21,7 @@ async function login(page, email, password) {
   await page.waitForURL('**/dashboard');
 }
 
-async function getAuthToken(email, password) {
+async function getAuthToken(email: string, password: string) {
   const response = await fetch(`${API_BASE}/api/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -37,7 +37,7 @@ async function getAuthToken(email, password) {
   return data.access_token;
 }
 
-async function createDraft(token, draftData) {
+async function createDraft(token: string, draftData: Record<string, unknown>) {
   const response = await fetch(`${API_BASE}/api/v1/research-drafts/`, {
     method: 'POST',
     headers: {
@@ -56,7 +56,7 @@ async function createDraft(token, draftData) {
   return data;
 }
 
-async function approveDraft(token, draftId, action = 'accept') {
+async function approveDraft(token: string, draftId: string, action = 'accept') {
   const response = await fetch(`${API_BASE}/api/v1/research-drafts/${draftId}/approve`, {
     method: 'POST',
     headers: {
@@ -74,7 +74,7 @@ async function approveDraft(token, draftId, action = 'accept') {
   return await response.json();
 }
 
-async function getDraft(token, draftId) {
+async function getDraft(token: string, draftId: string) {
   const response = await fetch(`${API_BASE}/api/v1/research-drafts/${draftId}`, {
     headers: { 'Authorization': `Bearer ${token}` },
   });

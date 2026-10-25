@@ -869,9 +869,11 @@ export default function ExperimentDetailPage() {
           <div style={{ display: 'grid', gap: '8px' }}>
             {runs.map((run) => {
               const isSelected = selectedRuns.includes(run.id);
+              const selectionFull = selectedRuns.length >= 2 && !isSelected;
               return (
                 <div
                   key={run.id}
+                  data-testid={`run-row-${run.id}`}
                   style={{
                     padding: '12px',
                     backgroundColor: isSelected ? '#e7f3ff' : '#f5f5f5',
@@ -880,23 +882,22 @@ export default function ExperimentDetailPage() {
                     justifyContent: 'space-between',
                     alignItems: 'center',
                     border: isSelected ? '2px solid #007bff' : '2px solid transparent',
-                    cursor: 'pointer',
-                  }}
-                  onClick={() => {
-                    if (isSelected) {
-                      setSelectedRuns(selectedRuns.filter(id => id !== run.id));
-                    } else {
-                      if (selectedRuns.length < 2) {
-                        setSelectedRuns([...selectedRuns, run.id]);
-                      }
-                    }
                   }}
                 >
                   <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                     <input
                       type="checkbox"
+                      data-testid={`run-select-${run.id}`}
+                      aria-label={`選取 run ${run.id.slice(0, 8)} 作比較`}
                       checked={isSelected}
-                      onChange={() => {}}
+                      disabled={selectionFull}
+                      onChange={() => {
+                        setSelectedRuns((prev) => {
+                          if (prev.includes(run.id)) return prev.filter((id) => id !== run.id);
+                          if (prev.length >= 2) return prev;
+                          return [...prev, run.id];
+                        });
+                      }}
                       style={{ cursor: 'pointer' }}
                     />
                     <div>
@@ -908,11 +909,27 @@ export default function ExperimentDetailPage() {
                       </div>
                     </div>
                   </div>
-                  {run.metrics?.total_return_pct != null && (
-                    <div style={{ fontSize: '14px', fontWeight: 'bold' }}>
-                      {run.metrics.total_return_pct.toFixed(2)}%
-                    </div>
-                  )}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                    {run.metrics?.total_return_pct != null && (
+                      <div style={{ fontSize: '14px', fontWeight: 'bold' }}>
+                        {run.metrics.total_return_pct.toFixed(2)}%
+                      </div>
+                    )}
+                    <Link
+                      href={`/experiments/${experimentId}/runs/${run.id}`}
+                      data-testid={`run-detail-link-${run.id}`}
+                      aria-label={`查看 run ${run.id.slice(0, 8)} 嘅執行結果`}
+                      className="btn"
+                      style={{
+                        backgroundColor: '#eaeaea',
+                        fontSize: '12px',
+                        padding: '6px 10px',
+                        textDecoration: 'none',
+                      }}
+                    >
+                      查看結果
+                    </Link>
+                  </div>
                 </div>
               );
             })}

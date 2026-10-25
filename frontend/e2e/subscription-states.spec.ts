@@ -42,7 +42,7 @@ const OP_STATUS_RESPONSE = {
 
 async function setupAuth(page: any) {
   await page.goto(FRONTEND_URL);
-  await page.evaluate((token) => {
+  await page.evaluate((token: string) => {
     localStorage.setItem('token', token);
   }, MOCK_TOKEN);
 }
