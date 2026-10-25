@@ -1,0 +1,57 @@
+# Disposable stack for the tracked research-flow Playwright regression.
+#
+# Isolated from every other stack on this host:
+#   - compose project name `alethra-e2e` (own containers, own ephemeral volume)
+#   - loopback-only port 127.0.0.1:8099 (backend); the database publishes nothing
+#   - database `alethra_e2e` on an unnamed volume, destroyed by `down -v`
+#
+# The frontend is NOT part of this file: `start_e2e_research_flow.sh` serves it
+# with the host `next dev` on 127.0.0.1:3099 so the regression runs against the
+# working tree without an image build.
+#
+# All credential values come from a generated, git-ignored env file
+# (`.local/e2e-credentials.env`, mode 600) passed with `--env-file`.
+# Never put values in this file, in CLI arguments, or in logs.
+
+name: alethra-e2e
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${E2E_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${E2E_POSTGRES_PASSWORD}
+      POSTGRES_DB: ${E2E_POSTGRES_DB}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${E2E_POSTGRES_USER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  backend:
+    image: alethra-unified-dev/backend:local
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "127.0.0.1:8099:8000"
+    environment:
+      DATABASE_URL: postgresql://${E2E_POSTGRES_USER}:${E2E_POSTGRES_PASSWORD}@db:5432/${E2E_POSTGRES_DB}
+      JWT_SECRET_KEY: ${E2E_JWT_SECRET_KEY}
+      JWT_ALGORITHM: HS256
+      JWT_ACCESS_TOKEN_EXPIRE_MINUTES: "1440"
+      AI_PROVIDER: mock
+      DATA_PROVIDER: demo
+      APP_ENV: development
+      ENABLE_LIVE_PAYMENTS: "false"
+      ENABLE_PUBLIC_SHARING: "false"
+      ENABLE_EXTERNAL_NOTIFICATIONS: "false"
+      CORS_ORIGINS: http://localhost:3099
+      E2E_EMAIL: ${E2E_EMAIL}
+      E2E_PASSWORD: ${E2E_PASSWORD}
+    volumes:
+      - ./backend:/app
+    depends_on:
+      db:
+        condition: service_healthy
+    command: sh -c "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000"

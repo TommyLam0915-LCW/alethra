@@ -1,0 +1,57 @@
+version: '3.8'
+
+name: alethra-unified-dev
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_unified_dev_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: ../.local/Dockerfile.backend.unified
+    image: alethra-unified-dev/backend:local
+    ports:
+      - "127.0.0.1:8011:8000"
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      JWT_ALGORITHM: HS256
+      JWT_ACCESS_TOKEN_EXPIRE_MINUTES: "1440"
+      AI_PROVIDER: mock
+      DATA_PROVIDER: demo
+      APP_ENV: development
+      ENABLE_LIVE_PAYMENTS: "false"
+      ENABLE_PUBLIC_SHARING: "false"
+      ENABLE_EXTERNAL_NOTIFICATIONS: "false"
+      CORS_ORIGINS: http://localhost:3011
+    depends_on:
+      db:
+        condition: service_healthy
+    command: sh -c "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000"
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: ../.local/Dockerfile.frontend.prod
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8011
+    image: alethra-unified-dev/frontend:local
+    ports:
+      - "127.0.0.1:3011:3000"
+    depends_on:
+      - backend
+
+volumes:
+  postgres_unified_dev_data:
