@@ -530,6 +530,7 @@ class TestExecutionAgent:
             order_type="MARKET",
             limit_price=None,
             status="authorized",
+            execution_scope="fake-transport",
             expires_at=(utcnow() + timedelta(minutes=5)).isoformat(),
             created_at=utcnow().isoformat(),
         )
@@ -559,6 +560,7 @@ class TestExecutionAgent:
             order_type="MARKET",
             limit_price=None,
             status="authorized",
+            execution_scope="fake-transport",
             expires_at=(utcnow() + timedelta(minutes=5)).isoformat(),
             created_at=utcnow().isoformat(),
         )
@@ -586,6 +588,7 @@ class TestExecutionAgent:
             order_type="MARKET",
             limit_price=None,
             status="authorized",
+            execution_scope="fake-transport",
             expires_at=(utcnow() - timedelta(minutes=1)).isoformat(),
             created_at=utcnow().isoformat(),
         )
@@ -612,6 +615,7 @@ class TestExecutionAgent:
             order_type="MARKET",
             limit_price=None,
             status="authorized",
+            execution_scope="fake-transport",
             expires_at=(utcnow() + timedelta(minutes=5)).isoformat(),
             created_at=utcnow().isoformat(),
         )
@@ -637,6 +641,7 @@ class TestExecutionAgent:
             order_type="LIMIT",
             limit_price=160.0,
             status="authorized",
+            execution_scope="fake-transport",
             expires_at=(utcnow() + timedelta(minutes=5)).isoformat(),
             created_at=utcnow().isoformat(),
         )
@@ -682,6 +687,7 @@ class TestExecutionAgent:
             order_type="MARKET",
             limit_price=None,
             status="authorized",
+            execution_scope="fake-transport",
             expires_at=(utcnow() + timedelta(minutes=5)).isoformat(),
             created_at=utcnow().isoformat(),
         )

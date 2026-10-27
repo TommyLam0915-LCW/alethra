@@ -74,7 +74,17 @@ class TestClientAlethraClient:
     def poll_order_intents(self):
         resp = self.client.get("/api/v1/execution-agent/order-intents", headers=self.headers)
         resp.raise_for_status()
-        return [OrderIntentDTO(**item) for item in resp.json()]
+        # The platform returns no execution scope (it has no scope column yet),
+        # and an unscoped intent is refused by the containment gate — that path
+        # is covered in tests/test_execution_containment.py. This file proves
+        # the *post-binding* lifecycle (submit → broker cancel → platform
+        # status), so the harness declares the scope it would get from a server-
+        # side account binding: this agent process only ever drives a
+        # FakeBrokerTransport, so 'fake-transport' is the truthful binding here.
+        return [
+            OrderIntentDTO(**{**item, "execution_scope": "fake-transport"})
+            for item in resp.json()
+        ]
 
     def get_control_status(self):
         resp = self.client.get("/api/v1/execution-agent/control-status", headers=self.headers)

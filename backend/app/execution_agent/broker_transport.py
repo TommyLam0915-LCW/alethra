@@ -6,6 +6,13 @@ without a live IBKR connection.
 - ``BrokerTransport`` — abstract interface
 - ``FakeBrokerTransport`` — deterministic in-memory transport for tests
 - ``IBKRBrokerTransport`` — real IBKR transport (requires ib_insync)
+
+CONTAINMENT POLICY (offline-only round, 2026-10-27): ``IBKRBrokerTransport``
+refuses every broker side effect — connect, submit and cancel — before it
+touches ``ib_insync``. Only the in-memory fake transport is runnable in this
+build. The policy is a module constant with no environment or config lookup,
+so it cannot be flipped by configuration; lifting it requires separate owner
+approval (see docs/ibkr-execution-agent-setup-guide.md).
 """
 import random
 import uuid
@@ -276,6 +283,40 @@ class FakeBrokerTransport(BrokerTransport):
         return self._orders.get(broker_order_id)
 
 
+# ── Broker execution containment ─────────────────────────────────────────
+#
+# This build is offline-only: the real transport must not be able to open a
+# gateway session or transmit an order. The flag is a literal module constant
+# and is deliberately NOT read from os.environ / AgentConfig, because a
+# configuration-readable switch is exactly what this round is closing off.
+# Lifting it is a code change under separate owner approval.
+
+CONTAINMENT_POLICY_ID = "OFFLINE-ONLY-2026-10-27"
+
+BROKER_EXECUTION_CONTAINED = True
+
+CONTAINMENT_ERROR_MESSAGE = (
+    f"IBKR broker execution is disabled by the {CONTAINMENT_POLICY_ID} containment "
+    "policy: no gateway connection, order submission or cancellation is permitted "
+    "from this build without separate owner approval. Offline simulation and the "
+    "fake transport are unaffected."
+)
+
+
+class BrokerExecutionContained(RuntimeError):
+    """A broker side effect was attempted while execution is contained.
+
+    Raised rather than returned so no caller can mistake it for an ordinary
+    broker rejection. Carries no host, port, client id, account or credential
+    data — the refusal must stay safe to log and to surface in an error report.
+    """
+
+
+def _assert_execution_permitted() -> None:
+    if BROKER_EXECUTION_CONTAINED:
+        raise BrokerExecutionContained(CONTAINMENT_ERROR_MESSAGE)
+
+
 # ib_insync OrderStatus strings → BrokerOrderStatus
 _IBKR_STATUS_MAP = {
     "PendingSubmit": BrokerOrderStatus.PENDING,
@@ -311,13 +352,19 @@ def normalize_instrument_id(instrument_id: str) -> str:
 class IBKRBrokerTransport(BrokerTransport):
     """Real IBKR transport via ib_insync (IB Gateway / TWS).
 
+    Under the containment policy above, ``connect``, ``submit_order`` and
+    ``cancel_order`` refuse to act, so this class performs no broker side effect
+    in the current build; read-only status/fill adapters stay available for
+    reconciling an order mapped before containment.
+
     Requires a reachable IB Gateway or TWS with the API enabled. ``ib_insync``
     is imported lazily so environments without it can still import this module
     (e.g. tests that use FakeBrokerTransport).
 
     An already-connected ``ib`` instance can be injected for offline unit
     testing of the adapter logic (contract building, status mapping, fill
-    extraction) — the socket-level connection to a real gateway is verified
+    extraction) — that exercises this module's own mapping code only. It is not
+    evidence about a real gateway, and the socket-level connection is verified
     externally only.
 
     Contract mapping: ``US:<SYM>`` / bare ``SYM`` → SMART(USD);
@@ -350,6 +397,9 @@ class IBKRBrokerTransport(BrokerTransport):
         return self._ib
 
     def connect(self) -> None:
+        # Containment boundary 1/3: before any session is opened. An operator
+        # starting the agent against a gateway gets this refusal, not a socket.
+        _assert_execution_permitted()
         ib = self._get_ib()
         ib.connect(self._host, self._port, clientId=self._client_id, timeout=self._connect_timeout)
         if not ib.isConnected():
@@ -403,6 +453,11 @@ class IBKRBrokerTransport(BrokerTransport):
         order_type: str = "MARKET",
         limit_price: Optional[float] = None,
     ) -> BrokerOrderResult:
+        # Containment boundary 2/3: the actual submit boundary. Checked before
+        # the is_connected() shortcut and outside the try/except below, so the
+        # refusal cannot be downgraded into an ordinary broker rejection result.
+        _assert_execution_permitted()
+
         if not self.is_connected():
             return BrokerOrderResult(
                 success=False,
@@ -454,6 +509,11 @@ class IBKRBrokerTransport(BrokerTransport):
         return None
 
     def cancel_order(self, broker_order_id: str) -> bool:
+        # Containment boundary 3/3: cancelling a live order is a broker
+        # side effect too, so it is refused rather than silently reported as
+        # "not accepted" (which would read like an order-state fact).
+        _assert_execution_permitted()
+
         trade = self._get_trade(broker_order_id)
         if trade is None:
             return False

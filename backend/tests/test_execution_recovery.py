@@ -47,6 +47,7 @@ def _make_intent(
     limit_price=None,
     status="authorized",
     broker_ref=None,
+    execution_scope="fake-transport",
 ):
     return OrderIntentDTO(
         intent_id=intent_id,
@@ -61,6 +62,7 @@ def _make_intent(
         expires_at=(utcnow() + timedelta(minutes=5)).isoformat(),
         created_at=utcnow().isoformat(),
         broker_ref=broker_ref,
+        execution_scope=execution_scope,
     )
 
 

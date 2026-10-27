@@ -24,6 +24,15 @@ Safety invariants:
 - Respects the platform execution kill switch: while active, no new
   submissions (in-flight monitoring continues); control-status fetch
   failures fail closed
+- Broker execution is contained by default: the agent has no implicit broker
+  transport, and the real IBKR transport refuses connect/submit/cancel until
+  an operator grants broker execution separately (see broker_transport's
+  OFFLINE-ONLY containment policy)
+- Authorize is not submit: an intent reaches a broker only when the platform
+  binds it to a trusted execution scope, which today means the fake transport.
+  Scope is never inferred from a port, a broker_ref prefix or a UI flag; an
+  unscoped intent is refused without any broker call, without any status report
+  back to the platform, and once per intent per process in the logs
 """
 import logging
 import os
@@ -36,10 +45,13 @@ from typing import Dict, List, Optional, Set
 from .config import AgentConfig, load_config_from_env
 from .ibkr_client import IBKRClient
 from .alethra_client import AlethraAPIClient, OrderIntentDTO, FillReport
+from . import broker_transport
 from .broker_transport import (
     BrokerTransport,
     BrokerOrderStatus,
     BrokerOrderState,
+    CONTAINMENT_ERROR_MESSAGE,
+    CONTAINMENT_POLICY_ID,
     normalize_instrument_id,
 )
 from .fill_journal import FillDeliveryJournal, PendingFill
@@ -50,6 +62,22 @@ logger = logging.getLogger(__name__)
 
 # Clock-skew tolerance when matching broker orders to an intent's creation time.
 _SUBMISSION_MATCH_SKEW_SECONDS = 60
+
+# ── Execution containment (offline-only round, 2026-10-27) ────────────────
+#
+# An intent may be submitted to a broker only when the platform's poll response
+# binds it to a trusted execution scope. The platform has no execution-scope
+# column, so every real polled intent arrives with execution_scope=None and is
+# refused: an authorized intent in the agent's queue is never treated as a
+# submission instruction.
+#
+# Scope is never inferred — not from the gateway port, not from a broker_ref
+# prefix, not from a UI flag — and a bare "paper"/"live" label is not trusted
+# either, because no verified account binding exists yet. The only value on the
+# trusted list is the in-memory fake transport, which cannot reach a broker.
+# Broker execution needs its own approval before this list can grow.
+FAKE_TRANSPORT_SCOPE = "fake-transport"
+TRUSTED_EXECUTION_SCOPES = frozenset({FAKE_TRANSPORT_SCOPE})
 
 
 class ExecutionAgent:
@@ -74,6 +102,10 @@ class ExecutionAgent:
         # re-adopted from the platform). Excluded from lost-ack matching so a
         # second identical intent never adopts another intent's order.
         self._claimed_broker_refs: Set[str] = set()
+        # Containment bookkeeping: intents whose scope refusal has already been
+        # logged in this process, and how many refusals have happened.
+        self._scope_refusals_logged: Set[str] = set()
+        self.scope_refusal_count = 0
         
         # Durable journal for fill delivery recovery across restarts (P0-C)
         self.fill_delivery_journal = FillDeliveryJournal()
@@ -279,6 +311,33 @@ class ExecutionAgent:
             candidates.append(order)
         return candidates
 
+    def _refuse_unscoped_intent(self, intent: OrderIntentDTO) -> None:
+        """Refuse an intent that carries no trusted execution scope.
+
+        Semantics, defined once:
+        - the broker is not called at all (not even a read-only lookup);
+        - nothing is reported to the platform — no submitted/filled claim, and
+          no rejection event either, because a policy refusal is not a
+          statement about the order. The intent stays 'authorized', which keeps
+          the offline HTTP simulation path and its accounting untouched;
+        - the refusal is logged once per intent per process, so repeated polls
+          are diagnosable without spamming events.
+        """
+        self.scope_refusal_count += 1
+        if intent.intent_id in self._scope_refusals_logged:
+            logger.debug(
+                f"Intent {intent.intent_id} remains refused (no trusted execution scope)"
+            )
+            return
+        self._scope_refusals_logged.add(intent.intent_id)
+        logger.error(
+            f"Refusing to submit intent {intent.intent_id}: it carries no trusted "
+            f"execution scope (platform value="
+            f"{getattr(intent, 'execution_scope', None)!r}; containment "
+            f"{CONTAINMENT_POLICY_ID}). No broker call was made and nothing was "
+            f"reported; the intent stays authorized on the platform."
+        )
+
     def _process_single_intent(
         self, intent: OrderIntentDTO, kill_switch_active: bool = False
     ) -> None:
@@ -347,6 +406,14 @@ class ExecutionAgent:
             logger.warning(
                 f"Execution kill switch active; not submitting {intent.intent_id}"
             )
+            return
+
+        # Containment gate: without a trusted execution scope from the
+        # platform, the broker is never queried and never submitted to. This is
+        # checked before the lost-acknowledgement lookup so an unscoped intent
+        # cannot even reach a read-only broker call.
+        if getattr(intent, "execution_scope", None) not in TRUSTED_EXECUTION_SCOPES:
+            self._refuse_unscoped_intent(intent)
             return
 
         # Lost-acknowledgement recovery: if a matching unclaimed broker order
@@ -675,6 +742,44 @@ class ExecutionAgent:
         self.disconnect()
 
 
+def build_transport(config: AgentConfig) -> BrokerTransport:
+    """Build the broker transport for this process. There is no default.
+
+    Under the ``CONTAINMENT_POLICY_ID`` round only the in-memory fake transport
+    may run. ``ibkr`` — whether requested explicitly or reached by an unset
+    variable — exits before any gateway session is opened, and no environment
+    variable relaxes that: real broker execution needs its own owner approval.
+    """
+    raw = os.getenv("ALETHRA_BROKER_TRANSPORT")
+    if raw is None:
+        message = (
+            "ALETHRA_BROKER_TRANSPORT is unset and has no default. Set it to "
+            f"'fake' for offline simulation. {CONTAINMENT_ERROR_MESSAGE}"
+        )
+        logger.error(message)
+        sys.exit(message)
+
+    name = raw.strip().lower()
+    if name == "fake":
+        logger.warning(
+            "Using FakeBrokerTransport: in-memory offline simulation, no broker "
+            "connection is possible from this transport"
+        )
+        return broker_transport.FakeBrokerTransport()
+
+    if name == "ibkr":
+        logger.error(CONTAINMENT_ERROR_MESSAGE)
+        sys.exit(CONTAINMENT_ERROR_MESSAGE)
+
+    message = (
+        f"Unknown ALETHRA_BROKER_TRANSPORT: {raw!r}. Only 'fake' is runnable "
+        f"under the {CONTAINMENT_POLICY_ID} containment policy; 'ibkr' requires "
+        "separate owner approval and is refused even when set explicitly."
+    )
+    logger.error(message)
+    sys.exit(message)
+
+
 def main():
     """Main entry point for the execution agent."""
     logging.basicConfig(
@@ -688,22 +793,7 @@ def main():
         logger.error(f"Configuration error: {e}")
         sys.exit(1)
 
-    transport_name = os.getenv("ALETHRA_BROKER_TRANSPORT", "ibkr").strip().lower()
-    if transport_name == "fake":
-        # Explicit override for local development/tests — never used by default.
-        logger.warning("Using FakeBrokerTransport (ALETHRA_BROKER_TRANSPORT=fake)")
-        from .broker_transport import FakeBrokerTransport
-        transport = FakeBrokerTransport()
-    elif transport_name == "ibkr":
-        from .broker_transport import IBKRBrokerTransport
-        transport = IBKRBrokerTransport(
-            host=config.ib_gateway_host,
-            port=config.ib_gateway_port,
-            client_id=config.ib_client_id,
-        )
-    else:
-        logger.error(f"Unknown ALETHRA_BROKER_TRANSPORT: {transport_name!r}")
-        sys.exit(1)
+    transport = build_transport(config)
     ibkr_client = IBKRClient(transport)
 
     alethra_client = AlethraAPIClient(

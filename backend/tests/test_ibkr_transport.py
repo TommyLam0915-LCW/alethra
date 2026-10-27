@@ -18,6 +18,24 @@ from app.execution_agent.broker_transport import (
 from app.lib.timeutil import utcnow
 
 
+@pytest.fixture(autouse=True)
+def _lift_containment_for_stub_gateway(monkeypatch):
+    """Adapter-mapping evidence only — never gateway evidence.
+
+    Under the OFFLINE-ONLY containment policy the transport's connect/submit/
+    cancel methods refuse, which is covered by
+    ``tests/test_execution_containment.py``. The tests in this file exercise the
+    mapping code behind those methods (contract construction, order building,
+    status mapping, fill extraction, recent-order recovery) against the injected
+    ``FakeIb`` stand-in below, so they lift the flag for the duration of each
+    test. ``FakeIb`` is a local object: no socket is opened, and in any process
+    that does not run this fixture the real transport still refuses.
+    """
+    from app.execution_agent import broker_transport as bt
+
+    monkeypatch.setattr(bt, "BROKER_EXECUTION_CONTAINED", False)
+
+
 class FakeIb:
     """Minimal ib_insync.IB stand-in."""
 

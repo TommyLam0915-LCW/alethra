@@ -30,6 +30,12 @@ class OrderIntentDTO:
     # True when the owner requested cancellation of a submitted intent: the
     # agent must cancel the live broker order and report the result.
     cancel_requested: bool = False
+    # The platform's authoritative execution scope / account binding for this
+    # intent. The platform has no execution-scope column, so its poll response
+    # sends no such key and a real intent always arrives here as None — which
+    # the agent treats as "not trusted for broker submission". The agent never
+    # infers scope from a gateway port, a broker_ref prefix or a UI flag.
+    execution_scope: Optional[str] = None
 
 
 @dataclass
