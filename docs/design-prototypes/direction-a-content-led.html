@@ -1,0 +1,1171 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=1440">
+<title>Alethra — Content-Led Workspace（定稿）</title>
+<style>
+/* ===== RESET ===== */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg-base: #0a0a0a;
+  --bg-surface: #121212;
+  --bg-hover: #1a1a1a;
+  --bg-active: #1f1f1f;
+  --border-subtle: #1a1a1a;
+  --border: #252525;
+  --text-primary: #e8e8e8;
+  --text-secondary: #a0a0a0;
+  --text-tertiary: #606060;
+  --accent: #3b82f6;
+  --accent-hover: #2563eb;
+  --green: #22c55e;
+  --red: #ef4444;
+  --green-dim: rgba(34,197,94,0.15);
+  --red-dim: rgba(239,68,68,0.15);
+  --radius: 3px;
+  --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'PingFang TC', Roboto, sans-serif;
+  --mono: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+}
+
+body {
+  font-family: var(--font);
+  background: #050505;
+  color: var(--text-primary);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: "tnum" 1;
+}
+
+/* ===== PROTOTYPE BANNER ===== */
+.proto-banner {
+  padding: 10px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.proto-banner .warn { color: var(--accent); }
+
+/* ===== SHARED APP SHELL ===== */
+.app-nav-bar {
+  height: 48px;
+  padding: 0 24px;
+  display: flex;
+  align-items: center;
+  gap: 32px;
+}
+.brand { font-size: 15px; font-weight: 600; color: var(--text-primary); letter-spacing: -0.2px; }
+.nav-links { display: flex; gap: 0; }
+.nav-link {
+  padding: 12px 16px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  text-decoration: none;
+  font-weight: 450;
+  position: relative;
+}
+.nav-link:hover { color: var(--text-primary); }
+.nav-link.active { color: var(--text-primary); font-weight: 550; }
+.nav-link.active::after {
+  content: '';
+  position: absolute;
+  bottom: 0; left: 16px; right: 16px;
+  height: 1.5px;
+  background: var(--text-primary);
+  border-radius: 1px;
+}
+.nav-right { margin-left: auto; display: flex; gap: 16px; align-items: center; }
+.nav-right-btn {
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 4px 0;
+}
+.nav-right-btn:hover { color: var(--text-primary); }
+
+/* ===== LOGIN ===== */
+.login-wrap {
+  width: 1440px;
+  min-height: 800px;
+  margin: 0 auto;
+  display: flex;
+}
+.login-brand-col {
+  width: 520px;
+  padding: 80px 64px 60px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  background: var(--bg-surface);
+}
+.login-brand-mark {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: -0.2px;
+  margin-bottom: 48px;
+}
+.login-brand-heading {
+  font-size: 28px;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.35;
+  margin-bottom: 12px;
+  letter-spacing: -0.3px;
+}
+.login-brand-sub {
+  font-size: 14px;
+  color: var(--text-secondary);
+  line-height: 1.65;
+  margin-bottom: 56px;
+}
+.login-evidence {
+  padding: 20px 0 0;
+  border-top: 1px solid var(--border);
+}
+.login-evidence-label {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  margin-bottom: 14px;
+  font-weight: 600;
+}
+.login-evidence-line {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.7;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.login-evidence-line .g { color: var(--green); }
+.login-evidence-line .r { color: var(--red); }
+.login-evidence-reason {
+  margin-top: 10px;
+  font-family: var(--font);
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+.login-form-col {
+  flex: 1;
+  padding: 80px 64px 60px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  max-width: 480px;
+}
+.login-form-title {
+  font-size: 20px;
+  font-weight: 600;
+  margin-bottom: 36px;
+  letter-spacing: -0.2px;
+}
+.field { margin-bottom: 20px; }
+.field-label {
+  display: block;
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+  font-weight: 500;
+}
+.field-input {
+  width: 100%;
+  height: 42px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0 14px;
+  color: var(--text-primary);
+  font-size: 14px;
+  outline: none;
+  font-family: var(--font);
+}
+.field-input:focus { border-color: var(--accent); }
+.field-input::placeholder { color: var(--text-tertiary); }
+.login-submit {
+  width: 100%;
+  height: 42px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  margin-top: 8px;
+  font-family: var(--font);
+}
+.login-submit:hover { background: var(--accent-hover); }
+.login-switch {
+  text-align: center;
+  margin-top: 24px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.login-switch a { color: var(--accent); text-decoration: none; }
+.login-footer {
+  margin-top: auto;
+  padding-top: 32px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  line-height: 1.6;
+}
+
+/* ===== RESEARCH PAGE ===== */
+.research-wrap {
+  width: 1440px;
+  margin: 0 auto;
+}
+.research-body { padding: 40px 48px; }
+.research-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 28px;
+}
+.research-title { font-size: 18px; font-weight: 600; letter-spacing: -0.2px; }
+.research-cta {
+  display: inline-block;
+  padding: 7px 18px;
+  background: var(--accent);
+  color: #fff;
+  border-radius: var(--radius);
+  font-size: 12px;
+  font-weight: 600;
+  text-decoration: none;
+  font-family: var(--font);
+}
+.filter-row {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  margin-bottom: 24px;
+  border-bottom: 1px solid var(--border);
+}
+.filter-tab {
+  padding: 8px 16px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-weight: 450;
+  position: relative;
+  font-family: var(--font);
+}
+.filter-tab:hover { color: var(--text-primary); }
+.filter-tab.active { color: var(--text-primary); font-weight: 550; }
+.filter-tab.active::after {
+  content: '';
+  position: absolute;
+  bottom: -1px; left: 16px; right: 16px;
+  height: 1.5px;
+  background: var(--text-primary);
+}
+.filter-tab .ct { font-size: 11px; color: var(--text-tertiary); margin-left: 4px; font-weight: 400; }
+.exp-table { width: 100%; border-collapse: collapse; }
+.exp-table th {
+  text-align: left;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-tertiary);
+  padding: 0 16px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.exp-table td {
+  padding: 16px;
+  font-size: 13px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.exp-table tbody tr:hover td { background: var(--bg-hover); }
+.exp-name { font-weight: 500; color: var(--text-primary); cursor: pointer; }
+.exp-name:hover { color: var(--accent); }
+.exp-meta { font-size: 11px; color: var(--text-tertiary); margin-top: 3px; }
+.exp-status {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 550;
+  padding: 2px 8px;
+  border-radius: 2px;
+}
+.exp-status.draft { color: var(--text-secondary); background: var(--bg-active); }
+.exp-status.exploring { color: var(--accent); background: rgba(59,130,246,0.1); }
+.exp-status.locked { color: var(--green); background: var(--green-dim); }
+.exp-result { font-family: var(--mono); font-size: 12px; }
+.exp-result.pos { color: var(--green); }
+.exp-result.neg { color: var(--red); }
+.exp-result.none { color: var(--text-tertiary); }
+.exp-action { color: var(--accent); text-decoration: none; font-size: 12px; font-weight: 500; }
+
+/* ===== WORKSPACE PAGE ===== */
+.workspace-wrap {
+  width: 1440px;
+  height: 900px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-base);
+}
+
+/* Context strip — inline, no chips */
+.ctx-strip {
+  padding: 0 24px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  gap: 0;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.ctx-strip .sep { margin: 0 10px; color: var(--border); }
+.ctx-strip .mode-sim { color: var(--accent); font-weight: 500; }
+.ctx-strip .replay-time { font-family: var(--mono); color: var(--text-secondary); }
+.ctx-strip .right { margin-left: auto; font-size: 11px; }
+
+/* Body: three regions via placement, not frames */
+.ws-body { flex: 1; display: flex; min-height: 0; }
+
+/* Watchlist — quiet, no row borders */
+.ws-watchlist {
+  width: 200px;
+  padding: 16px 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-surface);
+}
+.wl-heading {
+  padding: 0 16px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.wl-add {
+  font-size: 14px;
+  color: var(--text-tertiary);
+  background: none;
+  border: none;
+  cursor: pointer;
+  line-height: 1;
+}
+.wl-add:hover { color: var(--accent); }
+.wl-item {
+  padding: 10px 16px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  cursor: pointer;
+  border-radius: 0;
+}
+.wl-item:hover { background: var(--bg-hover); }
+.wl-item.active { background: var(--bg-active); }
+.wl-sym { font-size: 13px; font-weight: 550; color: var(--text-primary); }
+.wl-right { text-align: right; }
+.wl-price { font-family: var(--mono); font-size: 12px; color: var(--text-primary); }
+.wl-chg { font-family: var(--mono); font-size: 11px; }
+.wl-chg.up { color: var(--green); }
+.wl-chg.down { color: var(--red); }
+
+/* Divider between regions — single subtle line */
+.region-div { width: 1px; background: var(--border-subtle); }
+
+/* Center — open canvas */
+.ws-center { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+
+/* Instrument summary — no frame, just type hierarchy */
+.inst-summary {
+  padding: 20px 24px 16px;
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.inst-symbol { font-size: 20px; font-weight: 650; letter-spacing: -0.3px; }
+.inst-name { font-size: 13px; color: var(--text-secondary); }
+.inst-exchange { font-size: 12px; color: var(--text-tertiary); }
+.inst-price-block { margin-left: auto; display: flex; align-items: baseline; gap: 10px; }
+.inst-price { font-family: var(--mono); font-size: 24px; font-weight: 650; letter-spacing: -0.5px; }
+.inst-change { font-family: var(--mono); font-size: 13px; font-weight: 550; }
+.inst-change.up { color: var(--green); }
+
+/* Tabs under summary */
+.inst-tabs {
+  padding: 0 24px;
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.inst-tab {
+  padding: 8px 16px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-weight: 450;
+  position: relative;
+  font-family: var(--font);
+}
+.inst-tab:hover { color: var(--text-primary); }
+.inst-tab.active { color: var(--text-primary); font-weight: 550; }
+.inst-tab.active::after {
+  content: '';
+  position: absolute;
+  bottom: -1px; left: 16px; right: 16px;
+  height: 1.5px;
+  background: var(--text-primary);
+}
+
+/* Chart — with proper price scale */
+.chart-area {
+  flex: 1;
+  position: relative;
+  padding: 16px 48px 28px 16px;
+}
+.chart-meta {
+  position: absolute;
+  top: 12px;
+  left: 16px;
+  font-size: 10px;
+  color: var(--text-tertiary);
+  display: flex;
+  gap: 12px;
+}
+.chart-meta .sample-tag { color: var(--accent); }
+
+/* Price pane — 70% of chart height */
+.price-pane {
+  position: absolute;
+  top: 32px;
+  left: 16px;
+  right: 48px;
+  bottom: 100px;
+}
+
+/* Volume pane — 30% of chart height */
+.volume-pane {
+  position: absolute;
+  bottom: 28px;
+  left: 16px;
+  right: 48px;
+  height: 60px;
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  opacity: 0.3;
+}
+.vol-bar { flex: 1; border-radius: 1px; }
+.vol-bar.up { background: var(--green); }
+.vol-bar.down { background: var(--red); }
+
+/* Candles positioned by price */
+.candle {
+  position: absolute;
+  width: 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.candle-body { width: 8px; border-radius: 1px; }
+.candle-body.up { background: var(--green); }
+.candle-body.down { background: var(--red); }
+.candle-wick { width: 1px; }
+.candle-wick.up { background: var(--green); }
+.candle-wick.down { background: var(--red); }
+
+/* Axes */
+.axis-y {
+  position: absolute;
+  right: 4px;
+  top: 32px;
+  bottom: 100px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  font-size: 10px;
+  color: var(--text-tertiary);
+  font-family: var(--mono);
+}
+.axis-x {
+  position: absolute;
+  bottom: 6px;
+  left: 16px;
+  right: 48px;
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  color: var(--text-tertiary);
+  font-family: var(--mono);
+}
+.volume-area {
+  position: absolute;
+  bottom: 28px;
+  left: 16px;
+  right: 48px;
+  height: 36px;
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  opacity: 0.25;
+}
+.vol-bar { flex: 1; border-radius: 1px; }
+.vol-bar.up { background: var(--green); }
+.vol-bar.down { background: var(--red); }
+.chart-marker {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid var(--accent);
+  background: var(--bg-base);
+}
+.chart-marker::after {
+  content: '';
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 1px;
+  height: 14px;
+  background: var(--accent);
+}
+
+/* Replay strip — quiet, inline */
+.replay-strip {
+  height: 36px;
+  padding: 0 24px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  border-top: 1px solid var(--border-subtle);
+}
+.replay-btn {
+  width: 22px;
+  height: 22px;
+  background: var(--bg-active);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-size: 9px;
+}
+.replay-time { font-family: var(--mono); color: var(--accent); font-weight: 600; }
+.replay-label { color: var(--text-tertiary); }
+
+/* Right panel — tabs + content, no nested cards */
+.ws-right {
+  width: 320px;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-surface);
+}
+.right-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.right-tab {
+  flex: 1;
+  padding: 10px;
+  font-size: 12px;
+  font-weight: 450;
+  color: var(--text-secondary);
+  text-align: center;
+  border: none;
+  background: none;
+  cursor: pointer;
+  border-bottom: 1.5px solid transparent;
+  font-family: var(--font);
+}
+.right-tab:hover { color: var(--text-primary); }
+.right-tab.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 550; }
+.right-body { flex: 1; padding: 20px; overflow-y: auto; }
+
+/* Strategy info — compact definition list, no stacked labels */
+.strat-block { margin-bottom: 24px; }
+.strat-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+  letter-spacing: -0.1px;
+}
+.strat-method {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 16px;
+}
+.def-row {
+  display: flex;
+  align-items: baseline;
+  padding: 5px 0;
+  font-size: 12px;
+}
+.def-label {
+  width: 80px;
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+.def-value {
+  color: var(--text-primary);
+  font-weight: 450;
+}
+.def-value.mono { font-family: var(--mono); font-size: 11px; }
+
+/* Evidence table — improved contrast */
+.evidence-heading {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 12px;
+}
+.ev-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+.ev-table th {
+  text-align: left;
+  padding: 0 6px 8px;
+  color: var(--text-tertiary);
+  font-weight: 500;
+  font-size: 10px;
+  border-bottom: 1px solid var(--border);
+}
+.ev-table td {
+  padding: 7px 6px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.ev-table .g { color: var(--green); }
+.ev-table .r { color: var(--red); }
+.ev-table .sym { color: var(--text-primary); font-weight: 500; }
+
+/* ===== RESPONSIVE PREVIEW (compact) ===== */
+.compact-wrap {
+  width: 1024px;
+  height: 768px;
+  margin: 48px auto;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-base);
+  border: 1px solid var(--border);
+}
+</style>
+</head>
+<body>
+
+<!-- PROTOTYPE BANNER -->
+<div class="proto-banner">
+  <span>Alethra — Content-Led Workspace（定稿）</span>
+  <span class="warn">所有數據均為設計示例，非真實帳戶</span>
+  <span>Not implemented — Visual review only — 2026-10-27</span>
+</div>
+
+<!-- ==================== LOGIN ==================== -->
+<div class="login-wrap">
+  <div class="login-brand-col">
+    <div class="login-brand-mark">Alethra</div>
+    <div class="login-brand-heading">研究策略，<br>追溯每次交易。</div>
+    <div class="login-brand-sub">在歷史資料中測試規則，保存模擬交易與研究結果。</div>
+    <div class="login-evidence">
+      <div class="login-evidence-label">示例交易紀錄（已平倉）</div>
+      <div class="login-evidence-line">AAPL · 買入 100 股 @ $185.40 · 2026-10-15 09:31</div>
+      <div class="login-evidence-line">AAPL · 賣出 100 股 @ $198.11 · 2026-10-24 14:35 · <span class="g">+$1,271</span></div>
+      <div class="login-evidence-reason">訊號：10-14 · 退出原因：SMA(5) 下穿 SMA(20)</div>
+    </div>
+  </div>
+  <div class="login-form-col">
+    <div class="login-form-title">登入</div>
+    <div class="field">
+      <label class="field-label">電子郵件</label>
+      <input class="field-input" type="email" placeholder="your@email.com" readonly>
+    </div>
+    <div class="field">
+      <label class="field-label">密碼</label>
+      <input class="field-input" type="password" readonly>
+    </div>
+    <button class="login-submit">登入</button>
+    <div class="login-switch">沒有帳號？<a href="#">建立帳號</a></div>
+    <div class="login-footer">Alethra 為研究與模擬交易平台，不涉及真實資金與證券交易。</div>
+  </div>
+</div>
+
+<!-- ==================== RESEARCH ==================== -->
+<div class="research-wrap">
+  <div class="app-nav-bar">
+    <span class="brand">Alethra</span>
+    <nav class="nav-links">
+      <a class="nav-link" href="#">工作台</a>
+      <a class="nav-link active" href="#">研究</a>
+      <a class="nav-link" href="#">組合</a>
+      <a class="nav-link" href="#">紀錄</a>
+    </nav>
+    <div class="nav-right">
+      <button class="nav-right-btn">設定</button>
+      <button class="nav-right-btn">登出</button>
+    </div>
+  </div>
+  <div class="research-body">
+    <div class="research-top">
+      <div class="research-title">研究</div>
+      <a href="#" class="research-cta">+ 建立研究</a>
+    </div>
+    <div class="filter-row">
+      <button class="filter-tab active">全部 <span class="ct">12</span></button>
+      <button class="filter-tab">草稿 <span class="ct">5</span></button>
+      <button class="filter-tab">探索中 <span class="ct">3</span></button>
+      <button class="filter-tab">已鎖定 <span class="ct">4</span></button>
+    </div>
+    <table class="exp-table">
+      <thead>
+        <tr>
+          <th>名稱</th>
+          <th>最近測試</th>
+          <th>狀態</th>
+          <th>更新</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>
+            <div class="exp-name">AAPL 均線突破策略</div>
+            <div class="exp-meta">建於 2026-10-15 · 47 筆交易</div>
+          </td>
+          <td><span class="exp-result pos">+12.5% · 10-24</span></td>
+          <td><span class="exp-status locked">已鎖定</span></td>
+          <td style="color:var(--text-tertiary);font-size:12px">2026-10-24</td>
+          <td><a href="#" class="exp-action">查看結果 →</a></td>
+        </tr>
+        <tr>
+          <td>
+            <div class="exp-name">TSLA 波動率分析</div>
+            <div class="exp-meta">建於 2026-10-18 · 尚未執行回測</div>
+          </td>
+          <td><span class="exp-result none">尚未執行</span></td>
+          <td><span class="exp-status exploring">探索中</span></td>
+          <td style="color:var(--text-tertiary);font-size:12px">2026-10-25</td>
+          <td><a href="#" class="exp-action">繼續研究 →</a></td>
+        </tr>
+        <tr>
+          <td>
+            <div class="exp-name">NVDA 動能策略回測</div>
+            <div class="exp-meta">建於 2026-10-20 · 草稿</div>
+          </td>
+          <td><span class="exp-result none">—</span></td>
+          <td><span class="exp-status draft">草稿</span></td>
+          <td style="color:var(--text-tertiary);font-size:12px">2026-10-20</td>
+          <td><a href="#" class="exp-action">編輯 →</a></td>
+        </tr>
+        <tr>
+          <td>
+            <div class="exp-name">騰訊 (0700.HK) 長線研究</div>
+            <div class="exp-meta">建於 2026-09-05 · 23 筆交易</div>
+          </td>
+          <td><span class="exp-result neg">-2.3% · 10-22</span></td>
+          <td><span class="exp-status locked">已鎖定</span></td>
+          <td style="color:var(--text-tertiary);font-size:12px">2026-10-22</td>
+          <td><a href="#" class="exp-action">查看結果 →</a></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ==================== WORKSPACE ==================== -->
+<div class="workspace-wrap">
+  <div class="app-nav-bar">
+    <span class="brand">Alethra</span>
+    <nav class="nav-links">
+      <a class="nav-link active" href="#">工作台</a>
+      <a class="nav-link" href="#">研究</a>
+      <a class="nav-link" href="#">組合</a>
+      <a class="nav-link" href="#">紀錄</a>
+    </nav>
+    <div class="nav-right">
+      <button class="nav-right-btn">設定</button>
+      <button class="nav-right-btn">登出</button>
+    </div>
+  </div>
+
+  <!-- Context strip — inline text, no chips -->
+  <div class="ctx-strip">
+    <span>AAPL 均線突破策略</span>
+    <span class="sep">·</span>
+    <span class="mode-sim">模擬交易</span>
+    <span class="sep">·</span>
+    <span>回放中</span>
+    <span class="sep">·</span>
+    <span class="replay-time">截至 10月24日 14:35</span>
+    <span class="right">示例資料 · 1D · HKT</span>
+  </div>
+
+  <div class="ws-body">
+    <!-- Watchlist — quiet, no row borders -->
+    <div class="ws-watchlist">
+      <div class="wl-heading">
+        監察名單
+        <button class="wl-add">+</button>
+      </div>
+      <div class="wl-item active">
+        <span class="wl-sym">AAPL</span>
+        <div class="wl-right">
+          <div class="wl-price">198.11</div>
+          <div class="wl-chg up">+1.24%</div>
+        </div>
+      </div>
+      <div class="wl-item">
+        <span class="wl-sym">TSLA</span>
+        <div class="wl-right">
+          <div class="wl-price">248.50</div>
+          <div class="wl-chg down">-0.83%</div>
+        </div>
+      </div>
+      <div class="wl-item">
+        <span class="wl-sym">NVDA</span>
+        <div class="wl-right">
+          <div class="wl-price">142.30</div>
+          <div class="wl-chg up">+2.15%</div>
+        </div>
+      </div>
+      <div class="wl-item">
+        <span class="wl-sym">0700.HK</span>
+        <div class="wl-right">
+          <div class="wl-price">372.40</div>
+          <div class="wl-chg up">+0.54%</div>
+        </div>
+      </div>
+      <div class="wl-item">
+        <span class="wl-sym">MSFT</span>
+        <div class="wl-right">
+          <div class="wl-price">415.60</div>
+          <div class="wl-chg up">+0.92%</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="region-div"></div>
+
+    <!-- Center — open canvas -->
+    <div class="ws-center">
+      <!-- Instrument summary — no frame -->
+      <div class="inst-summary">
+        <span class="inst-symbol">AAPL</span>
+        <span class="inst-name">Apple Inc.</span>
+        <span class="inst-exchange">NASDAQ</span>
+        <div class="inst-price-block">
+          <span class="inst-price">198.11</span>
+          <span class="inst-change up">+2.43 (+1.24%)</span>
+        </div>
+      </div>
+
+      <!-- Tabs -->
+      <div class="inst-tabs">
+        <button class="inst-tab active">圖表</button>
+        <button class="inst-tab">策略</button>
+        <button class="inst-tab">交易紀錄</button>
+        <button class="inst-tab">概覽</button>
+      </div>
+
+      <!-- Chart — directly on canvas -->
+      <div class="chart-area">
+        <div class="chart-meta">
+          <span class="sample-tag">示例資料</span>
+          <span>SMA(5) — SMA(20)</span>
+        </div>
+
+        <!-- Price pane: 25 candles, price range 185-200, current 198.11 -->
+        <!-- Y-axis: 200 (top) to 185 (bottom), 15px range = 100% height -->
+        <div class="price-pane">
+          <!-- Candle 1: 10-01, close 187.50 -->
+          <div class="candle" style="left:0%; top:83.3%">
+            <div class="candle-wick up" style="height:4px"></div>
+            <div class="candle-body up" style="height:12px"></div>
+            <div class="candle-wick up" style="height:3px"></div>
+          </div>
+          <!-- Candle 2: 10-02, close 189.20 -->
+          <div class="candle" style="left:4%; top:72%">
+            <div class="candle-wick up" style="height:5px"></div>
+            <div class="candle-body up" style="height:14px"></div>
+            <div class="candle-wick up" style="height:4px"></div>
+          </div>
+          <!-- Candle 3: 10-03, close 188.10 -->
+          <div class="candle" style="left:8%; top:79.3%">
+            <div class="candle-wick down" style="height:6px"></div>
+            <div class="candle-body down" style="height:10px"></div>
+            <div class="candle-wick down" style="height:5px"></div>
+          </div>
+          <!-- Candle 4: 10-04, close 190.50 -->
+          <div class="candle" style="left:12%; top:63.3%">
+            <div class="candle-wick up" style="height:4px"></div>
+            <div class="candle-body up" style="height:16px"></div>
+            <div class="candle-wick up" style="height:3px"></div>
+          </div>
+          <!-- Candle 5: 10-07, close 192.80 -->
+          <div class="candle" style="left:16%; top:48%">
+            <div class="candle-wick up" style="height:5px"></div>
+            <div class="candle-body up" style="height:18px"></div>
+            <div class="candle-wick up" style="height:4px"></div>
+          </div>
+          <!-- Candle 6: 10-08, close 191.40 -->
+          <div class="candle" style="left:20%; top:57.3%">
+            <div class="candle-wick down" style="height:7px"></div>
+            <div class="candle-body down" style="height:12px"></div>
+            <div class="candle-wick down" style="height:6px"></div>
+          </div>
+          <!-- Candle 7: 10-09, close 189.90 -->
+          <div class="candle" style="left:24%; top:67.3%">
+            <div class="candle-wick down" style="height:6px"></div>
+            <div class="candle-body down" style="height:14px"></div>
+            <div class="candle-wick down" style="height:5px"></div>
+          </div>
+          <!-- Candle 8: 10-10, close 188.60 -->
+          <div class="candle" style="left:28%; top:76%">
+            <div class="candle-wick down" style="height:5px"></div>
+            <div class="candle-body down" style="height:10px"></div>
+            <div class="candle-wick down" style="height:7px"></div>
+          </div>
+          <!-- Candle 9: 10-11, close 187.20 -->
+          <div class="candle" style="left:32%; top:85.3%">
+            <div class="candle-wick down" style="height:4px"></div>
+            <div class="candle-body down" style="height:12px"></div>
+            <div class="candle-wick down" style="height:6px"></div>
+          </div>
+          <!-- Candle 10: 10-14, close 185.40 (ENTRY) -->
+          <div class="candle" style="left:36%; top:97.3%">
+            <div class="candle-wick down" style="height:6px"></div>
+            <div class="candle-body down" style="height:8px"></div>
+            <div class="candle-wick down" style="height:4px"></div>
+          </div>
+          <!-- Candle 11: 10-15, close 186.80 -->
+          <div class="candle" style="left:40%; top:88%">
+            <div class="candle-wick up" style="height:5px"></div>
+            <div class="candle-body up" style="height:10px"></div>
+            <div class="candle-wick up" style="height:3px"></div>
+          </div>
+          <!-- Candle 12: 10-16, close 189.50 -->
+          <div class="candle" style="left:44%; top:70%">
+            <div class="candle-wick up" style="height:6px"></div>
+            <div class="candle-body up" style="height:18px"></div>
+            <div class="candle-wick up" style="height:4px"></div>
+          </div>
+          <!-- Candle 13: 10-17, close 191.20 -->
+          <div class="candle" style="left:48%; top:58.7%">
+            <div class="candle-wick up" style="height:5px"></div>
+            <div class="candle-body up" style="height:14px"></div>
+            <div class="candle-wick up" style="height:5px"></div>
+          </div>
+          <!-- Candle 14: 10-18, close 193.60 -->
+          <div class="candle" style="left:52%; top:42.7%">
+            <div class="candle-wick up" style="height:4px"></div>
+            <div class="candle-body up" style="height:16px"></div>
+            <div class="candle-wick up" style="height:6px"></div>
+          </div>
+          <!-- Candle 15: 10-21, close 195.40 -->
+          <div class="candle" style="left:56%; top:30.7%">
+            <div class="candle-wick up" style="height:5px"></div>
+            <div class="candle-body up" style="height:14px"></div>
+            <div class="candle-wick up" style="height:4px"></div>
+          </div>
+          <!-- Candle 16: 10-22, close 194.10 -->
+          <div class="candle" style="left:60%; top:39.3%">
+            <div class="candle-wick down" style="height:6px"></div>
+            <div class="candle-body down" style="height:10px"></div>
+            <div class="candle-wick down" style="height:5px"></div>
+          </div>
+          <!-- Candle 17: 10-23, close 196.80 -->
+          <div class="candle" style="left:64%; top:21.3%">
+            <div class="candle-wick up" style="height:4px"></div>
+            <div class="candle-body up" style="height:18px"></div>
+            <div class="candle-wick up" style="height:5px"></div>
+          </div>
+          <!-- Candle 18: 10-24, close 198.11 (EXIT) -->
+          <div class="candle" style="left:68%; top:12.6%">
+            <div class="candle-wick up" style="height:5px"></div>
+            <div class="candle-body up" style="height:12px"></div>
+            <div class="candle-wick up" style="height:3px"></div>
+          </div>
+
+          <!-- Entry marker at 10-15 (185.40) — execution date -->
+          <div class="chart-marker" style="left:calc(40% + 4px); top:88%"></div>
+          <!-- Exit marker at 10-24 (198.11) -->
+          <div class="chart-marker" style="left:calc(68% + 4px); top:12.6%"></div>
+        </div>
+
+        <!-- Volume pane -->
+        <div class="volume-pane">
+          <div class="vol-bar up" style="height:45%"></div>
+          <div class="vol-bar up" style="height:55%"></div>
+          <div class="vol-bar down" style="height:40%"></div>
+          <div class="vol-bar up" style="height:65%"></div>
+          <div class="vol-bar up" style="height:75%"></div>
+          <div class="vol-bar down" style="height:50%"></div>
+          <div class="vol-bar down" style="height:55%"></div>
+          <div class="vol-bar down" style="height:45%"></div>
+          <div class="vol-bar down" style="height:35%"></div>
+          <div class="vol-bar down" style="height:60%"></div>
+          <div class="vol-bar up" style="height:50%"></div>
+          <div class="vol-bar up" style="height:70%"></div>
+          <div class="vol-bar up" style="height:60%"></div>
+          <div class="vol-bar up" style="height:80%"></div>
+          <div class="vol-bar up" style="height:70%"></div>
+          <div class="vol-bar down" style="height:55%"></div>
+          <div class="vol-bar up" style="height:85%"></div>
+          <div class="vol-bar up" style="height:90%"></div>
+        </div>
+
+        <!-- Axes -->
+        <div class="axis-y">
+          <span>200</span>
+          <span>195</span>
+          <span>190</span>
+          <span>185</span>
+        </div>
+        <div class="axis-x">
+          <span>10-01</span>
+          <span>10-08</span>
+          <span>10-15</span>
+          <span>10-22</span>
+        </div>
+      </div>
+
+      <!-- Replay strip — step only -->
+      <div class="replay-strip">
+        <button class="replay-btn">→</button>
+        <span class="replay-label">下一個交易日</span>
+        <span class="replay-time">2026-10-24 14:35</span>
+        <span class="replay-label">·</span>
+        <span>1D</span>
+      </div>
+    </div>
+
+    <div class="region-div"></div>
+
+    <!-- Right panel — tabs + content -->
+    <div class="ws-right">
+      <div class="right-tabs">
+        <button class="right-tab">訂單</button>
+        <button class="right-tab active">持倉</button>
+        <button class="right-tab">日誌</button>
+      </div>
+      <div class="right-body">
+        <!-- Strategy info — compact, no stacked labels -->
+        <div class="strat-block">
+          <div class="strat-name">AAPL 均線突破策略</div>
+          <div class="strat-method">SMA 交叉 · 5／20</div>
+          <div class="def-row">
+            <span class="def-label">研究標的</span>
+            <span class="def-value">AAPL · Nasdaq</span>
+          </div>
+          <div class="def-row">
+            <span class="def-label">回測期間</span>
+            <span class="def-value mono">2025/01/01 — 2026/10/20</span>
+          </div>
+          <div class="def-row">
+            <span class="def-label">策略版本</span>
+            <span class="def-value mono">v3 · locked</span>
+          </div>
+          <div class="def-row">
+            <span class="def-label">資料來源</span>
+            <span class="def-value">示例 OHLC · Daily</span>
+          </div>
+        </div>
+
+        <!-- Current position: NONE -->
+        <div class="evidence-heading">當前持倉</div>
+        <div style="font-size:12px;color:var(--text-tertiary);padding:8px 0">無持倉</div>
+
+        <!-- Closed trade: detailed breakdown -->
+        <div class="evidence-heading" style="margin-top:24px">已平倉交易</div>
+        <table class="ev-table">
+          <tbody>
+            <tr>
+              <td style="color:var(--text-tertiary)">標的</td>
+              <td class="sym">AAPL</td>
+            </tr>
+            <tr>
+              <td style="color:var(--text-tertiary)">方向</td>
+              <td>買入 → 賣出</td>
+            </tr>
+            <tr>
+              <td style="color:var(--text-tertiary)">數量</td>
+              <td>100 股</td>
+            </tr>
+            <tr>
+              <td style="color:var(--text-tertiary)">入場</td>
+              <td>185.40 <span style="color:var(--text-tertiary);font-size:10px">· 10-15 09:31</span></td>
+            </tr>
+            <tr>
+              <td style="color:var(--text-tertiary)">退出</td>
+              <td>198.11 <span style="color:var(--text-tertiary);font-size:10px">· 10-24 14:35</span></td>
+            </tr>
+            <tr>
+              <td style="color:var(--text-tertiary)">價差</td>
+              <td class="g">+12.71 / 股</td>
+            </tr>
+            <tr>
+              <td style="color:var(--text-tertiary)">毛利潤</td>
+              <td class="g">+1,271</td>
+            </tr>
+            <tr>
+              <td style="color:var(--text-tertiary)">成本</td>
+              <td>0</td>
+            </tr>
+            <tr>
+              <td style="color:var(--text-tertiary)">淨利潤</td>
+              <td class="g" style="font-weight:600">+1,271</td>
+            </tr>
+          </tbody>
+        </table>
+        <div style="margin-top:8px;font-size:11px;color:var(--text-tertiary)">退出原因：SMA(5) 下穿 SMA(20)</div>
+
+        <!-- Recent fills -->
+        <div class="evidence-heading" style="margin-top:24px">最近成交</div>
+        <table class="ev-table">
+          <thead>
+            <tr>
+              <th>時間</th>
+              <th>方向</th>
+              <th>數量</th>
+              <th>價格</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>10-24 14:35</td>
+              <td class="r">賣出</td>
+              <td>100</td>
+              <td>198.11</td>
+            </tr>
+            <tr>
+              <td>10-15 09:31</td>
+              <td class="g">買入</td>
+              <td>100</td>
+              <td>185.40</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

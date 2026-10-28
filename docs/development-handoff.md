@@ -115,7 +115,11 @@ Compose resolves `dockerfile` relative to the build `context`, same as
    To run a second, fully isolated instance alongside the first (e.g. from another
    checkout), override `E2E_COMPOSE_PROJECT`, `E2E_FRONTEND_PORT`, `E2E_BACKEND_PORT`,
    `E2E_POSTGRES_DB` (must start with `alethra_e2e`), `E2E_ENV_FILE`, `E2E_LOG_DIR`, and
-   pass the same values to the stop script. For the review stack, `UNIFIED_BACKEND_IMAGE`
+   pass the same values to the stop script. Two `next dev` servers on one `frontend/`
+   directory share a build output by default, and whichever compiled last fixes the
+   `NEXT_PUBLIC_API_URL` every browser is served — so the starter passes
+   `NEXT_DEV_DIST_DIR=.next/dev-$E2E_FRONTEND_PORT` and each port keeps its own output.
+   For the review stack, `UNIFIED_BACKEND_IMAGE`
    and `UNIFIED_FRONTEND_IMAGE` let you build without retagging a running stack's images.
 3. Migration chain check (disposable databases only, never the review DB):
    ```bash
@@ -129,3 +133,34 @@ Compose resolves `dockerfile` relative to the build `context`, same as
 `*.tsbuildinfo`, `.venv`, `node_modules`, `/tmp` review resources, and test-login
 credentials. The `.gitignore` was extended so these are never swept in by an
 accidental `git add .`.
+
+## 2026-10-28 — status amendment (candidate freeze, opens nothing)
+
+Appended, not a rewrite of anything above. Candidate source state: branch
+`work/unified-research-flow` at containment commit `0463811`, plus the uncommitted
+working-tree changes described in `.local/commit-groups-20261028.md`.
+
+- **Adopted visual direction is content-led** — `docs/design-prototypes/direction-a-content-led.html`
+  (its own banner: 「定稿」, 「所有數據均為設計示例，非真實帳戶」, "Not implemented - Visual review only - 2026-10-27"),
+  with `direction-a-mobile.html` as its mobile counterpart. The bordered proposal in
+  `docs/workspace-redesign-spec.md` §0 is earlier history; see that file's §12.2.
+- **production / live are unverified.** Every screenshot and browser result to date comes
+  from a host `next dev` server against synthetic/demo data. No production build was run
+  for this candidate, and no real market feed or broker transport is connected (execution
+  stays offline-only).
+- **Owner visual / usage acceptance is still pending**, including readability on the
+  synthetic data, narrow-viewport and mobile access, portfolio-switch freshness, trade
+  traceability, and reload consistency.
+- **The latest full backend suite remains EXIT=1**, with four pre-existing failures kept
+  as-is (three billing redirect allow-list, one repo-root mount contract). The suite is
+  *not* passing and must not be described as such.
+- **Lifecycle spec rerun is blocked by a shared fixture.** `frontend/e2e/order-lifecycle-flow.spec.ts`
+  requires exactly one session on the seeded version; once a run consumes it, a second run
+  fails at setup and reseeding is not authorized this round. The most recent full 10/10 pass
+  predates the workspace dock's stale-response guard; post-guard coverage of that lane is the
+  targeted workspace test only (`.local/e2e-cb-stale-guard-20261028.log`).
+- **Direct portfolio cancel is API-only** — there is no portfolio-level cancel control in the
+  workspace UI; the session-linked cancel lane is what the browser exercises.
+- **Eight disposable PostgreSQL databases named for cleanup this round were not dropped**
+  (they were already absent when re-verified). Their disappearance time and cause are
+  unconfirmed; this is reported as "not deleted this round", not as a cleanup result.

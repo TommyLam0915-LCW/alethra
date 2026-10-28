@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=375">
+<title>Alethra — Mobile Views（定稿）</title>
+<style>
+/* ===== RESET ===== */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg-base: #0a0a0a;
+  --bg-surface: #121212;
+  --bg-hover: #1a1a1a;
+  --bg-active: #1f1f1f;
+  --border-subtle: #1a1a1a;
+  --border: #252525;
+  --text-primary: #e8e8e8;
+  --text-secondary: #a0a0a0;
+  --text-tertiary: #606060;
+  --accent: #3b82f6;
+  --accent-hover: #2563eb;
+  --green: #22c55e;
+  --red: #ef4444;
+  --green-dim: rgba(34,197,94,0.15);
+  --red-dim: rgba(239,68,68,0.15);
+  --radius: 3px;
+  --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'PingFang TC', Roboto, sans-serif;
+  --mono: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+}
+
+body {
+  font-family: var(--font);
+  background: #050505;
+  color: var(--text-primary);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: "tnum" 1;
+}
+
+/* ===== PROTOTYPE BANNER ===== */
+.proto-banner {
+  padding: 10px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 10px;
+  color: var(--text-tertiary);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.proto-banner .warn { color: var(--accent); }
+
+/* ===== MOBILE LOGIN ===== */
+.mobile-login {
+  width: 375px;
+  min-height: 812px;
+  margin: 48px auto;
+  background: var(--bg-base);
+  display: flex;
+  flex-direction: column;
+}
+.ml-header {
+  padding: 48px 24px 32px;
+  background: var(--bg-surface);
+}
+.ml-brand {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 32px;
+}
+.ml-heading {
+  font-size: 24px;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.35;
+  margin-bottom: 12px;
+}
+.ml-sub {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+.ml-form {
+  flex: 1;
+  padding: 32px 24px;
+  display: flex;
+  flex-direction: column;
+}
+.ml-title {
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: 28px;
+}
+.ml-field { margin-bottom: 16px; }
+.ml-label {
+  display: block;
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+  font-weight: 500;
+}
+.ml-input {
+  width: 100%;
+  height: 44px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0 12px;
+  color: var(--text-primary);
+  font-size: 14px;
+  outline: none;
+  font-family: var(--font);
+}
+.ml-submit {
+  width: 100%;
+  height: 44px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  margin-top: 8px;
+  font-family: var(--font);
+}
+.ml-switch {
+  text-align: center;
+  margin-top: 20px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.ml-switch a { color: var(--accent); text-decoration: none; }
+.ml-footer {
+  padding: 24px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  line-height: 1.6;
+  text-align: center;
+}
+
+/* ===== MOBILE RESEARCH ===== */
+.mobile-research {
+  width: 375px;
+  min-height: 812px;
+  margin: 48px auto;
+  background: var(--bg-base);
+  display: flex;
+  flex-direction: column;
+}
+.mr-nav {
+  height: 44px;
+  padding: 0 16px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.mr-brand {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.mr-nav-links {
+  display: flex;
+  gap: 0;
+  margin-left: auto;
+}
+.mr-nav-link {
+  padding: 10px 12px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  text-decoration: none;
+  font-weight: 450;
+}
+.mr-nav-link.active {
+  color: var(--text-primary);
+  font-weight: 550;
+}
+.mr-content {
+  flex: 1;
+  padding: 20px 16px;
+}
+.mr-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+.mr-title {
+  font-size: 18px;
+  font-weight: 600;
+}
+.mr-cta {
+  padding: 6px 14px;
+  background: var(--accent);
+  color: #fff;
+  border-radius: var(--radius);
+  font-size: 12px;
+  font-weight: 600;
+  text-decoration: none;
+}
+.mr-filters {
+  display: flex;
+  gap: 0;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+}
+.mr-filter {
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-weight: 450;
+  position: relative;
+}
+.mr-filter.active {
+  color: var(--text-primary);
+  font-weight: 550;
+}
+.mr-filter.active::after {
+  content: '';
+  position: absolute;
+  bottom: -1px;
+  left: 12px;
+  right: 12px;
+  height: 1.5px;
+  background: var(--text-primary);
+}
+.mr-filter .count {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  margin-left: 3px;
+}
+.mr-card {
+  padding: 14px 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.mr-card-name {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+.mr-card-meta {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  margin-bottom: 8px;
+}
+.mr-card-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.mr-card-result {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.mr-card-result.pos { color: var(--green); }
+.mr-card-result.neg { color: var(--red); }
+.mr-card-result.none { color: var(--text-tertiary); }
+.mr-card-status {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 550;
+  padding: 2px 6px;
+  border-radius: 2px;
+}
+.mr-card-status.draft { color: var(--text-secondary); background: var(--bg-active); }
+.mr-card-status.exploring { color: var(--accent); background: rgba(59,130,246,0.1); }
+.mr-card-status.locked { color: var(--green); background: var(--green-dim); }
+.mr-card-action {
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+/* ===== MOBILE WORKSPACE ===== */
+.mobile-workspace {
+  width: 375px;
+  height: 812px;
+  margin: 48px auto;
+  background: var(--bg-base);
+  display: flex;
+  flex-direction: column;
+}
+.mw-nav {
+  height: 44px;
+  padding: 0 16px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.mw-brand {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.mw-nav-links {
+  display: flex;
+  gap: 0;
+  margin-left: auto;
+}
+.mw-nav-link {
+  padding: 10px 12px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  text-decoration: none;
+  font-weight: 450;
+}
+.mw-nav-link.active {
+  color: var(--text-primary);
+  font-weight: 550;
+}
+.mw-context {
+  padding: 8px 16px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  border-bottom: 1px solid var(--border-subtle);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.mw-context .mode {
+  color: var(--accent);
+  font-weight: 500;
+}
+.mw-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.mw-instrument {
+  padding: 16px;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.mw-symbol {
+  font-size: 18px;
+  font-weight: 650;
+}
+.mw-name {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.mw-price-block {
+  margin-left: auto;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.mw-price {
+  font-family: var(--mono);
+  font-size: 20px;
+  font-weight: 650;
+}
+.mw-change {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 550;
+}
+.mw-change.up { color: var(--green); }
+.mw-tabs {
+  padding: 0 16px;
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.mw-tab {
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-weight: 450;
+  position: relative;
+}
+.mw-tab.active {
+  color: var(--text-primary);
+  font-weight: 550;
+}
+.mw-tab.active::after {
+  content: '';
+  position: absolute;
+  bottom: -1px;
+  left: 12px;
+  right: 12px;
+  height: 1.5px;
+  background: var(--text-primary);
+}
+.mw-chart {
+  flex: 1;
+  position: relative;
+  padding: 12px 16px;
+  min-height: 200px;
+}
+.mw-chart-label {
+  position: absolute;
+  top: 8px;
+  left: 16px;
+  font-size: 9px;
+  color: var(--accent);
+}
+.mw-candles {
+  position: absolute;
+  top: 24px;
+  left: 16px;
+  right: 16px;
+  bottom: 40px;
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+}
+.mw-candle {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.mw-candle-body {
+  width: 6px;
+  border-radius: 1px;
+}
+.mw-candle-body.up { background: var(--green); }
+.mw-candle-body.down { background: var(--red); }
+.mw-candle-wick {
+  width: 1px;
+}
+.mw-candle-wick.up { background: var(--green); }
+.mw-candle-wick.down { background: var(--red); }
+.mw-axis-x {
+  position: absolute;
+  bottom: 8px;
+  left: 16px;
+  right: 16px;
+  display: flex;
+  justify-content: space-between;
+  font-size: 9px;
+  color: var(--text-tertiary);
+  font-family: var(--mono);
+}
+.mw-replay {
+  height: 32px;
+  padding: 0 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  color: var(--text-secondary);
+  border-top: 1px solid var(--border-subtle);
+}
+.mw-replay-btn {
+  width: 20px;
+  height: 20px;
+  background: var(--bg-active);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-size: 8px;
+}
+.mw-replay-time {
+  font-family: var(--mono);
+  color: var(--accent);
+  font-weight: 600;
+}
+</style>
+</head>
+<body>
+
+<!-- PROTOTYPE BANNER -->
+<div class="proto-banner">
+  <span>Alethra — Mobile Views（定稿）</span>
+  <span class="warn">所有數據均為設計示例</span>
+  <span>2026-10-27</span>
+</div>
+
+<!-- ==================== MOBILE LOGIN ==================== -->
+<div class="mobile-login">
+  <div class="ml-header">
+    <div class="ml-brand">Alethra</div>
+    <div class="ml-heading">研究策略，<br>追溯每次交易。</div>
+    <div class="ml-sub">在歷史資料中測試規則，保存模擬交易與研究結果。</div>
+  </div>
+  <div class="ml-form">
+    <div class="ml-title">登入</div>
+    <div class="ml-field">
+      <label class="ml-label">電子郵件</label>
+      <input class="ml-input" type="email" placeholder="your@email.com" readonly>
+    </div>
+    <div class="ml-field">
+      <label class="ml-label">密碼</label>
+      <input class="ml-input" type="password" readonly>
+    </div>
+    <button class="ml-submit">登入</button>
+    <div class="ml-switch">沒有帳號？<a href="#">建立帳號</a></div>
+  </div>
+  <div class="ml-footer">Alethra 為研究與模擬交易平台，不涉及真實資金與證券交易。</div>
+</div>
+
+<!-- ==================== MOBILE RESEARCH ==================== -->
+<div class="mobile-research">
+  <div class="mr-nav">
+    <span class="mr-brand">Alethra</span>
+    <div class="mr-nav-links">
+      <a class="mr-nav-link" href="#">工作台</a>
+      <a class="mr-nav-link active" href="#">研究</a>
+      <a class="mr-nav-link" href="#">組合</a>
+    </div>
+  </div>
+  <div class="mr-content">
+    <div class="mr-header">
+      <div class="mr-title">研究</div>
+      <a href="#" class="mr-cta">+ 建立</a>
+    </div>
+    <div class="mr-filters">
+      <button class="mr-filter active">全部 <span class="count">12</span></button>
+      <button class="mr-filter">草稿 <span class="count">5</span></button>
+      <button class="mr-filter">探索中 <span class="count">3</span></button>
+      <button class="mr-filter">已鎖定 <span class="count">4</span></button>
+    </div>
+    <div class="mr-card">
+      <div class="mr-card-name">AAPL 均線突破策略</div>
+      <div class="mr-card-meta">建於 2026-10-15 · 47 筆交易</div>
+      <div class="mr-card-row">
+        <span class="mr-card-result pos">+12.5%</span>
+        <span class="mr-card-status locked">已鎖定</span>
+        <a href="#" class="mr-card-action">查看 →</a>
+      </div>
+    </div>
+    <div class="mr-card">
+      <div class="mr-card-name">TSLA 波動率分析</div>
+      <div class="mr-card-meta">建於 2026-10-18 · 尚未執行</div>
+      <div class="mr-card-row">
+        <span class="mr-card-result none">—</span>
+        <span class="mr-card-status exploring">探索中</span>
+        <a href="#" class="mr-card-action">繼續 →</a>
+      </div>
+    </div>
+    <div class="mr-card">
+      <div class="mr-card-name">NVDA 動能策略回測</div>
+      <div class="mr-card-meta">建於 2026-10-20 · 草稿</div>
+      <div class="mr-card-row">
+        <span class="mr-card-result none">—</span>
+        <span class="mr-card-status draft">草稿</span>
+        <a href="#" class="mr-card-action">編輯 →</a>
+      </div>
+    </div>
+    <div class="mr-card">
+      <div class="mr-card-name">騰訊 (0700.HK) 長線研究</div>
+      <div class="mr-card-meta">建於 2026-09-05 · 23 筆交易</div>
+      <div class="mr-card-row">
+        <span class="mr-card-result neg">-2.3%</span>
+        <span class="mr-card-status locked">已鎖定</span>
+        <a href="#" class="mr-card-action">查看 →</a>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== MOBILE WORKSPACE ==================== -->
+<div class="mobile-workspace">
+  <div class="mw-nav">
+    <span class="mw-brand">Alethra</span>
+    <div class="mw-nav-links">
+      <a class="mw-nav-link active" href="#">工作台</a>
+      <a class="mw-nav-link" href="#">研究</a>
+      <a class="mw-nav-link" href="#">組合</a>
+    </div>
+  </div>
+  <div class="mw-context">
+    <span>AAPL 均線突破策略</span>
+    <span>·</span>
+    <span class="mode">模擬交易</span>
+    <span>·</span>
+    <span>回放中</span>
+  </div>
+  <div class="mw-body">
+    <div class="mw-instrument">
+      <span class="mw-symbol">AAPL</span>
+      <span class="mw-name">Apple Inc.</span>
+      <div class="mw-price-block">
+        <span class="mw-price">198.11</span>
+        <span class="mw-change up">+1.24%</span>
+      </div>
+    </div>
+    <div class="mw-tabs">
+      <button class="mw-tab active">圖表</button>
+      <button class="mw-tab">策略</button>
+      <button class="mw-tab">紀錄</button>
+    </div>
+    <div class="mw-chart">
+      <div class="mw-chart-label">示例資料 · 1D</div>
+      <div class="mw-candles">
+        <div class="mw-candle"><div class="mw-candle-wick up" style="height:3px"></div><div class="mw-candle-body up" style="height:10px"></div><div class="mw-candle-wick up" style="height:2px"></div></div>
+        <div class="mw-candle"><div class="mw-candle-wick up" style="height:4px"></div><div class="mw-candle-body up" style="height:12px"></div><div class="mw-candle-wick up" style="height:3px"></div></div>
+        <div class="mw-candle"><div class="mw-candle-wick down" style="height:5px"></div><div class="mw-candle-body down" style="height:8px"></div><div class="mw-candle-wick down" style="height:4px"></div></div>
+        <div class="mw-candle"><div class="mw-candle-wick up" style="height:3px"></div><div class="mw-candle-body up" style="height:14px"></div><div class="mw-candle-wick up" style="height:2px"></div></div>
+        <div class="mw-candle"><div class="mw-candle-wick up" style="height:4px"></div><div class="mw-candle-body up" style="height:16px"></div><div class="mw-candle-wick up" style="height:3px"></div></div>
+        <div class="mw-candle"><div class="mw-candle-wick down" style="height:6px"></div><div class="mw-candle-body down" style="height:10px"></div><div class="mw-candle-wick down" style="height:5px"></div></div>
+        <div class="mw-candle"><div class="mw-candle-wick down" style="height:5px"></div><div class="mw-candle-body down" style="height:12px"></div><div class="mw-candle-wick down" style="height:4px"></div></div>
+        <div class="mw-candle"><div class="mw-candle-wick down" style="height:4px"></div><div class="mw-candle-body down" style="height:8px"></div><div class="mw-candle-wick down" style="height:6px"></div></div>
+        <div class="mw-candle"><div class="mw-candle-wick down" style="height:3px"></div><div class="mw-candle-body down" style="height:10px"></div><div class="mw-candle-wick down" style="height:5px"></div></div>
+        <div class="mw-candle"><div class="mw-candle-wick down" style="height:5px"></div><div class="mw-candle-body down" style="height:6px"></div><div class="mw-candle-wick down" style="height:3px"></div></div>
+        <div class="mw-candle"><div class="mw-candle-wick up" style="height:4px"></div><div class="mw-candle-body up" style="height:8px"></div><div class="mw-candle-wick up" style="height:2px"></div></div>
+        <div class="mw-candle"><div class="mw-candle-wick up" style="height:5px"></div><div class="mw-candle-body up" style="height:16px"></div><div class="mw-candle-wick up" style="height:3px"></div></div>
+        <div class="mw-candle"><div class="mw-candle-wick up" style="height:4px"></div><div class="mw-candle-body up" style="height:12px"></div><div class="mw-candle-wick up" style="height:4px"></div></div>
+        <div class="mw-candle"><div class="mw-candle-wick up" style="height:3px"></div><div class="mw-candle-body up" style="height:14px"></div><div class="mw-candle-wick up" style="height:5px"></div></div>
+        <div class="mw-candle"><div class="mw-candle-wick up" style="height:4px"></div><div class="mw-candle-body up" style="height:12px"></div><div class="mw-candle-wick up" style="height:3px"></div></div>
+        <div class="mw-candle"><div class="mw-candle-wick down" style="height:5px"></div><div class="mw-candle-body down" style="height:8px"></div><div class="mw-candle-wick down" style="height:4px"></div></div>
+        <div class="mw-candle"><div class="mw-candle-wick up" style="height:3px"></div><div class="mw-candle-body up" style="height:16px"></div><div class="mw-candle-wick up" style="height:4px"></div></div>
+        <div class="mw-candle"><div class="mw-candle-wick up" style="height:4px"></div><div class="mw-candle-body up" style="height:10px"></div><div class="mw-candle-wick up" style="height:2px"></div></div>
+      </div>
+      <div class="mw-axis-x">
+        <span>10-01</span>
+        <span>10-08</span>
+        <span>10-15</span>
+        <span>10-22</span>
+      </div>
+    </div>
+    <div class="mw-replay">
+      <button class="mw-replay-btn">→</button>
+      <span>下一個交易日</span>
+      <span class="mw-replay-time">10-24 14:35</span>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
