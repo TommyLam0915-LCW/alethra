@@ -54,7 +54,7 @@ backend/app/ml/artifacts/
 backups/
 
 # Local-only runtime state (generated credentials, stack logs, browser evidence)
-/.local/
+.local/
 
 # Playwright / pytest artifacts anywhere in the tree
 test-results/
