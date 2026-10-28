@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -53,10 +53,20 @@ class ApiKeyListItem(BaseModel):
 @router.post("", response_model=ApiKeyCreateResponse, status_code=status.HTTP_201_CREATED)
 def create_api_key(
     body: ApiKeyCreateRequest,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Create a new API key. The raw key is returned only in this response."""
+    """Create a new API key. The raw key is returned only in this response.
+
+    Creating a key is a privileged action, so a key cannot be used to mint
+    another key with broader scopes.
+    """
+    if getattr(request.state, "api_key_scopes", None) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="API key creation requires interactive login",
+        )
     key_prefix, raw_key = generate_api_key(
         db=db,
         user_id=current_user.id,

@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Text, DateTime, Integer, Float, ForeignKey, Enum as SAEnum, Boolean
+from sqlalchemy import Column, String, Text, DateTime, Integer, Float, ForeignKey, Enum as SAEnum, Boolean, Index, text
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
 from app.database import Base
@@ -97,7 +97,9 @@ class PaperPortfolio(Base):
 
     @property
     def total_realized_pnl(self):
-        return sum(p.realized_pnl or 0 for p in self.positions if p.status == PositionStatus.closed)
+        # Partial exits book realised P&L while the position is still open, so
+        # filtering on closed positions here would drop money already taken.
+        return sum(p.realized_pnl or 0 for p in self.positions)
 
     @property
     def total_unrealized_pnl(self):
@@ -137,6 +139,19 @@ class PaperOrder(Base):
     data_cutoff_at = Column(String(10), nullable=True)
     rationale = Column(Text, nullable=True)
     risk_check_status = Column(SAEnum(RiskCheckStatus), default=RiskCheckStatus.passed)
+    idempotency_key = Column(String(128), nullable=True)
+    actor_type = Column(String(20), nullable=False, default="human")
+
+    __table_args__ = (
+        Index(
+            "uq_paper_order_portfolio_idempotency",
+            "portfolio_id",
+            "idempotency_key",
+            unique=True,
+            postgresql_where=text("idempotency_key IS NOT NULL"),
+            sqlite_where=text("idempotency_key IS NOT NULL"),
+        ),
+    )
 
     portfolio = relationship("PaperPortfolio", back_populates="orders")
     fills = relationship("PaperFill", back_populates="order", order_by="PaperFill.execution_date")
@@ -156,6 +171,11 @@ class PaperFill(Base):
     gross_amount = Column(Float, nullable=False)
     net_cash_change = Column(Float, nullable=False)
     simulated_fill_reason = Column(String(100), nullable=True)
+    # Additive: exact intraday bar time for a per-bar replay fill. execution_date
+    # is date-granular (String(10)); an intraday fill records its 5-minute bar
+    # timestamp here so the journal/CSV can show and order intraday time. Null for
+    # daily fills, which keeps their existing behaviour unchanged.
+    bar_timestamp = Column(DateTime, nullable=True)
 
     order = relationship("PaperOrder", back_populates="fills")
 
@@ -166,6 +186,11 @@ class DecisionRecord(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     owner_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     simulation_session_id = Column(UUID(as_uuid=True), ForeignKey("simulation_sessions.id"), nullable=True)
+    # Nullable: decisions recorded before this link existed cannot be attributed
+    # to a portfolio, and hiding them would make recorded history disappear.
+    paper_portfolio_id = Column(
+        UUID(as_uuid=True), ForeignKey("paper_portfolios.id"), nullable=True, index=True
+    )
     actor_type = Column(SAEnum(PaperDecisionActorType), nullable=False)
     decision_type = Column(SAEnum(PaperDecisionType), nullable=False)
     decision_time = Column(DateTime, default=utcnow, nullable=False)

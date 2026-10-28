@@ -2,6 +2,7 @@
 C1-C4 Safety Case Tests - HTTP-based
 Tests against running application without importing app modules
 """
+import pytest
 import requests
 import threading
 import time
@@ -9,8 +10,16 @@ import sqlite3
 from datetime import datetime
 from uuid import uuid4
 
+from tests.live_stack_guard import live_probe_skip_reason
+
 BASE_URL = "http://127.0.0.1:8000"
 DB_PATH = "backend/alethra_dev.db"
+
+_SKIP_REASON = live_probe_skip_reason(BASE_URL, (DB_PATH,))
+pytestmark = pytest.mark.skipif(
+    _SKIP_REASON is not None,
+    reason=f"live-stack probe: {_SKIP_REASON}",
+)
 
 def get_auth_token():
     """Get auth token for owner@test.com."""

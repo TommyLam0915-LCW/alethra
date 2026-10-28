@@ -11,7 +11,10 @@ from fastapi.testclient import TestClient
 from unittest.mock import patch
 
 from app.database import Base, get_db
-from app.models import SimulationSession, SimulationDecision, MarketDataBar, AuditEvent
+from app.models import (
+    SimulationSession, SimulationDecision, MarketDataBar, AuditEvent,
+    PaperPortfolio, PaperOrder, PaperFill, DecisionRecord,
+)
 from app.main import app
 
 
@@ -137,6 +140,22 @@ class C4TestHarness:
         assert resp.status_code == 201, f"Session creation failed: {resp.text}"
         session_id = resp.json()["id"]
 
+        # Bind the account these intents settle into: a submission with no linked
+        # portfolio has no book of record and the product refuses it by name.
+        resp = self.client.post("/api/v1/paper-portfolio", headers=auth_headers, json={
+            "initial_virtual_cash": 100000.0,
+            "currency": "USD",
+            "simulation_session_id": session_id,
+        })
+        assert resp.status_code == 201, f"Portfolio binding failed: {resp.text}"
+        self.portfolio_id = UUID_Type(resp.json()["id"])
+
+        # Run the market clock onto the first bar so an intent has a decision time.
+        resp = self.client.post(
+            f"/api/v1/simulations/{session_id}/advance", headers=auth_headers
+        )
+        assert resp.status_code == 200, f"First advance failed: {resp.text}"
+
         return session_id
 
     def get_session_state(self, session_id):
@@ -199,6 +218,44 @@ class C4TestHarness:
         finally:
             db.close()
 
+    def get_book_state(self):
+        """The account rows a submission writes, alongside the replay rows.
+
+        Rollback is only real if the pending order, the human decision record and
+        their audit events disappear too — a test that checks just the session and
+        its decisions would pass while leaving an order the user never sees.
+        """
+        db = self.SessionFactory()
+        try:
+            orders = db.query(PaperOrder).filter(
+                PaperOrder.portfolio_id == self.portfolio_id
+            ).all()
+            order_ids = [o.id for o in orders]
+            fills = (
+                db.query(PaperFill)
+                .filter(PaperFill.paper_order_id.in_(order_ids))
+                .all()
+                if order_ids
+                else []
+            )
+            portfolio = db.query(PaperPortfolio).filter(
+                PaperPortfolio.id == self.portfolio_id
+            ).first()
+            return {
+                "order_count": len(orders),
+                "pending_count": sum(1 for o in orders if o.status.value == "pending"),
+                "decision_record_count": db.query(DecisionRecord).filter(
+                    DecisionRecord.paper_portfolio_id == self.portfolio_id
+                ).count(),
+                "fill_count": len(fills),
+                "current_cash": round(float(portfolio.current_virtual_cash), 4),
+                "portfolio_audit_count": db.query(AuditEvent).filter(
+                    AuditEvent.entity_id == str(self.portfolio_id)
+                ).count(),
+            }
+        finally:
+            db.close()
+
     def cleanup(self):
         """Clean up resources."""
         # Restore previous dependency overrides (not .clear())
@@ -228,15 +285,24 @@ class TestC4TransactionRollback:
 
             # Get baseline state
             baseline = harness.get_session_state(session_id)
+            baseline_book = harness.get_book_state()
             print(f"Baseline: version={baseline['state_version']}, "
                   f"decisions={baseline['decision_count']}, "
                   f"equity={baseline['paper_equity']}, "
                   f"audit_events={baseline['audit_event_count']}")
+            print(f"Baseline book: orders={baseline_book['order_count']}, "
+                  f"pending={baseline_book['pending_count']}, "
+                  f"decision_records={baseline_book['decision_record_count']}, "
+                  f"fills={baseline_book['fill_count']}, "
+                  f"cash={baseline_book['current_cash']}")
 
-            # Prepare request
+            # Prepare request. SELL, not BUY: the replay's own buy-and-hold rule
+            # already holds the asset in the bound account, and a second BUY on a
+            # held asset is refused at submit by the product — it would never
+            # reach the order table, so rolling it back would prove nothing.
             idem_key = f"c4_rollback_{uuid4().hex}"
             payload = {
-                "action": "buy",
+                "action": "sell",
                 "quantity": 100,
                 "rationale": "C4 rollback test",
                 "idempotency_key": idem_key,
@@ -290,11 +356,17 @@ class TestC4TransactionRollback:
             after_failure = harness.get_session_state(session_id)
             decisions_after = harness.get_decisions(session_id)
             audit_events_after = harness.get_audit_events(session_id)
+            book_after_failure = harness.get_book_state()
 
             print(f"After failure: version={after_failure['state_version']}, "
                   f"decisions={after_failure['decision_count']}, "
                   f"equity={after_failure['paper_equity']}, "
                   f"audit_events={len(audit_events_after)}")
+            print(f"After failure book: orders={book_after_failure['order_count']}, "
+                  f"pending={book_after_failure['pending_count']}, "
+                  f"decision_records={book_after_failure['decision_record_count']}, "
+                  f"fills={book_after_failure['fill_count']}, "
+                  f"cash={book_after_failure['current_cash']}")
 
             # Compare against baseline
             assert after_failure['state_version'] == baseline['state_version'], \
@@ -322,7 +394,35 @@ class TestC4TransactionRollback:
             assert len(audit_events_after) == baseline['audit_event_count'], \
                 f"Audit event not rolled back: {len(audit_events_after)} vs {baseline['audit_event_count']}"
 
-            print("✓ Full rollback verified: no partial effects (including audit event)")
+            # The intent writes three account rows before this endpoint's own
+            # commit — a pending order, a human decision record and their audit
+            # events. Any one of them surviving would leave an order the user
+            # never sees and an idempotency key that blocks the retry.
+            assert book_after_failure['order_count'] == baseline_book['order_count'], \
+                (
+                f"PaperOrder not rolled back: {baseline_book['order_count']} → "
+                f"{book_after_failure['order_count']}"
+            )
+            assert book_after_failure['pending_count'] == baseline_book['pending_count'], \
+                f"Pending order residue: {book_after_failure['pending_count']}"
+            assert book_after_failure['decision_record_count'] == baseline_book['decision_record_count'], \
+                (
+                f"DecisionRecord not rolled back: {baseline_book['decision_record_count']} → "
+                f"{book_after_failure['decision_record_count']}"
+            )
+            assert book_after_failure['portfolio_audit_count'] == baseline_book['portfolio_audit_count'], \
+                (
+                f"Portfolio audit event residue: {baseline_book['portfolio_audit_count']} → "
+                f"{book_after_failure['portfolio_audit_count']}"
+            )
+            assert book_after_failure['fill_count'] == baseline_book['fill_count'], \
+                f"Fill residue from the failed submission: {book_after_failure['fill_count']}"
+            assert book_after_failure['current_cash'] == baseline_book['current_cash'], \
+                f"Cash moved by a rolled-back submission: {baseline_book['current_cash']} → " \
+                f"{book_after_failure['current_cash']}"
+
+            print("✓ Full rollback verified: no partial effects (decision, order, "
+                  "decision record, audit events, cash)")
 
             # Verify retry after rollback
             print("\nRetrying with EXACT SAME payload...")
@@ -341,10 +441,15 @@ class TestC4TransactionRollback:
             # Verify retry committed correctly
             after_retry = harness.get_session_state(session_id)
             decisions_after_retry = harness.get_decisions(session_id)
+            book_after_retry = harness.get_book_state()
 
             print(f"After retry: version={after_retry['state_version']}, "
                   f"decisions={after_retry['decision_count']}, "
-                  f"equity={after_retry['paper_equity']}")
+                  f"equity={after_retry['paper_equity']}, "
+                  f"orders={book_after_retry['order_count']}, "
+                  f"pending={book_after_retry['pending_count']}, "
+                  f"decision_records={book_after_retry['decision_record_count']}, "
+                  f"cash={book_after_retry['current_cash']}")
 
             # Verify exactly one decision created
             assert after_retry['decision_count'] == baseline['decision_count'] + 1, \
@@ -358,7 +463,37 @@ class TestC4TransactionRollback:
             assert len(decisions_after_retry) == after_retry['decision_count'], \
                 "Decision count mismatch"
 
-            print("\n✓ C4 PASS: Full rollback on failure, retry succeeded")
+            # The retry writes its own intent, exactly once: one order and one
+            # decision record above the baseline, not two (the failed attempt's
+            # rows are gone) and not zero.
+            assert book_after_retry['order_count'] == baseline_book['order_count'] + 1, \
+                (
+                f"Expected {baseline_book['order_count'] + 1} orders after retry, got "
+                f"{book_after_retry['order_count']}"
+            )
+            assert book_after_retry['decision_record_count'] == baseline_book['decision_record_count'] + 1, \
+                (
+                f"Expected {baseline_book['decision_record_count'] + 1} decision records after retry, "
+                f"got {book_after_retry['decision_record_count']}"
+            )
+
+            # Pending is not executed: the retried order has no fill and the
+            # account's cash has not moved.
+            retry_body = retry_resp.json()
+            assert retry_body["rejection"]["reason"] == "awaiting_execution_window", \
+                f"Retry did not queue the intent: {retry_body['rejection']}"
+            assert retry_body["order"]["status"] == "pending", \
+                f"Retried order is not pending: {retry_body['order']['status']}"
+            assert book_after_retry['pending_count'] == baseline_book['pending_count'] + 1, \
+                f"Retried order is not pending on the book: {book_after_retry['pending_count']}"
+            assert book_after_retry['fill_count'] == baseline_book['fill_count'], \
+                f"Retry filled before the clock moved: {book_after_retry['fill_count']}"
+            assert book_after_retry['current_cash'] == baseline_book['current_cash'], \
+                f"Retry moved cash at submit: {baseline_book['current_cash']} → " \
+                f"{book_after_retry['current_cash']}"
+
+            print("\n✓ C4 PASS: Full rollback on failure, retry queued exactly one "
+                  "pending order with no economic effect")
 
         finally:
             harness.cleanup()

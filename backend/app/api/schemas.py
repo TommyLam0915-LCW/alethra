@@ -28,6 +28,7 @@ class StrategySpec(BaseModel):
     entry_rule: dict = Field(default_factory=dict)
     exit_rule: dict = Field(default_factory=dict)
     sizing_rule: dict = Field(default_factory=dict)
+    risk_parameters: dict = Field(default_factory=dict)
     execution_timing: dict = Field(default_factory=lambda: {"execute_at": "next_open"})
     commission_rate: float = Field(default=0.0, ge=0, le=0.05)
     slippage_rate: float = Field(default=0.0, ge=0, le=0.05)
@@ -225,6 +226,8 @@ class SimulationSessionResponse(BaseModel):
     simulation_policy_version: str
     provider_id: Optional[str]
     provider_confirmed: bool
+    timeframe: Optional[str] = None
+    current_bar_timestamp: Optional[datetime] = None
     paper_equity: Optional[float]
     current_position_json: Optional[dict]
     warnings: Optional[list]
@@ -242,6 +245,7 @@ class SimulationDecisionResponse(BaseModel):
     session_id: UUID
     step_number: int
     snapshot_date: str
+    bar_timestamp: Optional[datetime] = None
     data_cutoff_at: str
     engine_version: str
     decision_type: str
@@ -274,6 +278,12 @@ class ManualDecisionResponse(BaseModel):
     decision: SimulationDecisionResponse
     fill: Optional[dict] = None
     rejection: Optional[dict] = None
+    # A submitted BUY/SELL is a pending order, not a fill: `order` is the intent
+    # the account now holds and `execution` names the window it is waiting for
+    # (or says there is none). Dicts rather than models because this schema is
+    # defined before PaperOrderResponse.
+    order: Optional[dict] = None
+    execution: Optional[dict] = None
 
 
 class ReflectionUpdateRequest(BaseModel):
@@ -290,6 +300,17 @@ class PaperPortfolioCreate(BaseModel):
     simulation_session_id: Optional[UUID] = None
 
 
+class PaperValuationBasis(BaseModel):
+    """What the mark-to-market numbers on a paper portfolio are actually based on."""
+
+    mode: str
+    mode_label_zh: str
+    provider: str
+    data_as_of: Optional[str] = None
+    unpriced_assets: List[str] = Field(default_factory=list)
+    note: str
+
+
 class PaperPortfolioResponse(BaseModel):
     id: UUID
     owner_id: UUID
@@ -301,7 +322,10 @@ class PaperPortfolioResponse(BaseModel):
     created_at: datetime
     closed_at: Optional[datetime]
     total_realized_pnl: float
-    total_unrealized_pnl: float
+    # None means "no mark price for at least one open position", which is a
+    # different statement from 0.0 and must not be collapsed into one.
+    total_unrealized_pnl: Optional[float] = None
+    valuation: Optional[PaperValuationBasis] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -333,6 +357,7 @@ class PaperOrderCreate(BaseModel):
         None, pattern="^(low|medium|high|not_provided)$"
     )
     falsification_condition: Optional[str] = None
+    idempotency_key: Optional[str] = Field(None, min_length=1, max_length=128)
 
 
 class PaperOrderResponse(BaseModel):
@@ -349,6 +374,8 @@ class PaperOrderResponse(BaseModel):
     data_cutoff_at: Optional[str]
     rationale: Optional[str]
     risk_check_status: str
+    actor_type: str
+    idempotency_key: Optional[str]
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -357,6 +384,7 @@ class PaperFillResponse(BaseModel):
     id: UUID
     paper_order_id: UUID
     execution_date: str
+    bar_timestamp: Optional[datetime] = None
     observed_price: float
     execution_price_before_costs: float
     slippage_amount: float
@@ -367,6 +395,13 @@ class PaperFillResponse(BaseModel):
     simulated_fill_reason: Optional[str]
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class PaperOrderLifecycleResponse(BaseModel):
+    """One order plus where it stands in 提交 → pending → 執行 → fills → settlement."""
+
+    order: PaperOrderResponse
+    execution: Optional[dict] = None
 
 
 class DecisionRecordCreate(BaseModel):

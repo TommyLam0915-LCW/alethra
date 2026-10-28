@@ -37,6 +37,8 @@ class Settings(BaseSettings):
     enable_external_notifications: bool = False
     cors_origins: str = "http://localhost:3000"
     redis_url: str = ""
+    api_key_rate_limit_requests: int = 60
+    api_key_rate_limit_window_seconds: int = 60
 
     @property
     def cors_origins_list(self) -> list[str]:

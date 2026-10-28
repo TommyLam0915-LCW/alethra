@@ -60,15 +60,17 @@ def get_current_user(
             user = db.query(User).filter(User.id == user_uuid).first()
             if user and user.is_active:
                 request.state.api_key_scopes = None
+                request.state.api_key_id = None
                 return user
     except (JWTError, ValueError):
         pass
 
-    from app.auth.api_keys import authenticate_api_key_with_scopes
-    result = authenticate_api_key_with_scopes(db, token)
+    from app.auth.api_keys import authenticate_api_key_identity
+    result = authenticate_api_key_identity(db, token)
     if result is not None:
-        user, scopes = result
+        user, scopes, key_id = result
         request.state.api_key_scopes = scopes
+        request.state.api_key_id = key_id
         return user
 
     raise credentials_exception

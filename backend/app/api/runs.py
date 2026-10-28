@@ -21,10 +21,15 @@ from app.services import emit_event
 router = APIRouter(tags=["runs"])
 
 
+class BacktestRefused(Exception):
+    """The engine declined to compute a book, so there is no result to publish."""
+
+
 @router.post("/versions/{version_id}/runs", response_model=ResearchRunResponse, status_code=status.HTTP_201_CREATED)
 def create_run(
     version_id: UUID,
     data_source: str = Query("auto", pattern="^(auto|stored|provider)$"),
+    provider_id: Optional[str] = Query(None, max_length=50),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_entitlement(quota_type="research_run")),
     _scope_check=Depends(check_api_key_scope("write")),
@@ -77,7 +82,14 @@ def create_run(
             data_provider=data_provider,
             db_session=db,
             data_source=data_source,
+            provider_id=provider_id,
         )
+
+        if result.get("run_status") == "error":
+            # A refusal is not a backtest that found no trades. Publishing it as
+            # completed with empty transactions would read as evidence about the
+            # strategy, and would charge the run against the user's quota.
+            raise BacktestRefused("; ".join(result.get("errors") or ["backtest refused"]))
 
         run.status = RunStatus.completed
         run.metrics = result["metrics"]
@@ -86,6 +98,7 @@ def create_run(
         run.methodology_json = result.get("methodology_summary")
         run.result_json = {
             "transactions": result.get("transactions", []),
+            "round_trips": result.get("round_trips", []),
             "daily_equity_curve": result.get("daily_equity_curve", []),
             "daily_accounting": result.get("daily_accounting", []),
             "data_provider": result.get("data_provider"),

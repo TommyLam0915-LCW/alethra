@@ -128,53 +128,122 @@ class TestUserPlusKeyAggregateEnforcement:
             db.close()
 
     def test_dual_enforcement_both_limits_apply(self):
-        """Both user-level and API-key-level limits must pass."""
+        """Both the user-level and the API-key-level limit must independently refuse.
+
+        Drives the REAL product dependency ``app.auth.safety.rate_limit("training")``
+        (limit 10 per window). A sentinel order is recorded ONLY when the dependency
+        returns without raising — mirroring how FastAPI short-circuits the route body
+        on a raised dependency — so "either refusal => no order" is asserted, and the
+        control case proves the sentinel is capable of recording (the no-order
+        assertions are therefore not vacuously true).
+
+          * control: both counters fresh -> dependency passes, exactly one order.
+          * user quota exhausted (key fresh) -> HTTP 429 at the USER layer, no order,
+            and the key layer is never reached (detail names the route category, not
+            the API key).
+          * key quota exhausted (user fresh) -> HTTP 429 attributed to the API-key
+            layer, no order.
+
+        Dialect disclosure: this asserts the dual-enforcement LOGIC in a single
+        session on whatever dialect ALETHRA_TEST_DB points at. It does NOT prove the
+        PostgreSQL ``ON CONFLICT`` counter upsert is atomic under concurrent writers;
+        that path requires the separate PostgreSQL integration harness, not a
+        single-session SQLite run.
+        """
+        import types
+        from fastapi import HTTPException
+        from app.auth.safety import rate_limit
+        from app.services.rate_limit import RATE_LIMITS
+        from app.models.user import User
+
+        category = "training"
+        limit = RATE_LIMITS[category]
+
         db = TestSession()
-        try:
-            # This test verifies the logic in safety.py
-            # When an API key is used:
-            # 1. User-level limit is checked first
-            # 2. API-key-level limit is checked second
-            # Both must pass
-            
-            # Create test data
-            from app.models.user import User
-            user_id = uuid4()
-            user = User(
-                id=user_id,
-                email=f"dual-{user_id}@example.com",
+        dialect = db.bind.dialect.name
+        orders: list = []
+        created: list = []
+
+        def make_user_and_key(prefix: str):
+            uid = uuid4()
+            db.add(User(
+                id=uid,
+                email=f"{prefix}-{uid}@example.com",
                 password_hash="dummy",
                 display_name="Test",
                 user_type="individual",
-            )
-            db.add(user)
+            ))
             db.commit()
-            
-            key_hash = hashlib.sha256(secrets.token_bytes(32)).hexdigest()
-            api_key = ApiKey(
-                user_id=user_id,
-                name="Test Key",
+            raw_token = secrets.token_hex(32)
+            key_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+            ak = ApiKey(
+                user_id=uid,
+                name=f"{prefix} key",
                 key_hash=key_hash,
-                key_prefix="dual",
+                key_prefix=prefix,
                 is_active=True,
             )
-            db.add(api_key)
+            db.add(ak)
             db.commit()
-            
-            # Verify both identity keys can be tracked
-            user_identity = f"user:{user_id}"
-            key_identity = f"api_key:{api_key.id}"
-            
-            # Increment user limit
-            increment_rate_limit(db, user_identity, "training")
-            # Increment key limit
-            increment_rate_limit(db, key_identity, "training")
-            
-            # Both should have count 1
-            # (This is a simplified test; full integration test would require HTTP requests)
+            created.append(uid)
+            user = db.query(User).filter(User.id == uid).one()
+            request = types.SimpleNamespace(
+                headers={"Authorization": f"Bearer {raw_token}"}
+            )
+            return uid, ak.id, user, request
+
+        def attempt_order(dep, request, user):
+            # Records an order only if the dependency does not raise.
+            dep(request, db=db, current_user=user)
+            orders.append("order")
+
+        try:
+            dep = rate_limit(category)
+
+            # --- control: both counters fresh -> allowed, one order recorded ---
+            _uid, _kid, user, req = make_user_and_key("dualctl")
+            attempt_order(dep, req, user)
+            assert len(orders) == 1, (
+                f"[{dialect}] control case must record exactly one order when both limits are fresh"
+            )
+
+            # --- user quota exhausted, key fresh -> USER-layer 429, no order ---
+            uid, _kid, user, req = make_user_and_key("dualuser")
+            for _ in range(limit):
+                increment_rate_limit(db, f"user:{uid}", category)
+            before = len(orders)
+            with pytest.raises(HTTPException) as exc_user:
+                attempt_order(dep, req, user)
+            assert exc_user.value.status_code == 429, (
+                f"[{dialect}] user-quota-exceeded must refuse with HTTP 429"
+            )
+            assert "API key" not in (exc_user.value.detail or ""), (
+                f"[{dialect}] user-quota refusal must trip at the USER layer before the key layer"
+            )
+            assert len(orders) == before, (
+                f"[{dialect}] user-quota-exceeded must place NO order"
+            )
+
+            # --- key quota exhausted, user fresh -> KEY-layer 429, no order ---
+            _uid, kid, user, req = make_user_and_key("dualkey")
+            for _ in range(limit):
+                increment_rate_limit(db, f"api_key:{kid}", category)
+            before = len(orders)
+            with pytest.raises(HTTPException) as exc_key:
+                attempt_order(dep, req, user)
+            assert exc_key.value.status_code == 429, (
+                f"[{dialect}] key-quota-exceeded must refuse with HTTP 429"
+            )
+            assert "API key" in (exc_key.value.detail or ""), (
+                f"[{dialect}] key-quota refusal must be attributed to the API-key layer"
+            )
+            assert len(orders) == before, (
+                f"[{dialect}] key-quota-exceeded must place NO order"
+            )
         finally:
-            db.query(ApiKey).filter(ApiKey.user_id == user_id).delete()
-            db.query(User).filter(User.id == user_id).delete()
+            for uid in created:
+                db.query(ApiKey).filter(ApiKey.user_id == uid).delete()
+                db.query(User).filter(User.id == uid).delete()
             db.commit()
             db.close()
 

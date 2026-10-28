@@ -175,6 +175,19 @@ class DemoDataProvider(DataProvider):
             "real_instruments_range": real_range,
         }
 
+    def get_available_range(self, instrument_id: str) -> Optional[Dict[str, str]]:
+        if self._is_real_instrument(instrument_id):
+            # The synthetic series for a real instrument is generated over one
+            # fixed window; requests outside it legitimately have no bars.
+            syn = _get_real_synthetic_data()
+            real_range = syn.get_real_date_range()
+            return {"start": real_range["min"], "end": real_range["max"]}
+        series = DEMO_DATA.get(instrument_id)
+        if not series:
+            return None
+        dates = sorted(series.keys())
+        return {"start": dates[0], "end": dates[-1]}
+
     def compute_checksum(
         self,
         symbols: List[str],

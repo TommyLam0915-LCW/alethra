@@ -217,19 +217,46 @@ class TestLegacySourceGuard:
             # Verify provider_confirmed is True
             assert resp.json()["provider_confirmed"] is True
 
-            # Execute manual decision
+            # Execute manual decision. The lifecycle needs two things this test
+            # predates: a bound account to settle into, and an observed bar to
+            # stamp the decision time with. Without them the endpoint refuses the
+            # request by name, which is not what this test is about.
+            resp = client.post("/api/v1/paper-portfolio", headers=auth_headers, json={
+                "initial_virtual_cash": 10000.0,
+                "currency": "USD",
+                "simulation_session_id": session_id,
+            })
+            assert resp.status_code == 201, f"Portfolio binding failed: {resp.text}"
+
+            resp = client.post(
+                f"/api/v1/simulations/{session_id}/advance", headers=auth_headers
+            )
+            assert resp.status_code == 200, f"First advance failed: {resp.text}"
+
+            # SELL, not BUY: the replay's own buy-and-hold rule has already entered
+            # the position, and a second BUY on a held asset is refused by name.
             resp = client.post(
                 f"/api/v1/simulations/{session_id}/manual-decision",
                 headers=auth_headers,
                 json={
-                    "action": "buy",
-                    "quantity": 100,
+                    "action": "sell",
+                    "quantity": 10,
                     "idempotency_key": "test-confirmed-001",
                     "rationale": "Test confirmed session"
                 }
             )
 
-            # Should succeed
-            assert resp.status_code == 200
+            # Should succeed: the provider guard passes, so the intent is accepted.
+            assert resp.status_code == 200, (
+                "Confirmed session was refused: "
+                f"{resp.status_code} {resp.json().get('detail')}"
+            )
+            body = resp.json()
+            assert body["rejection"]["reason"] == "awaiting_execution_window", \
+                body["rejection"]
+            assert body["order"]["status"] == "pending", body["order"]
+            # Pending is not executed: nothing has filled at submit.
+            assert body["fill"] is None, body["fill"]
+            assert body["decision"]["decision_detail"]["book"]["moved_by_this_submission"] is False
         finally:
             db_session.close()

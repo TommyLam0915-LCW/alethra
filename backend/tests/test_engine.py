@@ -135,7 +135,7 @@ def test_price_change_invalid_params():
     assert len(result["errors"]) > 0
 
 
-# --- 10. transaction ledger has 16 fields ---
+# --- 10. transaction ledger has 16 execution fields + 8 risk-journal fields ---
 def test_transaction_ledger_fields():
     result = run_backtest(_base_spec())
     txn = result["transactions"][0]
@@ -144,6 +144,12 @@ def test_transaction_ledger_fields():
         "symbol", "side", "quantity", "observed_price",
         "execution_price_before_costs", "slippage_amount", "commission_amount",
         "gross_amount", "net_cash_change", "cash_after", "shares_after", "rationale",
+        # Why a SELL filled: stop, target, time, signal or end_of_data. None on a BUY.
+        "exit_reason",
+        # Risk journal: provenance plus the declared plan and its realised outcome.
+        "actor", "strategy_config_hash",
+        "stop_price", "target_price", "planned_risk", "planned_r",
+        "realized_pnl", "realized_r",
     }
     assert set(txn.keys()) == expected_fields
 

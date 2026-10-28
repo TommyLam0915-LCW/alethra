@@ -14,9 +14,17 @@ import pytest
 from sqlalchemy import text
 from app.models.market_data import MarketDataBar
 
+from tests.live_stack_guard import live_probe_skip_reason
+
 BASE_URL = "http://127.0.0.1:8000"
 DB_PATH = "backend/alethra_dev.db"
 TEST_DB_PATH = "backend/alethra_test_safety.db"
+
+_SKIP_REASON = live_probe_skip_reason(BASE_URL, (DB_PATH,))
+pytestmark = pytest.mark.skipif(
+    _SKIP_REASON is not None,
+    reason=f"live-stack probe: {_SKIP_REASON}",
+)
 
 @contextmanager
 def get_db_connection(db_path=DB_PATH):

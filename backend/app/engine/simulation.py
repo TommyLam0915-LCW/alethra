@@ -1,6 +1,9 @@
 from typing import Dict, Any, Optional, List
 import pandas as pd
 
+from app.engine import exit_rules
+from app.engine.fill_math import BUY, SELL, fill_economics, size_position, slipped_price
+
 SIMULATION_ENGINE_VERSION = "1.0.0"
 
 
@@ -31,9 +34,11 @@ class StepResult:
     ):
         self.decision_type = decision_type
         self.decision_detail = decision_detail
-        self.paper_cash = round(paper_cash, 4)
+        # Cast to plain float: pandas/numpy scalars survive round() and psycopg2
+        # renders np.float64 literally, aborting the write on PostgreSQL.
+        self.paper_cash = round(float(paper_cash), 4)
         self.paper_position = paper_position
-        self.paper_equity = round(paper_equity, 4)
+        self.paper_equity = round(float(paper_equity), 4)
         self.warnings = warnings
         self.snapshot_date = snapshot_date
         self.data_cutoff_at = data_cutoff_at
@@ -77,6 +82,13 @@ class ForwardSimulator:
         self.entry_price: Optional[float] = None
         self.entry_date: Optional[str] = None
 
+        # The plan the forward simulator trades against is read the same way the
+        # backtester and the risk journal read it, so a declared stop cannot be
+        # honoured by one engine and ignored by another.
+        self.risk_plan = exit_rules.plan_from_spec(strategy_spec)
+        self.stop_level: Optional[float] = None
+        self.target_level: Optional[float] = None
+
         self._prev_sma_short: Optional[float] = None
         self._prev_sma_long: Optional[float] = None
 
@@ -90,19 +102,21 @@ class ForwardSimulator:
         self._last_snapshot_date: Optional[str] = None
 
     def _current_equity(self, price: float) -> float:
-        return self.cash + self.shares * price
+        # Plain float: this value is bound directly to a Float column and a
+        # numpy scalar would abort the write on PostgreSQL.
+        return float(self.cash + self.shares * price)
 
     def _position_dict(self, current_price: Optional[float] = None) -> Optional[Dict[str, Any]]:
         if self.shares == 0:
             return None
         pos: Dict[str, Any] = {
             "symbol": self.symbol,
-            "shares": self.shares,
-            "entry_price": self.entry_price,
+            "shares": int(self.shares),
+            "entry_price": float(self.entry_price) if self.entry_price is not None else None,
             "entry_date": self.entry_date,
         }
         if current_price is not None:
-            pos["unrealized_pnl"] = round((current_price - self.entry_price) * self.shares, 4)
+            pos["unrealized_pnl"] = round(float((current_price - self.entry_price) * self.shares), 4)
         return pos
 
     def step(self, ohlcv: pd.DataFrame, snapshot_date: str) -> StepResult:
@@ -116,6 +130,14 @@ class ForwardSimulator:
 
         if self._pending_order is not None:
             return self._execute_pending(ohlcv, snapshot_date, warnings)
+
+        # Exits are checked before the template's own signal, so a session that
+        # touches a declared stop cannot also generate a fresh entry: the stop
+        # filled somewhere inside the bar and that bar's open has already passed.
+        if self.shares > 0:
+            exit_result = self._evaluate_exit(ohlcv, snapshot_date, warnings)
+            if exit_result is not None:
+                return exit_result
 
         if self.template_type == "buy_and_hold":
             return self._step_buy_and_hold(ohlcv, snapshot_date, warnings)
@@ -134,28 +156,28 @@ class ForwardSimulator:
         if self.shares == 0:
             return self._no_action(snapshot_date, warnings, ohlcv)
 
-        last_close = ohlcv.iloc[-1]["close"]
-        sell_price = last_close * (1 - self.slippage_rate)
-        gross = self.shares * sell_price
-        commission = round(gross * self.commission_rate, 4)
-        self.cash = round(self.cash + gross - commission, 4)
+        last_close = float(ohlcv.iloc[-1]["close"])
+        quantity = self.shares
+        sell_price = slipped_price(last_close, SELL, self.slippage_rate)
+        economics = fill_economics(
+            SELL, quantity, last_close, sell_price, self.commission_rate
+        )
+        self.cash = round(self.cash + economics.net_cash_change, 4)
 
         detail = {
             "symbol": self.symbol,
             "side": "SELL",
-            "quantity": self.shares,
+            "quantity": quantity,
             "observed_price": round(last_close, 4),
-            "execution_price": round(sell_price, 4),
-            "commission": commission,
+            "execution_price": sell_price,
+            "slippage_amount": economics.slippage_amount,
+            "commission": economics.commission_amount,
             "entry_price": self.entry_price,
             "entry_date": self.entry_date,
-            "exit_reason": "forced_exit",
+            "exit_reason": exit_rules.END_OF_DATA,
         }
 
-        self.shares = 0
-        self.entry_price = None
-        self.entry_date = None
-        self._holding_steps_remaining = None
+        self._clear_position_state()
 
         equity = self.cash
         warnings.append(f"Forced exit at {snapshot_date} close — end of available data")
@@ -172,6 +194,80 @@ class ForwardSimulator:
             engine_version=self.engine_version,
         )
 
+    def _arm_levels(self, entry_price: float, warnings: List[str]) -> None:
+        """Resolve the declared plan against the price actually paid."""
+        self.stop_level, self.target_level = exit_rules.resolve_levels(self.risk_plan, entry_price)
+        for message in exit_rules.unusable_warnings(self.risk_plan, self.stop_level, self.target_level):
+            if message not in warnings:
+                warnings.append(message)
+
+    def _clear_position_state(self) -> None:
+        self.shares = 0
+        self.entry_price = None
+        self.entry_date = None
+        self._holding_steps_remaining = None
+        self.stop_level = None
+        self.target_level = None
+
+    def _evaluate_exit(
+        self, ohlcv: pd.DataFrame, snapshot_date: str, warnings: List[str]
+    ) -> Optional[StepResult]:
+        """Close the open position if this session's bar forces it, else None.
+
+        The holding clock ticks here rather than inside the template step, so one
+        exit path serves every template and a declared stop cannot be shadowed by
+        the schedule. The entry session never reaches this method: the pending
+        order that opened the position returns from ``step`` first, which is what
+        keeps the entry bar's own range out of the exit evidence.
+        """
+        time_exit = False
+        if self._holding_steps_remaining is not None:
+            self._holding_steps_remaining -= 1
+            if self._holding_steps_remaining <= 0:
+                time_exit = True
+
+        bar = ohlcv.iloc[-1]
+        decision = exit_rules.evaluate_bar(
+            {"open": bar["open"], "high": bar["high"], "low": bar["low"], "close": bar["close"]},
+            self.stop_level,
+            self.target_level,
+            time_exit=time_exit,
+        )
+        if decision is None:
+            return None
+
+        observed = decision.observed_price
+        quantity = self.shares
+        exec_price = slipped_price(observed, SELL, self.slippage_rate)
+        economics = fill_economics(
+            SELL, quantity, observed, exec_price, self.commission_rate
+        )
+        self.cash = round(self.cash + economics.net_cash_change, 4)
+
+        if decision.reason == exit_rules.TIME:
+            holding_days = self.strategy_spec.get("signal_parameters", {}).get("holding_days")
+            rationale = f"Fixed holding period exit after {holding_days} sessions"
+        else:
+            rationale = decision.note
+
+        detail = {
+            "symbol": self.symbol,
+            "side": "SELL",
+            "quantity": quantity,
+            "observed_price": round(observed, 4),
+            "execution_price": exec_price,
+            "slippage_amount": economics.slippage_amount,
+            "commission": economics.commission_amount,
+            "entry_price": self.entry_price,
+            "entry_date": self.entry_date,
+            "exit_reason": decision.reason,
+            "exit_level": decision.level,
+            "rationale": rationale,
+        }
+
+        self._clear_position_state()
+        return self._make_result("simulated_exit", detail, snapshot_date, warnings, bar["close"])
+
     def _execute_pending(
         self, ohlcv: pd.DataFrame, snapshot_date: str, warnings: List[str]
     ) -> StepResult:
@@ -182,8 +278,8 @@ class ForwardSimulator:
         today_close = ohlcv.iloc[-1]["close"]
 
         if order["side"] == "BUY":
-            exec_price = round(today_open * (1 + self.slippage_rate), 4)
-            max_shares = int(self.cash / (exec_price * (1 + self.commission_rate)))
+            exec_price = slipped_price(today_open, BUY, self.slippage_rate)
+            max_shares = size_position(self.cash, exec_price, self.commission_rate)
 
             if max_shares <= 0:
                 warnings.append(
@@ -203,12 +299,14 @@ class ForwardSimulator:
                     today_close,
                 )
 
-            gross = round(max_shares * exec_price, 4)
-            commission = round(gross * self.commission_rate, 4)
-            self.cash = round(self.cash - gross - commission, 4)
+            economics = fill_economics(
+                BUY, max_shares, today_open, exec_price, self.commission_rate
+            )
+            self.cash = round(self.cash + economics.net_cash_change, 4)
             self.shares = max_shares
             self.entry_price = exec_price
             self.entry_date = snapshot_date
+            self._arm_levels(exec_price, warnings)
 
             if self.template_type == "price_change_fixed_hold":
                 holding_days = self.strategy_spec.get("signal_parameters", {}).get("holding_days", 1)
@@ -220,8 +318,8 @@ class ForwardSimulator:
                 "quantity": max_shares,
                 "observed_price": round(today_open, 4),
                 "execution_price": exec_price,
-                "slippage_amount": round(abs(exec_price - today_open) * max_shares, 4),
-                "commission": commission,
+                "slippage_amount": economics.slippage_amount,
+                "commission": economics.commission_amount,
                 "signal_date": order.get("signal_date"),
                 "rationale": order.get("rationale", ""),
             }
@@ -232,29 +330,29 @@ class ForwardSimulator:
             )
 
         else:
-            exec_price = round(today_open * (1 - self.slippage_rate), 4)
-            gross = round(self.shares * exec_price, 4)
-            commission = round(gross * self.commission_rate, 4)
-            self.cash = round(self.cash + gross - commission, 4)
+            exec_price = slipped_price(today_open, SELL, self.slippage_rate)
+            quantity = self.shares
+            economics = fill_economics(
+                SELL, quantity, today_open, exec_price, self.commission_rate
+            )
+            self.cash = round(self.cash + economics.net_cash_change, 4)
 
             detail = {
                 "symbol": self.symbol,
                 "side": "SELL",
-                "quantity": self.shares,
+                "quantity": quantity,
                 "observed_price": round(today_open, 4),
                 "execution_price": exec_price,
-                "slippage_amount": round(abs(today_open - exec_price) * self.shares, 4),
-                "commission": commission,
+                "slippage_amount": economics.slippage_amount,
+                "commission": economics.commission_amount,
                 "entry_price": self.entry_price,
                 "entry_date": self.entry_date,
                 "signal_date": order.get("signal_date"),
+                "exit_reason": exit_rules.SIGNAL,
                 "rationale": order.get("rationale", ""),
             }
 
-            self.shares = 0
-            self.entry_price = None
-            self.entry_date = None
-            self._holding_steps_remaining = None
+            self._clear_position_state()
 
             equity = self.cash
             return self._make_result(
@@ -267,8 +365,8 @@ class ForwardSimulator:
         if not self._bought and self.shares == 0:
             today_open = ohlcv.iloc[-1]["open"]
             today_close = ohlcv.iloc[-1]["close"]
-            exec_price = round(today_open * (1 + self.slippage_rate), 4)
-            max_shares = int(self.cash / (exec_price * (1 + self.commission_rate)))
+            exec_price = slipped_price(today_open, BUY, self.slippage_rate)
+            max_shares = size_position(self.cash, exec_price, self.commission_rate)
 
             if max_shares <= 0:
                 warnings.append(
@@ -288,13 +386,15 @@ class ForwardSimulator:
                     today_close,
                 )
 
-            gross = round(max_shares * exec_price, 4)
-            commission = round(gross * self.commission_rate, 4)
-            self.cash = round(self.cash - gross - commission, 4)
+            economics = fill_economics(
+                BUY, max_shares, today_open, exec_price, self.commission_rate
+            )
+            self.cash = round(self.cash + economics.net_cash_change, 4)
             self.shares = max_shares
             self.entry_price = exec_price
             self.entry_date = snapshot_date
             self._bought = True
+            self._arm_levels(exec_price, warnings)
 
             detail = {
                 "symbol": self.symbol,
@@ -302,8 +402,8 @@ class ForwardSimulator:
                 "quantity": max_shares,
                 "observed_price": round(today_open, 4),
                 "execution_price": exec_price,
-                "slippage_amount": round(abs(exec_price - today_open) * max_shares, 4),
-                "commission": commission,
+                "slippage_amount": economics.slippage_amount,
+                "commission": economics.commission_amount,
                 "rationale": "Initial allocation at first tradable session (buy-and-hold)",
             }
 
@@ -378,41 +478,8 @@ class ForwardSimulator:
         lookback_days = sig_params.get("lookback_days", 3)
         threshold_pct = sig_params.get("threshold_pct", 0.05)
 
-        if self.shares > 0 and self._holding_steps_remaining is not None:
-            self._holding_steps_remaining -= 1
-            if self._holding_steps_remaining <= 0:
-                today_close = ohlcv.iloc[-1]["close"]
-                sell_price = round(today_close * (1 - self.slippage_rate), 4)
-                gross = round(self.shares * sell_price, 4)
-                commission = round(gross * self.commission_rate, 4)
-                self.cash = round(self.cash + gross - commission, 4)
-
-                holding_days = sig_params.get("holding_days", 1)
-                detail = {
-                    "symbol": self.symbol,
-                    "side": "SELL",
-                    "quantity": self.shares,
-                    "observed_price": round(today_close, 4),
-                    "execution_price": sell_price,
-                    "slippage_amount": round(abs(today_close - sell_price) * self.shares, 4),
-                    "commission": commission,
-                    "entry_price": self.entry_price,
-                    "entry_date": self.entry_date,
-                    "rationale": f"Fixed holding period exit after {holding_days} sessions",
-                }
-
-                self.shares = 0
-                self.entry_price = None
-                self.entry_date = None
-                self._holding_steps_remaining = None
-
-                equity = self.cash
-                return self._make_result(
-                    "simulated_exit", detail, snapshot_date, warnings, today_close
-                )
-
-            return self._no_action(snapshot_date, warnings, ohlcv)
-
+        # The holding-period exit is not handled here: _evaluate_exit ticks the
+        # clock and fills it, so this step only decides whether to enter.
         if len(ohlcv) < lookback_days + 1:
             return self._no_action(
                 snapshot_date,

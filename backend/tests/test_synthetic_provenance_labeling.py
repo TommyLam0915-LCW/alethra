@@ -113,7 +113,16 @@ class TestBacktestSurfacesDataNature:
         assert result["data_nature"] == {"US:PROVLIVE": "live"}
         assert not any("Synthetic data used" in w for w in result["warnings"])
 
-    def test_mixed_provider_natures_reported_mixed(self):
+    def test_multi_provider_stored_data_refuses_blend_until_one_provider_selected(
+        self,
+    ):
+        """Two providers on one range must not be averaged into one price path.
+
+        The replay will not start a session over ambiguous stored data, so the
+        backtest cannot be allowed to silently merge it either: it refuses the run
+        and tells the caller to name one provider. Label the nature only for a run
+        that actually priced off a single dataset.
+        """
         from tests.conftest import TestSession
 
         db = TestSession()
@@ -123,12 +132,44 @@ class TestBacktestSurfacesDataNature:
                 db, "US:PROVMIX", "lseg", "live",
                 _synthetic_bars(start="2024-03-01", n=40),
             )
-            result = run_backtest(self._spec("US:PROVMIX"), db_session=db, data_source="stored")
+            spec = self._spec("US:PROVMIX")
+
+            refused = run_backtest(spec, db_session=db, data_source="stored")
+
+            assert refused["run_status"] == "error"
+            # Fail-closed: nothing is presented as a result of the ambiguous range.
+            assert refused["daily_equity_curve"] == [], refused["daily_equity_curve"]
+            assert refused["metrics"] == {}, refused["metrics"]
+            assert refused["transactions"] == [], refused["transactions"]
+            assert refused["data_nature"] is None, \
+                "An ambiguous range must not claim a data nature"
+
+            error_text = " ".join(refused["errors"])
+            assert "demo" in error_text and "lseg" in error_text, refused["errors"]
+            assert "more than one provider" in error_text, refused["errors"]
+
+            # The refusal names the way out, and the way out works: the same
+            # stored rows price cleanly once one provider is chosen, each with
+            # its own provenance.
+            live = run_backtest(
+                spec, db_session=db, data_source="stored", provider_id="lseg"
+            )
+            assert live["run_status"] == "completed", live["errors"]
+            assert live["data_nature"] == {"US:PROVMIX": "live"}, live["data_nature"]
+            assert not any("Synthetic data used" in w for w in live["warnings"])
+
+            synthetic = run_backtest(
+                spec, db_session=db, data_source="stored", provider_id="demo"
+            )
+            assert synthetic["run_status"] == "completed", synthetic["errors"]
+            assert synthetic["data_nature"] == {"US:PROVMIX": "synthetic"}, \
+                synthetic["data_nature"]
+            assert any(
+                "Synthetic data used" in w and "US:PROVMIX" in w
+                for w in synthetic["warnings"]
+            ), synthetic["warnings"]
         finally:
             db.close()
-
-        assert result["run_status"] == "completed"
-        assert result["data_nature"]["US:PROVMIX"] == "mixed"
 
     def test_demo_fallback_labeled_synthetic(self):
         spec = self._spec("DEMO-ALPHA", start="2024-01-02", end="2024-03-01")

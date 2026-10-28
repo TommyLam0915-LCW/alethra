@@ -152,10 +152,10 @@ class TestProviderSelection:
             db_session.close()
 
     def test_d_manual_execution_uses_bound_provider(self, client, auth_headers, setup_db):
-        """Case D: Manual execution uses selected provider's bars."""
+        """Case D: Manual execution prices its fill from the selected provider's bars."""
         from app.database import get_db
         db_session = next(get_db())
-        
+
         try:
             exp_id, version_id = self._create_experiment_with_data(client, auth_headers, db_session)
 
@@ -171,28 +171,99 @@ class TestProviderSelection:
             assert resp.status_code == 201
             session_id = resp.json()["id"]
 
-            # Execute manual decision (buy)
+            # An intent needs an account to settle into and an observed bar to be
+            # decided on; this dataset deliberately holds bars from two providers,
+            # which is what makes the binding worth testing.
+            resp = client.post("/api/v1/paper-portfolio", headers=auth_headers, json={
+                "initial_virtual_cash": 10000.0,
+                "currency": "USD",
+                "simulation_session_id": session_id,
+            })
+            assert resp.status_code == 201, f"Portfolio binding failed: {resp.text}"
+            portfolio_id = resp.json()["id"]
+
+            resp = client.post(
+                f"/api/v1/simulations/{session_id}/advance", headers=auth_headers
+            )
+            assert resp.status_code == 200, f"First advance failed: {resp.text}"
+            decided_on = resp.json()["session"]["current_snapshot_date"]
+
+            # SELL: the rule's own entry already holds US:AAPL, and a second BUY on
+            # a held asset is refused by name rather than queued.
             resp = client.post(
                 f"/api/v1/simulations/{session_id}/manual-decision",
                 headers=auth_headers,
                 json={
-                    "action": "buy",
-                    "quantity": 100,
-                    "idempotency_key": "test-buy-001",
-                    "rationale": "Test buy with twelvedata"
+                    "action": "sell",
+                    "quantity": 10,
+                    "idempotency_key": "test-d-provider-binding",
+                    "rationale": "Test manual execution with twelvedata"
                 }
             )
-            assert resp.status_code == 200
-            decision = resp.json()["decision"]
-            
-            # Verify decision was recorded (may be blocked_action if no valid next date)
-            assert decision["decision_type"] in ["simulated_entry", "no_action", "blocked_action"]
-            
-            # Verify session still has twelvedata provider after decision
+            assert resp.status_code == 200, f"Submission failed: {resp.status_code} {resp.text}"
+            submitted = resp.json()
+            assert submitted["rejection"]["reason"] == "awaiting_execution_window", \
+                submitted["rejection"]
+            assert submitted["order"]["status"] == "pending", submitted["order"]
+            assert submitted["fill"] is None, "Pending order filled at submit"
+            order_id = submitted["order"]["order_id"]
+
+            # Advance onto the next stored bar — that is the execution window.
+            resp = client.post(
+                f"/api/v1/simulations/{session_id}/advance", headers=auth_headers
+            )
+            assert resp.status_code == 200, f"Second advance failed: {resp.text}"
+            execution_date = resp.json()["session"]["current_snapshot_date"]
+            assert execution_date > decided_on, \
+                f"Clock did not move past the decision bar: {decided_on} → {execution_date}"
+
+            fills_resp = client.get(
+                f"/api/v1/paper-portfolio/{portfolio_id}/orders/{order_id}/fills",
+                headers=auth_headers,
+            )
+            assert fills_resp.status_code == 200, fills_resp.text
+            fills = fills_resp.json()
+            assert len(fills) == 1, f"Expected exactly one fill, got {len(fills)}: {fills}"
+            fill = fills[0]
+            assert fill["execution_date"] == execution_date, fill
+            assert float(fill["quantity"]) == 10.0, fill
+
+            # The fill must carry the bound provider's own open for that bar.
+            bound_open = (
+                db_session.query(MarketDataBar)
+                .filter(
+                    MarketDataBar.instrument_id == "US:AAPL",
+                    MarketDataBar.provider_id == "twelvedata",
+                    MarketDataBar.bar_date == date.fromisoformat(execution_date),
+                )
+                .first()
+            )
+            assert bound_open is not None, \
+                f"No twelvedata bar on the execution date {execution_date}"
+            assert round(float(fill["observed_price"]), 4) == round(float(bound_open.open), 4), (
+                f"Fill priced from the wrong bar: {fill['observed_price']} vs "
+                f"twelvedata open {bound_open.open} on {execution_date}"
+            )
+
+            # And it must not carry the other provider's price — the reason this
+            # dataset has two providers in the first place.
+            demo_opens = [
+                float(bar.open)
+                for bar in db_session.query(MarketDataBar).filter(
+                    MarketDataBar.instrument_id == "US:AAPL",
+                    MarketDataBar.provider_id == "demo",
+                ).all()
+            ]
+            assert float(fill["observed_price"]) not in demo_opens, (
+                f"Fill used a demo-provider price {fill['observed_price']} although the "
+                f"session is bound to twelvedata (demo opens: {demo_opens})"
+            )
+
+            # Verify session still has twelvedata provider after execution
             resp = client.get(f"/api/v1/simulations/{session_id}", headers=auth_headers)
             assert resp.status_code == 200
             assert resp.json()["provider_id"] == "twelvedata"
-            
+
             # Verify session state is preserved
             assert resp.json()["total_decisions"] >= 1
         finally:

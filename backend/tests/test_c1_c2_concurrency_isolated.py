@@ -11,7 +11,10 @@ from sqlalchemy.pool import NullPool
 from fastapi.testclient import TestClient
 
 from app.database import Base, get_db
-from app.models import SimulationSession, SimulationDecision, MarketDataBar
+from app.models import (
+    SimulationSession, SimulationDecision, MarketDataBar,
+    PaperPortfolio, PaperOrder, PaperFill, PaperPosition,
+)
 from app.main import app
 
 
@@ -138,6 +141,26 @@ class ConcurrencyTestHarness:
         assert resp.status_code == 201, f"Session creation failed: {resp.text}"
         session_id = resp.json()["id"]
 
+        # Bind the account these intents settle into. A submission with no linked
+        # portfolio has no book of record, and the product refuses it by name
+        # rather than inventing or silently picking one.
+        resp = self.client.post("/api/v1/paper-portfolio", headers=auth_headers, json={
+            "initial_virtual_cash": 100000.0,
+            "currency": "USD",
+            "simulation_session_id": session_id,
+        })
+        assert resp.status_code == 201, f"Portfolio binding failed: {resp.text}"
+        self.portfolio_id = UUID_Type(resp.json()["id"])
+
+        # Run the market clock onto the first bar. An intent needs a market time
+        # to be decided against; submitting before anyone has observed a bar is
+        # refused rather than priced off an unseen bar.
+        resp = self.client.post(
+            f"/api/v1/simulations/{session_id}/advance", headers=auth_headers
+        )
+        assert resp.status_code == 200, f"First advance failed: {resp.text}"
+        self.observed_date = resp.json()["session"]["current_snapshot_date"]
+
         return session_id
 
     def get_session_state(self, session_id):
@@ -180,6 +203,44 @@ class ConcurrencyTestHarness:
         finally:
             db.close()
 
+    def get_book_state(self):
+        """The account rows a submission writes: orders, fills, cash.
+
+        A duplicate that survived would double-charge the account, so the race is
+        checked where the money moves, not only in the replay's decision rows.
+        """
+        db = self.SessionFactory()
+        try:
+            orders = db.query(PaperOrder).filter(
+                PaperOrder.portfolio_id == self.portfolio_id
+            ).all()
+            order_ids = [o.id for o in orders]
+            fills = (
+                db.query(PaperFill)
+                .filter(PaperFill.paper_order_id.in_(order_ids))
+                .all()
+                if order_ids
+                else []
+            )
+            portfolio = db.query(PaperPortfolio).filter(
+                PaperPortfolio.id == self.portfolio_id
+            ).first()
+            return {
+                "order_count": len(orders),
+                "pending_count": sum(1 for o in orders if o.status.value == "pending"),
+                "order_ids": sorted(str(o.id) for o in orders),
+                "fill_count": len(fills),
+                "current_cash": round(float(portfolio.current_virtual_cash), 4),
+                "positions": {
+                    p.asset_id: float(p.quantity)
+                    for p in db.query(PaperPosition)
+                    .filter(PaperPosition.portfolio_id == self.portfolio_id)
+                    .all()
+                },
+            }
+        finally:
+            db.close()
+
     def cleanup(self):
         """Clean up resources."""
         # Restore previous dependency overrides (not .clear())
@@ -210,13 +271,17 @@ class TestC1SimultaneousIdentical:
 
             # Get initial state
             initial_state = harness.get_session_state(session_id)
+            initial_book = harness.get_book_state()
             print(f"Initial state: version={initial_state['state_version']}, "
                   f"decisions={initial_state['decision_count']}")
 
-            # Prepare identical requests
+            # Prepare identical requests. The intent is a SELL because the setup
+            # advance let the replay's own buy-and-hold rule enter the position and
+            # mirror it into the bound account; a second BUY on a held asset is
+            # refused by the product, so it would never reach the order table.
             idem_key = f"c1_concurrent_{uuid4().hex}"
             payload = {
-                "action": "buy",
+                "action": "sell",
                 "quantity": 100,
                 "rationale": "C1 concurrent test",
                 "idempotency_key": idem_key,
@@ -292,13 +357,37 @@ class TestC1SimultaneousIdentical:
             print(f"\nFinal state: version={final_state['state_version']}, "
                   f"decisions={final_state['decision_count']}")
 
-            # Verify exactly one decision
-            assert final_state['decision_count'] == 1, \
-                f"Expected 1 decision, got {final_state['decision_count']}"
+            # Verify exactly one decision beyond the observed bar the setup
+            # already walked onto.
+            assert final_state['decision_count'] == initial_state['decision_count'] + 1, \
+                f"Expected {initial_state['decision_count'] + 1} decisions, got {final_state['decision_count']}"
 
             # Verify state incremented once
             assert final_state['state_version'] == initial_state['state_version'] + 1, \
                 f"Expected version {initial_state['state_version'] + 1}, got {final_state['state_version']}"
+
+            # The account is where a surviving duplicate would double-charge, so
+            # the race is checked there too: submission books nothing, so one
+            # winner means one pending intent and an untouched book.
+            book_after_race = harness.get_book_state()
+            assert book_after_race['order_count'] == initial_book['order_count'] + 1, \
+                (
+                    f"Expected {initial_book['order_count'] + 1} orders "
+                    f"(baseline + 1), got {book_after_race['order_count']}"
+                )
+            assert book_after_race['pending_count'] == initial_book['pending_count'] + 1, \
+                f"A duplicate was executed at submit: {book_after_race}"
+            assert book_after_race['fill_count'] == initial_book['fill_count'], \
+                "Submission booked a fill; the market clock owns execution"
+            assert book_after_race['positions'] == initial_book['positions'], \
+                (
+                    f"Pending order changed holdings: "
+                    f"{initial_book['positions']} → {book_after_race['positions']}"
+                )
+            assert book_after_race['current_cash'] == initial_book['current_cash'], \
+                f"Pending order moved cash: {initial_book['current_cash']} → {book_after_race['current_cash']}"
+
+            print(f"Account after race: {book_after_race}")
 
             # If one got 409, verify it can retry successfully (C3 contract)
             if 409 in status_codes:
@@ -324,6 +413,35 @@ class TestC1SimultaneousIdentical:
 
                 print(f"✓ C3 retry succeeded: returned original decision {retry_decision_id}")
 
+            # Now let the market clock reach the intent: one order, one fill,
+            # one cash movement. A second pending order left by the race would
+            # book a second time here.
+            advance = harness.client.post(
+                f"/api/v1/simulations/{session_id}/advance", headers=auth_headers
+            )
+            assert advance.status_code == 200, f"Advance failed: {advance.status_code} {advance.text}"
+
+            book_after_clock = harness.get_book_state()
+            assert book_after_clock['order_count'] == initial_book['order_count'] + 1, \
+                f"Clock step created another order: {book_after_clock['order_count']}"
+            assert book_after_clock['fill_count'] == initial_book['fill_count'] + 1, \
+                (
+                    f"Expected exactly one booked fill beyond the baseline "
+                    f"{initial_book['fill_count']}, got {book_after_clock['fill_count']}"
+                )
+            assert book_after_clock['pending_count'] == initial_book['pending_count'], \
+                "Order still pending after the clock passed its execution bar"
+            assert book_after_clock['current_cash'] > initial_book['current_cash'], \
+                f"Sale did not credit the account: {initial_book['current_cash']} → {book_after_clock['current_cash']}"
+            sold_from = initial_book['positions'].get('US:AAPL', 0.0)
+            assert book_after_clock['positions'].get('US:AAPL') == sold_from - 100.0, \
+                (
+                    "Holdings did not move by exactly one 100-share fill: "
+                    f"{initial_book['positions']} → {book_after_clock['positions']}"
+                )
+
+            print(f"Account after clock: {book_after_clock}")
+
             print("\n✓ C1 PASS: Exactly one decision created, no duplicate effects")
 
         finally:
@@ -334,6 +452,113 @@ class TestC1SimultaneousIdentical:
                 print(f"\n⚠ Workers timed out. Retaining resources for inspection:")
                 print(f"  Database: {harness.db_path}")
                 print(f"  Temp dir: {harness.temp_dir}")
+
+
+class TestC3RetryAfterLostResponse:
+    """C3: a retry after the response was lost must replay, not re-execute.
+
+    The same contract is only covered conditionally inside C1, behind
+    ``if 409 in status_codes``, so it depends on winning a race. This test
+    drives it sequentially: the first request commits, then an identical
+    retry arrives carrying a now-stale ``expected_version``. The idempotency
+    lookup runs before the mutable-state checks, so the retry must return the
+    original decision instead of advancing the session twice.
+    """
+
+    def test_c3_identical_retry_replays_original_decision(self):
+        harness = ConcurrencyTestHarness()
+        try:
+            print("\n=== C3: Retry After Lost Response ===")
+
+            auth_headers = harness.create_user_and_auth()
+            session_id = harness.create_session_with_data(auth_headers)
+            initial_state = harness.get_session_state(session_id)
+            initial_book = harness.get_book_state()
+
+            idem_key = f"c3_replay_{uuid4().hex}"
+            # SELL, as in C1: the replay's own rule holds the position, so a BUY
+            # would be refused before it ever reached the order table.
+            payload = {
+                "action": "sell",
+                "quantity": 100,
+                "rationale": "C3 replay test",
+                "idempotency_key": idem_key,
+                "expected_version": initial_state["state_version"],
+            }
+
+            first = harness.client.post(
+                f"/api/v1/simulations/{session_id}/manual-decision",
+                headers=auth_headers,
+                json=payload,
+            )
+            assert first.status_code in (200, 201), f"First request failed: {first.status_code} {first.text}"
+            first_decision = first.json()["decision"]
+
+            after_commit = harness.get_session_state(session_id)
+            assert after_commit["state_version"] == initial_state["state_version"] + 1
+
+            retry = harness.client.post(
+                f"/api/v1/simulations/{session_id}/manual-decision",
+                headers=auth_headers,
+                json=payload,
+            )
+            assert retry.status_code in (200, 201), \
+                f"Replay must not conflict on the stale version: {retry.status_code} {retry.text}"
+
+            replayed = retry.json()["decision"]
+            assert replayed["id"] == first_decision["id"], \
+                f"Replay returned a new decision: {replayed['id']} != {first_decision['id']}"
+            assert replayed["step_number"] == first_decision["step_number"]
+            assert replayed["paper_cash"] == first_decision["paper_cash"]
+
+            after_replay = harness.get_session_state(session_id)
+            assert after_replay["state_version"] == after_commit["state_version"], \
+                "Replay mutated session state"
+            assert after_replay["total_decisions"] == after_commit["total_decisions"]
+            assert after_replay["paper_equity"] == after_commit["paper_equity"], \
+                "Replay re-priced the position"
+            assert harness.get_session_state(session_id)["decision_count"] == initial_state["decision_count"] + 1, \
+                "Replay inserted a second decision row"
+
+            # A different payload under the same key is a conflict, not a replay.
+            conflicting = harness.client.post(
+                f"/api/v1/simulations/{session_id}/manual-decision",
+                headers=auth_headers,
+                json={**payload, "quantity": 500},
+            )
+            assert conflicting.status_code == 409, \
+                f"Same key with a different payload must be rejected: {conflicting.status_code} {conflicting.text}"
+
+            assert harness.get_session_state(session_id)["decision_count"] == initial_state["decision_count"] + 1, \
+                "Rejected conflict still wrote a decision"
+
+            # Negative control: the same stale version under a NEW key is rejected,
+            # so the replay above only passed because the idempotency lookup
+            # precedes the version check rather than because state never moved.
+            stale_new_key = harness.client.post(
+                f"/api/v1/simulations/{session_id}/manual-decision",
+                headers=auth_headers,
+                json={**payload, "idempotency_key": f"c3_control_{uuid4().hex}"},
+            )
+            assert stale_new_key.status_code == 409, \
+                f"Stale expected_version under a new key must conflict: {stale_new_key.status_code} {stale_new_key.text}"
+
+            # Same contract on the account: replaying the request must not queue a
+            # second intent, or the clock would book two fills from one decision.
+            book = harness.get_book_state()
+            assert book['order_count'] == initial_book['order_count'] + 1, \
+                f"Replay or conflict wrote a second order: {book['order_ids']}"
+            assert book['pending_count'] == initial_book['pending_count'] + 1, f"{book}"
+            assert book['fill_count'] == initial_book['fill_count'], \
+                "Submission booked a fill; the market clock owns execution"
+            assert book['positions'] == initial_book['positions'], \
+                f"Pending order changed holdings: {initial_book['positions']} → {book['positions']}"
+            assert book['current_cash'] == initial_book['current_cash'], \
+                f"Pending order moved cash before execution: {initial_book['current_cash']} → {book['current_cash']}"
+
+            print("\n✓ C3 PASS: Retry replayed the original decision with no second execution")
+        finally:
+            harness.cleanup()
 
 
 class TestC2CompetingDistinct:
@@ -353,13 +578,16 @@ class TestC2CompetingDistinct:
 
             # Get initial state
             initial_state = harness.get_session_state(session_id)
+            initial_book = harness.get_book_state()
             print(f"Initial state: version={initial_state['state_version']}, "
                   f"decisions={initial_state['decision_count']}")
 
-            # Prepare two DIFFERENT requests with SAME expected_version
+            # Prepare two DIFFERENT requests with SAME expected_version. Both are
+            # SELLs: the replay's rule already holds the position, so a BUY would
+            # be refused before it ever reached the order table.
             idem_key_1 = f"c2_competing_1_{uuid4().hex}"
             payload_1 = {
-                "action": "buy",
+                "action": "sell",
                 "quantity": 100,
                 "rationale": "C2 competitor 1",
                 "idempotency_key": idem_key_1,
@@ -368,7 +596,7 @@ class TestC2CompetingDistinct:
 
             idem_key_2 = f"c2_competing_2_{uuid4().hex}"
             payload_2 = {
-                "action": "buy",
+                "action": "sell",
                 "quantity": 50,  # Different quantity
                 "rationale": "C2 competitor 2",
                 "idempotency_key": idem_key_2,
@@ -443,9 +671,10 @@ class TestC2CompetingDistinct:
             print(f"\nFinal state: version={final_state['state_version']}, "
                   f"decisions={final_state['decision_count']}")
 
-            # Verify exactly one decision
-            assert final_state['decision_count'] == 1, \
-                f"Expected 1 decision, got {final_state['decision_count']}"
+            # Verify exactly one decision beyond the observed bar the setup
+            # already walked onto.
+            assert final_state['decision_count'] == initial_state['decision_count'] + 1, \
+                f"Expected {initial_state['decision_count'] + 1} decisions, got {final_state['decision_count']}"
 
             # Verify state incremented once
             assert final_state['state_version'] == initial_state['state_version'] + 1, \
@@ -463,6 +692,24 @@ class TestC2CompetingDistinct:
             loser_response = responses[loser_idx]['body']
             assert "State version conflict" in loser_response, \
                 f"Expected stale-version conflict, got: {loser_response}"
+
+            # The loser's intent was refused before it reached the book, so it
+            # must not linger as a second pending order waiting for the clock.
+            book_after_race = harness.get_book_state()
+            assert book_after_race['order_count'] == initial_book['order_count'] + 1, \
+                (
+                    f"Expected {initial_book['order_count'] + 1} orders (baseline + winner), "
+                    f"got {book_after_race['order_count']}"
+                )
+            assert book_after_race['pending_count'] == initial_book['pending_count'] + 1, \
+                f"Competing intents both reached the book: {book_after_race}"
+            assert book_after_race['fill_count'] == initial_book['fill_count'], \
+                "Submission booked a fill; the market clock owns execution"
+            assert book_after_race['positions'] == initial_book['positions']
+            assert book_after_race['current_cash'] == initial_book['current_cash'], \
+                f"Pending order moved cash: {initial_book['current_cash']} → {book_after_race['current_cash']}"
+
+            print(f"Account after race: {book_after_race}")
 
             print(f"\n✓ C2 PASS: Exactly one winner, one stale-version conflict")
 

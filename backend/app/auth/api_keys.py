@@ -68,8 +68,16 @@ def authenticate_api_key(db: Session, raw_key: str) -> Optional[User]:
     return user
 
 
-def authenticate_api_key_with_scopes(db: Session, raw_key: str) -> Optional[tuple[User, list]]:
-    """Authenticate via API key and return (User, scopes).  Returns None if invalid."""
+def authenticate_api_key_identity(
+    db: Session, raw_key: str
+) -> Optional[tuple[User, list, UUID]]:
+    """Authenticate via API key and return (User, scopes, api_key_id).
+
+    The key's database id is what per-key budgeting is measured against; the raw
+    key itself must never become a bucket name or reach a response, header or log.
+    Returns None when the key is unknown, inactive, expired, or belongs to an
+    inactive user.
+    """
     key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
     api_key = db.query(ApiKey).filter(ApiKey.key_hash == key_hash).first()
 
@@ -86,7 +94,16 @@ def authenticate_api_key_with_scopes(db: Session, raw_key: str) -> Optional[tupl
     user = db.query(User).filter(User.id == api_key.user_id).first()
     if user is None or not user.is_active:
         return None
-    return user, list(api_key.scopes or [])
+    return user, list(api_key.scopes or []), api_key.id
+
+
+def authenticate_api_key_with_scopes(db: Session, raw_key: str) -> Optional[tuple[User, list]]:
+    """Authenticate via API key and return (User, scopes).  Returns None if invalid."""
+    result = authenticate_api_key_identity(db, raw_key)
+    if result is None:
+        return None
+    user, scopes, _key_id = result
+    return user, scopes
 
 
 def get_api_key_dependency():
@@ -125,15 +142,17 @@ def get_api_key_dependency():
                 if user and user.is_active:
                     # JWT auth — no scope restrictions
                     request.state.api_key_scopes = None
+                    request.state.api_key_id = None
                     return user
         except (JWTError, ValueError):
             pass
 
         # Fall back to API key
-        result = authenticate_api_key_with_scopes(db, token)
+        result = authenticate_api_key_identity(db, token)
         if result is not None:
-            user, scopes = result
+            user, scopes, key_id = result
             request.state.api_key_scopes = scopes
+            request.state.api_key_id = key_id
             return user
 
         raise HTTPException(

@@ -197,3 +197,12 @@ class DataProvider(ABC):
             else:
                 symbols.append(asset.symbol)
         return symbols
+
+    def get_available_range(self, instrument_id: str) -> Optional[Dict[str, str]]:
+        """Oldest and newest date this provider can serve bars for, as YYYY-MM-DD.
+
+        Returns None when the provider cannot state the window per instrument —
+        callers must then treat availability as unknown rather than infer it
+        from what happens to be cached.
+        """
+        return None

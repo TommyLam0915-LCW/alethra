@@ -1,12 +1,19 @@
 from fastapi import APIRouter, HTTPException, Depends, Query
 from typing import Optional
-from datetime import date
+from datetime import date, datetime, timezone
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.providers import get_data_provider
 from app.providers.data_provider import compute_staleness
 from app.services.market_data_storage import MarketDataStorage
+from app.services.price_view import (
+    bar_view,
+    market_status_view,
+    resolve_mode,
+    stored_bar_view,
+    validate_timeframe,
+)
 from app.data.real_instruments import (
     ALL_REAL_INSTRUMENTS,
     get_instrument_by_id,
@@ -31,6 +38,56 @@ def _provider_failure(instrument_id: str, exc: Exception) -> HTTPException:
             "provider_status": provider.get_status(),
         },
     )
+
+
+def _data_coverage(
+    instrument_id: str,
+    provider,
+    storage: MarketDataStorage,
+    timeframe: str = "1d",
+) -> dict:
+    """What data exists for this instrument, separate from what is cached.
+
+    ``available_*`` answers "can this provider serve bars in this window";
+    ``stored_*`` answers "which bars are already in our storage". A provider
+    that cannot state a per-instrument window leaves availability UNKNOWN
+    instead of implying that the cached rows are all that exists.
+    """
+    declared = provider.get_available_range(instrument_id)
+    metadata = storage.get_metadata(instrument_id, provider.provider_id)
+    return {
+        "timeframe": timeframe,
+        "provider_id": provider.provider_id,
+        "available_start": declared["start"] if declared else None,
+        "available_end": declared["end"] if declared else None,
+        "availability_source": "provider_declared" if declared else "unknown",
+        "stored_start": (
+            metadata.first_bar_date.isoformat()
+            if metadata and metadata.first_bar_date
+            else None
+        ),
+        "stored_end": (
+            metadata.last_bar_date.isoformat()
+            if metadata and metadata.last_bar_date
+            else None
+        ),
+        "stored_bars": metadata.total_bars if metadata else 0,
+    }
+
+
+def _data_window(instrument_id: str, provider) -> dict:
+    """Whether this provider can serve bars for the instrument, and over what period.
+
+    Availability only — unlike ``_data_coverage`` it never touches storage, because
+    a picker labels every listed instrument and must not pay a metadata query each.
+    """
+    declared = provider.get_available_range(instrument_id)
+    return {
+        "timeframe": "1d",
+        "available_start": declared["start"] if declared else None,
+        "available_end": declared["end"] if declared else None,
+        "availability_source": "provider_declared" if declared else "unknown",
+    }
 
 
 @router.get("/instruments")
@@ -92,6 +149,7 @@ def list_instruments(
                 "lot_size": inst.lot_size,
                 "lot_size_verified": inst.lot_size_verified,
                 "provider_mappings": _get_provider_mappings(inst.instrument_id),
+                "data_window": _data_window(inst.instrument_id, provider),
             }
             for inst in instruments
         ],
@@ -104,7 +162,7 @@ def list_instruments(
 
 
 @router.get("/instruments/{instrument_id}")
-def get_instrument(instrument_id: str):
+def get_instrument(instrument_id: str, db: Session = Depends(get_db)):
     """Get detailed info for a single instrument.
 
     instrument_id format: MARKET:SYMBOL (e.g., US:AAPL, HK:0700)
@@ -114,24 +172,39 @@ def get_instrument(instrument_id: str):
         raise HTTPException(404, f"Instrument not found: {instrument_id}")
 
     provider = get_data_provider()
-    latest_bar = None
-    data_quality = None
+    structure = get_market_structure(inst.market)
+    received_at = datetime.now(timezone.utc)
+
     try:
         bar = provider.get_latest_bar(instrument_id)
-        if bar:
-            latest_bar = {
-                "date": bar.date,
-                "open": bar.open,
-                "high": bar.high,
-                "low": bar.low,
-                "close": bar.close,
-                "volume": bar.volume,
-            }
-            data_quality = provider.get_data_quality(instrument_id)
-            data_quality["timezone"] = inst.timezone
-            data_quality.update(compute_staleness(bar.date))
     except Exception as exc:
         raise _provider_failure(instrument_id, exc)
+
+    data_quality = None
+    latest_bar = None
+    staleness: dict = {"is_stale": True}
+    if bar:
+        data_quality = provider.get_data_quality(instrument_id)
+        data_quality["timezone"] = inst.timezone
+        staleness = compute_staleness(bar.date)
+        data_quality.update(staleness)
+        latest_bar = bar_view(bar, structure, "1d", received_at)
+
+    mode_fields = resolve_mode(
+        provider,
+        data_quality or provider.get_data_quality(instrument_id),
+        timeframe="1d",
+        latest_bar_date=bar.date if bar else None,
+        end_date=bar.date if bar else None,
+        now=received_at,
+    )
+    status_fields = market_status_view(
+        structure,
+        provider_available=provider.is_available(),
+        has_bars=bool(bar),
+        is_stale=bool(staleness.get("is_stale")),
+        now=received_at,
+    )
 
     return {
         "instrument_id": inst.instrument_id,
@@ -147,8 +220,12 @@ def get_instrument(instrument_id: str):
         "provider_mappings": _get_provider_mappings(instrument_id),
         "latest_bar": latest_bar,
         "data_quality": data_quality,
+        "data_coverage": _data_coverage(instrument_id, provider, MarketDataStorage(db)),
         "data_source": provider.provider_name,
         "feed_mode": provider.feed_mode,
+        **mode_fields,
+        **status_fields,
+        "received_at": received_at.isoformat(),
     }
 
 
@@ -157,6 +234,9 @@ def get_instrument_bars(
     instrument_id: str,
     start_date: str,
     end_date: str,
+    timeframe: Optional[str] = Query(
+        None, description="Bar timeframe. Only '1d' is served today."
+    ),
     db: Session = Depends(get_db),
 ):
     """Get OHLCV bars for a specific instrument.
@@ -164,11 +244,22 @@ def get_instrument_bars(
     instrument_id format: MARKET:SYMBOL (e.g., US:AAPL, HK:0700)
 
     Bars are fetched from the provider and persisted to storage for future use.
+
+    The response states how the series should be read: which timeframe it
+    actually is, whether it is synthetic/replayed/live, the exchange-local
+    market timestamp and the server-side receive time of each bar, and the
+    market's current state.
     """
     inst = get_instrument_by_id(instrument_id)
     if inst is None:
         raise HTTPException(404, f"Instrument not found: {instrument_id}")
 
+    try:
+        tf = validate_timeframe(timeframe)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+    structure = get_market_structure(inst.market)
     provider = get_data_provider()
     storage = MarketDataStorage(db)
 
@@ -192,32 +283,43 @@ def get_instrument_bars(
         storage.mark_error(instrument_id, provider.provider_id, str(exc))
         raise _provider_failure(instrument_id, exc)
 
+    series_received_at = datetime.now(timezone.utc)
     quality = provider.get_data_quality(instrument_id)
     quality["timezone"] = inst.timezone
-    quality.update(compute_staleness(bars[-1].date if bars else None))
+    staleness = compute_staleness(bars[-1].date if bars else None)
+    quality.update(staleness)
 
     return {
         "instrument_id": instrument_id,
         "symbol": inst.symbol,
         "name": inst.name,
+        "market": inst.market.value,
+        "exchange": inst.exchange.value,
         "currency": inst.currency.value,
+        "timezone": inst.timezone,
         "provider": provider.provider_name,
         "feed_mode": provider.feed_mode,
         "start_date": start_date,
         "end_date": end_date,
         "bar_count": len(bars),
+        **resolve_mode(
+            provider,
+            quality,
+            timeframe=tf,
+            latest_bar_date=bars[-1].date if bars else None,
+            end_date=end_date,
+            now=series_received_at,
+        ),
+        **market_status_view(
+            structure,
+            provider_available=provider.is_available(),
+            has_bars=bool(bars),
+            is_stale=bool(staleness.get("is_stale")),
+            now=series_received_at,
+        ),
+        "series_received_at": series_received_at.isoformat(),
         "data_quality": quality,
-        "bars": [
-            {
-                "date": b.date,
-                "open": b.open,
-                "high": b.high,
-                "low": b.low,
-                "close": b.close,
-                "volume": b.volume,
-            }
-            for b in bars
-        ],
+        "bars": [bar_view(b, structure, tf, series_received_at) for b in bars],
         "disclaimer": "Data may be synthetic or demo-only. Not suitable for trading decisions.",
         "disclaimer_zh": "數據可能為模擬或演示數據。不適合用於交易決策。",
     }
@@ -229,6 +331,9 @@ def get_stored_bars(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     provider_id: Optional[str] = None,
+    timeframe: Optional[str] = Query(
+        None, description="Bar timeframe. Only '1d' is stored today."
+    ),
     limit: Optional[int] = None,
     db: Session = Depends(get_db),
 ):
@@ -243,12 +348,20 @@ def get_stored_bars(
     - start_date: Filter bars from this date (YYYY-MM-DD)
     - end_date: Filter bars until this date (YYYY-MM-DD)
     - provider_id: Filter by provider (e.g., demo, lseg)
+    - timeframe: Bar timeframe; only 1d is stored, others are rejected
     - limit: Maximum number of bars to return
     """
     inst = get_instrument_by_id(instrument_id)
     if inst is None:
         raise HTTPException(404, f"Instrument not found: {instrument_id}")
 
+    try:
+        tf = validate_timeframe(timeframe)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+    structure = get_market_structure(inst.market)
+    provider = get_data_provider()
     storage = MarketDataStorage(db)
 
     start_date_obj = date.fromisoformat(start_date) if start_date else None
@@ -264,20 +377,45 @@ def get_stored_bars(
 
     metadata = storage.get_metadata(instrument_id, provider_id)
 
+    def _labels(latest_bar_date: Optional[str], has_bars: bool, is_stale: bool):
+        return {
+            **resolve_mode(
+                provider,
+                {"data_nature": (metadata.data_nature if metadata else None) or "unknown",
+                 "timezone": inst.timezone},
+                timeframe=tf,
+                latest_bar_date=latest_bar_date,
+                end_date=end_date,
+                allow_realtime=False,
+            ),
+            **market_status_view(
+                structure,
+                provider_available=provider.is_available(),
+                has_bars=has_bars,
+                is_stale=is_stale,
+            ),
+        }
+
     if not bars and not metadata:
         return {
             "instrument_id": instrument_id,
             "symbol": inst.symbol,
             "name": inst.name,
+            "market": inst.market.value,
+            "exchange": inst.exchange.value,
+            "currency": inst.currency.value,
+            "timezone": inst.timezone,
             "source": "storage",
             "bar_count": 0,
             "bars": [],
             "metadata": None,
+            **_labels(None, False, True),
             "message": "No stored data available. Fetch from provider first.",
             "message_zh": "無儲存數據。請先從數據供應商獲取。",
         }
 
     quality = None
+    staleness = {}
     if metadata:
         quality = {
             "data_nature": metadata.data_nature,
@@ -292,28 +430,26 @@ def get_stored_bars(
             "last_success_at": metadata.last_success_at.isoformat() if metadata.last_success_at else None,
             "health_status": metadata.health_status,
         }
-        quality.update(compute_staleness(metadata.last_bar_date.isoformat() if metadata.last_bar_date else None))
+        staleness = compute_staleness(metadata.last_bar_date.isoformat() if metadata.last_bar_date else None)
+        quality.update(staleness)
 
     return {
         "instrument_id": instrument_id,
         "symbol": inst.symbol,
         "name": inst.name,
+        "market": inst.market.value,
+        "exchange": inst.exchange.value,
+        "currency": inst.currency.value,
+        "timezone": inst.timezone,
         "source": "storage",
         "bar_count": len(bars),
         "data_quality": quality,
-        "bars": [
-            {
-                "date": bar.bar_date.isoformat(),
-                "open": bar.open,
-                "high": bar.high,
-                "low": bar.low,
-                "close": bar.close,
-                "volume": bar.volume,
-                "provider_id": bar.provider_id,
-                "fetched_at": bar.fetched_at.isoformat(),
-            }
-            for bar in bars
-        ],
+        **_labels(
+            (quality or {}).get("latest_bar_date"),
+            bool(bars),
+            bool((staleness or {}).get("is_stale", True)),
+        ),
+        "bars": [stored_bar_view(bar, structure, tf) for bar in bars],
         "metadata": {
             "storage_provider": metadata.provider_id if metadata else None,
             "query_provider_filter": provider_id,

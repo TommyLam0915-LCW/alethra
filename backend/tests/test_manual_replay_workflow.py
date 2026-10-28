@@ -6,8 +6,16 @@ import pytest
 import requests
 from datetime import date
 
+from tests.live_stack_guard import live_probe_skip_reason
+
 
 BASE = "http://127.0.0.1:8000"
+
+_SKIP_REASON = live_probe_skip_reason(BASE)
+pytestmark = pytest.mark.skipif(
+    _SKIP_REASON is not None,
+    reason=f"live-stack probe: {_SKIP_REASON}",
+)
 
 
 @pytest.fixture

@@ -522,10 +522,11 @@ def run_experiment_backtest(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Run backtest for an experiment version and store results.
+    """Run backtest for an experiment version and return the results.
 
-    Executes the strategy against historical data and computes performance metrics.
-    Results are stored in the database and returned to the client.
+    Executes the strategy against historical data and computes performance
+    metrics. This ad-hoc endpoint does not persist a run row; use
+    POST /versions/{version_id}/runs for a durable, auditable run.
     """
     # Load experiment and verify ownership
     experiment = db.query(Experiment).filter(
@@ -553,14 +554,23 @@ def run_experiment_backtest(
         # Store results in ExperimentRun (if model exists) or return directly
         # For now, return results directly since ExperimentRun model may not exist
         return {
-            "status": "completed",
+            "status": result.get("run_status", "error"),
             "experiment_id": str(experiment_id),
             "version_id": str(version_id),
             "metrics": result.get("metrics", {}),
-            "equity_curve": result.get("equity_curve", []),
-            "trades": result.get("trades", []),
+            "equity_curve": result.get("daily_equity_curve", []),
+            "benchmark_equity_curve": result.get("benchmark_equity_curve", []),
+            "trades": result.get("transactions", []),
+            "round_trips": result.get("round_trips", []),
             "config_hash": result.get("config_hash"),
             "engine_version": result.get("engine_version"),
+            "data_provider": result.get("data_provider"),
+            "feed_mode": result.get("feed_mode"),
+            "data_source_used": result.get("data_source_used"),
+            "data_nature": result.get("data_nature"),
+            "dataset_checksum": result.get("dataset_checksum"),
+            "warnings": result.get("warnings", []),
+            "errors": result.get("errors", []),
             "completed_at": datetime.now(timezone.utc).isoformat(),
         }
     except Exception as e:

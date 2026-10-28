@@ -14,8 +14,18 @@ from app.engine.strategies import (
     run_price_change_fixed_hold,
 )
 from app.engine.metrics import compute_metrics, build_benchmark_equity_curve, calc_time_in_market
+from app.engine.attribution import annotate_and_attribute
+from app.engine import exit_rules
+from app.engine.intraday import INTRADAY_TIMEFRAMES
 
 ENGINE_VERSION = "1.1.0"
+
+KNOWN_DATA_NATURES = frozenset({"synthetic", "live", "delayed", "mixed", "unknown"})
+
+
+def _coerce_nature(value: Any) -> str:
+    """Collapse anything that is not a recognized nature token to "unknown"."""
+    return value if isinstance(value, str) and value in KNOWN_DATA_NATURES else "unknown"
 
 
 def compute_config_hash(strategy_spec: Dict[str, Any]) -> str:
@@ -67,15 +77,23 @@ def _load_stored_bars(
     start_date: str,
     end_date: str,
     provider_id: Optional[str] = None,
-) -> Tuple[Dict[str, pd.DataFrame], Dict[str, str]]:
+) -> Tuple[Dict[str, pd.DataFrame], Dict[str, str], Dict[str, List[str]]]:
     """Load bars from database storage with per-asset data nature.
 
-    Returns (data, natures): a dict mapping asset_id to DataFrame (only
-    assets that have stored data), and a dict mapping asset_id to the
-    resolved data_nature ("synthetic"/"live"/"delayed"/"mixed"/"unknown")
-    of the bars actually loaded — from MarketDataMetadata for the backing
-    providers. Synthetic-sourced bars must never be presented as real
-    market data.
+    Returns (data, natures, ambiguous): a dict mapping asset_id to DataFrame
+    (only assets that have stored data from exactly one provider), a dict
+    mapping asset_id to the resolved data_nature
+    ("synthetic"/"live"/"delayed"/"mixed"/"unknown") of the bars actually
+    loaded — from MarketDataMetadata for the backing providers. Synthetic-
+    sourced bars must never be presented as real market data.
+
+    ``ambiguous`` maps asset_id to the sorted provider ids that each hold rows
+    in the range. Rows are unique per (instrument, timestamp, provider), so two
+    providers mean two prices for one date; merging them would hand a strategy a
+    calendar that never existed. The forward replay already refuses this at
+    session creation and asks for one provider — binding is done the same way
+    here, by passing ``provider_id``. An ambiguous asset is withheld from
+    ``data`` so a merged series cannot reach a template unnoticed.
     """
     from app.services.market_data_storage import MarketDataStorage
 
@@ -84,6 +102,7 @@ def _load_stored_bars(
     end_date_obj = date.fromisoformat(end_date)
 
     result = {}
+    ambiguous: Dict[str, List[str]] = {}
     loaded_provider_ids: Dict[str, set] = {}
     for asset_id in asset_ids:
         stored_bars = storage.get_bars(
@@ -92,11 +111,16 @@ def _load_stored_bars(
             start_date=start_date_obj,
             end_date=end_date_obj,
         )
-        if stored_bars:
-            result[asset_id] = _stored_bars_to_dataframe(stored_bars)
-            loaded_provider_ids[asset_id] = {
-                getattr(bar, "provider_id", None) for bar in stored_bars
-            } - {None}
+        if not stored_bars:
+            continue
+        providers = {
+            getattr(bar, "provider_id", None) for bar in stored_bars
+        } - {None}
+        if len(providers) > 1:
+            ambiguous[asset_id] = sorted(providers)
+            continue
+        result[asset_id] = _stored_bars_to_dataframe(stored_bars)
+        loaded_provider_ids[asset_id] = providers
 
     nature_map = storage.get_nature_map(list(loaded_provider_ids.keys()))
     natures = {
@@ -105,7 +129,7 @@ def _load_stored_bars(
         )
         for asset_id, pids in loaded_provider_ids.items()
     }
-    return result, natures
+    return result, natures, ambiguous
 
 
 def _fetch_ohlcv_via_provider(
@@ -122,12 +146,29 @@ def _fetch_ohlcv_via_provider(
     return result
 
 
+def _ambiguous_dataset_error(
+    ambiguous: Dict[str, List[str]], asset_ids: List[str]
+) -> Optional[str]:
+    """One sentence explaining why a stored range cannot be traded as one series."""
+    hits = [aid for aid in asset_ids if aid in ambiguous]
+    if not hits:
+        return None
+    detail = "; ".join(f"{aid}: {', '.join(ambiguous[aid])}" for aid in hits)
+    return (
+        f"Stored data for {detail} comes from more than one provider, so this "
+        "range holds more than one price per date. A backtest must price off one "
+        "dataset — pass a single provider_id, exactly as the forward replay "
+        "requires when a session is created."
+    )
+
+
 def run_backtest(
     strategy_spec: Dict[str, Any],
     engine_version: str = ENGINE_VERSION,
     data_provider: Any = None,
     db_session: Optional[Session] = None,
     data_source: str = "auto",
+    provider_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     errors = []
     warnings = []
@@ -136,6 +177,21 @@ def run_backtest(
     if not template_type:
         errors.append("Missing template_type")
         return _error_result(errors)
+
+    # The batch backtester runs the daily templates and reports daily-annualized
+    # metrics keyed on one bar per calendar date. Feeding it an intraday spec would
+    # silently misrepresent 5-minute bars as daily ones, so refuse it here and point
+    # at the per-bar intraday forward replay, which is the path intraday strategies
+    # actually execute through. Additive: a spec with no timeframe (or "1d") is
+    # untouched and runs exactly as before.
+    timeframe = str(strategy_spec.get("timeframe", "1d"))
+    if timeframe in INTRADAY_TIMEFRAMES:
+        return _error_result([
+            f"Batch backtest does not execute '{timeframe}' intraday specs: the daily "
+            "templates and daily-annualized metrics would misrepresent intraday bars. "
+            "Run intraday strategies through the per-bar forward replay (simulation "
+            "session create + advance), which binds one stored intraday dataset."
+        ])
 
     asset_ids = strategy_spec.get("asset_ids", [])
     if not asset_ids:
@@ -177,7 +233,12 @@ def run_backtest(
         if db_session is None:
             errors.append("data_source='stored' requires a database session (db_session)")
             return _error_result(errors)
-        ohlcv_data, stored_natures = _load_stored_bars(db_session, all_asset_ids, start_date, end_date)
+        ohlcv_data, stored_natures, stored_ambiguous = _load_stored_bars(
+            db_session, all_asset_ids, start_date, end_date, provider_id=provider_id
+        )
+        refusal = _ambiguous_dataset_error(stored_ambiguous, all_asset_ids)
+        if refusal:
+            return _error_result([refusal])
         for aid in asset_ids:
             if aid not in ohlcv_data or ohlcv_data[aid].empty:
                 errors.append(f"No stored data for {aid} in range {start_date} to {end_date}. Fetch from provider first.")
@@ -189,8 +250,17 @@ def run_backtest(
 
     elif data_source == "provider" or data_source == "auto":
         stored_data: Dict[str, pd.DataFrame] = {}
+        stored_ambiguous: Dict[str, List[str]] = {}
         if data_source == "auto" and db_session is not None:
-            stored_data, stored_natures = _load_stored_bars(db_session, all_asset_ids, start_date, end_date)
+            stored_data, stored_natures, stored_ambiguous = _load_stored_bars(
+                db_session, all_asset_ids, start_date, end_date, provider_id=provider_id
+            )
+            # Refuse before any fallback feed is consulted: an asset the user
+            # bound to two providers must not be quietly re-priced from a
+            # different dataset, and must not be averaged into one.
+            refusal = _ambiguous_dataset_error(stored_ambiguous, all_asset_ids)
+            if refusal:
+                return _error_result([refusal])
 
         missing_from_storage = [aid for aid in all_asset_ids if aid not in stored_data or stored_data[aid].empty]
 
@@ -242,7 +312,7 @@ def run_backtest(
             if data_provider is not None:
                 quality_fn = getattr(data_provider, "get_data_quality", None)
                 data_nature[aid] = (
-                    quality_fn(aid).get("data_nature", "unknown")
+                    _coerce_nature(quality_fn(aid).get("data_nature"))
                     if quality_fn is not None
                     else "unknown"
                 )
@@ -250,7 +320,7 @@ def run_backtest(
                 # Built-in demo fallback serves deterministic synthetic data.
                 data_nature[aid] = "synthetic"
         else:
-            data_nature[aid] = stored_natures.get(aid, "unknown")
+            data_nature[aid] = _coerce_nature(stored_natures.get(aid))
 
     config_hash = compute_config_hash(strategy_spec)
 
@@ -280,6 +350,11 @@ def run_backtest(
     transactions: List[Dict[str, Any]] = []
     strategy_warnings: List[str] = []
 
+    # One reading of the declared plan for execution and for the journal: if the
+    # engine traded a different stop than the one attribution reports, the R
+    # multiples in the risk journal would describe a strategy nobody ran.
+    risk_plan = exit_rules.plan_from_spec(strategy_spec)
+
     if template_type == "buy_and_hold":
         transactions, strategy_warnings = run_buy_and_hold(
             symbol=symbol,
@@ -287,6 +362,7 @@ def run_backtest(
             initial_cash=initial_cash,
             commission_rate=commission_rate,
             slippage_rate=slippage_rate,
+            risk_plan=risk_plan,
         )
     elif template_type == "sma_crossover":
         sig_params = strategy_spec.get("signal_parameters", {})
@@ -316,6 +392,7 @@ def run_backtest(
             slippage_rate=slippage_rate,
             short_window=short_window,
             long_window=long_window,
+            risk_plan=risk_plan,
         )
     elif template_type == "price_change_fixed_hold":
         sig_params = strategy_spec.get("signal_parameters", {})
@@ -344,6 +421,7 @@ def run_backtest(
             lookback_days=lookback_days,
             threshold_pct=threshold_pct,
             holding_days=holding_days,
+            risk_plan=risk_plan,
         )
     else:
         errors.append(f"Unsupported template_type: {template_type}")
@@ -353,6 +431,13 @@ def run_backtest(
 
     if not transactions:
         warnings.append("No trades generated by this strategy.")
+
+    attribution = annotate_and_attribute(
+        transactions,
+        strategy_spec=strategy_spec,
+        config_hash=config_hash,
+        actor="strategy",
+    )
 
     daily_equity = _build_daily_equity(transactions, initial_cash, ohlcv)
     daily_accounting = _build_daily_accounting(transactions, initial_cash, ohlcv)
@@ -380,10 +465,21 @@ def run_backtest(
         benchmark_equity=benchmark_equity,
         trading_days=trading_days,
         time_in_market_pct=time_in_market_pct,
+        attribution=attribution,
+        trading_dates=trading_dates,
     )
 
     if trading_days < 30:
         warnings.append(f"Short sample period: only {trading_days} trading days.")
+
+    cross_check = metrics.get("pnl_cross_check") or {}
+    if cross_check.get("consistent") is False:
+        warnings.append(
+            "Accounting cross-check failed: equity P&L "
+            f"{cross_check['equity_net_pnl']} vs FIFO realised P&L "
+            f"{cross_check['realized_net_pnl']} (difference {cross_check['difference']}). "
+            "These run metrics are not reconciled."
+        )
 
     daily_equity_curve = [
         {"date": row["date"].strftime("%Y-%m-%d"), "equity": eq}
@@ -402,7 +498,13 @@ def run_backtest(
             for i, eq in enumerate(benchmark_equity)
         ]
 
-    methodology_summary = _build_methodology_summary(strategy_spec, template_type)
+    methodology_summary = _build_methodology_summary(
+        strategy_spec,
+        template_type,
+        data_nature=data_nature,
+        provider_name=provider_name,
+        feed_mode=feed_mode,
+    )
 
     return {
         "run_status": "completed",
@@ -421,6 +523,7 @@ def run_backtest(
         "initial_cash": initial_cash,
         "final_equity": round(final_equity, 4),
         "transactions": transactions,
+        "round_trips": attribution["closed_trades"],
         "daily_equity_curve": daily_equity_curve,
         "daily_accounting": daily_accounting,
         "benchmark_equity_curve": benchmark_equity_curve,
@@ -527,28 +630,100 @@ def _build_daily_accounting(
     return accounting
 
 
-def _build_methodology_summary(strategy_spec: Dict[str, Any], template_type: str) -> Dict[str, Any]:
+def _build_methodology_summary(
+    strategy_spec: Dict[str, Any],
+    template_type: str,
+    *,
+    data_nature: Optional[Dict[str, str]] = None,
+    provider_name: Optional[str] = None,
+    feed_mode: Optional[str] = None,
+) -> Dict[str, Any]:
+    natures = sorted({n for n in (data_nature or {}).values() if n})
+    if not natures:
+        data_constraint = "Data provenance unresolved for this run — do not read these results as market-based."
+    elif natures == ["synthetic"]:
+        data_constraint = "Synthetic demo bars only — no real market data in this run."
+    else:
+        per_asset = ", ".join(f"{aid}={nat}" for aid, nat in sorted((data_nature or {}).items()))
+        data_constraint = (
+            f"Data nature per asset: {per_asset} (provider: {provider_name}, feed mode: {feed_mode}). "
+            "Any asset marked synthetic is not real market data."
+        )
+
     summary = {
         "template_type": template_type,
         "execution_convention": {
-            "buy": "execution_price = next_day_open * (1 + slippage_rate)",
-            "sell": "execution_price = close * (1 - slippage_rate) for buy-and-hold exit; next_day_open * (1 - slippage_rate) for SMA cross-down",
+            "buy": "execution_price = next_session_open * (1 + slippage_rate) for every signal-driven entry; buy-and-hold enters at the first session's open",
+            "sell": (
+                "execution_price = observed_exit_price * (1 - slippage_rate), where observed_exit_price "
+                "comes from the exit reason: min(session_open, stop_level) for a stop, the target level "
+                "for a target, the session close for a holding-period or end-of-data exit, and the "
+                "execution session's open for an SMA cross-down"
+            ),
             "commission": "gross_amount * commission_rate",
-            "signal_timing": "Signal computed from data available at day t close; execution at day t+1 open (except final liquidation)",
+            "signal_timing": (
+                "Entries are computed from completed bars and execute at the next session's open. A stop "
+                "or target exit is not a lagged signal: it is evidenced by the bar it fills on. The "
+                "holding-period exit and the end-of-data liquidation fill on their own session."
+            ),
+        },
+        "exit_policy": {
+            "source": "app/engine/exit_rules.py — one policy shared by the backtester, the forward simulator and the risk journal",
+            "stop": "Fires when the session low reaches the stop; fills at min(session_open, stop_level), so a gap down through the level fills at the worse open rather than at a price nobody could have traded at.",
+            "target": "Fires when the session high reaches the target; fills at the target level exactly, so a gap up beyond it does not earn the better open.",
+            "same_bar_stop_and_target": (
+                "A daily bar carries no evidence of intra-bar price order. When one bar touches both "
+                "levels the stop is assumed to fill first. This is a conservative assumption disclosed "
+                "here, not inferred from the data."
+            ),
+            "level_evaluation_start": "Levels are evaluated from the bar after the entry execution bar; the entry bar's own range is never used as exit evidence.",
+            "time_exit": "A holding-period exit fills at that session's close, and only if no stop or target triggered on or before that session.",
+            "end_of_data": "A position still open on the last available bar is force-closed at that bar's close and labelled end_of_data.",
+            "undeclared_plan": "A strategy that declares no risk_parameters gets no stop and no target, and behaves exactly as it did before exit-level execution existed.",
         },
         "position_sizing": "Integer whole shares only; no fractional shares in Phase 1",
+        "round_trip_attribution": (
+            "FIFO by share quantity. A buy's cost basis includes its commission; a sell's "
+            "proceeds are net of its commission; slippage is already in the execution price, "
+            "so costs are never counted twice."
+        ),
+        "journal_field_semantics": {
+            "actor": "Who produced the fill. Engine fills are recorded as 'strategy'; human and "
+                      "api_key actors appear on paper orders, not in a backtest.",
+            "strategy_config_hash": "SHA-256 of the strategy spec this run executed against.",
+            "stop_price": "Declared protective stop for the open position, simulated against each session's range after the entry bar; null when the template declares none or when the level defines no risk unit for a long position.",
+            "target_price": "Declared profit target, simulated the same way; null when the template declares none or when the level would have fired on the entry bar.",
+            "planned_risk": "Cash at risk if the stop is hit (entry - stop) * quantity; null when no stop is declared.",
+            "planned_r": "Reward/risk implied by stop and target at entry; null unless both are declared.",
+            "realized_pnl": "P&L booked by this fill. Null on a buy (position still open); on a sell it is the FIFO-matched close.",
+            "realized_r": "realized_pnl / planned_risk; null when planned risk is undefined. Never treated as zero, and never floored at -1R: a stop that gaps through its level really does lose more than the declared risk unit.",
+            "exit_reason": "Why a SELL filled: stop, target, time, signal or end_of_data. Null on a BUY, where no exit has happened yet.",
+        },
         "constraints": [
             "Long-only (no short selling)",
             "No leverage",
             "No negative cash",
-            "Demo data only — no live market data",
+            data_constraint,
             "No dividends, corporate actions, or survivorship bias adjustment",
+            "Stops and targets are executed, but only against daily OHLC bars: the intra-bar price "
+            "order is unknown, so a bar touching both levels is resolved as stop-first by disclosed "
+            "conservative assumption rather than by evidence",
+            "No intraday granularity: a stop or target can only be evidenced by a daily bar's range, "
+            "so a level breached and recovered inside a session is reported as an exit on that session",
         ],
         "parameters": {
             "commission_rate": strategy_spec.get("commission_rate", 0),
             "slippage_rate": strategy_spec.get("slippage_rate", 0),
             "initial_cash": strategy_spec.get("initial_cash", 0),
             "signal_parameters": strategy_spec.get("signal_parameters", {}),
+            "risk_parameters": strategy_spec.get("risk_parameters", {}),
+            # Read through the same single source the engine trades against, and keyed
+            # on presence rather than truthiness: a declared stop_pct of 0.0 is still a
+            # declaration, and a target-only plan is still a plan.
+            "risk_parameters_declared": any(
+                value is not None
+                for value in exit_rules.plan_from_spec(strategy_spec).values()
+            ),
         },
     }
 
@@ -560,21 +735,29 @@ def _build_methodology_summary(strategy_spec: Dict[str, Any], template_type: str
             "Cross-down (short < long) generates sell signal",
             "Use all available cash on buy; sell all shares on sell",
             "No duplicate buys while holding; no sells when not holding",
+            "A declared stop or target can close the position before a cross-down, and the session it "
+            "fills on generates no re-entry because its open has already passed",
         ]
     elif template_type == "price_change_fixed_hold":
         sp = strategy_spec.get("signal_parameters", {})
         summary["strategy_rules"] = [
             f"If price change over {sp.get('lookback_days')} days <= -{sp.get('threshold_pct')*100}%, generate buy signal",
-            f"Hold exactly {sp.get('holding_days')} trading sessions after execution",
-            "Liquidate at holding-period exit session close",
+            f"Hold at most {sp.get('holding_days')} trading sessions after execution",
+            "Liquidate at the holding-period exit session close, or earlier if a declared stop or target fires first",
             "Ignore new entry signals while already holding",
         ]
     elif template_type == "buy_and_hold":
         summary["strategy_rules"] = [
             "Buy maximum affordable whole shares at first valid open",
-            "Hold to final valid data date",
-            "Liquidate at final valid close",
+            "Hold until a declared stop or target fires, otherwise to the final valid data date",
+            "Liquidate at the final valid close when no declared level fired",
         ]
+
+    if summary["parameters"]["risk_parameters_declared"]:
+        summary["strategy_rules"].append(
+            "Declared stop and target levels are checked against every session from the bar after entry; "
+            "see exit_policy for the fill and ordering assumptions."
+        )
 
     return summary
 
@@ -616,6 +799,7 @@ def _error_result(errors: List[str]) -> Dict[str, Any]:
         "initial_cash": 0,
         "final_equity": 0,
         "transactions": [],
+        "round_trips": [],
         "daily_equity_curve": [],
         "daily_accounting": [],
         "benchmark_equity_curve": [],

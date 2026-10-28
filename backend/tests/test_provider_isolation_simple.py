@@ -1,158 +1,123 @@
-"""
-Provider read isolation tests for manual replay.
+"""Provider isolation edge cases for the stored-data reads.
 
-Verifies that manual replay sessions correctly isolate data by provider_id
-and do not mix data from different providers.
+The mock-query-chain version of this file asserted on ``'provider_id' in
+str(mock.call_args)``, which cannot see a SQLAlchemy expression passed
+positionally to ``filter``; two of its three cases failed at HEAD while the
+third passed vacuously. These cases run against the real test database and
+assert on the rows that come back, covering the boundaries the sibling file
+(test_provider_read_isolation.py) does not: emptiness, date windows,
+cross-instrument leakage and date deduplication.
 """
+from datetime import date, datetime
+
 import pytest
-from datetime import date
-from unittest.mock import Mock
-import pandas as pd
+
+from app.api.simulations import _get_stored_trade_dates, _load_stored_ohlcv
+from app.models.market_data import MarketDataBar
+from tests.conftest import TestSession
+
+SYMBOL = "US:AAPL"
+OTHER_SYMBOL = "US:MSFT"
+TWELVEDATA_OPEN = 190.94
+DEMO_OPEN = 200.176
 
 
-class TestProviderReadIsolation:
-    """Test provider isolation in stored data reads."""
-
-    def test_load_stored_ohlcv_filters_by_provider(self):
-        """Verify _load_stored_ohlcv filters by provider_id when specified."""
-        # Import here to avoid module-level import errors
-        from app.api.simulations import _load_stored_ohlcv
-        
-        # Setup mock database session
-        mock_db = Mock()
-        
-        # Create mock bars for two providers
-        twelvedata_bar = Mock()
-        twelvedata_bar.bar_date = date(2024, 1, 30)
-        twelvedata_bar.open = 190.94
-        twelvedata_bar.high = 191.8
-        twelvedata_bar.low = 187.47
-        twelvedata_bar.close = 188.04
-        twelvedata_bar.volume = 55859400
-        twelvedata_bar.provider_id = 'twelvedata'
-        
-        demo_bar = Mock()
-        demo_bar.bar_date = date(2024, 1, 30)
-        demo_bar.open = 200.176
-        demo_bar.high = 200.975
-        demo_bar.low = 196.463
-        demo_bar.close = 197.484
-        demo_bar.volume = 1437296
-        demo_bar.provider_id = 'demo'
-        
-        # Mock query chain
-        mock_query = Mock()
-        mock_filter = Mock()
-        mock_order_by = Mock()
-        
-        mock_db.query.return_value = mock_query
-        mock_query.filter.return_value = mock_filter
-        mock_filter.filter.return_value = mock_filter
-        mock_filter.order_by.return_value = mock_order_by
-        
-        # Test with provider_id='twelvedata'
-        mock_order_by.all.return_value = [twelvedata_bar]
-        result = _load_stored_ohlcv('US:AAPL', '2024-01-30', '2024-01-30', mock_db, provider_id='twelvedata')
-        
-        # Verify filter was called with provider_id
-        assert mock_filter.filter.called
-        filter_calls = mock_filter.filter.call_args_list
-        provider_filter_found = any(
-            'provider_id' in str(call) for call in filter_calls
-        )
-        assert provider_filter_found, "provider_id filter should be applied"
-        
-        # Verify result contains only twelvedata
-        assert len(result) == 1
-        assert result.iloc[0]['open'] == 190.94
-
-    def test_load_stored_ohlcv_without_provider_loads_all(self):
-        """Verify _load_stored_ohlcv loads all providers when provider_id is None."""
-        from app.api.simulations import _load_stored_ohlcv
-        
-        mock_db = Mock()
-        
-        # Create mock bars for two providers
-        twelvedata_bar = Mock()
-        twelvedata_bar.bar_date = date(2024, 1, 30)
-        twelvedata_bar.open = 190.94
-        twelvedata_bar.high = 191.8
-        twelvedata_bar.low = 187.47
-        twelvedata_bar.close = 188.04
-        twelvedata_bar.volume = 55859400
-        
-        demo_bar = Mock()
-        demo_bar.bar_date = date(2024, 1, 30)
-        demo_bar.open = 200.176
-        demo_bar.high = 200.975
-        demo_bar.low = 196.463
-        demo_bar.close = 197.484
-        demo_bar.volume = 1437296
-        
-        # Mock query chain
-        mock_query = Mock()
-        mock_filter = Mock()
-        mock_order_by = Mock()
-        
-        mock_db.query.return_value = mock_query
-        mock_query.filter.return_value = mock_filter
-        mock_filter.order_by.return_value = mock_order_by
-        mock_order_by.all.return_value = [twelvedata_bar, demo_bar]
-        
-        # Test without provider_id
-        result = _load_stored_ohlcv('US:AAPL', '2024-01-30', '2024-01-30', mock_db, provider_id=None)
-        
-        # Verify provider_id filter was NOT applied
-        filter_calls = mock_filter.filter.call_args_list
-        provider_filter_found = any(
-            'provider_id' in str(call) for call in filter_calls
-        )
-        assert not provider_filter_found, "provider_id filter should NOT be applied when None"
-        
-        # Verify result contains both providers (duplicate dates)
-        assert len(result) == 2
-
-    def test_get_stored_trade_dates_filters_by_provider(self):
-        """Verify _get_stored_trade_dates filters by provider_id when specified."""
-        from app.api.simulations import _get_stored_trade_dates
-        
-        mock_db = Mock()
-        
-        # Create mock bar dates
-        mock_bar1 = Mock()
-        mock_bar1.bar_date = date(2024, 1, 29)
-        
-        mock_bar2 = Mock()
-        mock_bar2.bar_date = date(2024, 1, 30)
-        
-        # Mock query chain
-        mock_query = Mock()
-        mock_filter = Mock()
-        mock_order_by = Mock()
-        mock_distinct = Mock()
-        
-        mock_db.query.return_value = mock_query
-        mock_query.filter.return_value = mock_filter
-        mock_filter.filter.return_value = mock_filter
-        mock_filter.order_by.return_value = mock_order_by
-        mock_order_by.distinct.return_value = mock_distinct
-        mock_distinct.all.return_value = [mock_bar1, mock_bar2]
-        
-        # Test with provider_id='twelvedata'
-        result = _get_stored_trade_dates('US:AAPL', '2024-01-29', '2024-01-30', mock_db, provider_id='twelvedata')
-        
-        # Verify filter was called with provider_id
-        filter_calls = mock_filter.filter.call_args_list
-        provider_filter_found = any(
-            'provider_id' in str(call) for call in filter_calls
-        )
-        assert provider_filter_found, "provider_id filter should be applied"
-        
-        # Verify result
-        assert len(result) == 2
-        assert '2024-01-29' in result
-        assert '2024-01-30' in result
+@pytest.fixture()
+def db():
+    session = TestSession()
+    try:
+        yield session
+    finally:
+        session.close()
 
 
-if __name__ == '__main__':
-    pytest.main([__file__, '-v'])
+def _bar(instrument_id: str, provider_id: str, day: int, open_: float) -> MarketDataBar:
+    bar_date = date(2024, 1, day)
+    return MarketDataBar(
+        instrument_id=instrument_id,
+        provider_id=provider_id,
+        bar_date=bar_date,
+        bar_timestamp=datetime.combine(bar_date, datetime.min.time()),
+        open=open_,
+        high=open_ + 1,
+        low=open_ - 1,
+        close=open_ + 0.5,
+        volume=1_000_000,
+    )
+
+
+def _seed(db):
+    """twelvedata 01-29/01-30/02-01, demo 01-29/01-30, plus another instrument."""
+    db.add(_bar(SYMBOL, "twelvedata", 29, TWELVEDATA_OPEN))
+    db.add(_bar(SYMBOL, "twelvedata", 30, TWELVEDATA_OPEN + 1))
+    db.add(_bar(SYMBOL, "twelvedata", 31, TWELVEDATA_OPEN + 2))
+    db.add(_bar(SYMBOL, "demo", 29, DEMO_OPEN))
+    db.add(_bar(SYMBOL, "demo", 30, DEMO_OPEN + 1))
+    db.add(_bar(OTHER_SYMBOL, "twelvedata", 29, 400.0))
+    db.commit()
+
+
+class TestProviderIsolationEdgeCases:
+    def test_load_stored_ohlcv_stays_empty_for_a_provider_without_data(self, db):
+        db.add(_bar(SYMBOL, "demo", 29, DEMO_OPEN))
+        db.commit()
+
+        df = _load_stored_ohlcv(SYMBOL, "2024-01-29", "2024-01-30", db, provider_id="twelvedata")
+
+        assert df.empty, "a provider with no stored bars must not borrow another provider's rows"
+
+    def test_load_stored_ohlcv_respects_the_date_window(self, db):
+        _seed(db)
+
+        df = _load_stored_ohlcv(SYMBOL, "2024-01-29", "2024-01-30", db, provider_id="twelvedata")
+
+        # 01-31 is stored for twelvedata but outside the requested window.
+        assert sorted(df.index.tolist()) == ["2024-01-29", "2024-01-30"]
+        assert df["open"].tolist() == [TWELVEDATA_OPEN, TWELVEDATA_OPEN + 1]
+
+    def test_load_stored_ohlcv_inclusive_bounds_return_the_edge_bars(self, db):
+        _seed(db)
+
+        df = _load_stored_ohlcv(SYMBOL, "2024-01-29", "2024-01-29", db, provider_id="twelvedata")
+
+        assert df.index.tolist() == ["2024-01-29"]
+
+    def test_load_stored_ohlcv_does_not_leak_other_instruments(self, db):
+        _seed(db)
+
+        df = _load_stored_ohlcv(SYMBOL, "2024-01-29", "2024-01-31", db, provider_id="twelvedata")
+
+        assert len(df) == 3
+        assert 400.0 not in df["open"].tolist(), "US:MSFT bars leaked into a US:AAPL read"
+
+    def test_load_stored_ohlcv_without_provider_keeps_every_provider_row(self, db):
+        _seed(db)
+
+        df = _load_stored_ohlcv(SYMBOL, "2024-01-29", "2024-01-30", db, provider_id=None)
+
+        # Unfiltered reads intentionally keep both providers, so 01-29 and 01-30
+        # each appear twice. A session must therefore carry an explicit provider.
+        assert len(df) == 4
+        assert df.index.tolist().count("2024-01-29") == 2
+        assert TWELVEDATA_OPEN + 2 not in df["open"].tolist(), "01-31 leaked past the end date"
+
+    def test_get_stored_trade_dates_filters_by_provider(self, db):
+        _seed(db)
+
+        dates = _get_stored_trade_dates(SYMBOL, "2024-01-29", "2024-01-31", db, provider_id="twelvedata")
+
+        assert dates == ["2024-01-29", "2024-01-30", "2024-01-31"]
+
+    def test_get_stored_trade_dates_deduplicates_shared_dates(self, db):
+        _seed(db)
+
+        dates = _get_stored_trade_dates(SYMBOL, "2024-01-29", "2024-01-30", db, provider_id=None)
+
+        # Both providers own 01-29 and 01-30; distinct() must collapse them into a
+        # single trading calendar rather than a repeated one.
+        assert dates == ["2024-01-29", "2024-01-30"]
+        assert len(dates) == len(set(dates))
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

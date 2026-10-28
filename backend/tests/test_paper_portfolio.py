@@ -352,7 +352,9 @@ class TestRetiredPortfolioImmutable:
             "expected_outcome": "Should be blocked",
         })
         assert resp.status_code == 400
-        assert "retired" in resp.json()["detail"].lower() or "cannot" in resp.json()["detail"].lower()
+        # Exact wording: an f-string on a str-mixin Enum renders "PortfolioStatus.retired",
+        # which used to reach the user.
+        assert resp.json()["detail"] == "Cannot create order for 'retired' portfolio"
 
         # Try to pause — should fail
         resp = client.post(f"/api/v1/paper-portfolio/{portfolio_id}/pause", headers=auth_headers)
@@ -361,6 +363,7 @@ class TestRetiredPortfolioImmutable:
         # Try to retire again — should fail
         resp = client.post(f"/api/v1/paper-portfolio/{portfolio_id}/retire", headers=auth_headers)
         assert resp.status_code == 400
+        assert resp.json()["detail"] == "Cannot retire a 'retired' portfolio"
 
 
 class TestNoExternalBrokerFields:

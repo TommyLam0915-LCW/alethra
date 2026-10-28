@@ -26,6 +26,14 @@ class SimulationSession(Base):
     started_at = Column(DateTime, nullable=True)
     data_cutoff_at = Column(String(10), nullable=False)
     current_snapshot_date = Column(String(10), nullable=True)
+    # Additive intraday support. timeframe is None/'1d' for the legacy daily path
+    # (which keeps advancing by current_snapshot_date exactly as before); an
+    # intraday value like '5m' selects the per-bar replay. current_bar_timestamp
+    # is the intraday cursor: current_snapshot_date is only date-granular and
+    # cannot address one 5-minute bar, so intraday sessions track the last bar's
+    # timestamp here. Both are nullable so every existing daily row is unaffected.
+    timeframe = Column(String(10), nullable=True)
+    current_bar_timestamp = Column(DateTime, nullable=True)
     status = Column(SAEnum(SimulationStatus), default=SimulationStatus.pending)
     simulation_policy_version = Column(String(20), nullable=False, default="1.0.0")
     provider_id = Column(String(50), nullable=True)
@@ -58,6 +66,11 @@ class SimulationDecision(Base):
     session_id = Column(UUID(as_uuid=True), ForeignKey("simulation_sessions.id"), nullable=False)
     step_number = Column(Integer, nullable=False)
     snapshot_date = Column(String(10), nullable=False)
+    # Additive: the exact intraday bar timestamp for a per-bar replay decision.
+    # snapshot_date stays date-granular for the daily path; intraday decisions
+    # also record the 5-minute bar they filled on so the journal/CSV can order
+    # and display intraday fills. Nullable, so daily decisions are unaffected.
+    bar_timestamp = Column(DateTime, nullable=True)
     data_cutoff_at = Column(String(10), nullable=False)
     engine_version = Column(String(50), nullable=False)
     decision_type = Column(SAEnum(DecisionType), nullable=False)
