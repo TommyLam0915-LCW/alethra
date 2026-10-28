@@ -1,9 +1,10 @@
 'use client';
 
-import { useState, useEffect, Suspense } from 'react';
+import { useState, useEffect, useRef, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { brand } from '@/lib/brand';
+import type { DataCoverage } from '@/components/workspace/types';
 
 const DEMO_ASSETS = ['DEMO-ALPHA', 'DEMO-BETA', 'DEMO-BENCHMARK'];
 const TEMPLATES = [
@@ -58,6 +59,35 @@ const DRAFT_TO_FORM: Record<string, string> = {
   slippage_rate: 'slippageRate',
 };
 
+const HORIZON_DAYS = 366;
+
+function shiftDate(isoDay: string, days: number): string {
+  const d = new Date(`${isoDay}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+/**
+ * The authoring default has to be anchored on bars this server actually stores.
+ * The provider's declared window answers "what could be served", which is a
+ * different question — defaulting a strategy over a declared-but-empty window
+ * produces a backtest with no rows and a replay that cannot take one step.
+ */
+function windowFromCoverage(coverage: DataCoverage | null): { start: string; end: string } {
+  const today = new Date().toISOString().slice(0, 10);
+  const upper = coverage?.stored_end ?? coverage?.available_end ?? today;
+  const end = upper > today ? today : upper;
+  const earliest = shiftDate(end, -HORIZON_DAYS);
+  const floor = coverage?.stored_start ?? earliest;
+  const start = floor > earliest ? floor : earliest;
+  return { start: start < end ? start : shiftDate(end, -1), end };
+}
+
+function touchesStoredBars(startDate: string, endDate: string, coverage: DataCoverage | null): boolean {
+  if (!coverage || !coverage.stored_start || !coverage.stored_end) return true;
+  return startDate <= coverage.stored_end && endDate >= coverage.stored_start;
+}
+
 function NewExperimentForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -78,6 +108,12 @@ function NewExperimentForm() {
   const [commissionRate, setCommissionRate] = useState('0');
   const [slippageRate, setSlippageRate] = useState('0');
 
+  // Empty means "no plan declared"; the engine must not read that as zero risk.
+  const [stopPrice, setStopPrice] = useState('');
+  const [stopPct, setStopPct] = useState('');
+  const [targetPrice, setTargetPrice] = useState('');
+  const [targetPct, setTargetPct] = useState('');
+
   const [shortWindow, setShortWindow] = useState('5');
   const [longWindow, setLongWindow] = useState('10');
 
@@ -97,11 +133,42 @@ function NewExperimentForm() {
   const [showPreview, setShowPreview] = useState(false);
   const [appliedFields, setAppliedFields] = useState<string[]>([]);
 
+  const [coverage, setCoverage] = useState<DataCoverage | null>(null);
+  const [coverageLoaded, setCoverageLoaded] = useState(false);
+  // A picked window is user intent: once the owner edits either date, fetched
+  // coverage must stop moving the dates under them.
+  const datesEditedRef = useRef(false);
+
   useEffect(() => {
     api.instruments.list().then((data: any) => {
       setInstruments(data.instruments || []);
     }).catch(() => {});
   }, []);
+
+  useEffect(() => {
+    if (!assetId.includes(':')) {
+      setCoverage(null);
+      setCoverageLoaded(false);
+      return;
+    }
+    let cancelled = false;
+    api.instruments.get(assetId).then((data: any) => {
+      if (cancelled) return;
+      const next = (data?.data_coverage ?? null) as DataCoverage | null;
+      setCoverage(next);
+      setCoverageLoaded(Boolean(next));
+      if (next && !datesEditedRef.current) {
+        const nextWindow = windowFromCoverage(next);
+        setStartDate(nextWindow.start);
+        setEndDate(nextWindow.end);
+      }
+    }).catch(() => {
+      if (cancelled) return;
+      setCoverage(null);
+      setCoverageLoaded(false);
+    });
+    return () => { cancelled = true; };
+  }, [assetId]);
 
   useEffect(() => {
     if (!draftId || requestedFields.length === 0) return;
@@ -174,6 +241,21 @@ function NewExperimentForm() {
     return {};
   };
 
+  const buildRiskParameters = () => {
+    const params: Record<string, number> = {};
+    const entries: Array<[string, string]> = [
+      ['stop_price', stopPrice],
+      ['stop_pct', stopPct],
+      ['target_price', targetPrice],
+      ['target_pct', targetPct],
+    ];
+    for (const [key, raw] of entries) {
+      const value = parseFloat(raw);
+      if (Number.isFinite(value)) params[key] = value;
+    }
+    return params;
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
@@ -196,6 +278,7 @@ function NewExperimentForm() {
           entry_rule: {},
           exit_rule: {},
           sizing_rule: {},
+          risk_parameters: buildRiskParameters(),
           execution_timing: { execute_at: 'next_open' },
           commission_rate: parseFloat(commissionRate) || 0,
           slippage_rate: parseFloat(slippageRate) || 0,
@@ -282,6 +365,7 @@ function NewExperimentForm() {
             <input
               type="text"
               className="input"
+              data-testid="exp-title"
               value={title}
               onChange={(e) => setTitle(e.target.value)}
               placeholder="例如：測試 DEMO-ALPHA 的均線交叉策略"
@@ -326,8 +410,12 @@ function NewExperimentForm() {
             </div>
             <select
               className="input"
+              data-testid="exp-asset"
               value={assetId}
-              onChange={(e) => setAssetId(e.target.value)}
+              onChange={(e) => {
+                datesEditedRef.current = false;
+                setAssetId(e.target.value);
+              }}
             >
               {assetTab === 'real' ? (
                 <>
@@ -386,8 +474,12 @@ function NewExperimentForm() {
               <input
                 type="date"
                 className="input"
+                data-testid="exp-start-date"
                 value={startDate}
-                onChange={(e) => setStartDate(e.target.value)}
+                onChange={(e) => {
+                  datesEditedRef.current = true;
+                  setStartDate(e.target.value);
+                }}
                 required
               />
             </div>
@@ -396,12 +488,41 @@ function NewExperimentForm() {
               <input
                 type="date"
                 className="input"
+                data-testid="exp-end-date"
                 value={endDate}
-                onChange={(e) => setEndDate(e.target.value)}
+                onChange={(e) => {
+                  datesEditedRef.current = true;
+                  setEndDate(e.target.value);
+                }}
                 required
               />
             </div>
           </div>
+
+          <p data-testid="exp-coverage-line" style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '-8px', marginBottom: '16px' }}>
+            {coverageLoaded ? (
+              <>
+                {assetId} 的資料覆蓋：伺服器已儲存 K 線 {coverage?.stored_start ?? 'UNKNOWN'} 至 {coverage?.stored_end ?? 'UNKNOWN'}（{coverage?.stored_bars ?? 0} 根）；
+                提供者聲明可供應 {coverage?.available_start ?? 'UNKNOWN'} 至 {coverage?.available_end ?? 'UNKNOWN'}。回測、回放與成交只會讀取已儲存的 K 線，日期已依該範圍預設。
+              </>
+            ) : (
+              <>
+                {assetId} 的資料覆蓋：UNKNOWN（未取得覆蓋查詢結果，示範標的不提供覆蓋查詢）。日期為預設期間，建立後請先確認回測確實有數據。
+              </>
+            )}
+          </p>
+
+          {coverageLoaded && (coverage?.stored_bars ?? 0) === 0 && (
+            <div className="alert alert-warning" data-testid="exp-coverage-empty" style={{ fontSize: '13px', marginBottom: '16px' }}>
+              {assetId} 在伺服器上沒有任何已儲存的 K 線：回測會得到空結果，回放也無法推進第一步。此頁面只能查詢覆蓋，無法載入數據，需先由數據管道把 K 線寫入儲存。
+            </div>
+          )}
+
+          {coverageLoaded && (coverage?.stored_bars ?? 0) > 0 && !touchesStoredBars(startDate, endDate, coverage) && (
+            <div className="alert alert-warning" data-testid="exp-coverage-mismatch" style={{ fontSize: '13px', marginBottom: '16px' }}>
+              所選期間（{startDate || 'UNKNOWN'} 至 {endDate || 'UNKNOWN'}）與已儲存 K 線（{coverage?.stored_start ?? 'UNKNOWN'} 至 {coverage?.stored_end ?? 'UNKNOWN'}）沒有重疊，回測與回放會找不到數據。
+            </div>
+          )}
 
           <div className="form-group">
             <label>初始資金 (USD) *</label>
@@ -443,6 +564,65 @@ function NewExperimentForm() {
             </div>
           </div>
 
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+            <div className="form-group">
+              <label>停損價 (USD，可留空)</label>
+              <input
+                type="number"
+                className="input"
+                data-testid="risk-stop-price"
+                value={stopPrice}
+                onChange={(e) => setStopPrice(e.target.value)}
+                step="0.01"
+                placeholder="例如 190.00"
+              />
+            </div>
+            <div className="form-group">
+              <label>停損幅度 (0-1，可留空)</label>
+              <input
+                type="number"
+                className="input"
+                data-testid="risk-stop-pct"
+                value={stopPct}
+                onChange={(e) => setStopPct(e.target.value)}
+                min="0"
+                max="1"
+                step="0.01"
+                placeholder="例如 0.05"
+              />
+            </div>
+            <div className="form-group">
+              <label>目標價 (USD，可留空)</label>
+              <input
+                type="number"
+                className="input"
+                data-testid="risk-target-price"
+                value={targetPrice}
+                onChange={(e) => setTargetPrice(e.target.value)}
+                step="0.01"
+                placeholder="例如 220.00"
+              />
+            </div>
+            <div className="form-group">
+              <label>目標幅度 (0-1，可留空)</label>
+              <input
+                type="number"
+                className="input"
+                data-testid="risk-target-pct"
+                value={targetPct}
+                onChange={(e) => setTargetPct(e.target.value)}
+                min="0"
+                max="1"
+                step="0.01"
+                placeholder="例如 0.10"
+              />
+            </div>
+          </div>
+
+          <p style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '-8px', marginBottom: '16px' }}>
+            風險計劃用於成交後的歸因：系統以入場價與停損價計算每筆交易的計劃風險與 R 值，並不會在價格觸及停損或目標時自動平倉。留空即冇宣稱停損，該筆交易嘅計劃風險與實現 R 會標示為「不可計算」，唔會被當成 0。同時填寫價格與幅度時以價格為準；停損價等於或高於入場價時視為冇有效停損。
+          </p>
+
           {templateType === 'sma_crossover' && (
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
               <div className="form-group">
@@ -450,6 +630,7 @@ function NewExperimentForm() {
                 <input
                   type="number"
                   className="input"
+                  data-testid="sma-short-window"
                   value={shortWindow}
                   onChange={(e) => setShortWindow(e.target.value)}
                   min="2"
@@ -462,6 +643,7 @@ function NewExperimentForm() {
                 <input
                   type="number"
                   className="input"
+                  data-testid="sma-long-window"
                   value={longWindow}
                   onChange={(e) => setLongWindow(e.target.value)}
                   min="3"

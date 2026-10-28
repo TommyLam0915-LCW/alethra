@@ -45,6 +45,36 @@ export async function apiFetch(endpoint: string, options: RequestInit = {}) {
   return response.json();
 }
 
+// Same authorization handling as apiFetch, but returns the raw body text so a
+// non-JSON download (e.g. the trade-journal CSV) is not forced through .json().
+export async function apiFetchText(endpoint: string, options: RequestInit = {}): Promise<string> {
+  const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+
+  const headers: Record<string, string> = {
+    ...(options.headers as Record<string, string>),
+  };
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+
+  const response = await fetch(`${API_URL}${endpoint}`, { ...options, headers });
+
+  if (response.status === 401) {
+    if (typeof window !== 'undefined') {
+      localStorage.removeItem('token');
+      window.location.href = '/login';
+    }
+    throw new Error('Unauthorized');
+  }
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: 'Request failed' }));
+    throw new ApiError(error.detail || 'Request failed', response.status);
+  }
+
+  return response.text();
+}
+
 export interface AIConversationContext {
   research_draft_ids?: string[];
   memory_ids?: string[];
@@ -116,6 +146,8 @@ export const api = {
   simulations: {
     getAvailableProviders: (versionId: string) =>
       apiFetch(`/api/v1/simulations/versions/${versionId}/available-providers`),
+    listForVersion: (versionId: string) =>
+      apiFetch(`/api/v1/simulations/versions/${versionId}/sessions`),
     create: (versionId: string, data: { initial_virtual_cash: number; provider_id?: string }) =>
       apiFetch(`/api/v1/simulations/versions/${versionId}`, { method: 'POST', body: JSON.stringify(data) }),
     get: (sessionId: string) =>
@@ -139,6 +171,8 @@ export const api = {
       expected_version?: number;
     }) =>
       apiFetch(`/api/v1/simulations/${sessionId}/manual-decision`, { method: 'POST', body: JSON.stringify(data) }),
+    sessionOrders: (sessionId: string) =>
+      apiFetch(`/api/v1/simulations/${sessionId}/orders`),
     updateReflection: (sessionId: string, decisionId: string, reflection: string) =>
       apiFetch(`/api/v1/simulations/${sessionId}/decisions/${decisionId}/reflection`, { 
         method: 'PATCH', 
@@ -157,7 +191,11 @@ export const api = {
       apiFetch(`/api/v1/paper-portfolio/${id}/orders`, { method: 'POST', body: JSON.stringify(data) }),
     fills: (portfolioId: string, orderId: string) =>
       apiFetch(`/api/v1/paper-portfolio/${portfolioId}/orders/${orderId}/fills`),
+    cancelOrder: (portfolioId: string, orderId: string) =>
+      apiFetch(`/api/v1/paper-portfolio/${portfolioId}/orders/${orderId}/cancel`, { method: 'POST' }),
     decisions: (id: string) => apiFetch(`/api/v1/paper-portfolio/${id}/decisions`),
+    journalCsv: (id: string) => apiFetchText(`/api/v1/paper-portfolio/${id}/journal?format=csv`),
+    journalJson: (id: string) => apiFetch(`/api/v1/paper-portfolio/${id}/journal?format=json`),
     createDecision: (id: string, data: any) =>
       apiFetch(`/api/v1/paper-portfolio/${id}/decisions`, { method: 'POST', body: JSON.stringify(data) }),
     evaluateOutcome: (portfolioId: string, decisionId: string, data: any) =>

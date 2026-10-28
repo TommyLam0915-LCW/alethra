@@ -5,13 +5,24 @@ import { useRouter, useParams } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 
+interface ValuationBasis {
+  mode: string;
+  mode_label_zh: string;
+  provider: string;
+  data_as_of: string | null;
+  unpriced_assets: string[];
+  note: string;
+}
+
 interface Portfolio {
   id: string;
   status: string;
+  simulation_session_id: string | null;
   initial_virtual_cash: number;
   current_virtual_cash: number;
   total_realized_pnl: number;
-  total_unrealized_pnl: number;
+  total_unrealized_pnl: number | null;
+  valuation?: ValuationBasis | null;
   currency: string;
   created_at: string;
 }
@@ -36,6 +47,8 @@ interface Order {
   status: string;
   rationale: string | null;
   created_at: string;
+  actor_type: string;
+  data_cutoff_at: string | null;
 }
 
 interface Decision {
@@ -80,6 +93,22 @@ const SIDE_LABELS: Record<string, string> = {
   SELL: '賣出',
 };
 
+const ACTOR_LABELS: Record<string, string> = {
+  system: '系統規則',
+  human: '本人',
+  ai_draft: 'AI 草稿',
+  human_approved_ai_draft: '本人核准 AI 草稿',
+  api_key: 'API 程式',
+};
+
+/** Mirrors backend OrderStatus: pending waits, it is not a fill. */
+const ORDER_STATUS_LABELS: Record<string, { label: string; color: string; bg: string }> = {
+  pending: { label: '掛單待執行', color: '#856404', bg: '#fff3cd' },
+  filled: { label: '已成交', color: '#155724', bg: '#d4edda' },
+  cancelled: { label: '已取消', color: '#666', bg: '#f5f5f5' },
+  rejected: { label: '已拒絕', color: '#721c24', bg: '#f8d7da' },
+};
+
 const TAB_LABELS: Record<string, string> = {
   overview: '概覽',
   positions: '部位',
@@ -96,12 +125,17 @@ export default function PaperPortfolioDetailPage() {
   const [positions, setPositions] = useState<Position[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
   const [decisions, setDecisions] = useState<Decision[]>([]);
+  // When this portfolio is linked to a simulation session, surface that session's
+  // timeframe/provider so an intraday synthetic replay is labelled as such here too.
+  const [linkedSession, setLinkedSession] = useState<{ timeframe: string | null; provider_id: string | null } | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [activeTab, setActiveTab] = useState<'overview' | 'positions' | 'orders' | 'decisions'>('overview');
 
   const [orderForm, setOrderForm] = useState({
-    asset_id: 'DEMO-ALPHA',
+    // Empty on purpose: this lane only accepts DEMO-* synthetic assets, so the
+    // choice must be made deliberately rather than arriving pre-filled.
+    asset_id: '',
     side: 'BUY',
     quantity: '100',
     rationale: '',
@@ -111,6 +145,15 @@ export default function PaperPortfolioDetailPage() {
     falsification_condition: '',
   });
   const [submitting, setSubmitting] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+  // One key per submission attempt: reused when the user retries the very same
+  // order after a lost response, cleared as soon as any field changes.
+  const [pendingIdempotencyKey, setPendingIdempotencyKey] = useState<string | null>(null);
+
+  const setOrderField = (field: keyof typeof orderForm, value: string) => {
+    setOrderForm((prev) => ({ ...prev, [field]: value }));
+    setPendingIdempotencyKey(null);
+  };
 
   useEffect(() => {
     const token = localStorage.getItem('token');
@@ -133,6 +176,14 @@ export default function PaperPortfolioDetailPage() {
       setPositions(pos);
       setOrders(ord);
       setDecisions(dec);
+      if (p.simulation_session_id) {
+        try {
+          const s = await api.simulations.get(p.simulation_session_id);
+          setLinkedSession({ timeframe: s.timeframe ?? null, provider_id: s.provider_id ?? null });
+        } catch {
+          setLinkedSession(null);
+        }
+      }
     } catch (err: any) {
       setError(err.message || '載入失敗');
     } finally {
@@ -144,6 +195,9 @@ export default function PaperPortfolioDetailPage() {
     if (!portfolio) return;
     setSubmitting(true);
     setError('');
+    const idempotencyKey = pendingIdempotencyKey
+      ?? `ui-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    if (!pendingIdempotencyKey) setPendingIdempotencyKey(idempotencyKey);
     try {
       await api.paperPortfolio.createOrder(portfolioId, {
         asset_id: orderForm.asset_id,
@@ -154,10 +208,16 @@ export default function PaperPortfolioDetailPage() {
         expected_timeframe_days: orderForm.expected_timeframe_days ? parseInt(orderForm.expected_timeframe_days) : undefined,
         self_reported_confidence: orderForm.self_reported_confidence,
         falsification_condition: orderForm.falsification_condition || undefined,
+        idempotency_key: idempotencyKey,
       });
       await loadData();
+      setPendingIdempotencyKey(null);
       setOrderForm({ ...orderForm, rationale: '', expected_outcome: '', falsification_condition: '' });
     } catch (err: any) {
+      // A refused order is still persisted as a rejected row, so reload first:
+      // otherwise the refusal never reaches the 委託 journal until a manual
+      // page reload. Setting the message afterwards keeps it authoritative.
+      await loadData();
       setError(err.message || '建立委託失敗');
     } finally {
       setSubmitting(false);
@@ -192,6 +252,26 @@ export default function PaperPortfolioDetailPage() {
     }
   };
 
+  const handleDownloadCsv = async () => {
+    setDownloading(true);
+    try {
+      const text = await api.paperPortfolio.journalCsv(portfolioId);
+      const blob = new Blob([text], { type: 'text/csv;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `trade-journal-${portfolioId}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setDownloading(false);
+    }
+  };
+
   if (loading) {
     return <div style={{ padding: '2rem', textAlign: 'center' }}>載入中...</div>;
   }
@@ -201,8 +281,11 @@ export default function PaperPortfolioDetailPage() {
   }
 
   const statusStyle = STATUS_LABELS[portfolio.status] || STATUS_LABELS.active;
-  const pnl = portfolio.total_realized_pnl + portfolio.total_unrealized_pnl;
-  const pnlPct = ((portfolio.current_virtual_cash - portfolio.initial_virtual_cash) / portfolio.initial_virtual_cash * 100);
+  const unrealized = portfolio.total_unrealized_pnl;
+  const hasUnrealized = typeof unrealized === 'number';
+  // Cash-only return: open positions are not liquidated, so this is not a total return.
+  const cashReturnPct = ((portfolio.current_virtual_cash - portfolio.initial_virtual_cash) / portfolio.initial_virtual_cash * 100);
+  const valuation = portfolio.valuation ?? null;
   const openPositions = positions.filter(p => p.status === 'open');
   const closedPositions = positions.filter(p => p.status === 'closed');
 
@@ -225,8 +308,28 @@ export default function PaperPortfolioDetailPage() {
         無法重現真實資金心理、完整市場流動性、部分成交、交易所中斷、市場衝擊或實際券商執行。
       </div>
 
+      {linkedSession && linkedSession.timeframe && linkedSession.timeframe !== '1d' && (
+        <div
+          data-testid="pp-intraday-badge"
+          style={{
+            background: '#fde8ef', border: '1px solid #f5a3c0', borderRadius: '8px',
+            padding: '0.75rem', marginBottom: '1.5rem', fontSize: '0.8125rem', color: '#7a1f45',
+          }}
+        >
+          <strong>合成資料 · 歷史回放 · 非即時行情</strong>
+          <span style={{ marginLeft: '8px' }}>
+            此組合連結至日內回放 session（時間框架
+            <span data-testid="pp-intraday-timeframe"> {linkedSession.timeframe} </span>
+            {linkedSession.provider_id && (
+              <>· 資料來源 <span data-testid="pp-intraday-provider">{linkedSession.provider_id}</span></>
+            )}
+            ）。以下紀錄為逐根 K 線歷史回放的模擬成交，非即時行情或真實交易。
+          </span>
+        </div>
+      )}
+
       {error && (
-        <div style={{
+        <div data-testid="pp-error" style={{
           background: '#f8d7da', border: '1px solid #f5c6cb', borderRadius: '8px',
           padding: '0.75rem', marginBottom: '1rem', color: '#721c24', fontSize: '0.875rem',
         }}>
@@ -251,6 +354,18 @@ export default function PaperPortfolioDetailPage() {
           </div>
         </div>
         <div style={{ display: 'flex', gap: '0.5rem' }}>
+          <button
+            onClick={handleDownloadCsv}
+            disabled={downloading}
+            data-testid="pp-download-csv"
+            style={{
+              padding: '0.375rem 0.75rem', background: '#e7f1ff', color: '#0b5ed7',
+              border: '1px solid #b6d4fe', borderRadius: '4px',
+              cursor: downloading ? 'default' : 'pointer', fontSize: '0.8125rem',
+              opacity: downloading ? 0.6 : 1,
+            }}>
+            {downloading ? '匯出中…' : '下載交易紀錄 CSV'}
+          </button>
           {portfolio.status === 'active' && (
             <>
               <button onClick={handlePause} style={{
@@ -281,19 +396,19 @@ export default function PaperPortfolioDetailPage() {
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '1rem', marginBottom: '2rem' }}>
         <div style={{ background: 'white', border: '1px solid #e0e0e0', borderRadius: '8px', padding: '1rem' }}>
           <div style={{ fontSize: '0.75rem', color: '#666', marginBottom: '0.25rem' }}>現金</div>
-          <div style={{ fontSize: '1.25rem', fontWeight: 600 }}>
+          <div data-testid="pp-cash" style={{ fontSize: '1.25rem', fontWeight: 600 }}>
             {portfolio.currency} {portfolio.current_virtual_cash.toLocaleString(undefined, { minimumFractionDigits: 2 })}
           </div>
         </div>
         <div style={{ background: 'white', border: '1px solid #e0e0e0', borderRadius: '8px', padding: '1rem' }}>
-          <div style={{ fontSize: '0.75rem', color: '#666', marginBottom: '0.25rem' }}>報酬</div>
-          <div style={{ fontSize: '1.25rem', fontWeight: 600, color: pnl >= 0 ? '#155724' : '#721c24' }}>
-            {pnl >= 0 ? '+' : ''}{pnlPct.toFixed(2)}%
+          <div style={{ fontSize: '0.75rem', color: '#666', marginBottom: '0.25rem' }}>現金報酬（不含未實現）</div>
+          <div data-testid="pp-cash-return" style={{ fontSize: '1.25rem', fontWeight: 600, color: cashReturnPct >= 0 ? '#155724' : '#721c24' }}>
+            {cashReturnPct >= 0 ? '+' : ''}{cashReturnPct.toFixed(2)}%
           </div>
         </div>
         <div style={{ background: 'white', border: '1px solid #e0e0e0', borderRadius: '8px', padding: '1rem' }}>
           <div style={{ fontSize: '0.75rem', color: '#666', marginBottom: '0.25rem' }}>持有部位</div>
-          <div style={{ fontSize: '1.25rem', fontWeight: 600 }}>{openPositions.length}</div>
+          <div data-testid="pp-open-position-count" style={{ fontSize: '1.25rem', fontWeight: 600 }}>{openPositions.length}</div>
         </div>
         <div style={{ background: 'white', border: '1px solid #e0e0e0', borderRadius: '8px', padding: '1rem' }}>
           <div style={{ fontSize: '0.75rem', color: '#666', marginBottom: '0.25rem' }}>決策次數</div>
@@ -301,10 +416,46 @@ export default function PaperPortfolioDetailPage() {
         </div>
       </div>
 
+      <div
+        data-testid="pp-pnl-breakdown"
+        style={{
+          background: 'white', border: '1px solid #e0e0e0', borderRadius: '8px',
+          padding: '0.75rem 1rem', marginBottom: '1rem', fontSize: '0.8125rem',
+        }}
+      >
+        <span data-testid="pp-realized-pnl">
+          已實現損益 {portfolio.currency} {portfolio.total_realized_pnl.toFixed(2)}
+        </span>
+        <span style={{ color: '#ccc', margin: '0 0.5rem' }}>|</span>
+        <span data-testid="pp-unrealized-pnl">
+          未實現損益 {hasUnrealized
+            ? `${portfolio.currency} ${(unrealized as number).toFixed(2)}`
+            : '無法計算（缺少可用價格）'}
+        </span>
+      </div>
+
+      {valuation && (
+        <div
+          data-testid="pp-valuation-basis"
+          style={{
+            background: '#f8f9fa', border: '1px solid #e0e0e0', borderRadius: '8px',
+            padding: '0.75rem 1rem', marginBottom: '1.5rem', fontSize: '0.75rem', color: '#666',
+          }}
+        >
+          <strong>估值依據：</strong>
+          <span data-testid="pp-valuation-provider">{valuation.provider}</span>
+          （<span data-testid="pp-valuation-mode">{valuation.mode_label_zh}</span>）
+          · 數據截至 <span data-testid="pp-valuation-as-of">{valuation.data_as_of ?? '—'}</span>
+          <br />
+          {valuation.note}
+        </div>
+      )}
+
       <div style={{ display: 'flex', gap: '0', marginBottom: '1.5rem', borderBottom: '2px solid #e0e0e0' }}>
         {(['overview', 'positions', 'orders', 'decisions'] as const).map((tab) => (
           <button
             key={tab}
+            data-testid={`pp-tab-${tab}`}
             onClick={() => setActiveTab(tab)}
             style={{
               padding: '0.75rem 1.5rem', background: 'none', border: 'none',
@@ -325,25 +476,28 @@ export default function PaperPortfolioDetailPage() {
             <div style={{
               background: '#f8f9fa', borderRadius: '8px', padding: '1.5rem', marginBottom: '1.5rem',
             }}>
-              <h2 style={{ fontSize: '1.1rem', marginBottom: '1rem' }}>新增模擬委託</h2>
+              <h2 style={{ fontSize: '1.1rem', marginBottom: '1rem' }}>新增模擬委託（示範數據通道）</h2>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
                 <div>
                   <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.8125rem' }}>標的</label>
                   <select
+                    data-testid="pp-asset"
                     value={orderForm.asset_id}
-                    onChange={(e) => setOrderForm({ ...orderForm, asset_id: e.target.value })}
+                    onChange={(e) => setOrderField('asset_id', e.target.value)}
                     style={{ width: '100%', padding: '0.5rem', border: '1px solid #ddd', borderRadius: '4px' }}
                   >
-                    <option value="DEMO-ALPHA">DEMO-ALPHA</option>
-                    <option value="DEMO-BETA">DEMO-BETA</option>
-                    <option value="DEMO-BENCHMARK">DEMO-BENCHMARK</option>
+                    <option value="" disabled>— 請選擇標的 —</option>
+                    <option value="DEMO-ALPHA">DEMO-ALPHA（示範數據，合成）</option>
+                    <option value="DEMO-BETA">DEMO-BETA（示範數據，合成）</option>
+                    <option value="DEMO-BENCHMARK">DEMO-BENCHMARK（示範數據，合成）</option>
                   </select>
                 </div>
                 <div>
                   <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.8125rem' }}>方向</label>
                   <select
+                    data-testid="pp-side"
                     value={orderForm.side}
-                    onChange={(e) => setOrderForm({ ...orderForm, side: e.target.value })}
+                    onChange={(e) => setOrderField('side', e.target.value)}
                     style={{ width: '100%', padding: '0.5rem', border: '1px solid #ddd', borderRadius: '4px' }}
                   >
                     <option value="BUY">買入</option>
@@ -354,16 +508,18 @@ export default function PaperPortfolioDetailPage() {
                   <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.8125rem' }}>數量</label>
                   <input
                     type="number"
+                    data-testid="pp-quantity"
                     value={orderForm.quantity}
-                    onChange={(e) => setOrderForm({ ...orderForm, quantity: e.target.value })}
+                    onChange={(e) => setOrderField('quantity', e.target.value)}
                     style={{ width: '100%', padding: '0.5rem', border: '1px solid #ddd', borderRadius: '4px' }}
                   />
                 </div>
                 <div>
                   <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.8125rem' }}>信心程度</label>
                   <select
+                    data-testid="pp-confidence"
                     value={orderForm.self_reported_confidence}
-                    onChange={(e) => setOrderForm({ ...orderForm, self_reported_confidence: e.target.value })}
+                    onChange={(e) => setOrderField('self_reported_confidence', e.target.value)}
                     style={{ width: '100%', padding: '0.5rem', border: '1px solid #ddd', borderRadius: '4px' }}
                   >
                     <option value="low">低</option>
@@ -376,8 +532,9 @@ export default function PaperPortfolioDetailPage() {
                     理由 <span style={{ color: '#dc3545' }}>*</span>
                   </label>
                   <textarea
+                    data-testid="pp-rationale"
                     value={orderForm.rationale}
-                    onChange={(e) => setOrderForm({ ...orderForm, rationale: e.target.value })}
+                    onChange={(e) => setOrderField('rationale', e.target.value)}
                     rows={2}
                     style={{ width: '100%', padding: '0.5rem', border: '1px solid #ddd', borderRadius: '4px', resize: 'vertical' }}
                     placeholder="為什麼做這個決定？"
@@ -388,8 +545,9 @@ export default function PaperPortfolioDetailPage() {
                     預期結果 <span style={{ color: '#dc3545' }}>*</span>
                   </label>
                   <textarea
+                    data-testid="pp-expected-outcome"
                     value={orderForm.expected_outcome}
-                    onChange={(e) => setOrderForm({ ...orderForm, expected_outcome: e.target.value })}
+                    onChange={(e) => setOrderField('expected_outcome', e.target.value)}
                     rows={2}
                     style={{ width: '100%', padding: '0.5rem', border: '1px solid #ddd', borderRadius: '4px', resize: 'vertical' }}
                     placeholder="你預期會發生什麼？"
@@ -399,8 +557,9 @@ export default function PaperPortfolioDetailPage() {
                   <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.8125rem' }}>時間範圍（天）</label>
                   <input
                     type="number"
+                    data-testid="pp-timeframe-days"
                     value={orderForm.expected_timeframe_days}
-                    onChange={(e) => setOrderForm({ ...orderForm, expected_timeframe_days: e.target.value })}
+                    onChange={(e) => setOrderField('expected_timeframe_days', e.target.value)}
                     style={{ width: '100%', padding: '0.5rem', border: '1px solid #ddd', borderRadius: '4px' }}
                     placeholder="例如 30"
                   />
@@ -409,20 +568,29 @@ export default function PaperPortfolioDetailPage() {
                   <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.8125rem' }}>推翻條件</label>
                   <input
                     type="text"
+                    data-testid="pp-falsification"
                     value={orderForm.falsification_condition}
-                    onChange={(e) => setOrderForm({ ...orderForm, falsification_condition: e.target.value })}
+                    onChange={(e) => setOrderField('falsification_condition', e.target.value)}
                     style={{ width: '100%', padding: '0.5rem', border: '1px solid #ddd', borderRadius: '4px' }}
                     placeholder="什麼情況能證明這個決定是錯的？"
                   />
                 </div>
               </div>
+              <p style={{ margin: '1rem 0 0', fontSize: '0.8125rem', color: '#666' }}>
+                這條通道只接受 DEMO-* 示範資產，且送出後即以示範價格成交 — 這是示範數據，不是真實行情。
+                真實標的（例如 US:AAPL）請於工作區的「手動模擬單」提交：那裡提交的是 pending 掛單，
+                由重放時鐘在下一根可執行 K 線成交，決策時間與執行時間分開記錄。
+              </p>
               <button
+                data-testid="pp-submit-order"
                 onClick={handleCreateOrder}
-                disabled={submitting || !orderForm.rationale || !orderForm.expected_outcome}
+                disabled={
+                  submitting || !orderForm.asset_id || !orderForm.rationale || !orderForm.expected_outcome
+                }
                 style={{
                   marginTop: '1rem', padding: '0.5rem 1.5rem', background: '#0066cc', color: 'white',
                   border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '0.9375rem',
-                  opacity: (submitting || !orderForm.rationale || !orderForm.expected_outcome) ? 0.5 : 1,
+                  opacity: (submitting || !orderForm.asset_id || !orderForm.rationale || !orderForm.expected_outcome) ? 0.5 : 1,
                 }}
               >
                 {submitting ? '送出中...' : '送出委託'}
@@ -445,15 +613,21 @@ export default function PaperPortfolioDetailPage() {
               </thead>
               <tbody>
                 {openPositions.map((pos) => (
-                  <tr key={pos.id} style={{ borderBottom: '1px solid #f0f0f0' }}>
+                  <tr key={pos.id} data-testid={`pp-open-position-${pos.asset_id}`} style={{ borderBottom: '1px solid #f0f0f0' }}>
                     <td style={{ padding: '0.5rem', fontWeight: 500 }}>{pos.asset_id}</td>
-                    <td style={{ padding: '0.5rem', textAlign: 'right' }}>{pos.quantity}</td>
+                    <td data-testid={`pp-open-position-qty-${pos.asset_id}`} style={{ padding: '0.5rem', textAlign: 'right' }}>{pos.quantity}</td>
                     <td style={{ padding: '0.5rem', textAlign: 'right' }}>{pos.average_entry_price.toFixed(4)}</td>
-                    <td style={{
-                      padding: '0.5rem', textAlign: 'right',
-                      color: (pos.unrealized_pnl || 0) >= 0 ? '#155724' : '#721c24',
-                    }}>
-                      {(pos.unrealized_pnl || 0).toFixed(2)}
+                    <td
+                      data-testid={`pp-open-position-unrealized-${pos.asset_id}`}
+                      title={pos.unrealized_pnl === null ? '沒有可用價格，未實現損益無法計算' : undefined}
+                      style={{
+                        padding: '0.5rem', textAlign: 'right',
+                        color: pos.unrealized_pnl === null
+                          ? '#666'
+                          : (pos.unrealized_pnl >= 0 ? '#155724' : '#721c24'),
+                      }}
+                    >
+                      {pos.unrealized_pnl === null ? '—' : pos.unrealized_pnl.toFixed(2)}
                     </td>
                   </tr>
                 ))}
@@ -522,32 +696,46 @@ export default function PaperPortfolioDetailPage() {
               <thead>
                 <tr style={{ borderBottom: '2px solid #e0e0e0' }}>
                   <th style={{ textAlign: 'left', padding: '0.5rem', fontSize: '0.8125rem' }}>標的</th>
+                  <th style={{ textAlign: 'left', padding: '0.5rem', fontSize: '0.8125rem' }}>來源</th>
                   <th style={{ textAlign: 'center', padding: '0.5rem', fontSize: '0.8125rem' }}>方向</th>
                   <th style={{ textAlign: 'right', padding: '0.5rem', fontSize: '0.8125rem' }}>數量</th>
                   <th style={{ textAlign: 'center', padding: '0.5rem', fontSize: '0.8125rem' }}>狀態</th>
                   <th style={{ textAlign: 'left', padding: '0.5rem', fontSize: '0.8125rem' }}>理由</th>
-                  <th style={{ textAlign: 'right', padding: '0.5rem', fontSize: '0.8125rem' }}>日期</th>
+                  <th style={{ textAlign: 'right', padding: '0.5rem', fontSize: '0.8125rem' }}>下單時間</th>
                 </tr>
               </thead>
               <tbody>
                 {orders.map((o) => (
-                  <tr key={o.id} style={{ borderBottom: '1px solid #f0f0f0' }}>
-                    <td style={{ padding: '0.5rem', fontWeight: 500 }}>{o.asset_id}</td>
-                    <td style={{
+                  <tr key={o.id} data-testid={`pp-order-${o.asset_id}-${o.status}`} style={{ borderBottom: '1px solid #f0f0f0' }}>
+                    <td data-testid="pp-order-asset" style={{ padding: '0.5rem', fontWeight: 500 }}>{o.asset_id}</td>
+                    <td data-testid="pp-order-actor" style={{ padding: '0.5rem', fontSize: '0.8125rem', color: '#666' }}>
+                      {ACTOR_LABELS[o.actor_type] || o.actor_type}
+                      {o.data_cutoff_at && (
+                        <span data-testid="pp-order-cutoff" style={{ display: 'block', fontSize: '0.6875rem', color: '#999' }}>
+                          {o.actor_type === 'system'
+                            ? '重播日期'
+                            : o.actor_type === 'api_key'
+                              ? '定價日期'
+                              : '決策基準'}{' '}
+                          {o.data_cutoff_at}
+                        </span>
+                      )}
+                    </td>
+                    <td data-testid="pp-order-side" style={{
                       padding: '0.5rem', textAlign: 'center',
                       color: o.side === 'BUY' ? '#155724' : '#721c24',
                       fontWeight: 600, fontSize: '0.8125rem',
                     }}>
                       {SIDE_LABELS[o.side] || o.side}
                     </td>
-                    <td style={{ padding: '0.5rem', textAlign: 'right' }}>{o.quantity}</td>
+                    <td data-testid="pp-order-qty" style={{ padding: '0.5rem', textAlign: 'right' }}>{o.quantity}</td>
                     <td style={{ padding: '0.5rem', textAlign: 'center' }}>
-                      <span style={{
+                      <span data-testid="pp-order-status" style={{
                         padding: '0.125rem 0.5rem', borderRadius: '4px', fontSize: '0.75rem',
-                        background: o.status === 'filled' ? '#d4edda' : o.status === 'rejected' ? '#f8d7da' : '#f5f5f5',
-                        color: o.status === 'filled' ? '#155724' : o.status === 'rejected' ? '#721c24' : '#666',
+                        background: (ORDER_STATUS_LABELS[o.status] ?? { bg: '#f5f5f5' }).bg,
+                        color: (ORDER_STATUS_LABELS[o.status] ?? { color: '#666' }).color,
                       }}>
-                        {o.status === 'filled' ? '已成交' : o.status === 'rejected' ? '已拒絕' : o.status}
+                        {ORDER_STATUS_LABELS[o.status]?.label ?? o.status}
                       </span>
                     </td>
                     <td style={{ padding: '0.5rem', fontSize: '0.8125rem', color: '#666', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -587,9 +775,18 @@ export default function PaperPortfolioDetailPage() {
                         }}>
                           {typeStyle.label}
                         </span>
-                        <span style={{ fontSize: '0.75rem', color: '#999' }}>
-                          {d.actor_type}
+                        <span data-testid="pp-decision-actor" style={{ fontSize: '0.75rem', color: '#999' }}>
+                          {ACTOR_LABELS[d.actor_type] || d.actor_type}
                         </span>
+                        {d.risk_flags?.auto_execution && (
+                          <span data-testid="pp-decision-auto" style={{
+                            padding: '0.125rem 0.5rem', borderRadius: '4px',
+                            background: '#d1ecf1', color: '#0c5460',
+                            fontSize: '0.6875rem', fontWeight: 600,
+                          }}>
+                            自動執行
+                          </span>
+                        )}
                         {d.risk_flags?.is_override && (
                           <span style={{
                             padding: '0.125rem 0.5rem', borderRadius: '4px',
@@ -612,6 +809,19 @@ export default function PaperPortfolioDetailPage() {
                         </span>
                       </div>
                     </div>
+                    {d.risk_flags?.blocked_reason && (
+                      <div data-testid="pp-decision-blocked-reason" style={{
+                        fontSize: '0.8125rem', marginBottom: '0.5rem', padding: '0.5rem 0.75rem',
+                        background: '#fff3cd', color: '#856404', borderRadius: '4px',
+                      }}>
+                        <strong>未成交原因：</strong>{d.risk_flags.blocked_reason}
+                      </div>
+                    )}
+                    {d.risk_flags?.exit_reason && !d.risk_flags?.blocked_reason && (
+                      <div data-testid="pp-decision-exit-reason" style={{ fontSize: '0.8125rem', color: '#666', marginBottom: '0.5rem' }}>
+                        <strong>出場原因：</strong>{d.risk_flags.exit_reason}
+                      </div>
+                    )}
                     {d.rationale && (
                       <div style={{ fontSize: '0.875rem', marginBottom: '0.5rem' }}>{d.rationale}</div>
                     )}

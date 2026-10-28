@@ -119,6 +119,26 @@ export default function DetailsPanel({ instrumentId }: { instrumentId: string })
                     <td>{STALE_LABELS[detail.data_quality.adjustment] || detail.data_quality.adjustment}</td>
                   </tr>
                 )}
+                {detail.data_coverage && (
+                  <tr>
+                    <td className="ws-muted">可用數據期間</td>
+                    <td>
+                      {detail.data_coverage.availability_source === 'provider_declared' &&
+                      detail.data_coverage.available_start &&
+                      detail.data_coverage.available_end ? (
+                        <>
+                          {detail.data_coverage.available_start} 至 {detail.data_coverage.available_end}
+                          <span className="ws-muted">（{detail.data_coverage.timeframe}）</span>
+                        </>
+                      ) : (
+                        <>
+                          UNKNOWN
+                          <span className="ws-muted">（該數據源未提供可用期間）</span>
+                        </>
+                      )}
+                    </td>
+                  </tr>
+                )}
                 <tr>
                   <td className="ws-muted">數據源</td>
                   <td>

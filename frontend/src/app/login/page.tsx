@@ -38,138 +38,99 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="dash-root" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '100vh' }}>
-      <div style={{ maxWidth: '440px', width: '100%', padding: '0 24px' }}>
-        <div className="dash-panel" style={{ marginBottom: '24px' }}>
-          <div className="dash-panel-body" style={{ padding: '40px' }}>
-            {/* Brand Header */}
-            <div style={{ textAlign: 'center', marginBottom: '32px' }}>
-              <div style={{
-                fontSize: '12px',
-                letterSpacing: '2px',
-                color: 'var(--accent-blue)',
-                textTransform: 'uppercase',
-                marginBottom: '12px',
-                fontWeight: '600'
-              }}>
-                {brand.name}
-              </div>
-              <h1 style={{
-                fontSize: '28px',
-                color: 'var(--text-white)',
-                fontWeight: '700',
-                marginBottom: '8px'
-              }}>
-                {isLogin ? brand.ui.auth.loginZh : brand.ui.auth.registerZh}
-              </h1>
-              <p style={{ fontSize: '14px', color: 'var(--text-muted)' }}>
-                {isLogin ? '歡迎回來' : '建立你的帳戶'}
-              </p>
-            </div>
+    <div className="login-root">
+      {/* Left zone: brand identity */}
+      <div className="login-brand-zone">
+        <div className="login-brand-content">
+          <div className="login-brand-mark">{brand.name}</div>
+          <h1 className="login-brand-heading">
+            研究策略，<br />追溯每次交易。
+          </h1>
+          <p className="login-brand-tagline">
+            在歷史資料中測試規則，保存模擬交易與研究結果。
+          </p>
+          <div className="login-evidence">
+            <div className="login-evidence-label">示例交易紀錄（已平倉）</div>
+            <div className="login-evidence-line">AAPL · 買入 100 股 @ $185.40 · 2026-10-15 09:31</div>
+            <div className="login-evidence-line">AAPL · 賣出 100 股 @ $198.11 · 2026-10-24 14:35 · <span className="g">+$1,271</span></div>
+            <div className="login-evidence-reason">訊號：10-14 · 退出原因：SMA(5) 下穿 SMA(20)</div>
+          </div>
+        </div>
+      </div>
 
-            {error && (
-              <div className="dash-disclaimer" style={{ marginBottom: '24px' }}>
-                <strong>錯誤：</strong>{error}
+      {/* Right zone: form */}
+      <div className="login-form-zone">
+        <div className="login-form-container">
+          <h2 className="login-form-title">
+            {isLogin ? brand.ui.auth.loginZh : brand.ui.auth.registerZh}
+          </h2>
+
+          {error && (
+            <div className="login-error">
+              <strong>錯誤：</strong>{error}
+            </div>
+          )}
+
+          <form onSubmit={handleSubmit} className="login-form">
+            {!isLogin && (
+              <div className="login-field">
+                <label className="login-label">顯示名稱</label>
+                <input
+                  type="text"
+                  className="login-input"
+                  value={displayName}
+                  onChange={(e) => setDisplayName(e.target.value)}
+                  placeholder="選填"
+                />
               </div>
             )}
 
-            <form onSubmit={handleSubmit}>
-              {!isLogin && (
-                <div className="form-group" style={{ marginBottom: '20px' }}>
-                  <label style={{ color: 'var(--text-secondary)', marginBottom: '8px', display: 'block', fontSize: '13px', fontWeight: '500' }}>
-                    顯示名稱
-                  </label>
-                  <input
-                    type="text"
-                    className="input"
-                    value={displayName}
-                    onChange={(e) => setDisplayName(e.target.value)}
-                    placeholder="選填"
-                    style={{
-                      background: 'var(--bg-tertiary)',
-                      border: '1px solid var(--border-light)',
-                      color: 'var(--text-primary)',
-                      padding: '12px'
-                    }}
-                  />
-                </div>
-              )}
-
-              <div className="form-group" style={{ marginBottom: '20px' }}>
-                <label style={{ color: 'var(--text-secondary)', marginBottom: '8px', display: 'block', fontSize: '13px', fontWeight: '500' }}>
-                  電子郵件
-                </label>
-                <input
-                  type="email"
-                  className="input"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  required
-                  style={{
-                    background: 'var(--bg-tertiary)',
-                    border: '1px solid var(--border-light)',
-                    color: 'var(--text-primary)',
-                    padding: '12px'
-                  }}
-                />
-              </div>
-
-              <div className="form-group" style={{ marginBottom: '24px' }}>
-                <label style={{ color: 'var(--text-secondary)', marginBottom: '8px', display: 'block', fontSize: '13px', fontWeight: '500' }}>
-                  密碼
-                </label>
-                <input
-                  type="password"
-                  className="input"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  required
-                  minLength={8}
-                  style={{
-                    background: 'var(--bg-tertiary)',
-                    border: '1px solid var(--border-light)',
-                    color: 'var(--text-primary)',
-                    padding: '12px'
-                  }}
-                />
-              </div>
-
-              <button
-                type="submit"
-                className="btn btn-primary"
-                style={{
-                  width: '100%',
-                  padding: '14px',
-                  fontSize: '15px',
-                  fontWeight: '600'
-                }}
-                disabled={loading}
-              >
-                {loading ? '處理中...' : isLogin ? brand.ui.auth.loginZh : brand.ui.auth.registerZh}
-              </button>
-            </form>
-
-            <div style={{ textAlign: 'center', marginTop: '24px' }}>
-              <button
-                onClick={() => setIsLogin(!isLogin)}
-                style={{
-                  background: 'none',
-                  border: 'none',
-                  color: 'var(--accent-blue)',
-                  cursor: 'pointer',
-                  fontSize: '14px',
-                  fontWeight: '500'
-                }}
-              >
-                {isLogin ? '沒有帳號？註冊' : '已有帳號？登入'}
-              </button>
+            <div className="login-field">
+              <label className="login-label">電子郵件</label>
+              <input
+                type="email"
+                className="login-input"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                required
+                placeholder="your@email.com"
+              />
             </div>
-          </div>
-        </div>
 
-        {/* Footer */}
-        <div style={{ textAlign: 'center', fontSize: '12px', color: 'var(--text-muted)' }}>
-          <p>{brand.footer.textZh}</p>
+            <div className="login-field">
+              <label className="login-label">密碼</label>
+              <input
+                type="password"
+                className="login-input"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                required
+                minLength={8}
+                placeholder="至少 8 個字元"
+              />
+            </div>
+
+            <button
+              type="submit"
+              className="login-submit"
+              disabled={loading}
+            >
+              {loading ? '處理中...' : isLogin ? brand.ui.auth.loginZh : brand.ui.auth.registerZh}
+            </button>
+          </form>
+
+          <div className="login-switch">
+            <button
+              onClick={() => setIsLogin(!isLogin)}
+              className="login-switch-btn"
+            >
+              {isLogin ? '沒有帳號？註冊' : '已有帳號？登入'}
+            </button>
+          </div>
+
+          <div className="login-footer">
+            <p>{brand.footer.textZh}</p>
+          </div>
         </div>
       </div>
     </div>

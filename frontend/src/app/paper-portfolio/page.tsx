@@ -11,7 +11,7 @@ interface Portfolio {
   initial_virtual_cash: number;
   current_virtual_cash: number;
   total_realized_pnl: number;
-  total_unrealized_pnl: number;
+  total_unrealized_pnl: number | null;
   currency: string;
   created_at: string;
   closed_at: string | null;
@@ -109,6 +109,7 @@ export default function PaperPortfolioListPage() {
             </label>
             <input
               type="number"
+              data-testid="pp-new-cash"
               value={cashInput}
               onChange={(e) => setCashInput(e.target.value)}
               style={{
@@ -118,6 +119,7 @@ export default function PaperPortfolioListPage() {
             />
           </div>
           <button
+            data-testid="pp-create-portfolio"
             onClick={handleCreate}
             disabled={creating}
             style={{
@@ -129,8 +131,12 @@ export default function PaperPortfolioListPage() {
             {creating ? '建立中...' : '建立'}
           </button>
         </div>
+        <p data-testid="pp-link-hint" style={{ marginTop: '0.75rem', fontSize: '0.8125rem', color: '#666' }}>
+          在此建立的組合只記錄你手動做出的決策。若要讓<strong>已鎖定策略的規則</strong>自動進出場並寫入委託、成交與日誌，
+          請到該實驗的「前進模擬」頁面建立並連結紙上帳戶。
+        </p>
         {error && (
-          <div style={{ color: '#dc3545', marginTop: '0.5rem', fontSize: '0.875rem' }}>
+          <div data-testid="pp-error" style={{ color: '#dc3545', marginTop: '0.5rem', fontSize: '0.875rem' }}>
             {error}
           </div>
         )}
@@ -146,8 +152,8 @@ export default function PaperPortfolioListPage() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
           {portfolios.map((p) => {
             const statusStyle = STATUS_LABELS[p.status] || STATUS_LABELS.active;
-            const pnl = p.total_realized_pnl + p.total_unrealized_pnl;
-            const pnlPct = ((p.current_virtual_cash - p.initial_virtual_cash) / p.initial_virtual_cash * 100);
+            const hasUnrealized = typeof p.total_unrealized_pnl === 'number';
+            const cashReturnPct = ((p.current_virtual_cash - p.initial_virtual_cash) / p.initial_virtual_cash * 100);
             return (
               <Link
                 key={p.id}
@@ -182,12 +188,17 @@ export default function PaperPortfolioListPage() {
                   <div style={{ textAlign: 'right' }}>
                     <div style={{
                       fontSize: '1.1rem', fontWeight: 600,
-                      color: pnl >= 0 ? '#155724' : '#721c24',
+                      color: cashReturnPct >= 0 ? '#155724' : '#721c24',
                     }}>
-                      {pnl >= 0 ? '+' : ''}{pnlPct.toFixed(2)}%
+                      {cashReturnPct >= 0 ? '+' : ''}{cashReturnPct.toFixed(2)}%
                     </div>
-                    <div style={{ fontSize: '0.875rem', color: '#666' }}>
-                      損益：{pnl >= 0 ? '+' : ''}{pnl.toFixed(2)}
+                    <div style={{ fontSize: '0.75rem', color: '#999' }}>現金報酬（不含未實現）</div>
+                    <div style={{ fontSize: '0.8125rem', color: '#666', marginTop: '0.25rem' }}>
+                      已實現 {p.total_realized_pnl >= 0 ? '+' : ''}{p.total_realized_pnl.toFixed(2)}
+                      {' · '}
+                      未實現 {hasUnrealized
+                        ? `${(p.total_unrealized_pnl as number) >= 0 ? '+' : ''}${(p.total_unrealized_pnl as number).toFixed(2)}`
+                        : '無法計算'}
                     </div>
                   </div>
                 </div>

@@ -14,6 +14,7 @@ interface Experiment {
   status: string;
   created_at: string;
   current_version_id: string | null;
+  scope: Record<string, any> | null;
 }
 
 interface Run {
@@ -56,6 +57,7 @@ interface Version {
   change_reason: string | null;
   created_at: string;
   strategy_spec: any;
+  locked_at: string | null;
 }
 
 interface DiffEntry {
@@ -117,6 +119,8 @@ export default function ExperimentDetailPage() {
   const [notes, setNotes] = useState<Note[]>([]);
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
+  const [locking, setLocking] = useState(false);
+  const [showLockConfirm, setShowLockConfirm] = useState(false);
   const [error, setError] = useState('');
   const [noteText, setNoteText] = useState('');
   const [showTimeline, setShowTimeline] = useState(false);
@@ -182,6 +186,33 @@ export default function ExperimentDetailPage() {
       setError(err.message || '執行失敗');
     } finally {
       setRunning(false);
+    }
+  };
+
+  /**
+   * Freezing the current version is the product's only gate into replay: the
+   * backend refuses to create a simulation session on an unlocked version, and a
+   * locked experiment can no longer be edited — new parameters need a new version.
+   * The existing scope keys are carried along, because the PUT replaces the object.
+   */
+  const handleLock = async () => {
+    if (!experiment) return;
+    if (!experiment.current_version_id) {
+      setError('這個實驗還沒有可鎖定的策略版本');
+      return;
+    }
+    setLocking(true);
+    setError('');
+    try {
+      await api.experiments.update(experimentId, {
+        scope: { ...(experiment.scope ?? {}), status: 'locked' },
+      });
+      setShowLockConfirm(false);
+      await loadData();
+    } catch (err: any) {
+      setError(err.message || '鎖定失敗');
+    } finally {
+      setLocking(false);
     }
   };
 
@@ -254,6 +285,8 @@ export default function ExperimentDetailPage() {
   }
 
   const latestRun = runs.find(r => r.status === 'completed');
+  const currentVersion = versions.find((v) => v.id === experiment.current_version_id) ?? null;
+  const isLocked = experiment.status === 'locked';
 
   return (
     <div className="container" style={{ paddingTop: '40px', paddingBottom: '40px' }}>
@@ -272,11 +305,21 @@ export default function ExperimentDetailPage() {
         </div>
         <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
           {experiment.status === 'locked' && (
-            <Link href={`/experiments/${experimentId}/simulation`}>
+            <Link href={`/experiments/${experimentId}/simulation`} data-testid="exp-simulation-link">
               <button className="btn btn-primary" style={{ fontSize: '13px' }}>
                 前進模擬
               </button>
             </Link>
+          )}
+          {!isLocked && (
+            <button
+              onClick={() => setShowLockConfirm((open) => !open)}
+              className="btn"
+              data-testid="exp-lock-btn"
+              style={{ backgroundColor: '#eaeaea', fontSize: '13px' }}
+            >
+              {showLockConfirm ? '取消鎖定' : '鎖定策略'}
+            </button>
           )}
           <button onClick={handleExport} className="btn" style={{ backgroundColor: '#eaeaea', fontSize: '13px' }}>
             匯出
@@ -307,6 +350,85 @@ export default function ExperimentDetailPage() {
               <p style={{ color: '#666' }}>{experiment.falsification_conditions}</p>
             </>
           )}
+        </div>
+      )}
+
+      {!isLocked && showLockConfirm && (
+        <div className="card" style={{ marginBottom: '20px', borderLeft: '3px solid #0070f3' }}>
+          <h3 style={{ marginTop: 0, marginBottom: '8px' }}>
+            {currentVersion ? `鎖定版本 ${currentVersion.version_number}` : '尚無可鎖定的版本'}
+          </h3>
+          <p style={{ color: '#666', fontSize: '14px', marginTop: 0, marginBottom: '16px' }}>
+            鎖定後這個版本的策略參數與數據截止即不可再修改；要調整參數必須建立新版本。
+            前進模擬、回放游標與紙上交易成交都以此版本為準。
+          </p>
+
+          {currentVersion ? (
+            <div
+              data-testid="exp-lock-facts"
+              style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+                gap: '12px',
+                marginBottom: '16px',
+                fontSize: '13px',
+              }}
+            >
+              <div>
+                <div style={{ color: '#888' }}>標的</div>
+                <strong>{(currentVersion.strategy_spec?.asset_ids ?? []).join('、') || '未提供'}</strong>
+              </div>
+              <div>
+                <div style={{ color: '#888' }}>模板</div>
+                <strong>{currentVersion.strategy_spec?.template_type ?? '未提供'}</strong>
+              </div>
+              <div>
+                <div style={{ color: '#888' }}>期間</div>
+                <strong>
+                  {currentVersion.strategy_spec?.start_date ?? '?'} 至 {currentVersion.strategy_spec?.end_date ?? '?'}
+                </strong>
+              </div>
+              <div>
+                <div style={{ color: '#888' }}>數據截止</div>
+                <strong>{currentVersion.strategy_spec?.end_date ?? '未提供'}</strong>
+              </div>
+              <div>
+                <div style={{ color: '#888' }}>初始資金</div>
+                <strong>
+                  {currentVersion.strategy_spec?.initial_cash ?? '未提供'} {currentVersion.strategy_spec?.currency ?? ''}
+                </strong>
+              </div>
+              <div>
+                <div style={{ color: '#888' }}>手續費／滑點</div>
+                <strong>
+                  {currentVersion.strategy_spec?.commission_rate ?? 0} ／ {currentVersion.strategy_spec?.slippage_rate ?? 0}
+                </strong>
+              </div>
+            </div>
+          ) : (
+            <p style={{ color: '#856404', fontSize: '13px' }}>
+              這個實驗還沒有策略版本，無法鎖定；請先建立實驗或修改參數以產生新版本。
+            </p>
+          )}
+
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <button
+              onClick={handleLock}
+              className="btn btn-primary"
+              data-testid="exp-lock-confirm"
+              disabled={locking || !currentVersion}
+            >
+              {locking ? '鎖定中…' : '確認鎖定'}
+            </button>
+            <button
+              onClick={() => setShowLockConfirm(false)}
+              className="btn"
+              data-testid="exp-lock-cancel"
+              style={{ backgroundColor: '#eaeaea' }}
+            >
+              取消
+            </button>
+          </div>
         </div>
       )}
 

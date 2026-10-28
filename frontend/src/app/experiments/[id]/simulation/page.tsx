@@ -19,6 +19,8 @@ interface SimulationSession {
   observed_days: number;
   state_version: number;
   provider_id: string | null;
+  timeframe: string | null;
+  current_bar_timestamp: string | null;
   created_at: string;
 }
 
@@ -35,6 +37,7 @@ interface Decision {
   id: string;
   step_number: number;
   snapshot_date: string;
+  bar_timestamp: string | null;
   decision_type: string;
   decision_detail: any;
   paper_cash: number;
@@ -53,6 +56,17 @@ interface Experiment {
   current_version_id: string | null;
 }
 
+interface LinkedPortfolio {
+  id: string;
+  status: string;
+  simulation_session_id: string | null;
+  initial_virtual_cash: number;
+  current_virtual_cash: number;
+  total_realized_pnl: number;
+  total_unrealized_pnl: number | null;
+  currency: string;
+}
+
 const DECISION_LABELS: Record<string, { label: string; color: string; bg: string }> = {
   no_action: { label: '無操作', color: '#666', bg: '#f5f5f5' },
   simulated_entry: { label: '模擬買入', color: '#155724', bg: '#d4edda' },
@@ -68,6 +82,27 @@ const STATUS_LABELS: Record<string, string> = {
   completed: '已完成',
   retired: '已退役',
 };
+
+// A session whose timeframe is one of these replays bar-by-bar (intraday); the
+// daily path ('1d' or null) keeps the original "advance one day" semantics.
+const INTRADAY_TIMEFRAMES = ['1m', '5m', '15m', '30m', '1h'];
+
+const TIMEFRAME_LABELS: Record<string, string> = {
+  '1m': '1 分鐘',
+  '5m': '5 分鐘',
+  '15m': '15 分鐘',
+  '30m': '30 分鐘',
+  '1h': '1 小時',
+  '1d': '日線',
+};
+
+// bar_timestamp is a naive exchange-local ISO instant (e.g. 2024-03-04T09:50:00).
+// Render only the HH:MM time portion; the local date is shown separately.
+function formatBarTime(barTimestamp: string | null | undefined): string {
+  if (!barTimestamp) return '';
+  const m = /T(\d{2}:\d{2})/.exec(barTimestamp);
+  return m ? m[1] : barTimestamp;
+}
 
 export default function SimulationPage() {
   const router = useRouter();
@@ -103,6 +138,9 @@ export default function SimulationPage() {
     reflection?: string;
     expected_version: number;
   } | null>(null);
+  const [linkedPortfolio, setLinkedPortfolio] = useState<LinkedPortfolio | null>(null);
+  const [linking, setLinking] = useState(false);
+  const [priorSessions, setPriorSessions] = useState<SimulationSession[]>([]);
 
   useEffect(() => {
     const token = localStorage.getItem('token');
@@ -123,11 +161,39 @@ export default function SimulationPage() {
       // Fetch available providers for this version
       if (exp.current_version_id) {
         loadAvailableProviders(exp.current_version_id);
+        loadVersionSessions(exp.current_version_id);
       }
     } catch (err: any) {
       setError(err.message || '載入失敗');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loadLinkedPortfolio = async (sessionId: string) => {
+    try {
+      const portfolios: LinkedPortfolio[] = await api.paperPortfolio.list();
+      setLinkedPortfolio(
+        (portfolios || []).find((p) => p.simulation_session_id === sessionId) || null
+      );
+    } catch {
+      setLinkedPortfolio(null);
+    }
+  };
+
+  const loadVersionSessions = async (versionId: string) => {
+    try {
+      const list: SimulationSession[] = (await api.simulations.listForVersion(versionId)) || [];
+      setPriorSessions(list);
+      const resumable = list.find((s) =>
+        ['pending', 'active', 'paused'].includes(s.status)
+      );
+      if (!resumable) return;
+      setSession(resumable);
+      setDecisions((await api.simulations.decisions(resumable.id)) || []);
+      loadLinkedPortfolio(resumable.id);
+    } catch (err: any) {
+      setError(err.message || '載入模擬紀錄失敗');
     }
   };
 
@@ -181,6 +247,8 @@ export default function SimulationPage() {
       });
       setSession(s);
       setDecisions([]);
+      setLinkedPortfolio(null);
+      setPriorSessions((prev) => [s, ...prev]);
     } catch (err: any) {
       setError(err.message || '建立模擬失敗');
     } finally {
@@ -197,6 +265,7 @@ export default function SimulationPage() {
       setSession(result.session);
       const d = await api.simulations.decisions(session.id);
       setDecisions(d);
+      loadLinkedPortfolio(session.id);
     } catch (err: any) {
       setError(err.message || '推進失敗');
     } finally {
@@ -232,6 +301,52 @@ export default function SimulationPage() {
       setSession(s);
     } catch (err: any) {
       setError(err.message);
+    }
+  };
+
+  const handleLinkPortfolio = async () => {
+    if (!session?.id) return;
+    setLinking(true);
+    setError('');
+    try {
+      const created: LinkedPortfolio = await api.paperPortfolio.create({
+        initial_virtual_cash: session.initial_virtual_cash,
+        simulation_session_id: session.id,
+      });
+      setLinkedPortfolio(created);
+    } catch (err: any) {
+      setError(err.message || '建立紙上帳戶失敗');
+    } finally {
+      setLinking(false);
+    }
+  };
+
+  const handlePortfolioStatus = async (action: 'pause' | 'resume') => {
+    if (!linkedPortfolio || !session?.id) return;
+    setLinking(true);
+    setError('');
+    try {
+      await api.paperPortfolio[action](linkedPortfolio.id);
+      loadLinkedPortfolio(session.id);
+    } catch (err: any) {
+      setError(err.message || '更新紙上帳戶狀態失敗');
+    } finally {
+      setLinking(false);
+    }
+  };
+
+  const handleReopenSession = async (target: SimulationSession) => {
+    setError('');
+    try {
+      const [s, d] = await Promise.all([
+        api.simulations.get(target.id),
+        api.simulations.decisions(target.id),
+      ]);
+      setSession(s);
+      setDecisions(d || []);
+      loadLinkedPortfolio(s.id);
+    } catch (err: any) {
+      setError(err.message || '開啟模擬失敗');
     }
   };
 
@@ -340,6 +455,9 @@ export default function SimulationPage() {
     return <div className="container" style={{ paddingTop: '40px' }}>載入中...</div>;
   }
 
+  const isIntraday = !!session?.timeframe && INTRADAY_TIMEFRAMES.includes(session.timeframe);
+  const tfLabel = session?.timeframe ? (TIMEFRAME_LABELS[session.timeframe] || session.timeframe) : '';
+
   return (
     <div className="container" style={{ paddingTop: '40px', paddingBottom: '40px' }}>
       <div style={{ marginBottom: '20px' }}>
@@ -444,6 +562,7 @@ export default function SimulationPage() {
           
           <button
             className="btn btn-primary"
+            data-testid="sim-create-btn"
             onClick={handleCreate}
             disabled={creating || !selectedProvider || availableProviders.length === 0}
             style={{ marginTop: '12px' }}
@@ -455,6 +574,39 @@ export default function SimulationPage() {
 
       {session && (
         <>
+          {isIntraday && (
+            <div
+              data-testid="sim-intraday-badge"
+              className="alert"
+              style={{
+                marginBottom: '16px',
+                background: '#fde8ef',
+                border: '1px solid #f5a3c0',
+                color: '#7a1f45',
+                fontSize: '13px',
+                lineHeight: 1.6,
+              }}
+            >
+              <strong>合成資料 · 歷史回放 · 非即時行情</strong>
+              <span style={{ marginLeft: '8px' }}>
+                時間框架：<span data-testid="sim-intraday-timeframe">{tfLabel} K 線</span>
+                {session.provider_id && (
+                  <> · 資料來源：<span data-testid="sim-intraday-provider">{session.provider_id}</span></>
+                )}
+                {session.current_bar_timestamp && (
+                  <>
+                    {' '}· 目前回放至：
+                    <span data-testid="sim-current-bar">
+                      {session.current_bar_timestamp.slice(0, 10)} {formatBarTime(session.current_bar_timestamp)}（交易所當地時間）
+                    </span>
+                  </>
+                )}
+              </span>
+              <div style={{ marginTop: '4px', color: '#8a4a63' }}>
+                每次「推進」只釋放下一根已完成的 K 線；訊號於完成 bar 收盤形成，於下一根 bar 開盤成交。固定合成資料的獲利不代表策略真實有效。
+              </div>
+            </div>
+          )}
           <div style={{
             display: 'grid',
             gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
@@ -478,8 +630,10 @@ export default function SimulationPage() {
               </div>
             </div>
             <div className="card" style={{ padding: '16px' }}>
-              <div style={{ fontSize: '12px', color: '#666', marginBottom: '4px' }}>觀察天數</div>
-              <div style={{ fontSize: '20px', fontWeight: 700 }}>{session.observed_days}</div>
+              <div style={{ fontSize: '12px', color: '#666', marginBottom: '4px' }}>
+                {isIntraday ? '觀察根數（K 線）' : '觀察天數'}
+              </div>
+              <div data-testid="sim-observed-count" style={{ fontSize: '20px', fontWeight: 700 }}>{session.observed_days}</div>
             </div>
             <div className="card" style={{ padding: '16px' }}>
               <div style={{ fontSize: '12px', color: '#666', marginBottom: '4px' }}>決策次數</div>
@@ -534,10 +688,11 @@ export default function SimulationPage() {
               <>
                 <button
                   className="btn btn-primary"
+                  data-testid="sim-advance-btn"
                   onClick={handleAdvance}
                   disabled={advancing || manualMode}
                 >
-                  {advancing ? '推進中...' : '自動推進一日'}
+                  {advancing ? '推進中...' : isIntraday ? `推進下一根 ${tfLabel} K 線` : '自動推進一日'}
                 </button>
                 <button
                   className="btn"
@@ -568,6 +723,125 @@ export default function SimulationPage() {
               </button>
             )}
           </div>
+
+          <div
+            data-testid="sim-linked-portfolio"
+            className="card"
+            style={{ marginBottom: '24px', borderLeft: '4px solid #6f42c1' }}
+          >
+            <h3 style={{ marginBottom: '8px' }}>連結的紙上帳戶</h3>
+            {!linkedPortfolio ? (
+              <>
+                <p style={{ fontSize: '13px', color: '#666', marginBottom: '12px' }}>
+                  尚未連結紙上帳戶。連結後，鎖定策略觸發的進出場會自動寫入帳戶的委託、成交、部位、現金與決策日誌；
+                  未連結時，此重播只記錄研究日誌，不會產生任何帳戶資料。
+                </p>
+                <button
+                  data-testid="sim-link-portfolio-btn"
+                  className="btn btn-primary"
+                  onClick={handleLinkPortfolio}
+                  disabled={linking}
+                >
+                  {linking ? '建立中...' : `建立並連結紙上帳戶（初始資金 $${session.initial_virtual_cash.toLocaleString()}）`}
+                </button>
+              </>
+            ) : (
+              <>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '12px', marginBottom: '12px' }}>
+                  <div>
+                    <span style={{ fontSize: '12px', color: '#666' }}>帳戶狀態</span>
+                    <div data-testid="sim-portfolio-status" style={{ fontWeight: 600 }}>
+                      {STATUS_LABELS[linkedPortfolio.status] || linkedPortfolio.status}
+                    </div>
+                  </div>
+                  <div>
+                    <span style={{ fontSize: '12px', color: '#666' }}>可用虛擬現金</span>
+                    <div data-testid="sim-portfolio-cash" style={{ fontWeight: 600 }}>
+                      ${linkedPortfolio.current_virtual_cash.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </div>
+                  </div>
+                  <div>
+                    <span style={{ fontSize: '12px', color: '#666' }}>已實現損益</span>
+                    <div data-testid="sim-portfolio-realized" style={{
+                      fontWeight: 600,
+                      color: linkedPortfolio.total_realized_pnl >= 0 ? '#155724' : '#721c24',
+                    }}>
+                      ${linkedPortfolio.total_realized_pnl.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </div>
+                  </div>
+                  <div>
+                    <span style={{ fontSize: '12px', color: '#666' }}>未實現損益</span>
+                    <div data-testid="sim-portfolio-unrealized" style={{ fontWeight: 600, color: '#666' }}>
+                      {linkedPortfolio.total_unrealized_pnl === null
+                        ? '無法估值'
+                        : `$${linkedPortfolio.total_unrealized_pnl.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+                    </div>
+                  </div>
+                </div>
+                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+                  <Link
+                    data-testid="sim-portfolio-link"
+                    href={`/paper-portfolio/${linkedPortfolio.id}`}
+                    className="btn"
+                    style={{ backgroundColor: '#eaeaea', textDecoration: 'none' }}
+                  >
+                    開啟帳戶（委託／成交／日誌）
+                  </Link>
+                  {linkedPortfolio.status === 'active' && (
+                    <button
+                      data-testid="sim-portfolio-pause"
+                      className="btn"
+                      style={{ backgroundColor: '#fff3cd', color: '#856404' }}
+                      onClick={() => handlePortfolioStatus('pause')}
+                      disabled={linking}
+                    >
+                      暫停帳戶
+                    </button>
+                  )}
+                  {linkedPortfolio.status === 'paused' && (
+                    <button
+                      data-testid="sim-portfolio-resume"
+                      className="btn btn-primary"
+                      onClick={() => handlePortfolioStatus('resume')}
+                      disabled={linking}
+                    >
+                      繼續帳戶
+                    </button>
+                  )}
+                </div>
+                <p style={{ fontSize: '12px', color: '#666', marginTop: '12px' }}>
+                  帳戶暫停時，規則觸發的<strong>新進場</strong>會被記錄為受阻且不會成交；停損／停利等風險出場仍會執行。
+                  帳戶退役後不再接受任何規則下單。手動模式的決策只寫入此重播日誌，不會交易帳戶。
+                </p>
+              </>
+            )}
+          </div>
+
+          {priorSessions.length > 1 && (
+            <div className="card" style={{ marginBottom: '24px' }}>
+              <h3 style={{ marginBottom: '8px' }}>此版本的重播紀錄</h3>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                {priorSessions.map((s) => (
+                  <button
+                    key={s.id}
+                    data-testid={`sim-session-${s.status}`}
+                    className="btn"
+                    style={{
+                      justifyContent: 'flex-start',
+                      backgroundColor: s.id === session?.id ? '#e7f0fe' : 'transparent',
+                      border: '1px solid #e0e0e0',
+                      fontSize: '13px',
+                    }}
+                    onClick={() => handleReopenSession(s)}
+                    disabled={s.id === session?.id}
+                  >
+                    {new Date(s.created_at).toLocaleString('zh-Hant')} — {STATUS_LABELS[s.status] || s.status}
+                    {s.current_snapshot_date ? `（觀察日 ${s.current_snapshot_date}）` : '（尚未推進）'}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
 
           {manualMode && (session.status === 'pending' || session.status === 'active') && (
             <div className="card" style={{ marginBottom: '24px', borderLeft: '4px solid #0070f3' }}>
@@ -717,7 +991,9 @@ export default function SimulationPage() {
           <div className="card">
             <h3 style={{ marginBottom: '16px' }}>決策時間線</h3>
             {decisions.length === 0 ? (
-              <p style={{ color: '#999' }}>尚無決策紀錄。點擊「推進一日」開始模擬。</p>
+              <p style={{ color: '#999' }}>
+                尚無決策紀錄。點擊「{isIntraday ? `推進下一根 ${tfLabel} K 線` : '自動推進一日'}」開始模擬。
+              </p>
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                 {decisions.map((d) => {
@@ -744,6 +1020,23 @@ export default function SimulationPage() {
                           <span style={{ fontSize: '13px', color: '#666' }}>
                             {d.snapshot_date}
                           </span>
+                          {d.bar_timestamp && (
+                            <span
+                              data-testid="sim-decision-bar-ts"
+                              title="交易所當地時間的 K 線時點"
+                              style={{
+                                fontSize: '12px',
+                                fontWeight: 600,
+                                color: '#7a1f45',
+                                background: '#fde8ef',
+                                border: '1px solid #f5a3c0',
+                                borderRadius: '10px',
+                                padding: '1px 8px',
+                              }}
+                            >
+                              {formatBarTime(d.bar_timestamp)}
+                            </span>
+                          )}
                           <span style={{
                             padding: '2px 10px',
                             borderRadius: '12px',
@@ -949,11 +1242,15 @@ export default function SimulationPage() {
             {' '}&mdash; 
             {manualMode ? '人工程回放模式，每步由使用者決定買入／賣出／持有。' :
              '自動策略回放模式，由引擎根據策略規則自動決策。'}
-            {' '}資料來源：保存的歷史數據（零即時API請求）。
+            {' '}資料來源：{isIntraday
+              ? `綁定的合成／歷史 ${tfLabel} K 線資料集（歷史回放，非即時行情；零即時 API 請求）`
+              : '保存的歷史數據（零即時API請求）'}。
             資料截止日：{session.data_cutoff_at}。
             <br />
             <strong>執行時序：</strong>
-            決策於觀察日收盤後做出，成交於下一可用交易日開盤（買入與賣出均採用相同規則）。
+            {isIntraday
+              ? `訊號於已完成 ${tfLabel} K 線收盤時形成，成交於下一根 K 線開盤（交易所當地時間；買入與賣出均採用相同規則）。`
+              : '決策於觀察日收盤後做出，成交於下一可用交易日開盤（買入與賣出均採用相同規則）。'}
           </div>
         </>
       )}

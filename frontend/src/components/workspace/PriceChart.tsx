@@ -14,31 +14,34 @@ import {
 } from 'lightweight-charts';
 import type { BarsResponse } from './types';
 
-const NATURE_LABELS: Record<string, string> = {
-  synthetic: '模擬數據',
-  live: '即時數據',
-  delayed: '延遲數據',
-  unknown: '數據性質未知',
-};
-
-const NATURE_CLASSES: Record<string, string> = {
-  synthetic: 'ws-nature-badge ws-nature-synthetic',
-  live: 'ws-nature-badge ws-nature-live',
-  delayed: 'ws-nature-badge ws-nature-delayed',
-  unknown: 'ws-nature-badge ws-nature-unknown',
-};
-
 export const RANGES = ['3M', '6M', '1Y', 'ALL'] as const;
 export type RangeKey = (typeof RANGES)[number];
+
+/** A date window the provider has declared it can serve. */
+export interface ChartPeriod {
+  start: string;
+  end: string;
+}
 
 interface Props {
   data: BarsResponse | null;
   loading: boolean;
   range: RangeKey;
   onRangeChange: (range: RangeKey) => void;
+  availablePeriod: ChartPeriod | null;
+  samplePeriodActive: boolean;
+  onUseSamplePeriod: () => void;
 }
 
-export default function PriceChart({ data, loading, range, onRangeChange }: Props) {
+export default function PriceChart({
+  data,
+  loading,
+  range,
+  onRangeChange,
+  availablePeriod,
+  samplePeriodActive,
+  onUseSamplePeriod,
+}: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
@@ -49,32 +52,32 @@ export default function PriceChart({ data, loading, range, onRangeChange }: Prop
 
     const chart = createChart(containerRef.current, {
       layout: {
-        background: { type: ColorType.Solid, color: '#131722' },
-        textColor: '#b2b5be',
+        background: { type: ColorType.Solid, color: '#161D27' },
+        textColor: '#B6C2D2',
         fontSize: 11,
       },
       grid: {
-        vertLines: { color: '#1e222d' },
-        horzLines: { color: '#1e222d' },
+        vertLines: { color: '#1D2733' },
+        horzLines: { color: '#1D2733' },
       },
       crosshair: {
         mode: CrosshairMode.Normal,
-        vertLine: { color: '#758696', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#363a45' },
-        horzLine: { color: '#758696', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#363a45' },
+        vertLine: { color: '#8FA0B5', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#3B4A5C' },
+        horzLine: { color: '#8FA0B5', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#3B4A5C' },
       },
-      rightPriceScale: { borderColor: '#2a2e39' },
-      timeScale: { borderColor: '#2a2e39', timeVisible: false },
+      rightPriceScale: { borderColor: '#2B3746' },
+      timeScale: { borderColor: '#2B3746', timeVisible: false },
       autoSize: false,
       width: containerRef.current.clientWidth,
       height: containerRef.current.clientHeight,
     });
 
     const candles = chart.addSeries(CandlestickSeries, {
-      upColor: '#089981',
-      downColor: '#f23645',
+      upColor: '#36C7A0',
+      downColor: '#FF7585',
       borderVisible: false,
-      wickUpColor: '#089981',
-      wickDownColor: '#f23645',
+      wickUpColor: '#36C7A0',
+      wickDownColor: '#FF7585',
     });
 
     const volume = chart.addSeries(HistogramSeries, {
@@ -129,65 +132,72 @@ export default function PriceChart({ data, loading, range, onRangeChange }: Prop
       data.bars.map((b) => ({
         time: b.date as Time,
         value: b.volume ?? 0,
-        color: b.close >= b.open ? '#08998155' : '#f2364555',
+        color: b.close >= b.open ? '#36C7A055' : '#FF758555',
       }))
     );
   }, [data]);
 
-  const nature = data?.data_quality?.data_nature;
-  const isStale = data?.data_quality?.is_stale;
-  const lastBar = data && data.bars.length > 0 ? data.bars[data.bars.length - 1] : null;
-
   return (
-    <div style={{ position: 'relative', width: '100%', height: '100%', minHeight: 200 }} data-testid="price-chart">
-      <div className="ws-chart-legend" data-testid="chart-legend">
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <strong style={{ color: '#fff', fontSize: 13 }}>
-            {data ? `${data.symbol} · ${data.name}` : '—'}
-          </strong>
-          {nature && (
-            <span className={NATURE_CLASSES[nature] || NATURE_CLASSES.unknown} data-testid="chart-nature-badge">
-              {NATURE_LABELS[nature] || nature}
-            </span>
-          )}
-          {isStale && (
-            <span className="ws-nature-badge ws-nature-delayed" data-testid="chart-stale-badge">
-              陳舊
-            </span>
-          )}
+    <div
+      style={{
+        position: 'relative',
+        display: 'flex',
+        flexDirection: 'column',
+        width: '100%',
+        height: '100%',
+        minHeight: 200,
+      }}
+      data-testid="price-chart"
+    >
+      <div className="ws-chart-toolbar">
+        {samplePeriodActive && data && availablePeriod && (
+          <span className="ws-chart-sample-note" data-testid="chart-sample-note">
+            顯示數據集期間 {availablePeriod.start} – {availablePeriod.end}（非最近日期）
+          </span>
+        )}
+        <div className="ws-range-btns" data-testid="chart-range-buttons" role="group" aria-label="日期範圍">
+          {RANGES.map((r) => (
+            <button
+              key={r}
+              className={`ws-range-btn ${r === range && !samplePeriodActive ? 'ws-range-btn-active' : ''}`}
+              onClick={() => onRangeChange(r)}
+              aria-pressed={r === range && !samplePeriodActive}
+            >
+              {r === 'ALL' ? '全部' : r}
+            </button>
+          ))}
         </div>
-        {lastBar && (
-          <span style={{ color: lastBar.close >= lastBar.open ? '#089981' : '#f23645', fontWeight: 600 }}>
-            {lastBar.close.toFixed(2)} {data?.currency}
-          </span>
-        )}
-        {data && (
-          <span className="ws-muted">
-            {data.bar_count} 條 · 供應商 {data.provider} · 截至 {lastBar?.date || '—'}
-            {data.data_quality?.adjustment ? ` · ${data.data_quality.adjustment}` : ''}
-          </span>
-        )}
       </div>
-      <div className="ws-range-btns" data-testid="chart-range-buttons">
-        {RANGES.map((r) => (
-          <button
-            key={r}
-            className={`ws-range-btn ${r === range ? 'ws-range-btn-active' : ''}`}
-            onClick={() => onRangeChange(r)}
-          >
-            {r === 'ALL' ? '全部' : r}
-          </button>
-        ))}
-      </div>
-      <div ref={containerRef} style={{ width: '100%', height: '100%' }} />
+      <div ref={containerRef} className="ws-chart-canvas" />
       {loading && (
         <div className="ws-muted" style={{ position: 'absolute', bottom: 8, left: 10 }}>
           載入數據中…
         </div>
       )}
       {!loading && data && data.bars.length === 0 && (
-        <div className="ws-muted" style={{ position: 'absolute', bottom: 8, left: 10 }}>
-          此日期範圍沒有數據
+        <div className="ws-chart-empty" data-testid="chart-empty-state">
+          <div className="ws-chart-empty-title">此日期範圍沒有數據</div>
+          <div className="ws-chart-empty-detail">
+            {data.symbol} 在 {data.start_date} 至 {data.end_date} 沒有{' '}
+            {data.timeframe ?? '1d'} K 線。
+          </div>
+          {availablePeriod ? (
+            <div className="ws-chart-empty-detail">
+              可用期間：<strong>{availablePeriod.start} 至 {availablePeriod.end}</strong>
+              <br />
+              數據源：{data.provider}｜{data.mode_label_zh ?? data.data_quality?.data_nature ?? 'UNKNOWN'}
+            </div>
+          ) : (
+            <div className="ws-chart-empty-detail">
+              數據源：{data.provider}｜{data.data_quality?.data_nature ?? 'UNKNOWN'} —
+              該數據源未提供可用期間（UNKNOWN）。
+            </div>
+          )}
+          {availablePeriod && !samplePeriodActive && (
+            <button className="ws-btn ws-btn-accent" onClick={onUseSamplePeriod} data-testid="chart-use-sample-period">
+              查看可用示例期間
+            </button>
+          )}
         </div>
       )}
     </div>
