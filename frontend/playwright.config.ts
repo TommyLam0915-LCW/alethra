@@ -1,5 +1,9 @@
 import { defineConfig, devices } from '@playwright/test';
 
+// The specs navigate by this base, so the config must probe and serve the same
+// one; hardcoding a port made the suite unrunnable against any other stack.
+const FRONTEND_URL = process.env.E2E_FRONTEND_BASE ?? 'http://localhost:3001';
+
 export default defineConfig({
   testDir: './e2e',
   fullyParallel: false,
@@ -11,7 +15,7 @@ export default defineConfig({
     ['list']
   ],
   use: {
-    baseURL: 'http://localhost:3001',
+    baseURL: FRONTEND_URL,
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',
@@ -24,7 +28,7 @@ export default defineConfig({
   ],
   webServer: {
     command: 'echo "Using existing acceptance stack"',
-    url: 'http://localhost:3001',
+    url: FRONTEND_URL,
     reuseExistingServer: true,
   },
 });
