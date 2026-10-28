@@ -205,7 +205,7 @@
 | Step | Expected Result | Pass-Fail | Evidence |
 |------|----------------|-----------|----------|
 | Create portfolio, then pause it | Status → paused | | |
-| Try to place order on paused portfolio | 400 "Risk check failed: Portfolio is paused" | | |
+| Try to place order on paused portfolio | 400 `Risk check failed [portfolio_paused]: …` (code added 2026-10-28; see docs/risk-policy.md) | | |
 | Resume portfolio | Status → active | | |
 | Try entry decision without expected_outcome | 400 "Expected outcome required" | | |
 | Create entry decision with all required fields | 201, outcome_status=pending | | |

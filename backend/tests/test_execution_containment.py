@@ -27,7 +27,9 @@ of a constructor keyword: that keeps every test in this file constructible
 against the pre-patch code, so each gap surfaces as a failed assertion with real
 side-effect call counts, not as a TypeError or a collection error.
 """
+import os
 from datetime import timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -46,6 +48,48 @@ from app.execution_agent.agent import ExecutionAgent
 from app.lib.timeutil import utcnow
 from app.models.execution import FillRecord, FillSource, OrderIntent
 from tests.conftest import TestSession
+
+
+# ── Repository-root resolution for the operator-guide assertion ──────────
+#
+# The guide lives in the repository's ``docs/`` directory, which is outside the
+# backend image. Walking up from ``__file__`` only works when the test runs from
+# a host checkout; a runner that mounts just ``backend/`` must say where the
+# repository is. Markers keep the walk honest, and a missing guide fails with
+# the fix in the message — the containment wording in that guide is part of
+# what this round asserts, so it must never be skipped.
+
+_REPO_ROOT_MARKERS = ("backend/app", "docs")
+_GUIDE_RELATIVE_PATH = "docs/ibkr-execution-agent-setup-guide.md"
+
+
+def _looks_like_repo_root(candidate: Path) -> bool:
+    return all((candidate / marker).is_dir() for marker in _REPO_ROOT_MARKERS)
+
+
+def _resolve_repo_root() -> Path:
+    override = os.environ.get("ALETHRA_REPO_ROOT")
+    if override:
+        root = Path(override).expanduser().resolve()
+        if not _looks_like_repo_root(root):
+            pytest.fail(
+                f"ALETHRA_REPO_ROOT={override!r} is not a repository root: "
+                f"expected directories {', '.join(_REPO_ROOT_MARKERS)} under it.",
+                pytrace=False,
+            )
+        return root
+
+    for candidate in Path(__file__).resolve().parents:
+        if _looks_like_repo_root(candidate):
+            return candidate
+
+    pytest.fail(
+        f"Could not locate the repository root from {Path(__file__).resolve()}: "
+        f"no parent directory contains {' and '.join(_REPO_ROOT_MARKERS)}. "
+        "Run this test from a host checkout, or mount the repository into the "
+        "test container and set ALETHRA_REPO_ROOT to that mount point.",
+        pytrace=False,
+    )
 
 
 # ── Broker side-effect boundary recorders ────────────────────────────────
@@ -818,12 +862,16 @@ class TestPolicyIsNotEnvOpenable:
         assert len(ib.place_orders) == 0
 
     def test_operator_guide_states_the_containment_policy(self):
-        from pathlib import Path
-
-        guide = (
-            Path(__file__).resolve().parents[2]
-            / "docs" / "ibkr-execution-agent-setup-guide.md"
-        )
+        root = _resolve_repo_root()
+        guide = root / _GUIDE_RELATIVE_PATH
+        if not guide.is_file():
+            pytest.fail(
+                f"Operator guide missing at {guide} (repository root resolved to "
+                f"{root}). The runner must expose the repository's docs/ "
+                "directory, e.g. mount the repository read-only and set "
+                "ALETHRA_REPO_ROOT to the mount point.",
+                pytrace=False,
+            )
         text = guide.read_text(encoding="utf-8").lower()
         assert "containment" in text
         assert "separate approval" in text, (

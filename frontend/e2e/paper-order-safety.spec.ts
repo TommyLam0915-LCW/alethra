@@ -341,8 +341,10 @@ test.describe('paper order safety matrix', () => {
 
     const oversell = await submitOrder(page, portfolioId, { side: 'SELL', quantity: 6, note: '超額賣出' });
     expect(oversell.status, 'selling more than held must be refused').toBe(400);
-    expect(String(oversell.body.detail)).toMatch(/Risk check failed: Cannot sell 6(\.0)? — only hold 5(\.0)?/);
-    await expect(page.getByTestId('pp-error')).toContainText('Risk check failed');
+    expect(String(oversell.body.detail)).toMatch(
+      /Risk check failed \[quantity_exceeds_position\]: 帳戶僅持有 5 股，不能賣出 6 股。/
+    );
+    await expect(page.getByTestId('pp-error')).toContainText('quantity_exceeds_position');
 
     await expect.poll(() => readCash(page), { message: 'a refused sell must not credit cash' }).toBeCloseTo(cashAfterBuy, 2);
     const positions = await storedPositions(page, portfolioId);
@@ -518,8 +520,8 @@ test.describe('paper order safety matrix', () => {
 
     const paused = await submitOrder(page, portfolioId, { side: 'BUY', quantity: 2, note: '暫停期間下單' });
     expect(paused.status, 'a paused portfolio must not accept orders').toBe(400);
-    expect(String(paused.body.detail)).toMatch(/Risk check failed: Portfolio is paused/);
-    await expect(page.getByTestId('pp-error')).toContainText('Portfolio is paused');
+    expect(String(paused.body.detail)).toMatch(/Risk check failed \[portfolio_paused\]/);
+    await expect(page.getByTestId('pp-error')).toContainText('portfolio_paused');
     await expect.poll(() => readCash(page), { message: 'a paused portfolio must not move cash' }).toBeCloseTo(STARTING_CASH, 2);
 
     const rejected = (await storedOrders(page, portfolioId)).filter((o) => o.status === 'rejected');
@@ -559,6 +561,79 @@ test.describe('paper order safety matrix', () => {
     });
     expect(afterRetire.status).toBe(400);
     expect(String(afterRetire.json.detail)).toMatch(/Cannot create order for 'retired' portfolio/);
+  });
+
+  test('the daily entry budget refuses the eleventh same-day entry through the UI instead of queuing it', async () => {
+    // Eleven real clicks plus their cross-checks do not fit the 30s default.
+    test.setTimeout(180_000);
+    // Mirrors RiskPolicy.max_daily_entries (backend/app/services/risk_policy.py).
+    const DAILY_ENTRY_BUDGET = 10;
+    const portfolioId = await createPortfolio(page, STARTING_CASH);
+
+    const accepted: string[] = [];
+    for (let i = 0; i < DAILY_ENTRY_BUDGET; i += 1) {
+      const { status, body } = await submitOrder(page, portfolioId, {
+        side: 'BUY',
+        quantity: 1,
+        note: `進場 ${i + 1}`,
+      });
+      expect(status, `entry ${i + 1} of ${DAILY_ENTRY_BUDGET} must be accepted`).toBe(201);
+      expect(body.status, 'each accepted entry fills on submit').toBe('filled');
+      accepted.push(body.id);
+      // The page clears the journal fields after the post-submit reload; typing
+      // the next entry before that lands would race the reset.
+      await expect(page.getByTestId('pp-rationale')).toHaveValue('');
+    }
+
+    let cashLegs = 0;
+    for (const id of accepted) {
+      const fills = await fillsFor(page, portfolioId, id);
+      expect(fills.length, `order ${id} carries exactly one fill`).toBe(1);
+      cashLegs += fills[0].net_cash_change;
+    }
+    const cashAfterBudget = round4(STARTING_CASH + cashLegs);
+    await expect.poll(() => readCash(page)).toBeCloseTo(cashAfterBudget, 2);
+
+    // The eleventh entry of the same UTC day is refused at submit time.
+    const refused = await submitOrder(page, portfolioId, { side: 'BUY', quantity: 1, note: '超出每日額度' });
+    expect(refused.status, 'an entry over the daily budget must be refused').toBe(400);
+    expect(String(refused.body.detail)).toMatch(
+      /^Risk check failed \[daily_entry_limit\]: .*進場次數已達上限 10 次/
+    );
+    await expect(page.getByTestId('pp-error')).toContainText('daily_entry_limit');
+    await expect(page.getByTestId('pp-error')).toContainText('進場次數已達上限 10 次');
+
+    // No executable intent: nothing is pending, nothing fills, cash and holdings do not move.
+    const orders = await storedOrders(page, portfolioId);
+    expect(orders.length, 'ten fills plus one rejected row, and no queued order').toBe(DAILY_ENTRY_BUDGET + 1);
+    expect(orders.filter((o) => o.status === 'pending'), 'a refused entry must not be left queued').toEqual([]);
+    expect(orders.filter((o) => o.status === 'filled').length).toBe(DAILY_ENTRY_BUDGET);
+    const rejected = orders.filter((o) => o.status === 'rejected');
+    expect(rejected.length).toBe(1);
+    expect(rejected[0].side).toBe('BUY');
+    expect(rejected[0].quantity).toBe(1);
+    expect(rejected[0].risk_check_status, 'the refusal is labelled failed, never passed').toBe('failed');
+    expect((await fillsFor(page, portfolioId, rejected[0].id)).length, 'a refused entry must not fill').toBe(0);
+
+    await expect
+      .poll(() => readCash(page), { message: 'a refused entry must not move cash' })
+      .toBeCloseTo(cashAfterBudget, 2);
+    const portfolio = await storedPortfolio(page, portfolioId);
+    expect(portfolio.current_virtual_cash).toBeCloseTo(cashAfterBudget, 4);
+
+    const positions = await storedPositions(page, portfolioId);
+    expect(positions.length).toBe(1);
+    expect(positions[0].quantity, 'only the ten executed entries are held').toBe(DAILY_ENTRY_BUDGET);
+
+    await page.getByTestId('pp-tab-orders').click();
+    await expect(page.getByTestId(`pp-order-${ASSET}-filled`)).toHaveCount(DAILY_ENTRY_BUDGET);
+    await expect(page.getByTestId(`pp-order-${ASSET}-rejected`)).toHaveCount(1);
+    await expect(page.getByTestId(`pp-order-${ASSET}-rejected`).getByTestId('pp-order-status')).toHaveText('已拒絕');
+
+    // The screen's refusal is the server's decision: this id is the row the audit query follows.
+    console.log(
+      `DAILY_LIMIT_EVIDENCE portfolio=${portfolioId} rejected_order=${rejected[0].id} accepted=${accepted.length} code=daily_entry_limit`
+    );
   });
 
   test('partial and full exits keep order, fill, position, cash and P&L consistent', async () => {

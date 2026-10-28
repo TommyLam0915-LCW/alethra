@@ -13,11 +13,17 @@ place that applies the answer to cash, positions and the fill ledger.
 """
 
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional
 
 from sqlalchemy.orm import Session
 
 from app.engine.fill_math import fill_economics
+from app.services.risk_policy import (
+    RiskInputs,
+    count_entries,
+    evaluate_risk,
+    value_open_positions,
+)
 from app.models.paper_portfolio import (
     DecisionRecord,
     OutcomeStatus,
@@ -176,6 +182,8 @@ def apply_rule_decision(
     result: Any,
     commission_rate: float,
     bar_timestamp: Optional[datetime] = None,
+    allowed_instruments: Optional[Iterable[str]] = None,
+    provider_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Book one simulator step into the paper portfolio, or explain why not.
 
@@ -225,22 +233,7 @@ def apply_rule_decision(
 
     is_entry = side == "BUY"
 
-    # A paused portfolio takes no new positions. Exits still run: closing risk is
-    # the one thing pausing should not prevent. A retired or completed portfolio
-    # trades nothing at all.
-    if portfolio.status == PortfolioStatus.paused and is_entry:
-        return _record_blocked(
-            db,
-            portfolio=portfolio,
-            strategy_version_id=strategy_version_id,
-            session_id=session_id,
-            step_number=step_number,
-            snapshot_date=snapshot_date,
-            side=side,
-            quantity=quantity,
-            rationale=rationale,
-            reason="portfolio_paused",
-        )
+    # A retired or completed portfolio trades nothing at all — not even an exit.
     if portfolio.status in (PortfolioStatus.retired, PortfolioStatus.completed):
         return _record_blocked(
             db,
@@ -271,6 +264,62 @@ def apply_rule_decision(
             "duplicate": True,
         }
 
+    # Entries ask the shared policy, under a row lock so two replays booked
+    # against one account cannot both spend the last slot of the daily budget.
+    # Exits deliberately skip the entry gates — closing risk must never wait on
+    # the pause, the allow-list, the budget or the cap — and keep the fill-time
+    # affordability and held-quantity checks in ``book_fill``.
+    risk = None
+    if is_entry:
+        db.query(PaperPortfolio).populate_existing().filter(
+            PaperPortfolio.id == portfolio.id
+        ).with_for_update().first()
+
+        open_value, unpriced = value_open_positions(
+            db,
+            portfolio,
+            price_by_asset={symbol: observed_price},
+            on_or_before=snapshot_date,
+            provider_id=provider_id,
+        )
+        held = sum(
+            float(p.quantity or 0)
+            for p in portfolio.positions
+            if p.asset_id == symbol and p.status == PositionStatus.open
+        )
+        risk = evaluate_risk(
+            RiskInputs(
+                lane="rule",
+                side=side,
+                asset_id=symbol,
+                quantity=float(quantity),
+                portfolio_status=portfolio.status.value,
+                portfolio_cash=float(portfolio.current_virtual_cash),
+                held_quantity=held,
+                price=float(observed_price),
+                open_positions_value=None if unpriced else open_value,
+                unpriced_assets=unpriced,
+                entries_on_date=count_entries(
+                    db, portfolio, market_date=snapshot_date
+                ),
+                decision_date=snapshot_date,
+            ),
+            lane_allowed_instruments=allowed_instruments,
+        )
+        if not risk.allowed:
+            return _record_blocked(
+                db,
+                portfolio=portfolio,
+                strategy_version_id=strategy_version_id,
+                session_id=session_id,
+                step_number=step_number,
+                snapshot_date=snapshot_date,
+                side=side,
+                quantity=quantity,
+                rationale=rationale,
+                reason=risk.code,
+            )
+
     decision = DecisionRecord(
         owner_id=portfolio.owner_id,
         paper_portfolio_id=portfolio.id,
@@ -286,6 +335,7 @@ def apply_rule_decision(
             "auto_execution": True,
             "rules_locked": True,
             "exit_reason": exit_reason,
+            **({"risk_check": risk.as_dict()} if risk is not None else {}),
         },
     )
     db.add(decision)

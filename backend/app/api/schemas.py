@@ -483,13 +483,6 @@ class OverrideRequestCreate(BaseModel):
     falsification_condition: Optional[str] = None
 
 
-class RiskCheckConfig(BaseModel):
-    max_position_pct: float = Field(default=1.0, gt=0, le=1.0)
-    max_daily_orders: int = Field(default=10, gt=0)
-    allowed_assets: List[str] = Field(default_factory=lambda: list(ALLOWED_DEMO_ASSETS))
-    max_drawdown_warning_pct: float = Field(default=0.20, gt=0, le=1.0)
-
-
 # ── Phase 4: Model Research Records ──────────────────────────────────
 
 ALLOWED_MODEL_STATUSES = (

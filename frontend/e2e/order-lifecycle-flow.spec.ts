@@ -26,14 +26,28 @@ import { test, expect, type Page } from '@playwright/test';
  *     bars 2024-02-01..2024-02-13, plus the watchlist row that makes the symbol
  *     clickable in the workspace. Strategy authoring and watchlist creation UI are
  *     covered by their own specs; this one is about the order lifecycle.
- *   - EVERY product action is a real browser gesture: typing the login, 開始模擬,
+ *   - RUN ISOLATION: each execution creates its OWN session and its OWN linked
+ *     portfolio and only references the existing locked version and its stored
+ *     bars. Sessions left by earlier runs are never reused, reset or deleted: the
+ *     setup test records them first and then requires them to be unchanged, so the
+ *     journey can run repeatedly against one seeded version without the seed being
+ *     re-run (which would delete that state).
+ *   - ONE DISCLOSED SCAFFOLDING WRITE: the simulation page only renders 建立工作階段
+ *     while no resumable session exists, and earlier runs still have one on this
+ *     version. Clearing it would destroy another run's state, so this run creates
+ *     its own session by POSTing the same body the form would send, with the UI's
+ *     own token, then reloads the page — the newest resumable session is the one
+ *     just created, and the account it links is verified to be bound to it.
+ *     Everything downstream (連結模擬組合 onward) is a real browser gesture.
+ *   - EVERY OTHER product action is a real browser gesture: typing the login,
  *     連結模擬組合, clicking the watchlist symbol, choosing the account in ⑦,
  *     「下一日」, filling 動作／數量／理由, 檢視模擬單, 提交模擬單, 取消掛單,
- *     the ⑧ tabs, 重新載入證據 and the CSV export button. No API call performs a
- *     product step and no API call writes product state.
- *   - API calls in this file are READ-ONLY oracles (session row, order list, fills,
- *     portfolio, decisions) plus one CSV parse. They cross-check what the screen
- *     claims against what PostgreSQL persisted; each is labelled where it supplements.
+ *     the ⑧ tabs, 重新載入證據 and the CSV export button. Apart from the one
+ *     session POST above, no API call performs a product step.
+ *   - OTHER API calls in this file are READ-ONLY oracles (session row, order list,
+ *     fills, portfolio, decisions) plus one CSV parse. They cross-check what the
+ *     screen claims against what PostgreSQL persisted; each is labelled where it
+ *     supplements.
  *   - No route is intercepted, stubbed or mocked. Waits are waitForResponse /
  *     waitForURL / expect-poll conditions, never sleeps.
  *
@@ -118,6 +132,7 @@ interface OrderRow {
   side: string;
   quantity: number;
   status: string;
+  risk_check_status?: string | null;
   actor_type: string;
   data_cutoff_at: string | null;
   created_at: string | null;
@@ -160,6 +175,11 @@ async function readSession(page: Page, sessionId: string): Promise<SessionRow> {
   const { status, json } = await api(page, 'GET', `/api/v1/simulations/${sessionId}`);
   expect(status, 'the session row must be readable as an oracle').toBe(200);
   return json as SessionRow;
+}
+
+function sessionRows(json: unknown): SessionRow[] {
+  if (Array.isArray(json)) return json as SessionRow[];
+  return ((json as { sessions?: SessionRow[] } | null)?.sessions ?? []) as SessionRow[];
 }
 
 async function storedOrders(page: Page, portfolioId: string): Promise<OrderRow[]> {
@@ -347,15 +367,31 @@ test.describe('order lifecycle: submit → pending → market clock → fill →
     expect(spec.slippage_rate, 'seeded slippage rate').toBeCloseTo(EXPECT_SLIPPAGE_RATE, 12);
     expect(spec.asset_ids, 'the strategy trades exactly one instrument').toEqual([ASSET]);
 
-    await page
-      .locator('div.form-group', { hasText: '虛擬初始資金' })
-      .locator('input')
-      .fill(String(SESSION_CASH));
-    await Promise.all([
-      page.waitForResponse((r) => r.url().includes('/api/v1/simulations/versions/') && r.request().method() === 'POST'),
-      page.getByTestId('sim-create-btn').click(),
-    ]);
-    await expect(page.getByTestId('sim-advance-btn'), '建立工作階段後才出現推進控制').toBeVisible({
+    // Sessions already on this version belong to earlier runs. Record them so this
+    // run can prove it neither reused nor disturbed them (the seed is not re-run).
+    const priorList = await api(page, 'GET', `/api/v1/simulations/versions/${(versions.json as any[])[0].id}/sessions`);
+    expect(priorList.status).toBe(200);
+    const priorRows = sessionRows(priorList.json);
+    const priorFingerprints = new Map(
+      priorRows.map((r) => [String(r.id), `${r.status}@${r.current_snapshot_date ?? '-'}`])
+    );
+
+    // SCAFFOLDING (disclosed): 建立工作階段 is only rendered while no resumable
+    // session exists, and earlier runs left one on this version. Deleting it would
+    // destroy another run's state, so this run posts the very body the form sends
+    // (with the UI's own token) and then reloads; the page auto-selects the newest
+    // resumable session, which is this one.
+    const created = await api(page, 'POST', `/api/v1/simulations/versions/${(versions.json as any[])[0].id}`, {
+      initial_virtual_cash: SESSION_CASH,
+      provider_id: 'demo',
+    });
+    expect(created.status, 'creating this run\'s own session must be accepted').toBe(201);
+    journey.sessionId = String((created.json as { id?: string })?.id ?? '');
+    expect(journey.sessionId, 'the create call must report the session it made').not.toBe('');
+    expect(priorFingerprints.has(journey.sessionId), 'a new run must not reuse an earlier session').toBe(false);
+
+    await page.reload();
+    await expect(page.getByTestId('sim-advance-btn'), '本輪自己的工作階段必須被載入').toBeVisible({
       timeout: 30000,
     });
 
@@ -368,16 +404,31 @@ test.describe('order lifecycle: submit → pending → market clock → fill →
     journey.portfolioId = href.split('/').filter(Boolean).pop() ?? '';
     expect(journey.portfolioId, 'linked account id resolved from the UI link').not.toBe('');
 
-    const sessionList = await api(page, 'GET', `/api/v1/simulations/versions/${(versions.json as any[])[0].id}/sessions`);
-    expect(sessionList.status).toBe(200);
-    const rows = Array.isArray(sessionList.json) ? sessionList.json : (sessionList.json as any)?.sessions ?? [];
+    // The account the UI just linked must be bound to THIS run's session — proof the
+    // page had really loaded the session created above and not an earlier one.
+    const linkedBook = await api(page, 'GET', `/api/v1/paper-portfolio/${journey.portfolioId}`);
+    expect(linkedBook.status).toBe(200);
     expect(
-      rows.length,
-      '本旅程必須跑在剛重置過的堆疊上：seed 已清掉上一份工作階段，' +
-        '若這裡出現 2 份，代表同一個 version 上還留著上一次跑過的 session — ' +
-        '請先執行 backend/scripts/seed_e2e_order_lifecycle.py 再跑',
-    ).toBe(1);
-    journey.sessionId = String(rows[0].id);
+      (linkedBook.json as { simulation_session_id?: string | null }).simulation_session_id,
+      'this run\'s account must be bound to this run\'s session'
+    ).toBe(journey.sessionId);
+
+    // Ownership, not a fixed count: this run adds exactly one session and every
+    // session that was here before is still listed with the same status and cursor.
+    const afterList = await api(page, 'GET', `/api/v1/simulations/versions/${(versions.json as any[])[0].id}/sessions`);
+    expect(afterList.status).toBe(200);
+    const afterRows = sessionRows(afterList.json);
+    expect(afterRows.length, 'this run must add exactly one session').toBe(priorRows.length + 1);
+    expect(afterRows.map((r) => String(r.id)).filter((id) => id === journey.sessionId)).toHaveLength(1);
+    for (const [id, fingerprint] of Array.from(priorFingerprints)) {
+      const row = afterRows.find((r) => String(r.id) === id);
+      expect(row, `earlier session ${id} must still be listed`).toBeDefined();
+      expect(
+        `${row!.status}@${row!.current_snapshot_date ?? '-'}`,
+        `earlier session ${id} must be untouched by this run`
+      ).toBe(fingerprint);
+    }
+
     const session = await readSession(page, journey.sessionId);
     expect(session.provider_id, 'the session binds to one stored provider').toBe('demo');
     expect(session.timeframe).toBe('1d');
@@ -458,6 +509,9 @@ test.describe('order lifecycle: submit → pending → market clock → fill →
     expect(mine!.asset_id).toBe(ASSET);
     expect(mine!.quantity).toBeCloseTo(BUY_QTY, 6);
     expect(mine!.data_cutoff_at).toBe(cursor);
+    // Admitted by the shared risk evaluator, which the session lane must consult
+    // before it writes anything: the stamp is the outcome of that call, not a default.
+    expect(mine!.risk_check_status, 'an admissible order carries the passed stamp').toBe('passed');
     expect(orders.filter((o) => o.status === 'filled'), 'no order may already be filled').toEqual([]);
     expect(await storedFills(page, journey.portfolioId, mine!.id), 'a pending order has no fill').toEqual([]);
     expect((await storedPortfolio(page, journey.portfolioId)).current_virtual_cash).toBeCloseTo(cashBefore, 6);

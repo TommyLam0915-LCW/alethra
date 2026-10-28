@@ -138,7 +138,9 @@ class PaperOrder(Base):
     model_or_strategy_version_id = Column(UUID(as_uuid=True), nullable=True)
     data_cutoff_at = Column(String(10), nullable=True)
     rationale = Column(Text, nullable=True)
-    risk_check_status = Column(SAEnum(RiskCheckStatus), default=RiskCheckStatus.passed)
+    # No column default: every lane sets this explicitly after it asked the
+    # shared policy, so an order cannot be labelled passed by omission.
+    risk_check_status = Column(SAEnum(RiskCheckStatus), nullable=True)
     idempotency_key = Column(String(128), nullable=True)
     actor_type = Column(String(20), nullable=False, default="human")
 

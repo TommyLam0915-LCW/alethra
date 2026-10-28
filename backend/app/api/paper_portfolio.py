@@ -1,4 +1,4 @@
-from datetime import datetime, date, timezone
+from datetime import datetime, timezone
 import csv
 import io
 from typing import Any, Dict, Iterable, List, Optional
@@ -48,11 +48,16 @@ from app.api.schemas import (
     OutcomeEvaluationCreate,
     OutcomeEvaluationResponse,
     OverrideRequestCreate,
-    RiskCheckConfig,
 )
 from app.data.demo_data import get_demo_ohlcv, get_date_range
 from app.services import emit_event
 from app.services.paper_execution import PaperExecutionError, book_fill
+from app.services.risk_policy import (
+    RiskInputs,
+    count_entries_on_utc_date,
+    evaluate_risk,
+    value_open_positions,
+)
 from app.services.order_lifecycle import (
     LifecycleError,
     SETTLEMENT_POLICY_LABEL,
@@ -75,8 +80,6 @@ router = APIRouter(
         )
     ],
 )
-
-DEFAULT_RISK_CONFIG = RiskCheckConfig()
 
 # Shared by the fill path and the valuation path. Both must use the same rate,
 # otherwise realised/unrealized P&L cannot reconcile with the cash movement.
@@ -216,49 +219,53 @@ def _portfolio_response(portfolio: PaperPortfolio) -> PaperPortfolioResponse:
     )
 
 
-def _check_risk_limits(
-    portfolio: PaperPortfolio,
-    order: PaperOrderCreate,
+def _evaluate_direct_order(
     db: Session,
-    config: RiskCheckConfig = DEFAULT_RISK_CONFIG,
-) -> tuple[bool, Optional[str]]:
-    if portfolio.status == PortfolioStatus.paused:
-        return False, "Portfolio is paused"
+    portfolio: PaperPortfolio,
+    payload: PaperOrderCreate,
+    bar: Optional[dict],
+):
+    """Ask the shared admission policy before this lane creates anything.
 
-    if order.asset_id not in config.allowed_assets:
-        return False, f"Asset {order.asset_id} not in allowed list"
+    The direct lane prices off the newest stored bar, which is also the bar it
+    fills at, so the position cap is valued on the price the trade is about to
+    pay. Open positions the fixture cannot mark are passed through as unpriced —
+    never valued at zero — so a binding cap fails closed instead of passing.
 
-    if order.side == "SELL":
-        open_positions = [
-            p for p in portfolio.positions if p.status == PositionStatus.open and p.asset_id == order.asset_id
-        ]
-        total_held = sum(p.quantity for p in open_positions)
-        if order.quantity > total_held:
-            return False, f"Cannot sell {order.quantity} — only hold {total_held}"
-
-    today_str = date.today().isoformat()
-    today_orders = [
-        o for o in portfolio.orders
-        if o.created_at.date().isoformat() == today_str and o.status != OrderStatus.rejected
+    The budget is scoped to the UTC submission date: this lane is not a replay,
+    so it has no decision bar to belong to.
+    """
+    open_positions = [
+        p for p in portfolio.positions if p.status == PositionStatus.open
     ]
-    if len(today_orders) >= config.max_daily_orders:
-        return False, f"Daily order limit reached ({config.max_daily_orders})"
-
-    if order.side == "BUY":
-        date_range = get_date_range()
-        ohlcv_data = get_demo_ohlcv([order.asset_id], date_range["min"], date_range["max"])
-        if order.asset_id in ohlcv_data and not ohlcv_data[order.asset_id].empty:
-            latest_price = ohlcv_data[order.asset_id].iloc[-1]["close"]
-            order_value = order.quantity * latest_price
-            portfolio_value = portfolio.current_virtual_cash + sum(
-                p.quantity * latest_price
-                for p in portfolio.positions
-                if p.status == PositionStatus.open
-            )
-            if portfolio_value > 0 and (order_value / portfolio_value) > config.max_position_pct:
-                return False, f"Position would exceed {config.max_position_pct*100}% of portfolio"
-
-    return True, None
+    marks = _mark_prices(p.asset_id for p in open_positions)
+    open_value, unpriced = value_open_positions(
+        db,
+        portfolio,
+        price_by_asset={asset: mark["close"] for asset, mark in marks.items()},
+    )
+    held = sum(
+        float(p.quantity or 0)
+        for p in open_positions
+        if p.asset_id == payload.asset_id
+    )
+    decision_day = datetime.now(timezone.utc).date()
+    return evaluate_risk(
+        RiskInputs(
+            lane="direct",
+            side=payload.side,
+            asset_id=payload.asset_id,
+            quantity=float(payload.quantity),
+            portfolio_status=portfolio.status.value,
+            portfolio_cash=float(portfolio.current_virtual_cash),
+            held_quantity=held,
+            price=float(bar["close"]) if bar is not None else None,
+            open_positions_value=None if unpriced else open_value,
+            unpriced_assets=unpriced,
+            entries_on_date=count_entries_on_utc_date(db, portfolio, day=decision_day),
+            decision_date=decision_day.isoformat(),
+        )
+    )
 
 
 def _simulate_fill(
@@ -440,8 +447,13 @@ def create_order(
     if portfolio.status in (PortfolioStatus.retired, PortfolioStatus.completed):
         raise HTTPException(status_code=400, detail=f"Cannot create order for '{portfolio.status.value}' portfolio")
 
-    passed, reason = _check_risk_limits(portfolio, payload, db)
-    if not passed:
+    # The bar is read before the policy so the cap is valued on the price this
+    # order is about to pay, and a cap that cannot be priced is refused rather
+    # than labelled passed. A missing bar is still answered by the price-data
+    # error below when no binding cap needed it.
+    bar = _latest_available_bar(payload.asset_id)
+    risk = _evaluate_direct_order(db, portfolio, payload, bar)
+    if not risk.allowed:
         rejected = PaperOrder(
             portfolio_id=portfolio.id,
             asset_id=payload.asset_id,
@@ -453,13 +465,29 @@ def create_order(
             risk_check_status=RiskCheckStatus.failed,
             idempotency_key=payload.idempotency_key,
             actor_type=actor_type,
+            data_cutoff_at=bar["date"] if bar is not None else None,
         )
         db.add(rejected)
+        emit_event(
+            db,
+            entity_type="paper_portfolio", entity_id=portfolio.id,
+            event_type="order_rejected", actor_id=current_user.id, actor_type=actor_type,
+            data_cutoff_at=bar["date"] if bar is not None else None,
+            payload={
+                "asset_id": payload.asset_id,
+                "side": payload.side,
+                "quantity": payload.quantity,
+                "actor_type": actor_type,
+                "risk_check": risk.as_dict(),
+            },
+        )
         db.commit()
         db.refresh(rejected)
-        raise HTTPException(status_code=400, detail=f"Risk check failed: {reason}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Risk check failed [{risk.code}]: {risk.message}",
+        )
 
-    bar = _latest_available_bar(payload.asset_id)
     if bar is None:
         raise HTTPException(
             status_code=400,

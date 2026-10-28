@@ -58,6 +58,12 @@ from app.services.order_lifecycle import (
     submit_pending,
 )
 from app.services.paper_execution import apply_rule_decision
+from app.services.risk_policy import (
+    RiskInputs,
+    count_entries,
+    evaluate_risk,
+    value_open_positions,
+)
 from app.services.market_data_storage import MarketDataStorage
 from app.models.market_data import MarketDataBar
 from app.providers import get_data_provider
@@ -607,6 +613,10 @@ def _book_rule_trade(
         # and the replay cannot disagree about what the trade cost.
         commission_rate=spec.get("commission_rate", 0.0),
         bar_timestamp=bar_timestamp,
+        # The account is bound to the locked spec's instruments; the shared
+        # policy may narrow that further but no lane may widen it.
+        allowed_instruments=spec.get("asset_ids"),
+        provider_id=session.provider_id,
     )
     if applied is None:
         return
@@ -1738,6 +1748,52 @@ def _submit_manual_order(
     observed_close = _observed_bar_close(
         db, session=session, symbol=symbol, provider_id=provider_id, cutoff=cutoff
     )
+
+    # The same policy the other lanes ask, answered before an intent exists: a
+    # hard violation at submit must not leave a pending order the executor will
+    # later fill. The budget is counted on this decision's own bar date, so a
+    # replay of a 2024 bar gets that bar's budget rather than today's.
+    open_value, unpriced = value_open_positions(
+        db,
+        portfolio,
+        price_by_asset=(
+            {symbol: observed_close} if observed_close is not None else {}
+        ),
+        on_or_before=cutoff,
+        provider_id=provider_id,
+    )
+    risk = evaluate_risk(
+        RiskInputs(
+            lane="session",
+            side=side.value,
+            asset_id=symbol,
+            quantity=quantity,
+            portfolio_status=portfolio.status.value,
+            portfolio_cash=float(portfolio.current_virtual_cash),
+            held_quantity=held,
+            price=observed_close,
+            open_positions_value=None if unpriced else open_value,
+            unpriced_assets=unpriced,
+            entries_on_date=count_entries(db, portfolio, market_date=cutoff),
+            decision_date=cutoff,
+        ),
+        lane_allowed_instruments=spec.get("asset_ids"),
+    )
+    if not risk.allowed:
+        return (
+            DecisionType.blocked_action,
+            {
+                'reason': risk.code,
+                'message': risk.message,
+                'intent_preserved': False,
+                'booked_at_submit': False,
+                'risk_check': risk.as_dict(),
+            },
+            None,
+            None,
+            [],
+        )
+
     estimate: Optional[Dict[str, Any]] = None
     if observed_close is None:
         warnings.append(
@@ -1777,6 +1833,7 @@ def _submit_manual_order(
             "auto_execution": False,
             "booked_at_submit": False,
             "cost_estimate": estimate,
+            "risk_check": risk.as_dict(),
         },
     )
     order = PaperOrder(

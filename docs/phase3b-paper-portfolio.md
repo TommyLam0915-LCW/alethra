@@ -90,25 +90,22 @@ HypothesisStatus:   supported | partially_supported | evidence_insufficient | co
 
 ### 3.2 風險控制 (Rule B)
 
-預設風控配置：
+自 2026-10-28 起，direct、session、rule 三條會寫入 paper portfolio 的通道共用同一
+份伺服器端政策（`backend/app/services/risk_policy.py`）。逐項數值、拒絕代碼與行為
+契約見 [`docs/risk-policy.md`](risk-policy.md)。摘要：
 
-```python
-RiskCheckConfig(
-    max_position_pct=1.0,       # 單一持倉最大佔比
-    max_daily_orders=10,        # 每日最大訂單數
-    allowed_assets=["DEMO-ALPHA", "DEMO-BETA", "DEMO-BENCHMARK"],
-    max_drawdown_warning_pct=0.20,  # 最大回撤警告
-)
-```
+| 項目 | 值 | 說明 |
+| --- | --- | --- |
+| `max_position_pct` | `1.0` | 單筆進場 ÷（現金＋未平倉估值）；低於 1.0 且無法定價時拒絕 |
+| `max_daily_entries` | `10` | 每個決策日的新進場次數；pending／cancelled 計入，rejected 不計 |
+| 允許標的（direct） | `DEMO-` 商品目錄 | 由 schema 驗證；政策可再收窄 |
+| 允許標的（session / rule） | 鎖定版本 `asset_ids` | 政策可再收窄，通道不可放寬 |
 
-風控檢查順序：
-1. 投資組合狀態（paused 阻止所有訂單）
-2. 資產是否在允許清單
-3. 賣出數量是否超過持有量
-4. 每日訂單數是否超過上限
-5. 買入持倉是否超過最大佔比
+檢查順序：方向 → 帳戶狀態 → 平倉（只查持股）→ 暫停（只擋進場）→ 允許清單 →
+每日進場次數 → 持倉上限 → 通過。
 
-**測試**: `TestOrderBlockedWhenRiskLimitExceeded`
+**測試**: `TestOrderBlockedWhenRiskLimitExceeded`、`test_risk_policy_across_lanes.py`、
+`test_risk_policy_unit.py`
 
 ### 3.3 無操作記錄 (Rule C)
 

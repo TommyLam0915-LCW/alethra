@@ -71,6 +71,10 @@ const REJECTION_LABELS: Record<string, string> = {
   no_market_clock: '沒有綁定的模擬帳戶',
   no_quote_on_window: '視窗內沒有可執行報價',
   portfolio_paused: '帳戶已暫停',
+  instrument_not_allowed: '標的不在風控允許清單',
+  daily_entry_limit: '已達當日進場次數上限',
+  position_limit: '超過單一持倉上限',
+  risk_price_unavailable: '缺少決策價格，未能計算風控',
 };
 
 /** Mirrors backend OrderStatus. `pending` must never read as executed. */
