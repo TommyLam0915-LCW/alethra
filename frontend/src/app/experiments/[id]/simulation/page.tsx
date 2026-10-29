@@ -75,6 +75,20 @@ const DECISION_LABELS: Record<string, { label: string; color: string; bg: string
   blocked_action: { label: '操作受阻', color: '#856404', bg: '#fff3cd' },
 };
 
+// A submitted manual order that is queued for the next executable bar is stored
+// as blocked_action (native enum reuse) with reason awaiting_execution_window.
+// Rendering it as 操作受阻 would report an accepted order as a refusal.
+const PENDING_ORDER_STYLE = { label: '掛單待成交', color: '#0056b3', bg: '#e8f1fb' };
+
+function isPendingOrder(d: Decision): boolean {
+  return d.decision_detail?.rejection?.reason === 'awaiting_execution_window';
+}
+
+function decisionStyle(d: Decision) {
+  if (isPendingOrder(d)) return PENDING_ORDER_STYLE;
+  return DECISION_LABELS[d.decision_type] || DECISION_LABELS.no_action;
+}
+
 const STATUS_LABELS: Record<string, string> = {
   pending: '待開始',
   active: '進行中',
@@ -141,6 +155,7 @@ export default function SimulationPage() {
   const [linkedPortfolio, setLinkedPortfolio] = useState<LinkedPortfolio | null>(null);
   const [linking, setLinking] = useState(false);
   const [priorSessions, setPriorSessions] = useState<SimulationSession[]>([]);
+  const [showCreateForm, setShowCreateForm] = useState(false);
 
   useEffect(() => {
     const token = localStorage.getItem('token');
@@ -248,7 +263,8 @@ export default function SimulationPage() {
       setSession(s);
       setDecisions([]);
       setLinkedPortfolio(null);
-      setPriorSessions((prev) => [s, ...prev]);
+      setPriorSessions((prev) => [s, ...prev.filter((p) => p.id !== s.id)]);
+      setShowCreateForm(false);
     } catch (err: any) {
       setError(err.message || '建立模擬失敗');
     } finally {
@@ -337,6 +353,7 @@ export default function SimulationPage() {
 
   const handleReopenSession = async (target: SimulationSession) => {
     setError('');
+    setShowCreateForm(false);
     try {
       const [s, d] = await Promise.all([
         api.simulations.get(target.id),
@@ -479,9 +496,16 @@ export default function SimulationPage() {
 
       {error && <div className="alert alert-warning">{error}</div>}
 
-      {!session && experiment?.status === 'locked' && (
-        <div className="card" style={{ marginBottom: '24px' }}>
-          <h3 style={{ marginBottom: '16px' }}>建立模擬工作階段</h3>
+      {(!session || showCreateForm) && experiment?.status === 'locked' && (
+        <div className="card" style={{ marginBottom: '24px' }} data-testid="sim-create-card">
+          <h3 style={{ marginBottom: '16px' }}>
+            {session ? '建立新的模擬工作階段' : '建立模擬工作階段'}
+          </h3>
+          {session && (
+            <p style={{ fontSize: '13px', color: '#666', marginBottom: '12px' }}>
+              新工作階段會由鎖定規格重新開始；現有重播紀錄不受影響。
+            </p>
+          )}
           <div className="form-group">
             <label style={{ display: 'block', marginBottom: '6px', fontWeight: 600 }}>
               虛擬初始資金 (USD)
@@ -569,11 +593,33 @@ export default function SimulationPage() {
           >
             {creating ? '建立中...' : '開始模擬'}
           </button>
+          {session && (
+            <button
+              className="btn"
+              data-testid="sim-create-cancel"
+              onClick={() => setShowCreateForm(false)}
+              style={{ marginTop: '12px', marginLeft: '12px' }}
+            >
+              取消
+            </button>
+          )}
         </div>
       )}
 
       {session && (
         <>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '12px' }}>
+            <button
+              className="btn btn-secondary"
+              data-testid="sim-new-session"
+              onClick={() => {
+                setError('');
+                setShowCreateForm(true);
+              }}
+            >
+              建立新模擬工作階段
+            </button>
+          </div>
           {isIntraday && (
             <div
               data-testid="sim-intraday-badge"
@@ -811,7 +857,8 @@ export default function SimulationPage() {
                 </div>
                 <p style={{ fontSize: '12px', color: '#666', marginTop: '12px' }}>
                   帳戶暫停時，規則觸發的<strong>新進場</strong>會被記錄為受阻且不會成交；停損／停利等風險出場仍會執行。
-                  帳戶退役後不再接受任何規則下單。手動模式的決策只寫入此重播日誌，不會交易帳戶。
+                  帳戶退役後不再接受任何規則下單。手動模式提交的買賣會在這個帳戶建立掛單，於綁定數據集下一根可執行的 K 線成交；
+                  HOLD 只寫入重播日誌，不動帳戶。
                 </p>
               </>
             )}
@@ -997,27 +1044,27 @@ export default function SimulationPage() {
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                 {decisions.map((d) => {
-                  const style = DECISION_LABELS[d.decision_type] || DECISION_LABELS.no_action;
+                  const style = decisionStyle(d);
                   const isExpanded = showDetail === d.step_number;
                   return (
                     <div
                       key={d.id}
                       style={{
-                        border: '1px solid #eaeaea',
+                        border: '1px solid var(--border-strong)',
                         borderLeft: `4px solid ${style.color}`,
                         borderRadius: '6px',
                         padding: '12px 16px',
-                        backgroundColor: isExpanded ? '#fafafa' : '#fff',
+                        backgroundColor: isExpanded ? 'var(--surface-2)' : 'var(--surface-1)',
                         cursor: 'pointer',
                       }}
                       onClick={() => setShowDetail(isExpanded ? null : d.step_number)}
                     >
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                         <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
-                          <span style={{ fontSize: '12px', color: '#999', minWidth: '24px' }}>
+                          <span style={{ fontSize: '12px', color: 'var(--text-muted)', minWidth: '24px' }}>
                             #{d.step_number}
                           </span>
-                          <span style={{ fontSize: '13px', color: '#666' }}>
+                          <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
                             {d.snapshot_date}
                           </span>
                           {d.bar_timestamp && (
@@ -1056,49 +1103,49 @@ export default function SimulationPage() {
                       </div>
 
                       {isExpanded && d.decision_detail && (
-                        <div style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid #eaeaea' }}>
+                        <div style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid var(--border-strong)' }}>
                           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '8px', fontSize: '13px' }}>
                             {d.decision_detail.symbol && (
-                              <div><span style={{ color: '#999' }}>標的:</span> {d.decision_detail.symbol}</div>
+                              <div><span style={{ color: 'var(--text-secondary)' }}>標的:</span> {d.decision_detail.symbol}</div>
                             )}
                             {d.decision_detail.action && (
-                              <div><span style={{ color: '#999' }}>操作:</span> {d.decision_detail.action.toUpperCase()}</div>
+                              <div><span style={{ color: 'var(--text-secondary)' }}>操作:</span> {d.decision_detail.action.toUpperCase()}</div>
                             )}
                             {d.decision_detail.fill?.quantity && (
-                              <div><span style={{ color: '#999' }}>數量:</span> {d.decision_detail.fill.quantity}</div>
+                              <div><span style={{ color: 'var(--text-secondary)' }}>數量:</span> {d.decision_detail.fill.quantity}</div>
                             )}
                             {d.decision_detail.fill?.observed_date && (
-                              <div><span style={{ color: '#999' }}>觀察日:</span> {d.decision_detail.fill.observed_date}</div>
+                              <div><span style={{ color: 'var(--text-secondary)' }}>觀察日:</span> {d.decision_detail.fill.observed_date}</div>
                             )}
                             {d.decision_detail.fill?.observed_close && (
-                              <div><span style={{ color: '#999' }}>觀察收盤價:</span> ${d.decision_detail.fill.observed_close?.toFixed(2)}</div>
+                              <div><span style={{ color: 'var(--text-secondary)' }}>觀察收盤價:</span> ${d.decision_detail.fill.observed_close?.toFixed(2)}</div>
                             )}
                             {d.decision_detail.fill?.execution_date && (
-                              <div><span style={{ color: '#999' }}>成交日:</span> {d.decision_detail.fill.execution_date}</div>
+                              <div><span style={{ color: 'var(--text-secondary)' }}>成交日:</span> {d.decision_detail.fill.execution_date}</div>
                             )}
                             {d.decision_detail.fill?.price && (
-                              <div><span style={{ color: '#999' }}>成交價:</span> ${d.decision_detail.fill.price?.toFixed(2)}</div>
+                              <div><span style={{ color: 'var(--text-secondary)' }}>成交價:</span> ${d.decision_detail.fill.price?.toFixed(2)}</div>
                             )}
                             {d.decision_detail.fill?.execution_rule && (
-                              <div><span style={{ color: '#999' }}>執行規則:</span> {d.decision_detail.fill.execution_rule}</div>
+                              <div><span style={{ color: 'var(--text-secondary)' }}>執行規則:</span> {d.decision_detail.fill.execution_rule}</div>
                             )}
                             {d.decision_detail.fill?.commission !== undefined && (
-                              <div><span style={{ color: '#999' }}>佣金:</span> ${d.decision_detail.fill.commission?.toFixed(4)}</div>
+                              <div><span style={{ color: 'var(--text-secondary)' }}>佣金:</span> ${d.decision_detail.fill.commission?.toFixed(4)}</div>
                             )}
                             {d.decision_detail.fill?.slippage !== undefined && (
-                              <div><span style={{ color: '#999' }}>滑價:</span> ${d.decision_detail.fill.slippage?.toFixed(4)}</div>
+                              <div><span style={{ color: 'var(--text-secondary)' }}>滑價:</span> ${d.decision_detail.fill.slippage?.toFixed(4)}</div>
                             )}
                             {d.decision_detail.fill?.total_cost && (
-                              <div><span style={{ color: '#999' }}>總成本:</span> ${d.decision_detail.fill.total_cost?.toFixed(2)}</div>
+                              <div><span style={{ color: 'var(--text-secondary)' }}>總成本:</span> ${d.decision_detail.fill.total_cost?.toFixed(2)}</div>
                             )}
                             {d.decision_detail.fill?.net_proceeds && (
-                              <div><span style={{ color: '#999' }}>淨收入:</span> ${d.decision_detail.fill.net_proceeds?.toFixed(2)}</div>
+                              <div><span style={{ color: 'var(--text-secondary)' }}>淨收入:</span> ${d.decision_detail.fill.net_proceeds?.toFixed(2)}</div>
                             )}
                             {(d.decision_detail.fill?.gross_pnl !== undefined || d.decision_detail.fill?.realized_pnl !== undefined) && (
                               <div>
-                                <span style={{ color: '#999' }}>價差損益:</span> 
+                                <span style={{ color: 'var(--text-secondary)' }}>價差損益:</span> 
                                 <span style={{ 
-                                  color: (d.decision_detail.fill.gross_pnl ?? d.decision_detail.fill.realized_pnl) >= 0 ? '#155724' : '#721c24', 
+                                  color: (d.decision_detail.fill.gross_pnl ?? d.decision_detail.fill.realized_pnl) >= 0 ? 'var(--positive)' : 'var(--negative)', 
                                   fontWeight: 600 
                                 }}>
                                   {' '}${(d.decision_detail.fill.gross_pnl ?? d.decision_detail.fill.realized_pnl)?.toFixed(2)}
@@ -1106,19 +1153,36 @@ export default function SimulationPage() {
                               </div>
                             )}
                             {d.decision_detail.rejection && (
-                              <div style={{ gridColumn: '1 / -1', padding: '8px', backgroundColor: '#fff3cd', borderRadius: '4px' }}>
-                                <span style={{ color: '#856404', fontWeight: 600 }}>拒絕:</span> {d.decision_detail.rejection.reason}
+                              <div
+                                data-testid="sim-decision-rejection"
+                                style={{
+                                  gridColumn: '1 / -1',
+                                  padding: '8px',
+                                  borderRadius: '4px',
+                                  backgroundColor: isPendingOrder(d) ? PENDING_ORDER_STYLE.bg : '#fff3cd',
+                                  color: isPendingOrder(d) ? '#0b3d75' : '#5c4500',
+                                }}
+                              >
+                                <span style={{ color: isPendingOrder(d) ? PENDING_ORDER_STYLE.color : '#856404', fontWeight: 600 }}>
+                                  {isPendingOrder(d) ? '待成交:' : '拒絕:'}
+                                </span>{' '}
+                                {d.decision_detail.rejection.message || d.decision_detail.rejection.reason}
+                                {d.decision_detail.rejection.message && (
+                                  <span style={{ color: '#5a6b7a', fontSize: '11px', fontFamily: 'monospace' }}>
+                                    {' '}({d.decision_detail.rejection.reason})
+                                  </span>
+                                )}
                                 {d.decision_detail.rejection.required && (
                                   <span> (需要: ${d.decision_detail.rejection.required.toFixed(2)}, 可用: ${d.decision_detail.rejection.available.toFixed(2)})</span>
                                 )}
                               </div>
                             )}
                             {d.decision_detail.rationale && (
-                              <div style={{ gridColumn: '1 / -1' }}><span style={{ color: '#999' }}>決策理由:</span> {d.decision_detail.rationale}</div>
+                              <div style={{ gridColumn: '1 / -1' }}><span style={{ color: 'var(--text-secondary)' }}>決策理由:</span> {d.decision_detail.rationale}</div>
                             )}
                             {d.decision_detail.reflection && (
                               <div style={{ gridColumn: '1 / -1' }}>
-                                <span style={{ color: '#999' }}>事後反思:</span> {d.decision_detail.reflection}
+                                <span style={{ color: 'var(--text-secondary)' }}>事後反思:</span> {d.decision_detail.reflection}
                                 <button
                                   onClick={(e) => {
                                     e.stopPropagation();
@@ -1215,14 +1279,14 @@ export default function SimulationPage() {
                               </div>
                             )}
                           </div>
-                          <div style={{ marginTop: '8px', fontSize: '12px', color: '#999' }}>
+                          <div style={{ marginTop: '8px', fontSize: '12px', color: 'var(--text-secondary)' }}>
                             現金: ${d.paper_cash.toFixed(2)} | 引擎: {d.engine_version} | 資料截止: {d.data_cutoff_at}
                           </div>
                         </div>
                       )}
 
                       {d.warnings && d.warnings.length > 0 && (
-                        <div style={{ marginTop: '6px', fontSize: '12px', color: '#856404' }}>
+                        <div style={{ marginTop: '6px', fontSize: '12px', color: 'var(--warning)' }}>
                           {d.warnings.join('; ')}
                         </div>
                       )}
@@ -1233,7 +1297,7 @@ export default function SimulationPage() {
             )}
           </div>
 
-          <div style={{ marginTop: '24px', padding: '16px', backgroundColor: '#f8f9fa', borderRadius: '8px', fontSize: '12px', color: '#666' }}>
+          <div style={{ marginTop: '24px', padding: '16px', backgroundColor: 'var(--surface-1)', borderRadius: '8px', fontSize: '12px', color: 'var(--text-secondary)' }}>
             <strong>方法論狀態：</strong>
             {manualMode ? 'manual_replay' :
              session.status === 'completed' ? 'historical_test_complete' :
