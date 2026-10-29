@@ -1,7 +1,7 @@
 import { spawn, spawnSync, type ChildProcess } from 'child_process';
 import { existsSync, mkdirSync, openSync, readFileSync } from 'fs';
 import path from 'path';
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect, type Locator, type Page } from '@playwright/test';
 
 /**
  * Tracked E2E for the personal strategy learning product loop:
@@ -87,6 +87,12 @@ async function shot(page: Page, name: string): Promise<void> {
   if (!SHOT_DIR) return;
   mkdirSync(SHOT_DIR, { recursive: true });
   await page.screenshot({ path: path.join(SHOT_DIR, `${name}.png`) });
+}
+
+async function shotElement(locator: Locator, name: string): Promise<void> {
+  if (!SHOT_DIR) return;
+  mkdirSync(SHOT_DIR, { recursive: true });
+  await locator.screenshot({ path: path.join(SHOT_DIR, `${name}.png`) });
 }
 
 async function login(page: Page): Promise<void> {
@@ -404,6 +410,11 @@ test('desktop journey: consent -> review -> snapshot -> job -> version -> activa
     expect(comparability.same_evaluation_set, 'one frozen evaluation set').toBe(true);
     await expect(panel.getByTestId('pl-compare-checks')).toContainText('可比');
     await expect(panel.getByTestId('pl-compare-checks')).toContainText('同一評估集');
+    // The purpose label comes from the server's row-identity relationship, not
+    // from the UI guessing that two test windows mean one evaluation set.
+    await expect(panel.getByTestId('pl-comparability-purpose')).toContainText(
+      '共同未見評估',
+    );
 
     const comparisonResponse = page.waitForResponse(
       (res) =>
@@ -418,6 +429,9 @@ test('desktop journey: consent -> review -> snapshot -> job -> version -> activa
       comparison_run_id: string;
       mode: string;
       rankable: boolean;
+      evaluation_purpose: string;
+      independent_out_of_sample: boolean;
+      common_evaluation: { n_rows: number; n_groups: number } | null;
       versions: {
         a: { model_version_id: string; artifact_sha256: string };
         b: { model_version_id: string; artifact_sha256: string };
@@ -427,9 +441,20 @@ test('desktop journey: consent -> review -> snapshot -> job -> version -> activa
     expect(comparison.versions.a.model_version_id).toBe(modelId);
     expect(comparison.versions.b.model_version_id).toBe(secondModelId);
     expect(comparison.rankable, 'same evaluation set is rankable').toBe(true);
+    expect(comparison.evaluation_purpose).toBe('common_unseen');
+    expect(comparison.independent_out_of_sample).toBe(true);
+    expect(comparison.common_evaluation, 'a common batch is reported').not.toBeNull();
     expect(comparison.delta, 'same-set comparison reports a delta').not.toBeNull();
     const resultCard = panel.getByTestId('pl-comparison-result');
     await expect(resultCard).toContainText('同一評估集');
+    await expect(panel.getByTestId('pl-comparison-purpose')).toContainText(
+      '共同未見評估',
+    );
+    await expect(panel.getByTestId('pl-comparison-common')).toContainText(
+      `共同列 ${comparison.common_evaluation!.n_rows}`,
+    );
+    await expect(panel.getByTestId('pl-comparison-common-A')).toContainText('共同批次');
+    await expect(panel.getByTestId('pl-comparison-common-B')).toContainText('共同批次');
     await expect(panel.getByTestId('pl-comparison-version-A')).toContainText(
       `artifact ${comparison.versions.a.artifact_sha256.slice(0, 8)}`,
     );
@@ -440,7 +465,9 @@ test('desktop journey: consent -> review -> snapshot -> job -> version -> activa
     await expect(
       panel.getByTestId(`pl-comparison-history-${comparison.comparison_run_id}`),
     ).toContainText(`版本 ${model!.version_number} vs ${secondModel!.version_number}`);
+    await panel.getByTestId('pl-comparison-purpose').scrollIntoViewIfNeeded();
     await shot(page, '07-comparison');
+    await shotElement(panel.getByTestId('pl-comparison-result'), '07-comparison-result');
 
     // 8. Explicit select with a saved rationale, then rollback to the version
     //    that was active before the switch. History must show both actions.
@@ -455,6 +482,13 @@ test('desktop journey: consent -> review -> snapshot -> job -> version -> activa
     await panel.getByTestId('pl-select-b').click();
     const selectRes = await selectResponse;
     expect(selectRes.status(), 'select version').toBe(200);
+    const selectBody = selectRes.request().postDataJSON() as {
+      expected_active_version_id?: string | null;
+    };
+    expect(
+      Object.prototype.hasOwnProperty.call(selectBody, 'expected_active_version_id'),
+      'the UI must send the active version it last saw',
+    ).toBe(true);
     const selection = (await selectRes.json()) as {
       already_active: boolean;
       selection: {
@@ -488,6 +522,13 @@ test('desktop journey: consent -> review -> snapshot -> job -> version -> activa
     await panel.getByTestId('pl-rollback').click({ timeout: 30000 });
     const rollbackRes = await rollbackResponse;
     expect(rollbackRes.status(), 'rollback').toBe(200);
+    const rollbackBody = rollbackRes.request().postDataJSON() as {
+      expected_active_version_id?: string | null;
+    };
+    expect(
+      rollbackBody.expected_active_version_id,
+      'rollback carries the version the UI shows as active',
+    ).toBe(secondModelId);
     const rollback = (await rollbackRes.json()) as {
       selection: {
         selection_id: string;

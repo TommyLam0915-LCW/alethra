@@ -173,6 +173,14 @@ interface ComparabilityResponse {
   same_evaluation_set: boolean;
   checks: ComparabilityCheck[];
   not_comparable_reasons: Array<{ code: string; message_zh: string; detail?: unknown }>;
+  evaluation_relationship?: {
+    purpose: string;
+    purpose_zh: string;
+    usable_for_ranking: boolean;
+    row_count: number;
+    group_count: number;
+    reasons: string[];
+  } | null;
   quota?: { quota_type: string; amount: number };
   note_zh?: string;
 }
@@ -203,6 +211,22 @@ interface ComparisonWindow {
   insufficient_reasons: string[];
 }
 
+interface ComparisonBaseline {
+  rule?: string;
+  label?: string;
+  source?: string;
+  accuracy?: number;
+  macro_f1?: number;
+  note_zh?: string;
+}
+
+interface ComparisonCommonBatch {
+  metrics: ComparisonMetrics;
+  baseline: ComparisonBaseline | null;
+  windows: ComparisonWindow[];
+  warnings: string[];
+}
+
 interface ComparisonVersion {
   model_version_id: string;
   version_number: number;
@@ -214,6 +238,7 @@ interface ComparisonVersion {
   trained_at: string | null;
   is_active: boolean;
   revoked: boolean;
+  evaluation_basis?: string;
   evaluation_set: {
     test_size?: number;
     date_range_start?: string | null;
@@ -225,18 +250,46 @@ interface ComparisonVersion {
     test_end_event_id?: string;
   };
   metrics: ComparisonMetrics;
-  baseline: { label?: string; accuracy?: number } | null;
+  baseline: ComparisonBaseline | null;
   windows: ComparisonWindow[];
   warnings: string[];
+  common: ComparisonCommonBatch | null;
   evaluation_record_id?: string;
+}
+
+interface CommonEvaluationBlock {
+  purpose: string;
+  purpose_zh: string;
+  rankable: boolean;
+  independent_out_of_sample: boolean;
+  reasons: string[];
+  n_rows: number;
+  n_groups: number;
+  group_keys: string[];
+  row_sources: Record<string, number> | string[];
+  shared_test_group_count: number;
+  only_a_test_group_count: number;
+  only_b_test_group_count: number;
+  test_slices_identical: boolean;
+  baseline_shared: boolean;
+  leakage: Record<string, string[]>;
+  conflicts: unknown[];
+  sides: Record<string, Record<string, number | boolean | string[]>>;
+  warnings: string[];
+  note_zh: string;
 }
 
 interface ComparisonResult {
   comparison_run_id: string;
-  mode: 'same_evaluation_set' | 'per_version_test_window';
+  mode: 'same_evaluation_set' | 'common_evaluation_batch' | 'per_version_test_window';
   comparable: boolean;
   same_evaluation_set: boolean;
   rankable: boolean;
+  evaluation_purpose: string;
+  evaluation_purpose_zh: string;
+  independent_out_of_sample: boolean;
+  evaluation_reasons: string[];
+  common_evaluation: CommonEvaluationBlock | null;
   checks: ComparabilityCheck[];
   versions: { a: ComparisonVersion; b: ComparisonVersion };
   delta: {
@@ -296,6 +349,9 @@ interface ComparisonSummaryEntry {
   version_b: { model_version_id: string; version_number: number | null };
   same_evaluation_set: boolean | null;
   rankable: boolean | null;
+  evaluation_purpose: string | null;
+  evaluation_purpose_zh: string | null;
+  independent_out_of_sample: boolean | null;
   summary_zh: string | null;
   warnings: string[];
   delta: ComparisonResult['delta'];
@@ -330,6 +386,12 @@ const WARNING_LABELS: Record<string, string> = {
   missing_class_in_test: '測試集缺少部分類別',
   synthetic_market_features: '市場特徵來自合成資料（工程驗證用）',
   mixed_market_features: '市場特徵混合真實與合成資料',
+};
+
+const PURPOSE_LABELS: Record<string, string> = {
+  common_unseen: '共同未見評估',
+  exploratory_reused: '研究性重複使用',
+  provenance_insufficient: '來源不足',
 };
 
 const WINDOW_REASON_LABELS: Record<string, string> = {
@@ -765,12 +827,18 @@ export default function PersonalStrategyLearningPanel() {
       const body = (await api.ml.selectPersonalModel(targetId, {
         rationale: rationale.trim(),
         comparison_run_id: runMatchesTarget,
+        expected_active_version_id: activeVersionId,
       })) as SelectionResponse;
       setNotice(body.message_zh ?? `已選用版本 ${target.version_number}。`);
       setRationale('');
       if (versionId) await loadStrategy(versionId);
     } catch (err) {
       setError(describeFailure(err, '無法切換使用中版本'));
+      // A stale or refused switch means our view of the active version is out
+      // of date; reload instead of letting the user retry against old state.
+      if (err instanceof ApiError && err.status === 409 && versionId) {
+        await loadStrategy(versionId).catch(() => undefined);
+      }
     } finally {
       setBusy(null);
     }
@@ -786,15 +854,18 @@ export default function PersonalStrategyLearningPanel() {
     setError(null);
     setNotice(null);
     try {
-      const body = (await api.ml.rollbackPersonalModel(
-        recordId,
-        rationale.trim() || null,
-      )) as { selection: SelectionEntry; active_version: PersonalModel; message_zh?: string };
+      const body = (await api.ml.rollbackPersonalModel(recordId, {
+        rationale: rationale.trim() || null,
+        expected_active_version_id: activeVersionId,
+      })) as { selection: SelectionEntry; active_version: PersonalModel; message_zh?: string };
       setNotice(body.message_zh ?? '已回退到上一個版本。');
       setRationale('');
       if (versionId) await loadStrategy(versionId);
     } catch (err) {
       setError(describeFailure(err, '無法回退版本'));
+      if (err instanceof ApiError && err.status === 409 && versionId) {
+        await loadStrategy(versionId).catch(() => undefined);
+      }
     } finally {
       setBusy(null);
     }
@@ -1536,6 +1607,8 @@ export default function PersonalStrategyLearningPanel() {
             <p style={{ margin: '6px 0 0', fontSize: '12px', color: 'var(--text-secondary)' }}>
               只比較同一任務、同一策略範圍、同一特徵與同一評估方法的個人模型版本。可比性檢查屬唯讀、不扣額度；
               執行比較會在凍結快照的測試列上重新載入 artifact 並計算指標，消耗 1 個 AI 使用額度。
+              排名只用兩邊都未曾用於擬合的同一批原始決策列；沒有這種共同未見列時，只會並列顯示各自測試窗，
+              不會產生排名，也不會用訓練列代替。所有模型與基線使用同一批評估列，基線規則在訓練時已固定。
               分數只反映模仿本人已確認決策的能力，不是投資回報，也不代表越用越準。
             </p>
 
@@ -1629,6 +1702,21 @@ export default function PersonalStrategyLearningPanel() {
                           ? ' · 同一評估集'
                           : ' · 各自測試窗口（只可並列參考）')}
                     </div>
+                    {comparability.evaluation_relationship && (
+                      <div
+                        data-testid="pl-comparability-purpose"
+                        style={{ marginTop: '6px', color: 'var(--text-secondary)' }}
+                      >
+                        評估用途：
+                        {PURPOSE_LABELS[comparability.evaluation_relationship.purpose] ??
+                          comparability.evaluation_relationship.purpose}
+                        {' · '}共同列 {comparability.evaluation_relationship.row_count}／
+                        {comparability.evaluation_relationship.group_count} 組
+                        {comparability.evaluation_relationship.usable_for_ranking
+                          ? '（可作排名證據）'
+                          : '（只可作研究參考，不構成獨立樣本外證明）'}
+                      </div>
+                    )}
                     <ul style={{ margin: '6px 0 0', paddingLeft: '18px', color: 'var(--text-secondary)' }}>
                       {comparability.checks.map((check) => (
                         <li
@@ -1669,15 +1757,87 @@ export default function PersonalStrategyLearningPanel() {
                           color: comparison.rankable ? 'var(--positive)' : 'var(--text-secondary)',
                         }}
                       >
-                        {comparison.mode === 'same_evaluation_set' ? '同一評估集' : '各自測試窗口'}
+                        {comparison.mode === 'same_evaluation_set'
+                          ? '同一評估集'
+                          : comparison.mode === 'common_evaluation_batch'
+                            ? '共同評估批次'
+                            : '各自測試窗口'}
                       </span>
-                      {!comparison.rankable && (
-                        <span style={{ color: 'var(--warning)' }}>不可排名：兩邊測試列不同</span>
-                      )}
+                      <span
+                        style={{
+                          color: comparison.rankable ? 'var(--positive)' : 'var(--warning)',
+                        }}
+                      >
+                        {comparison.rankable
+                          ? '可排名（共同未見列）'
+                          : '不可排名（沒有共同未見列）'}
+                      </span>
                       {comparison.idempotent_replay && (
                         <span style={{ color: 'var(--text-muted)' }}>重複請求，已回傳保存結果</span>
                       )}
                     </div>
+
+                    <div
+                      data-testid="pl-comparison-purpose"
+                      style={{
+                        marginTop: '8px',
+                        fontSize: '12px',
+                        color: comparison.independent_out_of_sample
+                          ? 'var(--positive)'
+                          : 'var(--warning)',
+                      }}
+                    >
+                      {comparison.evaluation_purpose_zh}
+                    </div>
+
+                    {comparison.common_evaluation && (
+                      <div
+                        data-testid="pl-comparison-common"
+                        style={{
+                          marginTop: '10px',
+                          padding: '10px',
+                          border: '1px solid var(--border)',
+                          borderRadius: '6px',
+                          fontSize: '12px',
+                        }}
+                      >
+                        <strong>共同評估批次</strong>
+                        <div style={{ marginTop: '4px', color: 'var(--text-secondary)' }}>
+                          共同列 {comparison.common_evaluation.n_rows}／
+                          {comparison.common_evaluation.n_groups} 組 · 兩邊共用測試組{' '}
+                          {comparison.common_evaluation.shared_test_group_count}；只有 A{' '}
+                          {comparison.common_evaluation.only_a_test_group_count}、只有 B{' '}
+                          {comparison.common_evaluation.only_b_test_group_count}
+                        </div>
+                        <div style={{ marginTop: '2px', color: 'var(--text-secondary)' }}>
+                          已剔除：A 的測試組曾用於 B 擬合{' '}
+                          {comparison.common_evaluation.leakage.a_test_groups_used_in_b_fit
+                            ?.length ?? 0}{' '}
+                          組 · B 的測試組曾用於 A 擬合{' '}
+                          {comparison.common_evaluation.leakage.b_test_groups_used_in_a_fit
+                            ?.length ?? 0}{' '}
+                          組
+                        </div>
+                        <div style={{ marginTop: '2px', color: 'var(--text-secondary)' }}>
+                          基線共用同一規則：
+                          {comparison.common_evaluation.baseline_shared ? '是' : '否'}
+                          {' · '}批內晚於自身訓練結束：A{' '}
+                          {String(
+                            comparison.common_evaluation.sides.a
+                              ?.batch_rows_after_own_train_end ?? '—',
+                          )}{' '}
+                          / {comparison.common_evaluation.n_rows} 列 · B{' '}
+                          {String(
+                            comparison.common_evaluation.sides.b
+                              ?.batch_rows_after_own_train_end ?? '—',
+                          )}{' '}
+                          / {comparison.common_evaluation.n_rows} 列
+                        </div>
+                        <div style={{ marginTop: '4px', color: 'var(--text-muted)' }}>
+                          {comparison.common_evaluation.note_zh}
+                        </div>
+                      </div>
+                    )}
 
                     <div
                       style={{
@@ -1824,8 +1984,15 @@ export default function PersonalStrategyLearningPanel() {
                             版本 {run.version_a.version_number ?? '—'} vs{' '}
                             {run.version_b.version_number ?? '—'}
                           </span>
-                          <span style={{ color: run.rankable ? 'var(--positive)' : 'var(--text-muted)' }}>
-                            {run.rankable ? '同一評估集' : '各自測試窗口'}
+                          <span
+                            style={{
+                              color: run.independent_out_of_sample
+                                ? 'var(--positive)'
+                                : 'var(--warning)',
+                            }}
+                          >
+                            {PURPOSE_LABELS[run.evaluation_purpose ?? ''] ??
+                              (run.rankable ? '同一評估集' : '各自測試窗口')}
                           </span>
                           <span style={{ color: 'var(--text-muted)' }}>
                             {run.created_at ? run.created_at.slice(0, 19).replace('T', ' ') : '—'}
@@ -1919,6 +2086,9 @@ function ComparisonVersionCard({
         </span>
       </div>
 
+      <div style={{ marginTop: '4px', color: 'var(--text-muted)' }}>
+        以下數字＝本版本自己凍結的測試窗，只用於並列參考，不代表兩邊評分同一批列。
+      </div>
       <div style={{ marginTop: '6px', color: 'var(--text-secondary)' }}>
         測試列 {metrics.test_size} 筆 · 準確率 {formatScore(metrics.accuracy)} · macro F1{' '}
         {formatScore(metrics.macro_f1)} · weighted F1 {formatScore(metrics.weighted_f1)}
@@ -1926,11 +2096,44 @@ function ComparisonVersionCard({
           ? ` · 訓練基線 ${formatScore(version.baseline.accuracy)}`
           : ''}
       </div>
+      {version.baseline && (
+        <div style={{ marginTop: '2px', color: 'var(--text-muted)' }}>
+          基線規則：{version.baseline.rule ?? '—'}
+          {version.baseline.label ? `（${actionLabel(version.baseline.label)}）` : ''} ·
+          來源 {version.baseline.source ?? '—'}
+        </div>
+      )}
       <div style={{ marginTop: '4px', color: 'var(--text-muted)' }}>
         測試期 {version.evaluation_set.date_range_start ?? '—'} 至{' '}
         {version.evaluation_set.date_range_end ?? '—'} · 資料截止{' '}
         {version.evaluation_set.data_cutoff_at ?? '—'} · 快照 {shortId(version.snapshot_checksum)}
       </div>
+
+      {version.common && (
+        <div
+          data-testid={`pl-comparison-common-${label}`}
+          style={{
+            marginTop: '6px',
+            padding: '6px 8px',
+            border: '1px solid var(--border)',
+            borderRadius: '6px',
+          }}
+        >
+          <div style={{ color: 'var(--text-secondary)' }}>
+            共同批次：{version.common.metrics.test_size} 列 · 準確率{' '}
+            {formatScore(version.common.metrics.accuracy)} · macro F1{' '}
+            {formatScore(version.common.metrics.macro_f1)}
+          </div>
+          <div style={{ color: 'var(--text-muted)' }}>
+            同批基線：
+            {version.common.baseline?.label
+              ? `${actionLabel(version.common.baseline.label)}（${formatScore(
+                  version.common.baseline.accuracy ?? 0,
+                )}）`
+              : '—'}
+          </div>
+        </div>
+      )}
 
       <div style={{ marginTop: '8px', overflowX: 'auto' }}>
         <table style={{ borderCollapse: 'collapse', fontSize: '11px', minWidth: '320px' }}>

@@ -646,18 +646,27 @@ export const api = {
     },
     getPersonalComparison: (runId: string) =>
       apiFetch(`/api/v1/ml/personal/comparisons/${runId}`),
+    // The active alias the caller last saw is mandatory (null = nothing active)
+    // so the server can refuse a stale switch instead of silently overwriting.
     selectPersonalModel: (
       versionId: string,
-      data: { rationale: string; comparison_run_id?: string | null },
+      data: {
+        rationale: string;
+        comparison_run_id?: string | null;
+        expected_active_version_id: string | null;
+      },
     ) =>
       apiFetch(`/api/v1/ml/personal/models/${versionId}/select`, {
         method: 'POST',
         body: JSON.stringify(data),
       }),
-    rollbackPersonalModel: (recordId: string, rationale?: string | null) =>
+    rollbackPersonalModel: (
+      recordId: string,
+      data: { rationale?: string | null; expected_active_version_id: string | null },
+    ) =>
       apiFetch(`/api/v1/ml/personal/records/${recordId}/rollback`, {
         method: 'POST',
-        body: JSON.stringify(rationale ? { rationale } : {}),
+        body: JSON.stringify(data),
       }),
     listPersonalSelections: (recordId: string) =>
       apiFetch(`/api/v1/ml/personal/records/${recordId}/selections`),
