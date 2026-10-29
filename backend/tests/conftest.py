@@ -188,3 +188,30 @@ def auth_headers(client):
     })
     token = login.json()["access_token"]
     return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.fixture()
+def admin_headers(client):
+    """Interactive admin identity for server-side permission checks.
+
+    There is no product endpoint that promotes a user to admin, so the test
+    harness seeds the flag directly on the disposable test database.
+    """
+    from app.auth.jwt import create_access_token, get_password_hash
+    from app.models.user import User
+
+    db = TestSession()
+    try:
+        admin = User(
+            email="admin-test@alethra.io",
+            password_hash=get_password_hash("adminpass123"),
+            display_name="Admin Test",
+            is_admin=True,
+        )
+        db.add(admin)
+        db.commit()
+        db.refresh(admin)
+        token = create_access_token(data={"sub": str(admin.id)})
+    finally:
+        db.close()
+    return {"Authorization": f"Bearer {token}"}

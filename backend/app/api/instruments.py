@@ -4,6 +4,9 @@ from datetime import date, datetime, timezone
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.auth.jwt import require_admin
+from app.auth.safety import rate_limit
+from app.models.user import User
 from app.providers import get_data_provider
 from app.providers.data_provider import compute_staleness
 from app.services.market_data_storage import MarketDataStorage
@@ -27,6 +30,22 @@ from app.providers.instruments import (
 from app.data import real_synthetic_data
 
 router = APIRouter(tags=["instruments"])
+
+
+def _validated_refresh_range(start_date: str, end_date: str) -> None:
+    try:
+        start = date.fromisoformat(start_date)
+        end = date.fromisoformat(end_date)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail="start_date and end_date must be ISO dates (YYYY-MM-DD)",
+        )
+    if start > end:
+        raise HTTPException(
+            status_code=400,
+            detail="start_date must be on or before end_date",
+        )
 
 
 def _provider_failure(instrument_id: str, exc: Exception) -> HTTPException:
@@ -467,8 +486,14 @@ def refresh_instrument_bars(
     start_date: str,
     end_date: str,
     db: Session = Depends(get_db),
+    _admin: User = Depends(require_admin),
+    _rate_limit=Depends(rate_limit("market_data_refresh")),
 ):
     """Force-refresh market data for an instrument from the provider.
+
+    Admin-only write path: refresh triggers outbound provider work, so it is
+    gated server-side, validated, and rate limited before any provider call.
+    GET read endpoints are unaffected.
 
     Fetches fresh data from the provider and updates storage. Useful for:
     - Updating stale cached data
@@ -477,6 +502,8 @@ def refresh_instrument_bars(
 
     Returns the number of bars stored and data quality metadata.
     """
+    _validated_refresh_range(start_date, end_date)
+
     inst = get_instrument_by_id(instrument_id)
     if inst is None:
         raise HTTPException(404, f"Instrument not found: {instrument_id}")

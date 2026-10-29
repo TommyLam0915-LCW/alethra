@@ -16,6 +16,7 @@ RATE_LIMITS = {
     "backtest": 30,  # 30 backtests per window
     "auth": 20,  # 20 auth attempts per window
     "payment": 10,  # 10 payment intents per window
+    "market_data_refresh": 30,  # 30 provider-backfill requests per window
 }
 
 # Window duration (minutes)

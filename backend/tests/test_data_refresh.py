@@ -9,7 +9,7 @@ class TestDataRefreshEndpoint:
     """Test POST /instruments/{instrument_id}/bars/refresh endpoint."""
 
     @patch("app.api.instruments.get_data_provider")
-    def test_refresh_success(self, mock_get_provider, client, auth_headers):
+    def test_refresh_success(self, mock_get_provider, client, admin_headers):
         """Successful refresh stores bars and returns metadata."""
         mock_provider = MagicMock()
         mock_provider.provider_name = "Demo"
@@ -30,7 +30,7 @@ class TestDataRefreshEndpoint:
 
         response = client.post(
             "/api/v1/instruments/US:AAPL/bars/refresh?start_date=2024-01-02&end_date=2024-01-03",
-            headers=auth_headers,
+            headers=admin_headers,
         )
 
         assert response.status_code == 200
@@ -42,7 +42,7 @@ class TestDataRefreshEndpoint:
         assert "Successfully refreshed" in data["message"]
 
     @patch("app.api.instruments.get_data_provider")
-    def test_refresh_no_data(self, mock_get_provider, client, auth_headers):
+    def test_refresh_no_data(self, mock_get_provider, client, admin_headers):
         """Refresh with no data returns appropriate status."""
         mock_provider = MagicMock()
         mock_provider.provider_name = "Demo"
@@ -51,7 +51,7 @@ class TestDataRefreshEndpoint:
 
         response = client.post(
             "/api/v1/instruments/US:AAPL/bars/refresh?start_date=2024-01-02&end_date=2024-01-03",
-            headers=auth_headers,
+            headers=admin_headers,
         )
 
         assert response.status_code == 200
@@ -59,17 +59,17 @@ class TestDataRefreshEndpoint:
         assert data["status"] == "no_data"
         assert data["bars_stored"] == 0
 
-    def test_refresh_invalid_instrument(self, client, auth_headers):
+    def test_refresh_invalid_instrument(self, client, admin_headers):
         """Refresh for non-existent instrument returns 404."""
         response = client.post(
             "/api/v1/instruments/INVALID:SYMBOL/bars/refresh?start_date=2024-01-02&end_date=2024-01-03",
-            headers=auth_headers,
+            headers=admin_headers,
         )
 
         assert response.status_code == 404
 
     @patch("app.api.instruments.get_data_provider")
-    def test_refresh_provider_error(self, mock_get_provider, client, auth_headers):
+    def test_refresh_provider_error(self, mock_get_provider, client, admin_headers):
         """Provider failure returns 503 with provider status."""
         mock_provider = MagicMock()
         mock_provider.provider_id = "demo"
@@ -79,7 +79,7 @@ class TestDataRefreshEndpoint:
 
         response = client.post(
             "/api/v1/instruments/US:AAPL/bars/refresh?start_date=2024-01-02&end_date=2024-01-03",
-            headers=auth_headers,
+            headers=admin_headers,
         )
 
         assert response.status_code == 503
@@ -88,7 +88,7 @@ class TestDataRefreshEndpoint:
         assert data["provider_status"]["health"] == "disconnected"
 
     @patch("app.api.instruments.get_data_provider")
-    def test_refresh_updates_metadata(self, mock_get_provider, client, auth_headers):
+    def test_refresh_updates_metadata(self, mock_get_provider, client, admin_headers):
         """Refresh updates storage metadata with quality info."""
         mock_provider = MagicMock()
         mock_provider.provider_name = "Demo"
@@ -108,7 +108,7 @@ class TestDataRefreshEndpoint:
 
         response = client.post(
             "/api/v1/instruments/US:AAPL/bars/refresh?start_date=2024-01-02&end_date=2024-01-02",
-            headers=auth_headers,
+            headers=admin_headers,
         )
 
         assert response.status_code == 200
