@@ -144,6 +144,15 @@ def _split_group_key(row: dict) -> str:
     return str(row.get("decision_event_id"))
 
 
+def _most_frequent_label(labels: List[str]) -> Optional[str]:
+    if not labels:
+        return None
+    counts: Dict[str, int] = {}
+    for label in labels:
+        counts[label] = counts.get(label, 0) + 1
+    return sorted(counts.items(), key=lambda item: (-item[1], item[0]))[0][0]
+
+
 def grouped_temporal_split(
     group_sizes: List[int],
     train_ratio: float = 0.7,
@@ -300,6 +309,9 @@ def train_personal_model(
     baseline = DummyClassifier(strategy="most_frequent")
     baseline.fit(X_train_scaled, y_train)
     baseline_test = _class_metrics(y_test, baseline.predict(X_test_scaled), labels)
+    # The baseline rule is fixed here, from the training segment only, so a later
+    # evaluation can score it without ever looking at the test labels to choose it.
+    baseline_label = _most_frequent_label(y_train.tolist())
 
     warnings: List[str] = []
     if len(test_idx) < SMALL_TEST_THRESHOLD:
@@ -367,6 +379,11 @@ def train_personal_model(
         "feature_names": feature_names,
         "n_rows": len(ordered),
         "class_distribution": test_metrics["class_distribution"],
+        "baseline": {
+            "rule": "most_frequent_label_in_train_segment",
+            "label": baseline_label,
+            "source": "fixed_at_training",
+        },
         "label_definition": label_definition or {},
         "split": {
             "kind": "chronological_holdout",
@@ -439,6 +456,7 @@ def train_personal_model(
         "n_rows": len(ordered),
         "split": metadata["split"],
         "metrics": metadata["metrics"],
+        "baseline": metadata["baseline"],
         "warnings": warnings,
         "market_data_nature": market_data_nature or {},
         "reload_verified": True,

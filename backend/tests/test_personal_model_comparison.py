@@ -235,7 +235,7 @@ def test_comparison_metrics_are_bound_to_artifact_and_snapshot(
             assert identity["feature_names"]
             assert identity["split"]["kind"] == "chronological_holdout"
             assert identity["classes"] == sorted(pair["model_a"]["classes"])
-            assert evaluation.engine_version == "personal-comparison-v1"
+            assert evaluation.engine_version == "personal-comparison-v2"
             assert evaluation.data_cutoff_at
             assert evaluation.evaluator.value == "system"
             assert str(evaluation.id) in body["evaluation_record_ids"].values()
@@ -387,7 +387,10 @@ def test_cross_owner_is_refused(pair, client, auth_headers):
         client.post(
             f"/api/v1/ml/personal/models/{pair['model_a']['model_version_id']}/select",
             headers=other,
-            json={"rationale": "other owner attempt"},
+            json={
+                "rationale": "other owner attempt",
+                "expected_active_version_id": None,
+            },
         ).status_code
         == 404
     )
@@ -395,7 +398,10 @@ def test_cross_owner_is_refused(pair, client, auth_headers):
         client.post(
             f"/api/v1/ml/personal/records/{pair['record_id']}/rollback",
             headers=other,
-            json={"rationale": "other owner attempt"},
+            json={
+                "rationale": "other owner attempt",
+                "expected_active_version_id": None,
+            },
         ).status_code
         == 404
     )
@@ -695,18 +701,26 @@ def test_selection_records_rationale_and_leaves_history_unchanged(
     first = client.post(
         f"/api/v1/ml/personal/models/{model_b_id}/select",
         headers=auth_headers,
-        json={"rationale": "同一評估集上 macro F1 較好，先試用。", "comparison_run_id": run_id},
+        json={
+            "rationale": "同一評估集上 macro F1 較好，先試用。",
+            "comparison_run_id": run_id,
+            "expected_active_version_id": None,
+        },
     )
     assert first.status_code == 200, first.text
     assert first.json()["already_active"] is False
     assert first.json()["active_version"]["is_active"] is True
     assert first.json()["selection"]["previous_version_id"] is None
     assert first.json()["selection"]["comparison_run_id"] == run_id
+    assert first.json()["comparison_evidence"]["evaluation_purpose"] == "common_unseen"
 
     second = client.post(
         f"/api/v1/ml/personal/models/{model_a_id}/select",
         headers=auth_headers,
-        json={"rationale": "改用另一個版本觀察差異。"},
+        json={
+            "rationale": "改用另一個版本觀察差異。",
+            "expected_active_version_id": model_b_id,
+        },
     )
     assert second.status_code == 200, second.text
     assert second.json()["selection"]["previous_version_id"] == model_b_id
@@ -714,7 +728,10 @@ def test_selection_records_rationale_and_leaves_history_unchanged(
     duplicate = client.post(
         f"/api/v1/ml/personal/models/{model_a_id}/select",
         headers=auth_headers,
-        json={"rationale": "重複選同一個版本。"},
+        json={
+            "rationale": "重複選同一個版本。",
+            "expected_active_version_id": model_a_id,
+        },
     )
     assert duplicate.status_code == 200, duplicate.text
     assert duplicate.json()["already_active"] is True
@@ -766,7 +783,7 @@ def test_rollback_returns_previous_version_and_requires_history(
     empty = client.post(
         f"/api/v1/ml/personal/records/{record_id}/rollback",
         headers=auth_headers,
-        json={"rationale": "尚未切換過。"},
+        json={"rationale": "尚未切換過。", "expected_active_version_id": None},
     )
     assert empty.status_code == 409, empty.text
     assert empty.json()["detail"]["code"] == "no_previous_version"
@@ -775,7 +792,7 @@ def test_rollback_returns_previous_version_and_requires_history(
         client.post(
             f"/api/v1/ml/personal/models/{model_a_id}/select",
             headers=auth_headers,
-            json={"rationale": "先選 A。"},
+            json={"rationale": "先選 A。", "expected_active_version_id": None},
         ).status_code
         == 200
     )
@@ -783,7 +800,7 @@ def test_rollback_returns_previous_version_and_requires_history(
         client.post(
             f"/api/v1/ml/personal/models/{model_b_id}/select",
             headers=auth_headers,
-            json={"rationale": "再選 B。"},
+            json={"rationale": "再選 B。", "expected_active_version_id": model_a_id},
         ).status_code
         == 200
     )
@@ -791,7 +808,7 @@ def test_rollback_returns_previous_version_and_requires_history(
     rollback = client.post(
         f"/api/v1/ml/personal/records/{record_id}/rollback",
         headers=auth_headers,
-        json={"rationale": "B 表現較差，回退。"},
+        json={"rationale": "B 表現較差，回退。", "expected_active_version_id": model_b_id},
     )
     assert rollback.status_code == 200, rollback.text
     body = rollback.json()
@@ -830,7 +847,7 @@ def test_prediction_alias_follows_switch_and_old_versions_stay_usable(
         client.post(
             f"/api/v1/ml/personal/models/{model_a_id}/select",
             headers=auth_headers,
-            json={"rationale": "先用 A。"},
+            json={"rationale": "先用 A。", "expected_active_version_id": None},
         ).status_code
         == 200
     )
@@ -848,7 +865,7 @@ def test_prediction_alias_follows_switch_and_old_versions_stay_usable(
         client.post(
             f"/api/v1/ml/personal/models/{model_b_id}/select",
             headers=auth_headers,
-            json={"rationale": "改用 B。"},
+            json={"rationale": "改用 B。", "expected_active_version_id": model_a_id},
         ).status_code
         == 200
     )

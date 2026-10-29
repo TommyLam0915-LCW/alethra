@@ -248,6 +248,7 @@ def execute_personal_training(db: Session, job_id: uuid.UUID) -> TrainingJob:
                 "feature_names": result["feature_names"],
                 "n_rows": result["n_rows"],
                 "split": result["split"],
+                "baseline": result.get("baseline"),
                 "warnings": result["warnings"],
                 "reload_verified": result["reload_verified"],
                 "wording_zh": result["wording_zh"],
