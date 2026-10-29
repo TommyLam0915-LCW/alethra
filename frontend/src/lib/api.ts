@@ -7,6 +7,34 @@ export class ApiError extends Error {
   }
 }
 
+// FastAPI's `detail` is a string for HTTPException but an object or a list for
+// structured refusals (idempotency conflicts, validation errors). Stringifying
+// those produced the useless "[object Object]", which hid the actual reason
+// from the user and from the console.
+export function formatErrorDetail(detail: unknown): string {
+  if (typeof detail === 'string' && detail.trim()) return detail;
+  if (Array.isArray(detail)) {
+    const parts = detail.map((item) => {
+      if (typeof item === 'string') return item;
+      if (item && typeof item === 'object') {
+        const ent = item as Record<string, unknown>;
+        const loc = Array.isArray(ent.loc) ? ent.loc.join('.') : '';
+        if (typeof ent.msg === 'string') return loc ? `${loc}: ${ent.msg}` : ent.msg;
+        return JSON.stringify(item);
+      }
+      return String(item);
+    });
+    return parts.join('; ') || 'Request failed';
+  }
+  if (detail && typeof detail === 'object') {
+    const obj = detail as Record<string, unknown>;
+    if (typeof obj.message === 'string' && obj.message.trim()) return obj.message;
+    if (typeof obj.error === 'string' && obj.error.trim()) return obj.error;
+    return JSON.stringify(detail);
+  }
+  return 'Request failed';
+}
+
 export async function apiFetch(endpoint: string, options: RequestInit = {}) {
   const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
 
@@ -34,7 +62,7 @@ export async function apiFetch(endpoint: string, options: RequestInit = {}) {
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({ detail: 'Request failed' }));
-    throw new ApiError(error.detail || 'Request failed', response.status);
+    throw new ApiError(formatErrorDetail(error.detail), response.status);
   }
 
   // 204 No Content carries no body; response.json() would throw on it.
@@ -69,7 +97,7 @@ export async function apiFetchText(endpoint: string, options: RequestInit = {}):
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({ detail: 'Request failed' }));
-    throw new ApiError(error.detail || 'Request failed', response.status);
+    throw new ApiError(formatErrorDetail(error.detail), response.status);
   }
 
   return response.text();

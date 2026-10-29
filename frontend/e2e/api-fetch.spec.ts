@@ -45,6 +45,43 @@ test.describe('API client regression (apiFetch)', () => {
       })) as typeof fetch;
     await expect(apiFetch('/api/v1/research-drafts/broken')).rejects.toThrow();
   });
+
+  test('surfaces a structured detail object instead of "[object Object]"', async () => {
+    global.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          detail: {
+            error: 'idempotency_key_conflict',
+            message: 'idempotency_key was already used with a different order',
+            existing_order_id: 'abc',
+          },
+        }),
+        { status: 409, headers: { 'Content-Type': 'application/json' } }
+      )) as typeof fetch;
+    try {
+      await apiFetch('/api/v1/paper-portfolio/1/orders', { method: 'POST' });
+      throw new Error('Should have thrown');
+    } catch (err) {
+      expect(err).toBeInstanceOf(ApiError);
+      expect((err as ApiError).message).toBe(
+        'idempotency_key was already used with a different order'
+      );
+      expect((err as ApiError).message).not.toContain('[object Object]');
+    }
+  });
+
+  test('surfaces the first validation message from a detail array', async () => {
+    global.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          detail: [{ loc: ['body', 'quantity'], msg: 'Input should be greater than 0' }],
+        }),
+        { status: 422, headers: { 'Content-Type': 'application/json' } }
+      )) as typeof fetch;
+    await expect(apiFetch('/api/v1/paper-portfolio/1/orders', { method: 'POST' })).rejects.toThrow(
+      'body.quantity: Input should be greater than 0'
+    );
+  });
 });
 
 test.describe('ApiError class', () => {
