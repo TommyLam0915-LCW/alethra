@@ -92,6 +92,39 @@ class TestExperimentsEndpoints:
         assert resp.status_code == 200
         assert resp.json()["id"] == exp["id"]
 
+    def _list_row(self, client, auth_headers, experiment_id):
+        listed = client.get("/api/v1/experiments/", headers=auth_headers).json()
+        return next(e for e in listed if e["id"] == experiment_id)
+
+    def test_list_experiments_without_runs_has_no_latest_run(self, client, auth_headers):
+        exp = self._create_experiment(client, auth_headers)
+        assert self._list_row(client, auth_headers, exp["id"])["latest_run"] is None
+
+    def test_list_experiments_reports_latest_run_metrics(self, client, auth_headers):
+        exp = self._create_experiment(client, auth_headers)
+        run = client.post(
+            f"/api/v1/versions/{exp['current_version_id']}/runs", headers=auth_headers
+        ).json()
+
+        latest = self._list_row(client, auth_headers, exp["id"])["latest_run"]
+        assert latest["id"] == run["id"]
+        assert latest["status"] == "completed"
+        assert latest["total_return_pct"] == run["metrics"]["total_return_pct"]
+        assert latest["trading_days"] == run["metrics"]["trading_days"]
+        assert latest["completed_at"] is not None
+
+    def test_list_experiments_picks_newest_run(self, client, auth_headers):
+        exp = self._create_experiment(client, auth_headers)
+        client.post(
+            f"/api/v1/versions/{exp['current_version_id']}/runs", headers=auth_headers
+        )
+        newest = client.post(
+            f"/api/v1/versions/{exp['current_version_id']}/runs", headers=auth_headers
+        ).json()
+
+        latest = self._list_row(client, auth_headers, exp["id"])["latest_run"]
+        assert latest["id"] == newest["id"]
+
 
 class TestRunsEndpoints:
     def _create_experiment_and_version(self, client, auth_headers):

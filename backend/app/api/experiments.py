@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from typing import List
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.user import User
@@ -15,6 +16,7 @@ from app.api.schemas import (
     ExperimentUpdate,
     ExperimentResponse,
     ExperimentVersionResponse,
+    LatestRunSummary,
     ResearchNoteCreate,
     ResearchNoteResponse,
     AuditEventResponse,
@@ -97,7 +99,51 @@ def list_experiments(
     experiments = db.query(Experiment).filter(
         Experiment.owner_id == current_user.id
     ).order_by(Experiment.updated_at.desc()).all()
-    return experiments
+
+    latest_runs = _latest_runs_by_experiment(db, [e.id for e in experiments])
+
+    payloads: List[ExperimentResponse] = []
+    for experiment in experiments:
+        payload = ExperimentResponse.model_validate(experiment)
+        payload.latest_run = latest_runs.get(experiment.id)
+        payloads.append(payload)
+    return payloads
+
+
+def _latest_runs_by_experiment(db: Session, experiment_ids: List[UUID]) -> dict:
+    """Newest research run per experiment (by completion, else start)."""
+    if not experiment_ids:
+        return {}
+
+    from app.models.research_run import ResearchRun
+
+    ordering_key = func.coalesce(
+        ResearchRun.completed_at, ResearchRun.started_at
+    )
+    rows = (
+        db.query(ResearchRun, ExperimentVersion.experiment_id)
+        .join(ExperimentVersion, ResearchRun.experiment_version_id == ExperimentVersion.id)
+        .filter(ExperimentVersion.experiment_id.in_(experiment_ids))
+        .order_by(ordering_key.desc().nullslast(), ResearchRun.id.desc())
+        .all()
+    )
+
+    latest: dict = {}
+    for run, experiment_id in rows:
+        if experiment_id in latest:
+            continue
+        metrics = run.metrics or {}
+        latest[experiment_id] = LatestRunSummary(
+            id=run.id,
+            status=run.status.value if hasattr(run.status, "value") else str(run.status),
+            started_at=run.started_at,
+            completed_at=run.completed_at,
+            total_return_pct=metrics.get("total_return_pct"),
+            max_drawdown_pct=metrics.get("max_drawdown_pct"),
+            total_trades=metrics.get("total_trades"),
+            trading_days=metrics.get("trading_days"),
+        )
+    return latest
 
 
 @router.get("/{experiment_id}", response_model=ExperimentResponse)

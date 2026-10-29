@@ -81,6 +81,19 @@ class ExperimentUpdate(BaseModel):
     change_reason: Optional[str] = None
 
 
+class LatestRunSummary(BaseModel):
+    """Newest research run for an experiment, for the research list."""
+
+    id: UUID
+    status: str
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    total_return_pct: Optional[float] = None
+    max_drawdown_pct: Optional[float] = None
+    total_trades: Optional[int] = None
+    trading_days: Optional[int] = None
+
+
 class ExperimentResponse(BaseModel):
     id: UUID
     owner_id: UUID
@@ -97,6 +110,7 @@ class ExperimentResponse(BaseModel):
     current_version_id: Optional[UUID]
     created_at: datetime
     updated_at: datetime
+    latest_run: Optional[LatestRunSummary] = None
 
     model_config = ConfigDict(from_attributes=True)
 

@@ -3,7 +3,19 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { api } from '@/lib/api';
+import { describeRunStatus } from '@/lib/runStatus';
 import AppShell from '@/components/shell/AppShell';
+
+interface LatestRun {
+  id: string;
+  status: string;
+  started_at: string | null;
+  completed_at: string | null;
+  total_return_pct: number | null;
+  max_drawdown_pct: number | null;
+  total_trades: number | null;
+  trading_days: number | null;
+}
 
 interface Experiment {
   id: string;
@@ -11,9 +23,55 @@ interface Experiment {
   status: string;
   created_at: string;
   updated_at: string;
+  latest_run?: LatestRun | null;
 }
 
 type StatusFilter = 'all' | 'draft' | 'exploring' | 'locked' | 'archived';
+
+function LatestRunCell({ run }: { run: LatestRun | null }) {
+  if (!run) {
+    return <span className="research-table-result none">未測試</span>;
+  }
+
+  if (run.status !== 'completed' || run.total_return_pct == null) {
+    const view = describeRunStatus(run.status, run.started_at);
+    return (
+      <div>
+        <span
+          className="research-table-result none"
+          data-testid={view.stale ? 'latest-run-stale' : undefined}
+          title={view.detail}
+        >
+          {view.label}
+        </span>
+        {run.completed_at && (
+          <div className="research-table-meta">
+            {new Date(run.completed_at).toLocaleDateString('zh-Hant')}
+          </div>
+        )}
+        {view.stale && (
+          <div className="research-table-meta">
+            已超過 30 分鐘未完成，非目前執行中
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  const pct = run.total_return_pct;
+  return (
+    <div data-testid="latest-run-cell">
+      <span className={`research-table-result ${pct >= 0 ? 'pos' : 'neg'}`}>
+        {pct >= 0 ? '+' : ''}
+        {pct.toFixed(2)}%
+      </span>
+      <div className="research-table-meta">
+        {run.completed_at ? `${new Date(run.completed_at).toLocaleDateString('zh-Hant')} · ` : ''}
+        {run.trading_days != null ? `${run.trading_days} 個交易日` : `${run.total_trades ?? 0} 筆交易`}
+      </div>
+    </div>
+  );
+}
 
 export default function DashboardPage() {
   const [experiments, setExperiments] = useState<Experiment[]>([]);
@@ -146,7 +204,7 @@ export default function DashboardPage() {
                         </div>
                       </td>
                       <td>
-                        <span className="research-table-result none">—</span>
+                        <LatestRunCell run={exp.latest_run || null} />
                       </td>
                       <td>
                         <span className={`research-status ${exp.status}`}>

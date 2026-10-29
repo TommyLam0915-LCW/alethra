@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
+import { describeRunStatus } from '@/lib/runStatus';
 import { brand } from '@/lib/brand';
 
 interface Experiment {
@@ -1023,12 +1024,17 @@ export default function ExperimentDetailPage() {
                       style={{ cursor: 'pointer' }}
                     />
                     <div>
-                      <div style={{ fontSize: '14px', fontWeight: 500 }}>
-                        {run.status === 'completed' ? '已完成' : run.status === 'failed' ? '失敗' : '執行中'}
+                      <div style={{ fontSize: '14px', fontWeight: 500 }} data-testid={`run-status-${run.id}`}>
+                        {describeRunStatus(run.status, run.started_at).label}
                       </div>
                       <div style={{ fontSize: '12px', color: '#666' }}>
                         {run.started_at && new Date(run.started_at).toLocaleString('zh-Hant')}
                       </div>
+                      {describeRunStatus(run.status, run.started_at).stale && (
+                        <div style={{ fontSize: '12px', color: '#9a6700' }}>
+                          已超過 30 分鐘未完成，非目前執行中
+                        </div>
+                      )}
                     </div>
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>

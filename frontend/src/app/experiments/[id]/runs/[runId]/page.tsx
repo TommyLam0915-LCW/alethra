@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import { api, ApiError } from '@/lib/api';
+import { describeRunStatus } from '@/lib/runStatus';
 
 interface RunDetail {
   id: string;
@@ -290,8 +291,15 @@ export default function RunDetailPage() {
         >
           ← 返回實驗
         </Link>
-        <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>狀態：{run.status}</span>
+        <span style={{ fontSize: '12px', color: 'var(--text-muted)' }} data-testid="run-detail-status">
+          狀態：{describeRunStatus(run.status, run.started_at).label}
+        </span>
       </div>
+      {describeRunStatus(run.status, run.started_at).stale && (
+        <p style={{ margin: '0 0 16px', fontSize: '12px', color: 'var(--text-muted)' }}>
+          已超過 30 分鐘沒有完成記錄，也沒有 completed_at；這不是完成，也不是目前仍在執行。
+        </p>
+      )}
 
       <h1 style={{ margin: '0 0 8px', fontSize: '24px', color: 'var(--text-white)' }}>執行結果</h1>
 
