@@ -131,6 +131,34 @@ class ExperimentVersionResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class RevisionCreate(BaseModel):
+    """A new strategy version derived from an existing one.
+
+    The source version is never rewritten; it is named here so the lineage is
+    explicit rather than implied by version numbering.
+    """
+
+    base_version_id: UUID
+    strategy_spec: StrategySpec
+    change_reason: str = Field(..., min_length=1, max_length=2000)
+    expectation: Optional[str] = Field(None, max_length=2000)
+    request_id: Optional[UUID] = None
+
+
+class RevisionOutcomeUpdate(BaseModel):
+    met_expectation: bool
+    outcome: str = Field(..., min_length=1, max_length=4000)
+
+
+class RevisionResponse(BaseModel):
+    version: ExperimentVersionResponse
+    is_current: bool
+    changed_fields: List[str]
+    # "period_only": only the study window moved; "strategy_and_period": both;
+    # "strategy_only": the rules/costs/risk changed under the same window.
+    change_kind: str
+
+
 class ResearchRunResponse(BaseModel):
     id: UUID
     experiment_version_id: UUID

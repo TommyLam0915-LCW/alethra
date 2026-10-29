@@ -6,6 +6,7 @@ import Link from 'next/link';
 import { api } from '@/lib/api';
 import { describeRunStatus } from '@/lib/runStatus';
 import { brand } from '@/lib/brand';
+import RevisionPanel from '@/components/experiments/RevisionPanel';
 
 interface Experiment {
   id: string;
@@ -20,6 +21,7 @@ interface Experiment {
 
 interface Run {
   id: string;
+  experiment_version_id: string;
   status: string;
   metrics: any;
   warnings: string[] | null;
@@ -58,6 +60,7 @@ interface Version {
   change_reason: string | null;
   created_at: string;
   strategy_spec: any;
+  assumptions?: any;
   locked_at: string | null;
 }
 
@@ -105,6 +108,7 @@ const EVENT_LABELS: Record<string, string> = {
   warning_generated: '警告產生',
   strategy_locked: '策略鎖定',
   research_note_added: '研究筆記新增',
+  revision_outcome_recorded: '修訂結果記錄',
   export_generated: '匯出產生',
 };
 
@@ -469,6 +473,17 @@ export default function ExperimentDetailPage() {
             </div>
           )}
         </div>
+      )}
+
+      {versions.length > 0 && (
+        <RevisionPanel
+          experimentId={experimentId}
+          experimentStatus={experiment.status}
+          currentVersionId={experiment.current_version_id}
+          versions={versions}
+          runs={runs}
+          onChanged={loadData}
+        />
       )}
 
       <div className="card" style={{ marginBottom: '20px' }}>

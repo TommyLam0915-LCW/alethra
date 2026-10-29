@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from typing import List
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import ValidationError
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 from app.database import get_db
@@ -22,6 +23,10 @@ from app.api.schemas import (
     AuditEventResponse,
     VersionDiffResponse,
     VersionDiffEntry,
+    RevisionCreate,
+    RevisionOutcomeUpdate,
+    RevisionResponse,
+    StrategySpec,
 )
 from app.engine.backtest import compute_config_hash, run_backtest
 from app.services import emit_event
@@ -291,6 +296,329 @@ def list_versions(
         ExperimentVersion.experiment_id == experiment_id
     ).order_by(ExperimentVersion.version_number.desc()).all()
     return versions
+
+
+PERIOD_FIELDS = frozenset({"start_date", "end_date"})
+# Approval stamps are set per save, so they must never read as a strategy edit.
+IGNORED_CHANGE_FIELDS = frozenset({"user_approved_at"})
+# Execution-affecting keys the revision authoring surface does not cover.
+INTRADAY_KEYS = frozenset({"session", "timeframe"})
+
+
+def _canonical_spec(spec: dict | None) -> dict | None:
+    """Normalize a stored spec through the schema, or None if it cannot be.
+
+    Versions created before the schema grew defaults lack fields such as
+    schema_version/frequency, and some carry fixture-only keys (dataset,
+    synthetic). Comparing raw dicts would report those as research changes, and
+    copying them forward would carry stale dataset claims into a new version.
+    """
+    try:
+        model = StrategySpec.model_validate(spec or {})
+    except ValidationError:
+        return None
+    return model.model_dump(exclude={"user_approved_at"})
+
+
+def _flatten_spec(spec: dict | None, prefix: str = "") -> dict:
+    flat: dict = {}
+    for key, value in (spec or {}).items():
+        path = f"{prefix}{key}"
+        if isinstance(value, dict):
+            flat.update(_flatten_spec(value, f"{path}."))
+        else:
+            flat[path] = value
+    return flat
+
+
+def _classify_change(old_spec: dict, new_spec: dict) -> tuple[List[str], str]:
+    old_flat = _flatten_spec(old_spec)
+    new_flat = _flatten_spec(new_spec)
+    changed = sorted(
+        key
+        for key in set(old_flat) | set(new_flat)
+        if key not in IGNORED_CHANGE_FIELDS
+        and old_flat.get(key) != new_flat.get(key)
+    )
+    period_changed = any(key in PERIOD_FIELDS for key in changed)
+    strategy_changed = any(key not in PERIOD_FIELDS for key in changed)
+    if period_changed and strategy_changed:
+        return changed, "strategy_and_period"
+    if period_changed:
+        return changed, "period_only"
+    return changed, "strategy_only"
+
+
+def _research_signature(spec: dict | None) -> str:
+    """Hash the research configuration, ignoring per-save approval stamps.
+
+    Canonical form first so a revision cannot slip past duplicate detection by
+    differing only in schema defaults.
+    """
+    canonical = _canonical_spec(spec)
+    if canonical is None:
+        canonical = {
+            key: value
+            for key, value in (spec or {}).items()
+            if key not in IGNORED_CHANGE_FIELDS
+        }
+    return compute_config_hash(canonical)
+
+
+def _revision_meta(version: ExperimentVersion) -> dict | None:
+    assumptions = version.assumptions or {}
+    meta = assumptions.get("revision")
+    return meta if isinstance(meta, dict) else None
+
+
+def _build_revision_response(
+    experiment: Experiment,
+    version: ExperimentVersion,
+    changed_fields: List[str],
+    change_kind: str,
+) -> RevisionResponse:
+    return RevisionResponse(
+        version=ExperimentVersionResponse.model_validate(version),
+        is_current=experiment.current_version_id == version.id,
+        changed_fields=changed_fields,
+        change_kind=change_kind,
+    )
+
+
+@router.post(
+    "/{experiment_id}/revisions",
+    response_model=RevisionResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_revision(
+    experiment_id: UUID,
+    payload: RevisionCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Derive a new version from an existing one without rewriting the source.
+
+    A revision is a research hypothesis, so it is refused when nothing differs
+    from the source and when an identical configuration already exists: neither
+    would produce new evidence, only a duplicate row.
+    """
+    experiment = db.query(Experiment).filter(
+        Experiment.id == experiment_id,
+        Experiment.owner_id == current_user.id,
+    ).first()
+    if not experiment:
+        raise HTTPException(status_code=404, detail="Experiment not found")
+
+    base = db.query(ExperimentVersion).filter(
+        ExperimentVersion.id == payload.base_version_id,
+        ExperimentVersion.experiment_id == experiment_id,
+    ).first()
+    if not base:
+        raise HTTPException(status_code=404, detail="Base version not found")
+
+    existing_versions = db.query(ExperimentVersion).filter(
+        ExperimentVersion.experiment_id == experiment_id
+    ).all()
+
+    if payload.request_id is not None:
+        for version in existing_versions:
+            meta = _revision_meta(version)
+            if meta and meta.get("request_id") == str(payload.request_id):
+                return _build_revision_response(
+                    experiment,
+                    version,
+                    list(meta.get("changed_fields") or []),
+                    meta.get("change_kind") or "strategy_only",
+                )
+
+    base_spec = base.strategy_spec or {}
+    intraday_keys = sorted(set(base_spec) & INTRADAY_KEYS)
+    base_canonical = _canonical_spec(base_spec)
+    if intraday_keys or base_canonical is None:
+        unsupported = ", ".join(intraday_keys) if intraday_keys else "非日線頻率"
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"來源版本含有目前不支援的設定（{unsupported}），"
+                "修訂介面只支援日線策略，不會自動降級為日線；"
+                "請以支援的日線策略建立新實驗。"
+            ),
+        )
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    spec_dict = payload.strategy_spec.model_dump()
+    spec_dict["user_approved_at"] = now.isoformat()
+
+    changed_fields, change_kind = _classify_change(base_canonical, spec_dict)
+    if not changed_fields:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "這個修訂與來源版本完全相同，沒有可研究的變更；"
+                "請修改至少一個欄位，或直接沿用來源版本。"
+            ),
+        )
+
+    signature = _research_signature(spec_dict)
+    for version in existing_versions:
+        if _research_signature(version.strategy_spec) == signature:
+            raise HTTPException(
+                status_code=400,
+                detail=f"相同設定的版本已存在（v{version.version_number}），未建立重複版本。",
+            )
+
+    next_number = (
+        db.query(func.max(ExperimentVersion.version_number))
+        .filter(ExperimentVersion.experiment_id == experiment_id)
+        .scalar()
+        or 0
+    ) + 1
+
+    revision_meta = {
+        "of_version_id": str(base.id),
+        "of_version_number": base.version_number,
+        "expectation": payload.expectation,
+        "changed_fields": changed_fields,
+        "change_kind": change_kind,
+        "request_id": str(payload.request_id) if payload.request_id else None,
+        "outcome": None,
+        "met_expectation": None,
+        "outcome_recorded_at": None,
+        "outcome_recorded_by": None,
+    }
+
+    revision = ExperimentVersion(
+        experiment_id=experiment.id,
+        version_number=next_number,
+        strategy_spec=spec_dict,
+        assumptions={"revision": revision_meta},
+        change_reason=payload.change_reason.strip(),
+        config_hash=compute_config_hash(spec_dict),
+        user_approved_at=now,
+        created_by=current_user.id,
+    )
+    db.add(revision)
+    db.flush()
+
+    # Moving the current pointer would break the replay/simulation entry, which
+    # binds the experiment's current version and requires it to be locked.
+    source_locked = base.locked_at is not None
+    becomes_current = (
+        experiment.status != ExperimentStatus.locked and not source_locked
+    )
+    if becomes_current:
+        experiment.current_version_id = revision.id
+        experiment.updated_at = now
+
+    data_cutoff = spec_dict.get("end_date")
+    emit_event(
+        db,
+        entity_type="version",
+        entity_id=revision.id,
+        event_type="strategy_version_created",
+        actor_id=current_user.id,
+        payload={
+            "version_number": next_number,
+            "revision_of_version_id": str(base.id),
+            "revision_of_version_number": base.version_number,
+            "change_kind": change_kind,
+            "changed_fields": changed_fields,
+        },
+        rules_locked=source_locked,
+        data_cutoff_at=data_cutoff,
+    )
+    emit_event(
+        db,
+        entity_type="version",
+        entity_id=revision.id,
+        event_type="parameter_changed",
+        actor_id=current_user.id,
+        payload={
+            "change_reason": payload.change_reason.strip(),
+            "expectation": payload.expectation,
+            "version_number": next_number,
+            "template_type": spec_dict["template_type"],
+            "changed_fields": changed_fields,
+        },
+        rules_locked=source_locked,
+        data_cutoff_at=data_cutoff,
+    )
+
+    db.commit()
+    db.refresh(revision)
+    db.refresh(experiment)
+
+    return _build_revision_response(
+        experiment, revision, changed_fields, change_kind
+    )
+
+
+@router.patch(
+    "/{experiment_id}/revisions/{version_id}/outcome",
+    response_model=ExperimentVersionResponse,
+)
+def record_revision_outcome(
+    experiment_id: UUID,
+    version_id: UUID,
+    payload: RevisionOutcomeUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Record whether a revision met its stated expectation.
+
+    This is an annotation on a research outcome, not a strategy edit: the spec,
+    hash and lock identity are left untouched.
+    """
+    experiment = db.query(Experiment).filter(
+        Experiment.id == experiment_id,
+        Experiment.owner_id == current_user.id,
+    ).first()
+    if not experiment:
+        raise HTTPException(status_code=404, detail="Experiment not found")
+
+    version = db.query(ExperimentVersion).filter(
+        ExperimentVersion.id == version_id,
+        ExperimentVersion.experiment_id == experiment_id,
+    ).first()
+    if not version:
+        raise HTTPException(status_code=404, detail="Version not found")
+
+    meta = _revision_meta(version)
+    if meta is None:
+        raise HTTPException(
+            status_code=400,
+            detail="此版本不是修訂版本，沒有可記錄的預期結果。",
+        )
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    updated_meta = {
+        **meta,
+        "outcome": payload.outcome.strip(),
+        "met_expectation": payload.met_expectation,
+        "outcome_recorded_at": now.isoformat(),
+        "outcome_recorded_by": str(current_user.id),
+    }
+    version.assumptions = {
+        **(version.assumptions or {}),
+        "revision": updated_meta,
+    }
+
+    emit_event(
+        db,
+        entity_type="version",
+        entity_id=version.id,
+        event_type="revision_outcome_recorded",
+        actor_id=current_user.id,
+        payload={
+            "version_number": version.version_number,
+            "met_expectation": payload.met_expectation,
+        },
+        data_cutoff_at=(version.strategy_spec or {}).get("end_date"),
+    )
+
+    db.commit()
+    db.refresh(version)
+    return version
 
 
 @router.get("/{experiment_id}/timeline", response_model=List[AuditEventResponse])

@@ -144,6 +144,31 @@ export const api = {
     compare: (runA: string, runB: string) =>
       apiFetch(`/api/v1/runs/compare?run_a=${runA}&run_b=${runB}`),
   },
+  revisions: {
+    create: (
+      experimentId: string,
+      data: {
+        base_version_id: string;
+        strategy_spec: any;
+        change_reason: string;
+        expectation?: string | null;
+        request_id?: string;
+      }
+    ) =>
+      apiFetch(`/api/v1/experiments/${experimentId}/revisions`, {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    recordOutcome: (
+      experimentId: string,
+      versionId: string,
+      data: { met_expectation: boolean; outcome: string }
+    ) =>
+      apiFetch(
+        `/api/v1/experiments/${experimentId}/revisions/${versionId}/outcome`,
+        { method: 'PATCH', body: JSON.stringify(data) }
+      ),
+  },
   savedComparisons: {
     create: (data: {
       experiment_id: string;
