@@ -6,6 +6,10 @@ from typing import Any, Dict, List, Optional
 from app.ml.features import build_feature_matrix
 from app.ml.trainer import load_model
 
+# `confidence` is 2*|P(up) - 0.5|: how far the model output sits from an even
+# split. It is not a calibrated probability and must not be read as accuracy.
+SCORE_TYPE = "uncalibrated_margin"
+
 
 def predict(
     model_id: str,
@@ -68,12 +72,14 @@ def predict(
             "direction": "UP" if pred == 1 else "DOWN",
             "probability": round(prob, 4),
             "confidence": round(confidence, 4),
+            "score_type": SCORE_TYPE,
         })
 
     return {
         "model_id": model_id,
         "model_type": metadata.get("model_type", "unknown"),
         "instrument_id": metadata.get("instrument_id", "unknown"),
+        "score_type": SCORE_TYPE,
         "predictions": results,
         "n_predictions": len(results),
         "date_range": {
@@ -97,6 +103,7 @@ def predict_latest(
         "model_id": model_id,
         "model_type": result.get("model_type", "unknown"),
         "instrument_id": result.get("instrument_id", "unknown"),
+        "score_type": SCORE_TYPE,
         "latest_prediction": latest,
         "generated_at": latest["date"],
     }

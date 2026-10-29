@@ -311,18 +311,24 @@ class TestPrediction:
         bars = _make_bars(100, seed=99)
         result = predict(trained_model_id, bars)
         assert result["model_id"] == trained_model_id
+        assert result["score_type"] == "uncalibrated_margin"
         assert len(result["predictions"]) > 0
         for p in result["predictions"]:
             assert p["signal"] in ("BUY", "SELL")
             assert p["direction"] in ("UP", "DOWN")
             assert 0 <= p["probability"] <= 1
             assert 0 <= p["confidence"] <= 1
+            # Confidence is the 2*|P(up)-0.5| margin, not a calibrated score.
+            assert p["score_type"] == "uncalibrated_margin"
+            assert abs(p["confidence"] - 2 * abs(p["probability"] - 0.5)) < 0.0002
 
     def test_predict_latest(self, trained_model_id):
         bars = _make_bars(100, seed=99)
         result = predict_latest(trained_model_id, bars)
         assert result["model_id"] == trained_model_id
+        assert result["score_type"] == "uncalibrated_margin"
         assert "latest_prediction" in result
+        assert result["latest_prediction"]["score_type"] == "uncalibrated_margin"
         pred = result["latest_prediction"]
         assert pred["signal"] in ("BUY", "SELL")
 
@@ -399,6 +405,44 @@ class TestMLAPIEndpoints:
         assert job["status"] == "completed"
         assert job["best_params"]["model_id"] is not None
         assert "test" in job["results"]["metrics"]
+
+    def _fresh_user_token(self, client, email):
+        client.post("/api/auth/register", json={
+            "email": email,
+            "password": "testpassword123",
+            "display_name": "Quota User",
+        })
+        resp = client.post("/api/auth/login", json={
+            "email": email,
+            "password": "testpassword123",
+        })
+        return resp.json()["access_token"]
+
+    def test_entitlement_reports_free_plan_quota(self, client):
+        token = self._fresh_user_token(client, "ml-quota-fresh@example.com")
+        resp = client.get("/api/v1/ml/entitlement", headers=self._headers(token))
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["quota_type"] == "ai_usage"
+        assert data["source"] == "free_plan"
+        assert data["limit"] == 10
+        assert data["used"] == 0
+        assert data["reserved"] == 0
+        assert data["remaining"] == 10
+        assert data["entitlement_active"] is True
+
+    def test_entitlement_reports_queued_reservation(self, client):
+        token = self._fresh_user_token(client, "ml-quota-queued@example.com")
+        self._submit_train(
+            client,
+            token,
+            "instrument_id=US:AAPL&model_type=baseline&start_date=2024-01-02&end_date=2024-12-31",
+        )
+        data = client.get("/api/v1/ml/entitlement", headers=self._headers(token)).json()
+        # The job is queued, not settled: 1 unit reserved, 0 consumed.
+        assert data["used"] == 0
+        assert data["reserved"] == 1
+        assert data["remaining"] == 9
 
     def test_train_model_invalid_type(self, client, auth_token):
         resp = client.post(
@@ -912,3 +956,51 @@ class TestInferenceUsageTracking:
                 headers=self._headers(auth_token),
             )
         assert resp2.status_code == 200, f"Subsequent valid {endpoint_suffix} request must succeed after rollback"
+
+
+class TestMlCancelQuotaRelease:
+    """Cancelling a queued ML job must release its ai_usage reservation.
+
+    `POST /api/v1/ml/train` reserves one unit before the job is queued. If the
+    user cancels the job while it is still pending, no worker will ever run it,
+    so the cancel path is the only place that can return the reservation. A
+    stranded `reserved` row permanently reduces the user's remaining quota.
+    """
+
+    def test_cancel_pending_ml_job_releases_reservation(self, client, auth_headers):
+        from uuid import UUID
+
+        from tests.conftest import TestSession
+        from app.models.quota import QuotaReservation
+        from app.models.training import TrainingJob
+
+        before = client.get("/api/v1/ml/entitlement", headers=auth_headers).json()
+        resp = client.post(
+            "/api/v1/ml/train?instrument_id=US:AAPL&model_type=logistic_regression",
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200, resp.text
+        job_id = resp.json()["job_id"]
+
+        during = client.get("/api/v1/ml/entitlement", headers=auth_headers).json()
+        assert during["reserved"] == before["reserved"] + 1
+        assert during["remaining"] == before["remaining"] - 1
+
+        cancel = client.post(f"/api/v1/training/jobs/{job_id}/cancel", headers=auth_headers)
+        assert cancel.status_code == 200, cancel.text
+        assert cancel.json()["status"] == "cancelled"
+
+        after = client.get("/api/v1/ml/entitlement", headers=auth_headers).json()
+        assert after["reserved"] == before["reserved"], after
+        assert after["remaining"] == before["remaining"], after
+
+        db = TestSession()
+        try:
+            job = db.query(TrainingJob).filter(TrainingJob.id == UUID(job_id)).first()
+            reservation_id = job.strategy_spec_snapshot["quota_reservation_id"]
+            reservation = db.query(QuotaReservation).filter(
+                QuotaReservation.id == UUID(reservation_id)
+            ).first()
+            assert reservation.status == "released"
+        finally:
+            db.close()

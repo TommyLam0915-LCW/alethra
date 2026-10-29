@@ -211,6 +211,42 @@ def check_quota_available(
     return (used + reserved + required) <= limit
 
 
+def get_quota_status(db: Session, user_id: UUID, quota_type: str) -> dict:
+    """Read-only snapshot of one quota type for display.
+
+    Mirrors ``check_quota_available`` / ``reserve_quota`` so the UI shows the
+    same numbers the enforcement uses.  Never consumes quota.
+    """
+    if quota_type not in VALID_QUOTA_TYPES:
+        raise ValueError(f"Unknown quota_type: {quota_type!r}")
+
+    entitlement = get_entitlement(db, user_id)
+    limit = _get_limit(entitlement, quota_type)
+    used = get_quota_used(db, user_id, quota_type)
+    reserved = _get_reserved(db, user_id, quota_type)
+
+    return {
+        "quota_type": quota_type,
+        "limit": limit,
+        "used": used,
+        "reserved": reserved,
+        "remaining": None if limit is None else max(limit - used - reserved, 0),
+        "unlimited": limit is None,
+        "entitlement_active": (
+            True if entitlement is None else check_entitlement_active(entitlement)
+        ),
+        "source": "entitlement" if entitlement is not None else "free_plan",
+        "expiry_date": (
+            entitlement.expiry_date.isoformat()
+            if entitlement is not None and entitlement.expiry_date
+            else None
+        ),
+        "support_tier": (
+            entitlement.support_tier.value if entitlement is not None else None
+        ),
+    }
+
+
 # ── Two-phase quota flow ────────────────────────────────────────────────────
 
 def reserve_quota(

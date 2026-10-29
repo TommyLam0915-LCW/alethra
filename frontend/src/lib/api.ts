@@ -456,6 +456,7 @@ export const api = {
       if (params.end_date) qs.set('end_date', params.end_date);
       return apiFetch(`/api/v1/ml/train?${qs}`, { method: 'POST' });
     },
+    entitlement: () => apiFetch('/api/v1/ml/entitlement'),
     listModels: () => apiFetch('/api/v1/ml/models'),
     getModel: (modelId: string) => apiFetch(`/api/v1/ml/models/${modelId}`),
     deleteModel: (modelId: string) => apiFetch(`/api/v1/ml/models/${modelId}`, { method: 'DELETE' }),
@@ -471,6 +472,15 @@ export const api = {
       const qs = instrumentId ? `?instrument_id=${instrumentId}` : '';
       return apiFetch(`/api/v1/ml/models/${modelId}/predict-latest${qs}`, { method: 'POST' });
     },
+    capabilities: () => apiFetch('/api/v1/ml/capabilities'),
+    personalizationEligibility: () => apiFetch('/api/v1/ml/personalization/eligibility'),
+    grantPersonalizationConsent: (strategyVersionIds: string[]) =>
+      apiFetch('/api/v1/ml/personalization/consent', {
+        method: 'PUT',
+        body: JSON.stringify({ strategy_version_ids: strategyVersionIds, confirm: true }),
+      }),
+    revokePersonalizationConsent: () =>
+      apiFetch('/api/v1/ml/personalization/consent', { method: 'DELETE' }),
   },
   billing: {
     listPlans: () => apiFetch('/api/v1/plans'),

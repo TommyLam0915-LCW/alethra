@@ -169,6 +169,89 @@ class TestFreePlanEntitlement:
             assert FREE_PLAN_ENTITLEMENT[field] >= 0
 
 
+class TestQuotaStatus:
+    """get_quota_status must report the same numbers enforcement uses."""
+
+    def test_free_plan_defaults(self, db):
+        from app.auth.entitlements import get_quota_status
+        status = get_quota_status(db, uuid4(), "ai_usage")
+        assert status["source"] == "free_plan"
+        assert status["limit"] == FREE_PLAN_ENTITLEMENT["ai_usage_limit"]
+        assert status["used"] == 0
+        assert status["reserved"] == 0
+        assert status["remaining"] == FREE_PLAN_ENTITLEMENT["ai_usage_limit"]
+        assert status["unlimited"] is False
+        assert status["entitlement_active"] is True
+        assert status["expiry_date"] is None
+
+    def test_entitlement_source_and_expiry(self, db):
+        from app.auth.entitlements import get_quota_status
+        from app.models.user import User
+        user = User(id=uuid4(), email="qs1@example.com", display_name="QS", password_hash="x")
+        db.add(user)
+        db.flush()
+        expiry = utcnow() + timedelta(days=30)
+        db.add(PilotEntitlement(
+            user_id=user.id,
+            pilot_access=True,
+            ai_usage_limit=25,
+            expiry_date=expiry,
+        ))
+        db.flush()
+
+        status = get_quota_status(db, user.id, "ai_usage")
+        assert status["source"] == "entitlement"
+        assert status["limit"] == 25
+        assert status["remaining"] == 25
+        assert status["entitlement_active"] is True
+        assert status["expiry_date"] == expiry.isoformat()
+
+    def test_remaining_subtracts_used_and_reserved(self, db):
+        from app.auth.entitlements import get_quota_status
+        from app.models.quota import QuotaReservation
+        from app.models.user import User
+        user = User(id=uuid4(), email="qs2@example.com", display_name="QS", password_hash="x")
+        db.add(user)
+        db.flush()
+        db.add(QuotaCounter(user_id=user.id, quota_type="ai_usage", period="lifetime", used=4))
+        db.add(QuotaReservation(user_id=user.id, quota_type="ai_usage", amount=3, status="reserved"))
+        db.flush()
+
+        status = get_quota_status(db, user.id, "ai_usage")
+        assert status["used"] == 4
+        assert status["reserved"] == 3
+        assert status["remaining"] == FREE_PLAN_ENTITLEMENT["ai_usage_limit"] - 7
+
+    def test_expired_entitlement_is_reported_inactive(self, db):
+        from app.auth.entitlements import get_quota_status
+        from app.models.user import User
+        user = User(id=uuid4(), email="qs3@example.com", display_name="QS", password_hash="x")
+        db.add(user)
+        db.flush()
+        db.add(PilotEntitlement(
+            user_id=user.id,
+            pilot_access=True,
+            ai_usage_limit=5,
+            expiry_date=utcnow() - timedelta(days=1),
+        ))
+        db.flush()
+
+        status = get_quota_status(db, user.id, "ai_usage")
+        assert status["entitlement_active"] is False
+
+    def test_display_only_does_not_consume_quota(self, db):
+        from app.auth.entitlements import get_quota_status
+        user_id = uuid4()
+        get_quota_status(db, user_id, "ai_usage")
+        get_quota_status(db, user_id, "ai_usage")
+        assert get_quota_used(db, user_id, "ai_usage") == 0
+
+    def test_unknown_quota_type_raises(self, db):
+        from app.auth.entitlements import get_quota_status
+        with pytest.raises(ValueError):
+            get_quota_status(db, uuid4(), "nonexistent")
+
+
 class TestAtomicConsume:
     def test_consume_multiple_times(self, db):
         user_id = uuid4()

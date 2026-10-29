@@ -8,8 +8,15 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.auth.jwt import get_current_user
-from app.auth.entitlements import require_entitlement, reserve_quota, release_reservation, settle_reservation
+from app.auth.entitlements import (
+    require_entitlement,
+    reserve_quota,
+    release_reservation,
+    settle_reservation,
+    get_quota_status,
+)
 from app.auth.api_keys import check_api_key_scope
+from app.models.training import TrainingJob
 from app.models.user import User
 from app.services.ml_training import (
     create_ml_training_job,
@@ -96,13 +103,67 @@ def start_ml_training(
     }
 
 
+@router.get("/entitlement")
+def get_ml_entitlement(
+    current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope("read")),
+    db: Session = Depends(get_db),
+):
+    """AI-usage quota state for the caller.
+
+    Training and inference reserve/settle ``ai_usage`` units and refuse with
+    429 once the allowance is spent; the UI reads this endpoint to show the
+    remaining allowance before the user hits that refusal.
+    """
+    return get_quota_status(db, current_user.id, "ai_usage")
+
+
 @router.get("/models")
 def list_trained_models(
     current_user: User = Depends(get_current_user),
     _scope_check=Depends(check_api_key_scope("read")),
+    db: Session = Depends(get_db),
 ):
-    """List all trained model artifacts owned by the current user."""
+    """List all trained model artifacts owned by the current user.
+
+    Artifacts trained before metrics/provenance were written into
+    ``metadata.json`` are backfilled from their training job's recorded
+    results so the model card can show evaluation instead of "-".
+    """
     models = list_models(user_id=str(current_user.id))
+
+    legacy = [
+        m for m in models
+        if not m.get("metrics") and m.get("training_job_id")
+    ]
+    if legacy:
+        job_ids = []
+        for m in legacy:
+            try:
+                job_ids.append(uuid.UUID(str(m["training_job_id"])))
+            except ValueError:
+                continue
+        jobs = (
+            db.query(TrainingJob).filter(
+                TrainingJob.id.in_(job_ids),
+                TrainingJob.user_id == current_user.id,
+            ).all()
+            if job_ids else []
+        )
+        by_id = {str(job.id): job for job in jobs}
+        for m in legacy:
+            job = by_id.get(str(m["training_job_id"]))
+            if job is None or not job.results:
+                continue
+            m["metrics"] = job.results.get("metrics")
+            params = job.best_params or {}
+            if not m.get("data_provenance") and params.get("data_nature"):
+                m["data_provenance"] = {
+                    "data_source": params.get("data_source"),
+                    "data_nature": params.get("data_nature"),
+                    "is_synthetic": params.get("data_nature") == "synthetic",
+                }
+
     return {
         "models": models,
         "total": len(models),
@@ -235,6 +296,10 @@ def run_prediction(
             "data_nature": data_nature,
             "bars_count": len(bars),
             "prediction_type": "predict",
+            # Lineage: this inference -> artifact -> training job.
+            "model_id": model_id,
+            "training_job_id": metadata.get("training_job_id"),
+            "model_instrument_id": metadata.get("instrument_id"),
         },
     )
 
@@ -243,6 +308,7 @@ def run_prediction(
     return {
         **result,
         "data_nature": data_nature,
+        "training_job_id": metadata.get("training_job_id"),
         "disclaimer": "Predictions are for research purposes only. Not trading advice.",
         "disclaimer_zh": "預測僅供研究用途。非交易建議。",
     }
@@ -315,9 +381,17 @@ def run_latest_prediction(
             "data_nature": data_nature,
             "bars_count": len(bars),
             "prediction_type": "predict-latest",
+            # Lineage: this inference -> artifact -> training job.
+            "model_id": model_id,
+            "training_job_id": metadata.get("training_job_id"),
+            "model_instrument_id": metadata.get("instrument_id"),
         },
     )
 
     db.commit()
 
-    return {**result, "data_nature": data_nature}
+    return {
+        **result,
+        "data_nature": data_nature,
+        "training_job_id": metadata.get("training_job_id"),
+    }

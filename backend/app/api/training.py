@@ -14,6 +14,7 @@ from app.models.experiment import Experiment
 from app.models.experiment_version import ExperimentVersion
 from app.models.training import TrainingJob, TrainingJobStatus
 from app.auth.jwt import get_current_user
+from app.auth.entitlements import release_reservation
 from app.auth.safety import safety_control
 from app.models.kill_switch import KillSwitchScope
 from app.services.training import (
@@ -176,6 +177,23 @@ def list_training_jobs(
     return query.order_by(TrainingJob.created_at.desc()).all()
 
 
+def _release_queued_quota(db: Session, job: TrainingJob) -> None:
+    """Return the ai_usage unit reserved when this job was queued.
+
+    A pending job is never claimed by a worker, so cancelling it is the last
+    chance to release the reservation. Leaving it reserved would permanently
+    reduce the user's remaining quota.
+    """
+    raw = (job.strategy_spec_snapshot or {}).get("quota_reservation_id")
+    if not raw:
+        return
+    try:
+        release_reservation(db, UUID(str(raw)))
+    except ValueError:
+        # Already released/settled by a concurrent path — nothing to return.
+        pass
+
+
 @router.post("/jobs/{job_id}/cancel", response_model=TrainingJobResponse)
 def cancel_training_job(
     job_id: UUID,
@@ -184,7 +202,8 @@ def cancel_training_job(
 ):
     """Cancel a pending or running training job.
 
-    - Pending jobs are cancelled immediately (status -> cancelled).
+    - Pending jobs are cancelled immediately (status -> cancelled) and any
+      queued quota reservation is released.
     - Running jobs have a cancellation flag set; the sweep loop will detect
       it between iterations and transition the status to cancelled.
     """
@@ -199,6 +218,7 @@ def cancel_training_job(
         job.status = TrainingJobStatus.cancelled
         job.cancelled_at = utcnow()
         job.completed_at = utcnow()
+        _release_queued_quota(db, job)
         db.commit()
         db.refresh(job)
         return job

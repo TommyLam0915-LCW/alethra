@@ -237,11 +237,26 @@ def execute_ml_training(
             for b in bars
         ]
 
+        provider_status = provider.get_status() or {}
+        last_bar = bars[-1].date if bars else None
+        data_provenance = {
+            "provider_name": provider_status.get("provider_name"),
+            "feed_mode": provider_status.get("feed_mode"),
+            "data_source": data_source,
+            "data_nature": data_nature,
+            "is_synthetic": data_nature == "synthetic",
+            "last_bar_date": (
+                last_bar.isoformat() if hasattr(last_bar, "isoformat") else last_bar
+            ),
+        }
+
         result = train_model(
             bars=bar_dicts,
             instrument_id=instrument_id,
             model_type=model_type,
             user_id=str(job.user_id),
+            training_job_id=str(job.id),
+            data_provenance=data_provenance,
         )
 
         job.results = result

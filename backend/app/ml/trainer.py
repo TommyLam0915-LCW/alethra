@@ -61,6 +61,8 @@ def train_model(
     train_ratio: float = 0.7,
     val_ratio: float = 0.15,
     user_id: Optional[str] = None,
+    training_job_id: Optional[str] = None,
+    data_provenance: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Train a model on OHLCV bar data.
 
@@ -70,6 +72,9 @@ def train_model(
         model_type: "logistic_regression" or "gradient_boosting" or "baseline".
         train_ratio: Fraction of data for training.
         val_ratio: Fraction of data for validation.
+        data_provenance: Provenance of the bars actually trained on (nature,
+            provider, source). Stored in the artifact so model cards can show
+            metrics and label synthetic data without joining the job table.
 
     Returns:
         Dict with model artifact path, evaluation metrics, and metadata.
@@ -147,12 +152,22 @@ def train_model(
             "instrument_id": instrument_id,
             "model_type": model_type,
             "user_id": user_id,
+            # Artifact -> job identity so lineage does not rely on scanning
+            # training_jobs.results for a matching model_id.
+            "training_job_id": training_job_id,
             "trained_at": utcnow().isoformat(),
             "n_train": len(train_idx),
             "n_val": len(val_idx),
             "n_test": len(test_idx),
             "n_features": len(feature_names),
             "feature_names": feature_names,
+            "metrics": {
+                "train": train_metrics,
+                "val": val_metrics,
+                "test": test_metrics,
+                "baseline_test": baseline_test,
+            },
+            "data_provenance": data_provenance,
             "date_range": {
                 "start": valid_dates[0],
                 "end": valid_dates[-1],

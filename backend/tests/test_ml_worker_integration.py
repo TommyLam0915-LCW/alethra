@@ -89,6 +89,14 @@ class _FakeProvider:
     def get_data_quality(self, instrument_id):
         return {"data_nature": "synthetic", "adjustment": "not_applicable"}
 
+    def get_status(self):
+        return {
+            "provider_id": self.provider_id,
+            "provider_name": self.provider_name,
+            "feed_mode": self.feed_mode,
+            "available": True,
+        }
+
 
 class TestWorkerQuotaLifecycle:
     """Quota reserve (API) → settle (worker, success) / release (worker, failure)."""
@@ -337,6 +345,8 @@ class TestLatestDataWindows:
         resp = client.post(f"/api/v1/ml/models/{model_id}/predict-latest", headers=auth_headers)
         assert resp.status_code == 200, resp.text
         assert "latest_prediction" in resp.json()
+        # The inference names the job that produced its artifact.
+        assert resp.json()["training_job_id"] == job_id
 
 
 class TestArtifactReload:
@@ -362,9 +372,44 @@ class TestArtifactReload:
         )
         assert metadata["instrument_id"] == "US:AAPL"
         assert feature_names
+        # Artifact -> job lineage is written at training time, not re-derived.
+        assert metadata["training_job_id"] == job_id
+        assert detail.json()["best_params"]["model_id"] == model_id
 
         models = list_models(user_id=str(self._owner_id(client, auth_headers)))
         assert model_id in [m["model_id"] for m in models]
+
+    def test_worker_artifact_carries_metrics_and_provenance(self, client, auth_headers):
+        """The UI reads evaluation and provenance off the artifact.
+
+        Without them the model card silently shows "測試準確率：-" and never
+        discloses that the training data was synthetic.
+        """
+        resp = client.post(
+            "/api/v1/ml/train?instrument_id=US:AAPL&model_type=baseline&start_date=2024-01-02&end_date=2024-12-31",
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200, resp.text
+        job_id = resp.json()["job_id"]
+
+        _drain_worker()
+
+        from app.ml.trainer import load_model
+
+        detail = client.get(f"/api/v1/training/jobs/{job_id}", headers=auth_headers).json()
+        model_id = detail["best_params"]["model_id"]
+
+        _, _, metadata, _ = load_model(
+            model_id, user_id=str(self._owner_id(client, auth_headers))
+        )
+        assert metadata["metrics"]["test"]["accuracy"] == detail["results"]["metrics"]["test"]["accuracy"]
+        assert metadata["data_provenance"]["is_synthetic"] is True
+        assert metadata["data_provenance"]["data_nature"] == "synthetic"
+
+        models = client.get("/api/v1/ml/models", headers=auth_headers).json()["models"]
+        entry = next(m for m in models if m["model_id"] == model_id)
+        assert entry["metrics"]["test"]["accuracy"] == metadata["metrics"]["test"]["accuracy"]
+        assert entry["data_provenance"]["is_synthetic"] is True
 
     def _owner_id(self, client, auth_headers):
         from tests.conftest import TestSession

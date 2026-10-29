@@ -90,6 +90,10 @@ from app.models.human_decision import (
     HumanDecisionAction,
     HumanDecisionExecutionStatus,
 )
+from app.models.personalization import (
+    PersonalizationConsent,
+    PERSONALIZATION_TRAINING_PURPOSE,
+)
 
 __all__ = [
     "User",
@@ -194,4 +198,6 @@ __all__ = [
     "HumanDecisionEvent",
     "HumanDecisionAction",
     "HumanDecisionExecutionStatus",
+    "PersonalizationConsent",
+    "PERSONALIZATION_TRAINING_PURPOSE",
 ]
