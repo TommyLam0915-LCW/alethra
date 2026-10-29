@@ -97,6 +97,7 @@ def test_fresh_version_answers_five_questions_and_next_step(client, auth_headers
         "next",
     ]
     assert body["next_action"]["kind"] == "grant_consent"
+    assert body["next_action"]["href"] == "#personalization-eligibility"
     assert body["missing"][0]["code"] == "CONSENT_MISSING"
     assert _step(body, "missing")["state"] == "blocked"
     assert _step(body, "result")["state"] == "empty"
@@ -126,7 +127,12 @@ def test_missing_data_is_quantified_in_decisions_and_classes(client, auth_header
     assert "只有 1 個動作類別" in single_class["text_zh"]
     assert "買入 4 筆" in single_class["text_zh"]
     assert body["next_action"]["kind"] == "review_decisions"
-    assert body["next_action"]["detail_zh"] == insufficient["text_zh"]
+    assert insufficient["text_zh"] in body["next_action"]["detail_zh"]
+    assert "模擬工作區" in body["next_action"]["detail_zh"]
+    # The next step must point at a real product entry, not require an id paste.
+    assert body["next_action"]["href"].startswith("/experiments/")
+    assert body["next_action"]["href"].endswith("/simulation")
+    assert body["strategy"]["experiment_id"] in body["next_action"]["href"]
 
 
 def test_journey_walks_snapshot_job_model_and_active_version(
@@ -140,11 +146,13 @@ def test_journey_walks_snapshot_job_model_and_active_version(
 
     body = _journey(client, auth_headers, version_id)
     assert body["next_action"]["kind"] == "create_snapshot"
+    assert body["next_action"]["href"] == "#pl-preview"
     assert body["missing"][0].get("clear") is True
 
     snapshot = _build_snapshot(client, auth_headers, version_id)
     body = _journey(client, auth_headers, version_id)
     assert body["next_action"]["kind"] == "start_training"
+    assert body["next_action"]["href"] == "#pl-training"
     assert body["counts"]["snapshots"] == 1
     assert str(snapshot["snapshot_id"])[:8] in _step(body, "result")["summary_zh"]
 
@@ -157,6 +165,7 @@ def test_journey_walks_snapshot_job_model_and_active_version(
     job_id = started.json()["job_id"]
     body = _journey(client, auth_headers, version_id)
     assert body["next_action"]["kind"] == "wait_worker"
+    assert body["next_action"]["href"] is None
     assert body["counts"]["training_jobs"] == 1
     assert body["worker"]["pending_jobs"] == 1
     assert "worker 未確認在運行" in body["worker"]["waiting_reason_zh"]
@@ -174,6 +183,7 @@ def test_journey_walks_snapshot_job_model_and_active_version(
 
     body = _journey(client, auth_headers, version_id)
     assert body["next_action"]["kind"] == "activate_model"
+    assert body["next_action"]["href"] == "#pl-models"
     assert body["counts"]["model_versions"] == 1
     assert body["worker"]["pending_jobs"] == 0
     result = _step(body, "result")
@@ -187,6 +197,7 @@ def test_journey_walks_snapshot_job_model_and_active_version(
     assert activated.status_code == 200, activated.text
     body = _journey(client, auth_headers, version_id)
     assert body["next_action"]["kind"] == "predict"
+    assert body["next_action"]["href"] == "#pl-predict"
     assert "使用中版本" in json.dumps(_step(body, "result")["facts"], ensure_ascii=False)
 
 
@@ -316,6 +327,50 @@ def test_worker_status_reports_offline_stale_and_idle(tmp_path, monkeypatch):
     )
     body = _worker_status([], [stale_claim])
     assert "worker 重啟後會自動排回隊列" in body["waiting_reason_zh"]
+
+
+def test_worker_status_reports_a_fresh_stopped_or_failed_heartbeat(tmp_path, monkeypatch):
+    """A just-stopped worker must never read as idle standby.
+
+    The stop/error heartbeat is fresh by definition (age < stale window), so the
+    age check alone would fall through to "idle" and a queued job would look
+    like it will be picked up by a worker that has already exited.
+    """
+    pending = TrainingJob(id=uuid.uuid4(), status=TrainingJobStatus.pending)
+    path = tmp_path / "worker-heartbeat.json"
+    monkeypatch.setenv("TRAINING_WORKER_HEARTBEAT_PATH", str(path))
+
+    path.write_text(
+        json.dumps(
+            {
+                "pid": os.getpid(),
+                "state": "stopped",
+                "beat_at": utcnow().isoformat(),
+                "poll_interval_seconds": 2,
+            }
+        ),
+        encoding="utf-8",
+    )
+    stopped = _worker_status([pending], [])
+    assert stopped["state"] == "offline"
+    assert "已停止" in stopped["label_zh"]
+    assert "worker 未確認在運行" in stopped["waiting_reason_zh"]
+
+    path.write_text(
+        json.dumps(
+            {
+                "pid": os.getpid(),
+                "state": "error",
+                "beat_at": utcnow().isoformat(),
+                "poll_interval_seconds": 2,
+                "error": "boom",
+            }
+        ),
+        encoding="utf-8",
+    )
+    errored = _worker_status([], [])
+    assert errored["state"] == "error"
+    assert "boom" in errored["detail_zh"]
 
 
 def test_heartbeat_writer_is_atomic_and_self_describing(tmp_path, monkeypatch):

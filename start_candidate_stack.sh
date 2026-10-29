@@ -74,12 +74,29 @@ if [ "$RESET" = "1" ] || [ ! -f "$ENV_FILE" ]; then
     # unlike .local/.test it passes the login endpoint's EmailStr validation.
     printf 'CANDIDATE_EMAIL=candidate.owner@example.com\n'
     printf 'CANDIDATE_PASSWORD=%s\n' "$(openssl rand -hex 12)"
+    printf 'CANDIDATE_EMPTY_EMAIL=candidate.empty@example.com\n'
+    printf 'CANDIDATE_EMPTY_PASSWORD=%s\n' "$(openssl rand -hex 12)"
+    printf 'CANDIDATE_THIN_EMAIL=candidate.thin@example.com\n'
+    printf 'CANDIDATE_THIN_PASSWORD=%s\n' "$(openssl rand -hex 12)"
     printf 'CANDIDATE_JWT_SECRET_KEY=%s\n' "$(openssl rand -hex 32)"
   } >"$ENV_FILE"
   chmod 600 "$ENV_FILE"
   echo "generated candidate credentials in $ENV_FILE"
 else
   echo "reusing $ENV_FILE"
+fi
+# Credential files written before the first-use accounts existed lack these
+# keys; add only the missing ones and keep the file private.
+if ! grep -q '^CANDIDATE_THIN_PASSWORD=' "$ENV_FILE"; then
+  umask 077
+  {
+    printf 'CANDIDATE_EMPTY_EMAIL=candidate.empty@example.com\n'
+    printf 'CANDIDATE_EMPTY_PASSWORD=%s\n' "$(openssl rand -hex 12)"
+    printf 'CANDIDATE_THIN_EMAIL=candidate.thin@example.com\n'
+    printf 'CANDIDATE_THIN_PASSWORD=%s\n' "$(openssl rand -hex 12)"
+  } >>"$ENV_FILE"
+  chmod 600 "$ENV_FILE"
+  echo "added first-use scenario accounts to $ENV_FILE"
 fi
 [ "$(stat -f %Lp "$ENV_FILE")" = "600" ] || fail "$ENV_FILE must be mode 600"
 
@@ -160,6 +177,13 @@ if [ "$FRESH_SEED" = "1" ]; then
 else
   echo "resume keeps the existing fixture and any progress made in it"
 fi
+
+# First-use accounts (empty + thin) are create-if-missing, so a participant's
+# progress in the candidate database is never cleared by resume or a re-run.
+echo "ensuring first-use scenario accounts exist (create-if-missing)"
+(cd backend && E2E_EMPTY_EMAIL="$CANDIDATE_EMPTY_EMAIL" E2E_EMPTY_PASSWORD="$CANDIDATE_EMPTY_PASSWORD" \
+  E2E_THIN_EMAIL="$CANDIDATE_THIN_EMAIL" E2E_THIN_PASSWORD="$CANDIDATE_THIN_PASSWORD" \
+  "$PYTHON" scripts/seed_candidate_scenarios.py) | tee -a "$LOG_DIR/seed.log"
 
 # --- process helpers ----------------------------------------------------------
 listener_on() { lsof -nP -iTCP:"$1" -sTCP:LISTEN -t 2>/dev/null | head -1 || true; }
@@ -265,9 +289,10 @@ echo
 echo "Candidate stack ready (database $DB_NAME, mode: $([ "$RESET" = "1" ] && echo FRESH || echo RESUME)):"
 echo "  open     : http://localhost:$FRONTEND_PORT/login"
 echo "  login    : $CANDIDATE_EMAIL   password: $ENV_FILE_ABS (key CANDIDATE_PASSWORD, never printed)"
+echo "  accounts : empty $CANDIDATE_EMPTY_EMAIL · thin $CANDIDATE_THIN_EMAIL (passwords in the same 0600 file)"
 echo "  backend  : http://127.0.0.1:$BACKEND_PORT"
 echo "  worker   : resident pid $(pid_from_file "$WORKER_PID_FILE"), heartbeat $HEARTBEAT_FILE"
-echo "  data     : synthetic fixture only - 205 reviewed decisions, 140 synthetic bars; not real market data"
+echo "  data     : synthetic only - owner 205 reviewed decisions; thin 5 decisions (3 confirmed); empty account has no data"
 echo "  progress : this database is disposable and owned by this checkout"
 echo "  reset    : ./start_candidate_stack.sh --reset   (drops ONLY $DB_NAME and reseeds)"
 echo "  stop     : ./stop_candidate_stack.sh            (keeps the database)"

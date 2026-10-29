@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import Link from 'next/link';
 import { api, ApiError } from '@/lib/api';
 
 interface OwnedVersion {
@@ -132,6 +133,7 @@ interface PersonalJob {
   cancelled_at: string | null;
   created_at: string;
   completed_at: string | null;
+  strategy_spec_snapshot?: { strategy_version_id?: string | null } | null;
 }
 
 interface JourneyFact {
@@ -149,6 +151,7 @@ interface JourneyAction {
   kind: string;
   label_zh: string;
   detail_zh: string;
+  href?: string | null;
 }
 
 interface JourneyStep {
@@ -175,6 +178,14 @@ interface JourneyWorker {
 interface JourneyResponse {
   strategy_version_id: string;
   generated_at: string;
+  strategy: {
+    title: string | null;
+    experiment_id: string | null;
+    version_number: number;
+    instruments: string[];
+    period: string;
+    synthetic: boolean;
+  };
   counts: {
     total_current_decisions: number;
     confirmed: number;
@@ -635,6 +646,31 @@ export default function PersonalStrategyLearningPanel() {
     };
   }, [versionId, loadStrategy]);
 
+  // A reload during a queued/running job drops the per-job poller, so the
+  // page would keep showing "waiting" until a manual refresh. Keep following
+  // the journey while the worker still owes this strategy a result.
+  const waitingForWorker =
+    journey?.next_action.kind === 'wait_worker' ||
+    (journey?.worker.pending_jobs ?? 0) + (journey?.worker.running_jobs ?? 0) > 0;
+
+  useEffect(() => {
+    if (!versionId || !waitingForWorker) return;
+    const timer = setInterval(() => {
+      loadStrategy(versionId).catch(() => undefined);
+    }, 4000);
+    return () => clearInterval(timer);
+  }, [versionId, waitingForWorker, loadStrategy]);
+
+  // Consent lives in the panel above; granting or revoking it changes the
+  // journey's next action, so refresh rather than leaving a stale instruction.
+  useEffect(() => {
+    const handle = () => {
+      if (versionId) loadStrategy(versionId).catch(() => undefined);
+    };
+    window.addEventListener('alethra:consent-changed', handle);
+    return () => window.removeEventListener('alethra:consent-changed', handle);
+  }, [versionId, loadStrategy]);
+
   useEffect(() => {
     return () => {
       if (jobTimer.current) clearTimeout(jobTimer.current);
@@ -682,6 +718,38 @@ export default function PersonalStrategyLearningPanel() {
     },
     [loadStrategy, versionId],
   );
+
+  // Training jobs are not part of the strategy payload, so a reload dropped the
+  // row for a queued, running or failed job — leaving no job id, cancel button
+  // or failure reason. Restore the newest job for this version once per switch
+  // and resume polling while it is still active.
+  useEffect(() => {
+    if (!versionId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const rows = (await api.training.listJobs()) as PersonalJob[];
+        if (cancelled || !Array.isArray(rows)) return;
+        const latest = rows.find(
+          (row) => row.strategy_spec_snapshot?.strategy_version_id === versionId,
+        );
+        if (!latest) return;
+        setJob(latest);
+        if (latest.status === 'pending' || latest.status === 'running') {
+          pollJob(latest.id);
+        }
+      } catch {
+        // A job lookup failure must not hide the rest of the panel.
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (jobTimer.current) {
+        clearTimeout(jobTimer.current);
+        jobTimer.current = null;
+      }
+    };
+  }, [versionId, pollJob]);
 
   const refresh = async (id: string) => {
     await loadStrategy(id);
@@ -1184,6 +1252,24 @@ export default function PersonalStrategyLearningPanel() {
                   >
                     <span style={{ color: 'var(--text-secondary)' }}>{step.action.label_zh}</span>
                     <span style={{ color: 'var(--text-muted)' }}>{step.action.detail_zh}</span>
+                    {step.action.href &&
+                      (step.action.href.startsWith('#') ? (
+                        <a
+                          href={step.action.href}
+                          data-testid="pl-journey-next-link"
+                          style={{ color: 'var(--primary)', fontSize: '12px' }}
+                        >
+                          前往
+                        </a>
+                      ) : (
+                        <Link
+                          href={step.action.href}
+                          data-testid="pl-journey-next-link"
+                          style={{ color: 'var(--primary)', fontSize: '12px' }}
+                        >
+                          前往
+                        </Link>
+                      ))}
                   </div>
                 )}
               </div>
@@ -1197,9 +1283,18 @@ export default function PersonalStrategyLearningPanel() {
       )}
 
       {versions.length === 0 && (
-        <p style={{ marginTop: '16px', fontSize: '13px', color: 'var(--text-secondary)' }}>
-          此帳號尚無已保存的策略版本。先建立策略並保存版本，才會有可覆核的決策與可訓練的資料。
-        </p>
+        <div data-testid="pl-no-strategy" style={{ marginTop: '16px' }}>
+          <p style={{ margin: 0, fontSize: '13px', color: 'var(--text-secondary)' }}>
+            此帳號尚無已保存的策略版本。先建立策略並保存版本，才會有可覆核的決策與可訓練的資料。
+          </p>
+          <Link
+            href="/experiments/new"
+            data-testid="pl-no-strategy-link"
+            style={{ display: 'inline-block', marginTop: '8px', fontSize: '13px', color: 'var(--primary)' }}
+          >
+            建立第一個策略實驗
+          </Link>
+        </div>
       )}
 
       {versionId && review && (
@@ -1236,9 +1331,20 @@ export default function PersonalStrategyLearningPanel() {
             )}
 
             {review.decisions.length === 0 ? (
-              <p style={{ margin: '12px 0 0', fontSize: '13px', color: 'var(--text-secondary)' }}>
-                此策略版本尚未記錄任何決策。決策會在模擬工作區以手動單或規則單記錄。
-              </p>
+              <div data-testid="pl-no-decisions" style={{ marginTop: '12px' }}>
+                <p style={{ margin: 0, fontSize: '13px', color: 'var(--text-secondary)' }}>
+                  此策略版本尚未記錄任何決策。決策會在模擬工作區以手動單或規則單記錄。
+                </p>
+                {journey?.strategy.experiment_id && (
+                  <Link
+                    href={`/experiments/${journey.strategy.experiment_id}/simulation`}
+                    data-testid="pl-no-decisions-link"
+                    style={{ display: 'inline-block', marginTop: '8px', fontSize: '13px', color: 'var(--primary)' }}
+                  >
+                    前往模擬工作區記錄決策
+                  </Link>
+                )}
+              </div>
             ) : (
               <div style={{ marginTop: '12px', display: 'grid', gap: '8px' }}>
                 {review.decisions.slice(0, 25).map((row) => {
@@ -1447,6 +1553,7 @@ export default function PersonalStrategyLearningPanel() {
 
           {preview && (
             <div
+              id="pl-preview"
               data-testid="pl-preview"
               style={{ marginTop: '22px', paddingTop: '16px', borderTop: '1px solid var(--border)' }}
             >
@@ -1549,6 +1656,7 @@ export default function PersonalStrategyLearningPanel() {
           )}
 
           <div
+            id="pl-training"
             data-testid="pl-training"
             style={{ marginTop: '22px', paddingTop: '16px', borderTop: '1px solid var(--border)' }}
           >
@@ -1587,7 +1695,7 @@ export default function PersonalStrategyLearningPanel() {
                 className="btn btn-primary"
                 data-testid="pl-train-start"
                 onClick={startTraining}
-                disabled={busy === 'train' || !selectedSnapshot}
+                disabled={busy === 'train' || !selectedSnapshot || (job !== null && !jobTerminal)}
               >
                 開始訓練
               </button>
@@ -1639,6 +1747,7 @@ export default function PersonalStrategyLearningPanel() {
           </div>
 
           <div
+            id="pl-models"
             data-testid="pl-models"
             style={{ marginTop: '22px', paddingTop: '16px', borderTop: '1px solid var(--border)' }}
           >
@@ -1737,7 +1846,11 @@ export default function PersonalStrategyLearningPanel() {
             )}
 
             {models.length > 0 && (
-              <div style={{ marginTop: '14px', display: 'flex', gap: '10px', alignItems: 'end', flexWrap: 'wrap', fontSize: '12px' }}>
+              <div
+                id="pl-predict"
+                data-testid="pl-predict"
+                style={{ marginTop: '14px', display: 'flex', gap: '10px', alignItems: 'end', flexWrap: 'wrap', fontSize: '12px' }}
+              >
                 <label style={{ display: 'grid', gap: '4px' }}>
                   <span style={{ color: 'var(--text-muted)' }}>標的</span>
                   <input

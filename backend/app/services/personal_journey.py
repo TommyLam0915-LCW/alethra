@@ -235,7 +235,34 @@ def _worker_status(pending_jobs: List[TrainingJob], running_jobs: List[TrainingJ
             status["current_job_id"] = heartbeat.get("current_job_id")
             status["worker_pid"] = heartbeat.get("pid")
 
-            if age is not None and age > stale_after:
+            beat_state = heartbeat.get("state")
+            if beat_state == "stopped":
+                status.update(
+                    {
+                        "state": "offline",
+                        "label_zh": "背景 worker 已停止",
+                        "detail_zh": (
+                            "worker 最後一次心跳表示已停止；排隊中的工作要等 worker "
+                            "重新啟動才會處理，毋須重新提交。"
+                        ),
+                    }
+                )
+            elif beat_state == "error":
+                status.update(
+                    {
+                        "state": "error",
+                        "label_zh": "背景 worker 上次執行出錯",
+                        "detail_zh": (
+                            "worker 仍會繼續輪詢，但上次工作出錯"
+                            + (
+                                f"：{heartbeat.get('error')}。"
+                                if heartbeat.get("error")
+                                else "。"
+                            )
+                        ),
+                    }
+                )
+            elif age is not None and age > stale_after:
                 status.update(
                     {
                         "state": "stale",
@@ -566,24 +593,34 @@ def build_journey(
             "kind": "grant_consent",
             "label_zh": "先記錄個人化訓練同意",
             "detail_zh": "在上方「個人化訓練同意」面板勾選此策略版本，確認後記錄同意。",
+            "href": "#personalization-eligibility",
         }
     elif not can_build:
         next_action = {
             "kind": "review_decisions",
             "label_zh": "補足可用的已確認決策",
-            "detail_zh": missing[0]["text_zh"],
+            "detail_zh": (
+                f"{missing[0]['text_zh']}"
+                " 在「模擬工作區」以手動單或規則單累積新決策，再回到下方逐筆覆核；"
+                "資料未夠時，仍可檢視回測結果、修改策略或整理研究記錄。"
+            ),
+            "href": (
+                f"/experiments/{experiment.id}/simulation" if experiment else None
+            ),
         }
     elif latest_snapshot is None:
         next_action = {
             "kind": "create_snapshot",
             "label_zh": "建立凍結資料快照",
             "detail_zh": "在下方「訓練資料」按「建立快照」；系統會固定這批已確認決策與 checksum。",
+            "href": "#pl-preview",
         }
     elif latest_job is None or latest_job.status is TrainingJobStatus.failed:
         next_action = {
             "kind": "start_training",
             "label_zh": "開始訓練個人決策模型",
             "detail_zh": "選擇最新快照後按「開始訓練」；工作會交由背景 worker 執行，完成後自動更新。",
+            "href": "#pl-training",
         }
     elif latest_job.status in (TrainingJobStatus.pending, TrainingJobStatus.running):
         next_action = {
@@ -591,24 +628,28 @@ def build_journey(
             "label_zh": "等待背景 worker 完成訓練",
             "detail_zh": worker.get("waiting_reason_zh")
             or "工作已排隊；背景 worker 會自動處理。",
+            "href": None,
         }
     elif latest_model is not None and active_version_id is None:
         next_action = {
             "kind": "activate_model",
             "label_zh": "啟用一個模型版本",
             "detail_zh": "在下方模型版本按「啟用」，之後推論會解析到使用中版本。",
+            "href": "#pl-models",
         }
     elif latest_model is not None:
         next_action = {
             "kind": "predict",
             "label_zh": "以使用中版本執行一次推論",
             "detail_zh": "在下方填寫標的與日期，按「執行推論」查看模型對你決策的估計。",
+            "href": "#pl-predict",
         }
     else:
         next_action = {
             "kind": "none",
             "label_zh": "暫無可執行的下一步",
             "detail_zh": "請先處理上方列出的資料缺口。",
+            "href": None,
         }
 
     steps = [
@@ -693,6 +734,7 @@ def build_journey(
         "generated_at": utcnow().isoformat(),
         "strategy": {
             "title": experiment.title if experiment else None,
+            "experiment_id": str(experiment.id) if experiment else None,
             "version_number": version.version_number,
             "instruments": instruments,
             "period": period,

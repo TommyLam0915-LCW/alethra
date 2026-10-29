@@ -665,15 +665,24 @@ export default function SimulationPage() {
                 {STATUS_LABELS[session.status] || session.status}
               </div>
             </div>
-            <div className="card" style={{ padding: '16px' }}>
+            <div className="card" style={{ padding: '16px' }} data-testid="sim-paper-equity">
               <div style={{ fontSize: '12px', color: '#666', marginBottom: '4px' }}>虛擬淨值</div>
-              <div style={{ fontSize: '20px', fontWeight: 700 }}>
-                ${session.paper_equity?.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-              </div>
-              <div style={{ fontSize: '12px', color: session.paper_equity! >= session.initial_virtual_cash ? '#155724' : '#721c24' }}>
-                {session.paper_equity! >= session.initial_virtual_cash ? '+' : ''}
-                {((session.paper_equity! - session.initial_virtual_cash) / session.initial_virtual_cash * 100).toFixed(2)}%
-              </div>
+              {session.paper_equity === null ? (
+                <>
+                  <div style={{ fontSize: '20px', fontWeight: 700 }}>—</div>
+                  <div style={{ fontSize: '12px', color: '#666' }}>未連結紙上帳戶</div>
+                </>
+              ) : (
+                <>
+                  <div style={{ fontSize: '20px', fontWeight: 700 }}>
+                    ${session.paper_equity.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </div>
+                  <div style={{ fontSize: '12px', color: session.paper_equity >= session.initial_virtual_cash ? '#155724' : '#721c24' }}>
+                    {session.paper_equity >= session.initial_virtual_cash ? '+' : ''}
+                    {((session.paper_equity - session.initial_virtual_cash) / session.initial_virtual_cash * 100).toFixed(2)}%
+                  </div>
+                </>
+              )}
             </div>
             <div className="card" style={{ padding: '16px' }}>
               <div style={{ fontSize: '12px', color: '#666', marginBottom: '4px' }}>
