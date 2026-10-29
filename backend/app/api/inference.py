@@ -69,23 +69,32 @@ def create_inference_run(
     """
     # Reserve quota for inference
     reservation = reserve_quota(db, current_user.id, "ai_usage")
-    
+
     try:
         input_spec_dict = payload.input_spec.model_dump()
         run = run_inference(db, payload.model_version_id, current_user.id, input_spec_dict)
+    except ValueError:
+        # Unknown or foreign model version: nothing executed, so nothing is charged.
+        release_reservation(db, reservation.id)
         db.commit()
-        db.refresh(run)
-        
-        # Settle quota on success
-        settle_reservation(db, reservation.id)
-        db.commit()
-        
-        return run
-    except Exception as e:
+        raise HTTPException(status_code=404, detail="Model version not found")
+    except Exception:
         # Release reservation on failure
         release_reservation(db, reservation.id)
         db.commit()
         raise
+
+    db.commit()
+    db.refresh(run)
+
+    if run.status == InferenceRunStatus.failed:
+        # The run is kept as history but produced no result — do not charge for it.
+        release_reservation(db, reservation.id)
+    else:
+        settle_reservation(db, reservation.id)
+    db.commit()
+
+    return run
 
 
 @router.get("/runs/{run_id}", response_model=InferenceRunResponse)

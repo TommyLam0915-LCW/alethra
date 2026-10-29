@@ -6,7 +6,7 @@ from typing import Dict, List, Any, Optional
 from sqlalchemy.orm import Session
 
 from app.models.inference import InferenceRun, InferenceRunStatus
-from app.models.model_research import ModelVersion, ModelType
+from app.models.model_research import ModelResearchRecord, ModelVersion, ModelType
 from app.providers import get_data_provider
 from app.lib.timeutil import utcnow
 
@@ -148,8 +148,20 @@ def run_inference(
       - end_date: str (e.g. "2024-02-13")
       - parameters: dict (optional, passed through to rules)
     """
-    model_version = db.query(ModelVersion).filter(ModelVersion.id == model_version_id).first()
+    model_version = (
+        db.query(ModelVersion)
+        .join(
+            ModelResearchRecord,
+            ModelVersion.model_research_record_id == ModelResearchRecord.id,
+        )
+        .filter(
+            ModelVersion.id == model_version_id,
+            ModelResearchRecord.owner_id == user_id,
+        )
+        .first()
+    )
     if not model_version:
+        # Foreign and missing versions are indistinguishable to the caller.
         raise ValueError(f"Model version {model_version_id} not found")
 
     run = InferenceRun(

@@ -226,3 +226,67 @@ class TestInferenceUserIsolation:
         resp = client.get("/api/v1/inference/runs", headers=user2_headers)
         assert resp.status_code == 200
         assert len(resp.json()) == 0
+
+    def test_user_cannot_create_run_on_others_model_version(self, client, auth_headers):
+        """Ownership is enforced on the model version, not only on the run row."""
+        record = _create_model_record(client, auth_headers)
+        version = _create_model_version(client, auth_headers, record["id"])
+
+        user2_headers = _create_user2(client)
+        resp = client.post("/api/v1/inference/runs", headers=user2_headers, json={
+            "model_version_id": version["id"],
+            "input_spec": {"symbol": "DEMO-ALPHA", "start_date": "2024-01-02", "end_date": "2024-01-31"},
+        })
+        # A foreign UUID must look identical to a missing one.
+        assert resp.status_code == 404
+        listed = client.get("/api/v1/inference/runs", headers=user2_headers)
+        assert listed.json() == []
+
+    def test_unknown_model_version_returns_404(self, client, auth_headers):
+        import uuid
+
+        resp = client.post("/api/v1/inference/runs", headers=auth_headers, json={
+            "model_version_id": str(uuid.uuid4()),
+            "input_spec": {"symbol": "DEMO-ALPHA", "start_date": "2024-01-02", "end_date": "2024-01-31"},
+        })
+        assert resp.status_code == 404
+
+
+class TestInferenceQuotaAccounting:
+    """A run that could never produce a result must not burn ai_usage."""
+
+    def _used(self, client, headers):
+        resp = client.get("/api/v1/ml/entitlement", headers=headers)
+        assert resp.status_code == 200
+        return resp.json()["used"]
+
+    def test_completed_run_consumes_exactly_one_unit(self, client, auth_headers):
+        record = _create_model_record(client, auth_headers)
+        version = _create_model_version(client, auth_headers, record["id"])
+
+        before = self._used(client, auth_headers)
+        resp = client.post("/api/v1/inference/runs", headers=auth_headers, json={
+            "model_version_id": version["id"],
+            "input_spec": {"symbol": "DEMO-ALPHA", "start_date": "2024-01-02", "end_date": "2024-01-31"},
+        })
+        assert resp.status_code == 201
+        assert resp.json()["status"] == "completed"
+        assert self._used(client, auth_headers) == before + 1
+
+    def test_failed_run_does_not_consume_ai_usage(self, client, auth_headers):
+        """Unsupported model type fails deterministically before any output."""
+        record = _create_model_record(client, auth_headers)
+        version = _create_model_version(
+            client, auth_headers, record["id"],
+            model_type="future_external_model_reference",
+            spec={"reference": "some_external_model"},
+        )
+
+        before = self._used(client, auth_headers)
+        resp = client.post("/api/v1/inference/runs", headers=auth_headers, json={
+            "model_version_id": version["id"],
+            "input_spec": {"symbol": "DEMO-ALPHA", "start_date": "2024-01-02", "end_date": "2024-01-31"},
+        })
+        assert resp.status_code == 201
+        assert resp.json()["status"] == "failed"
+        assert self._used(client, auth_headers) == before
