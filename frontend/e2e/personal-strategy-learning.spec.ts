@@ -6,7 +6,8 @@ import { test, expect, type Page } from '@playwright/test';
 /**
  * Tracked E2E for the personal strategy learning product loop:
  * consent -> review -> frozen snapshot -> training job -> artifact/model version
- * -> activate -> prediction via the active-version alias.
+ * -> activate -> prediction via the active-version alias
+ * -> second version -> comparability -> comparison -> select -> rollback.
  *
  * DATA SETUP vs UI UNDER TEST (disclosed item-by-item):
  *   - beforeAll runs the tracked seed backend/scripts/seed_e2e_personal_learning.py
@@ -18,9 +19,12 @@ import { test, expect, type Page } from '@playwright/test';
  *     against that same disposable database, because the normal operator path is
  *     "user submits in the UI, a separate worker processes the job".
  *   - Every product mutation below is a real UI gesture (login, consent, label,
- *     snapshot, train, activate, predict). No API call stands in for a user step and
- *     no API call writes product state; API reads are used only to obtain
- *     server-assigned identities and numbers to assert against the rendered UI.
+ *     snapshot, train, activate, predict, compare, select, rollback). No API call
+ *     stands in for a user step and no API call writes product state; API reads are
+ *     used only to obtain server-assigned identities and numbers to assert against
+ *     the rendered UI. The second model version is produced by a second real
+ *     training job on the same frozen evidence, which is what makes the versions
+ *     comparable and share one evaluation set.
  *   - Waits are waitForResponse / expect / server-state predicates; there is no fixed
  *     sleep on product state and no assertion that depends on card order.
  *
@@ -138,7 +142,7 @@ test.afterAll(async () => {
   if (worker.exitCode === null) worker.kill('SIGKILL');
 });
 
-test('desktop journey: consent -> review -> snapshot -> job -> version -> activate -> predict', async ({
+test('desktop journey: consent -> review -> snapshot -> job -> version -> activate -> predict -> compare -> select -> rollback', async ({
   browser,
 }) => {
   test.skip(!DB_URL.includes('alethra_personal_e2e'), REQUIRES_DB);
@@ -251,6 +255,7 @@ test('desktop journey: consent -> review -> snapshot -> job -> version -> activa
     const modelsBody = (await modelsRes.json()) as {
       models: Array<{
         model_version_id: string;
+        record_id: string;
         version_number: number;
         training_job_id: string | null;
         artifact_sha256: string | null;
@@ -306,6 +311,199 @@ test('desktop journey: consent -> review -> snapshot -> job -> version -> activa
     await expect(result).toContainText(`特徵 K 線 ${prediction.as_of.feature_bar_date}`);
     await expect(result).toContainText('同意目前有效：是');
     await shot(page, '05-prediction');
+
+    // 6. Second version — a different model type trained on the same reviewed
+    //    evidence. The panel must now offer comparison instead of the
+    //    "need two versions" notice.
+    const secondSnapshotResponse = page.waitForResponse(
+      (res) =>
+        res.url().endsWith('/api/v1/ml/personal/snapshots') &&
+        res.request().method() === 'POST',
+    );
+    await panel.getByTestId('pl-snapshot-create').click();
+    const secondSnapshotRes = await secondSnapshotResponse;
+    expect(secondSnapshotRes.status(), 'second snapshot create').toBe(201);
+    const secondSnapshot = (await secondSnapshotRes.json()) as {
+      snapshot_id: string;
+      included_count: number;
+    };
+    await expect(panel.getByTestId('pl-snapshot-select')).toHaveValue(
+      secondSnapshot.snapshot_id,
+    );
+    await panel.getByTestId('pl-model-type').selectOption('baseline');
+
+    let secondJobId = '';
+    const secondModelsPromise = page.waitForResponse(
+      async (res) => {
+        if (!res.url().includes('/api/v1/ml/personal/models')) return false;
+        if (res.request().method() !== 'GET') return false;
+        if (!secondJobId) return false;
+        try {
+          const body = (await res.json()) as {
+            models: Array<{ training_job_id: string | null }>;
+          };
+          return body.models.some((m) => m.training_job_id === secondJobId);
+        } catch {
+          return false;
+        }
+      },
+      { timeout: 180000 },
+    );
+    const secondJobResponse = page.waitForResponse(
+      (res) =>
+        res.url().endsWith('/api/v1/ml/personal/training-jobs') &&
+        res.request().method() === 'POST',
+    );
+    await panel.getByTestId('pl-train-start').click();
+    const secondJobRes = await secondJobResponse;
+    expect(secondJobRes.status(), 'second training job accepted').toBe(202);
+    secondJobId = ((await secondJobRes.json()) as { job_id: string }).job_id;
+    await expect(panel.getByTestId('pl-train-status')).toContainText(
+      secondJobId.slice(0, 8),
+    );
+    await expect(panel.getByTestId('pl-train-status')).toContainText('已完成', {
+      timeout: 180000,
+    });
+    const secondModelsRes = await secondModelsPromise;
+    expect(secondModelsRes.status()).toBe(200);
+    const secondModelsBody = (await secondModelsRes.json()) as {
+      models: Array<{
+        model_version_id: string;
+        version_number: number;
+        training_job_id: string | null;
+      }>;
+    };
+    const secondModel = secondModelsBody.models.find(
+      (m) => m.training_job_id === secondJobId,
+    );
+    expect(secondModel, 'the second job must produce a model version').toBeTruthy();
+    const secondModelId = secondModel!.model_version_id;
+    await expect(panel.getByTestId(`pl-model-${secondModelId}`)).toContainText(
+      `版本 ${secondModel!.version_number}`,
+    );
+    await expect(panel.getByTestId('pl-compare')).toContainText('版本比較與選用');
+    await shot(page, '06-second-version');
+
+    // 7. Comparability is free; the comparison itself consumes one AI unit.
+    await panel.getByTestId('pl-compare-a').selectOption(modelId);
+    await panel.getByTestId('pl-compare-b').selectOption(secondModelId);
+    const comparabilityResponse = page.waitForResponse(
+      (res) =>
+        res.url().includes('/api/v1/ml/personal/models/comparability?') &&
+        res.request().method() === 'GET',
+    );
+    await panel.getByTestId('pl-compare-check').click();
+    const comparabilityRes = await comparabilityResponse;
+    expect(comparabilityRes.status(), 'comparability report').toBe(200);
+    const comparability = (await comparabilityRes.json()) as {
+      comparable: boolean;
+      same_evaluation_set: boolean;
+      checks: Array<{ code: string; ok: boolean; required: boolean }>;
+    };
+    expect(comparability.comparable, 'same task/features/labels').toBe(true);
+    expect(comparability.same_evaluation_set, 'one frozen evaluation set').toBe(true);
+    await expect(panel.getByTestId('pl-compare-checks')).toContainText('可比');
+    await expect(panel.getByTestId('pl-compare-checks')).toContainText('同一評估集');
+
+    const comparisonResponse = page.waitForResponse(
+      (res) =>
+        res.url().endsWith('/api/v1/ml/personal/models/comparisons') &&
+        res.request().method() === 'POST',
+      { timeout: 120000 },
+    );
+    await panel.getByTestId('pl-compare-run').click();
+    const comparisonRes = await comparisonResponse;
+    expect(comparisonRes.status(), 'comparison run').toBe(200);
+    const comparison = (await comparisonRes.json()) as {
+      comparison_run_id: string;
+      mode: string;
+      rankable: boolean;
+      versions: {
+        a: { model_version_id: string; artifact_sha256: string };
+        b: { model_version_id: string; artifact_sha256: string };
+      };
+      delta: { accuracy: number; macro_f1: number } | null;
+    };
+    expect(comparison.versions.a.model_version_id).toBe(modelId);
+    expect(comparison.versions.b.model_version_id).toBe(secondModelId);
+    expect(comparison.rankable, 'same evaluation set is rankable').toBe(true);
+    expect(comparison.delta, 'same-set comparison reports a delta').not.toBeNull();
+    const resultCard = panel.getByTestId('pl-comparison-result');
+    await expect(resultCard).toContainText('同一評估集');
+    await expect(panel.getByTestId('pl-comparison-version-A')).toContainText(
+      `artifact ${comparison.versions.a.artifact_sha256.slice(0, 8)}`,
+    );
+    await expect(panel.getByTestId('pl-comparison-version-B')).toContainText(
+      `artifact ${comparison.versions.b.artifact_sha256.slice(0, 8)}`,
+    );
+    await expect(panel.getByTestId('pl-comparison-delta')).toBeVisible();
+    await expect(
+      panel.getByTestId(`pl-comparison-history-${comparison.comparison_run_id}`),
+    ).toContainText(`版本 ${model!.version_number} vs ${secondModel!.version_number}`);
+    await shot(page, '07-comparison');
+
+    // 8. Explicit select with a saved rationale, then rollback to the version
+    //    that was active before the switch. History must show both actions.
+    const selectRationale = 'E2E：比較後選用版本 B';
+    await panel.getByTestId('pl-selection-rationale').fill(selectRationale);
+    const selectResponse = page.waitForResponse(
+      (res) =>
+        res.url().endsWith(`/api/v1/ml/personal/models/${secondModelId}/select`) &&
+        res.request().method() === 'POST',
+      { timeout: 60000 },
+    );
+    await panel.getByTestId('pl-select-b').click();
+    const selectRes = await selectResponse;
+    expect(selectRes.status(), 'select version').toBe(200);
+    const selection = (await selectRes.json()) as {
+      already_active: boolean;
+      selection: {
+        selection_id: string;
+        action: string;
+        version_number: number | null;
+        previous_version_number: number | null;
+        rationale: string | null;
+        comparison_run_id: string | null;
+      } | null;
+    };
+    expect(selection.already_active).toBe(false);
+    expect(selection.selection, 'a new selection row').not.toBeNull();
+    expect(selection.selection!.action).toBe('select');
+    expect(selection.selection!.comparison_run_id).toBe(comparison.comparison_run_id);
+    expect(selection.selection!.rationale).toBe(selectRationale);
+    expect(selection.selection!.previous_version_number).toBe(model!.version_number);
+    await expect(
+      panel.getByTestId(`pl-selection-${selection.selection!.selection_id}`),
+    ).toContainText(`選用 版本 ${secondModel!.version_number}`);
+    await expect(panel.getByTestId('pl-compare')).toContainText(
+      `目前使用中：版本 ${secondModel!.version_number}`,
+    );
+
+    const rollbackResponse = page.waitForResponse(
+      (res) =>
+        res.url().endsWith(`/api/v1/ml/personal/records/${model!.record_id}/rollback`) &&
+        res.request().method() === 'POST',
+      { timeout: 60000 },
+    );
+    await panel.getByTestId('pl-rollback').click({ timeout: 30000 });
+    const rollbackRes = await rollbackResponse;
+    expect(rollbackRes.status(), 'rollback').toBe(200);
+    const rollback = (await rollbackRes.json()) as {
+      selection: {
+        selection_id: string;
+        action: string;
+        version_number: number | null;
+      };
+    };
+    expect(rollback.selection.action).toBe('rollback');
+    expect(rollback.selection.version_number).toBe(model!.version_number);
+    await expect(
+      panel.getByTestId(`pl-selection-${rollback.selection.selection_id}`),
+    ).toContainText(`回退 版本 ${model!.version_number}`);
+    await expect(panel.getByTestId('pl-compare')).toContainText(
+      `目前使用中：版本 ${model!.version_number}`,
+    );
+    await shot(page, '08-selection-rollback');
   } finally {
     await page.close();
   }
@@ -335,6 +533,11 @@ test('mobile smoke: the personal learning panel renders with its controls', asyn
     const predictDate = panel.getByTestId('pl-predict-date');
     await predictDate.scrollIntoViewIfNeeded();
     await expect(predictDate).toBeVisible();
+    const compare = panel.getByTestId('pl-compare');
+    await compare.scrollIntoViewIfNeeded();
+    await expect(compare).toBeVisible();
+    await expect(compare).toContainText('版本比較與選用');
+    await expect(compare).toContainText('不是投資回報');
     await shot(page, '06-mobile-panel');
   } finally {
     await page.close();

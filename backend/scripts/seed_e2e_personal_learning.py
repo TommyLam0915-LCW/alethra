@@ -61,6 +61,10 @@ from app.models.model_research import (
     ModelVersion,
 )
 from app.models.personal_dataset import PersonalizationDatasetSnapshot
+from app.models.personal_model_selection import (
+    PersonalModelComparisonRun,
+    PersonalModelSelection,
+)
 from app.models.personalization import PersonalizationConsent
 from app.models.quota import QuotaCounter, QuotaReservation
 from app.models.simulation import SimulationSession, SimulationStatus
@@ -154,6 +158,18 @@ with Session(engine) as session:
         )
         session.execute(
             delete(TrainingJob).where(TrainingJob.user_id == user_id)
+        )
+        # Comparison runs and selections reference model versions, so they have
+        # to go first or the version delete hits a foreign key.
+        session.execute(
+            delete(PersonalModelSelection).where(
+                PersonalModelSelection.owner_id == user_id
+            )
+        )
+        session.execute(
+            delete(PersonalModelComparisonRun).where(
+                PersonalModelComparisonRun.owner_id == user_id
+            )
         )
         record_ids = [
             row.id
