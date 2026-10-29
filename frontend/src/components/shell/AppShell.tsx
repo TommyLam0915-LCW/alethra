@@ -5,7 +5,14 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { brand } from '@/lib/brand';
 
-export type NavKey = 'workspace' | 'strategies' | 'portfolios' | 'journal';
+export type NavKey =
+  | 'workspace'
+  | 'strategies'
+  | 'portfolios'
+  | 'journal'
+  | 'training'
+  | 'market'
+  | 'pilot';
 
 interface NavItem {
   key: NavKey;
@@ -23,10 +30,102 @@ const PRIMARY_NAV: NavItem[] = [
   { key: 'journal', href: '/paper-portfolio?view=journal', label: '紀錄與結果', labelEn: 'Journal & Results', labelMobile: '日誌' },
 ];
 
+const TOOL_LINKS = [
+  { key: 'training' as NavKey, href: '/training', label: '訓練與模型', labelEn: 'Training & Models' },
+  { key: 'market' as NavKey, href: '/market-data', label: '市場資料', labelEn: 'Market data' },
+  { key: 'pilot' as NavKey, href: '/pilot', label: 'Pilot 計劃', labelEn: 'Pilot program' },
+];
+
 const SETTINGS_LINKS = [
   { href: '/api-keys', label: 'API 金鑰', labelEn: 'API access' },
   { href: '/subscription', label: '訂閱與帳單', labelEn: 'Subscription' },
 ];
+
+interface MenuLink {
+  href: string;
+  label: string;
+  labelEn: string;
+  key?: NavKey;
+}
+
+/**
+ * A single dropdown used for both the tools and settings menus. Sharing it
+ * keeps the click-outside / Escape / aria-expanded behaviour identical, and it
+ * lives in the always-visible app-bar-right so mobile users (whose top nav is
+ * hidden) still have a path to every secondary page.
+ */
+function AppMenu({
+  label,
+  testId,
+  items,
+  activeKey,
+}: {
+  label: string;
+  testId: string;
+  items: MenuLink[];
+  activeKey?: NavKey;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('mousedown', onDocClick);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDocClick);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  return (
+    <div className="app-settings" ref={ref}>
+      <button
+        type="button"
+        className="app-settings-toggle"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={`${testId}-menu`}
+        onClick={() => setOpen((v) => !v)}
+        data-testid={testId}
+      >
+        {label}
+      </button>
+      {open && (
+        <div
+          id={`${testId}-menu`}
+          role="menu"
+          className="app-settings-menu"
+          data-testid={`${testId}-menu`}
+        >
+          {items.map((item) => (
+            <Link
+              key={item.href}
+              href={item.href}
+              role="menuitem"
+              className="app-settings-item"
+              aria-current={
+                activeKey !== undefined &&
+                (item as MenuLink & { key?: NavKey }).key === activeKey
+                  ? 'page'
+                  : undefined
+              }
+              onClick={() => setOpen(false)}
+            >
+              {item.label}
+            </Link>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 /**
  * The one shared application shell for every authenticated page. Owns the
@@ -51,8 +150,6 @@ export default function AppShell({
 }) {
   const pathname = usePathname();
   const [authed, setAuthed] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const settingsRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
@@ -62,24 +159,6 @@ export default function AppShell({
     }
     setAuthed(true);
   }, []);
-
-  useEffect(() => {
-    if (!settingsOpen) return;
-    const onDocClick = (e: MouseEvent) => {
-      if (settingsRef.current && !settingsRef.current.contains(e.target as Node)) {
-        setSettingsOpen(false);
-      }
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setSettingsOpen(false);
-    };
-    document.addEventListener('mousedown', onDocClick);
-    document.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('mousedown', onDocClick);
-      document.removeEventListener('keydown', onKey);
-    };
-  }, [settingsOpen]);
 
   const handleLogout = () => {
     localStorage.removeItem('token');
@@ -119,39 +198,8 @@ export default function AppShell({
         </nav>
 
         <div className="app-bar-right">
-          <div className="app-settings" ref={settingsRef}>
-            <button
-              type="button"
-              className="app-settings-toggle"
-              aria-haspopup="menu"
-              aria-expanded={settingsOpen}
-              aria-controls="app-settings-menu"
-              onClick={() => setSettingsOpen((v) => !v)}
-              data-testid="settings-toggle"
-            >
-              設定
-            </button>
-            {settingsOpen && (
-              <div
-                id="app-settings-menu"
-                role="menu"
-                className="app-settings-menu"
-                data-testid="settings-menu"
-              >
-                {SETTINGS_LINKS.map((s) => (
-                  <Link
-                    key={s.href}
-                    href={s.href}
-                    role="menuitem"
-                    className="app-settings-item"
-                    onClick={() => setSettingsOpen(false)}
-                  >
-                    {s.label}
-                  </Link>
-                ))}
-              </div>
-            )}
-          </div>
+          <AppMenu label="工具" testId="tools-toggle" items={TOOL_LINKS} activeKey={active} />
+          <AppMenu label="設定" testId="settings-toggle" items={SETTINGS_LINKS} />
           <button
             type="button"
             className="app-logout"

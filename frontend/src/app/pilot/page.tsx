@@ -2,9 +2,8 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import Link from 'next/link';
 import { api } from '@/lib/api';
-import { brand } from '@/lib/brand';
+import AppShell from '@/components/shell/AppShell';
 
 interface Application {
   id: string;
@@ -115,19 +114,19 @@ export default function PilotApplicationPage() {
 
   if (loading) {
     return (
-      <div className="container" style={{ paddingTop: '40px', textAlign: 'center' }}>
-        載入中...
-      </div>
+      <AppShell active="pilot">
+        <div className="container" style={{ paddingTop: '40px', textAlign: 'center', color: 'var(--text-secondary)' }}>
+          載入中...
+        </div>
+      </AppShell>
     );
   }
 
   return (
+    <AppShell active="pilot">
     <div className="container" style={{ paddingTop: '40px', paddingBottom: '40px' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '30px' }}>
-        <h1>Pilot 試點計劃</h1>
-        <Link href="/dashboard" className="btn btn-secondary">
-          返回我的實驗
-        </Link>
+      <div style={{ marginBottom: '30px' }}>
+        <h1 style={{ margin: 0 }}>Pilot 試點計劃</h1>
       </div>
 
       <div className="disclaimer" style={{ marginBottom: '24px' }}>
@@ -137,31 +136,31 @@ export default function PilotApplicationPage() {
       </div>
 
       {entitlement && (
-        <div className="card" style={{ marginBottom: '24px', borderLeft: '4px solid #28a745' }}>
+        <div className="card" style={{ marginBottom: '24px', borderLeft: '4px solid var(--positive)' }}>
           <h3 style={{ marginBottom: '16px' }}>你的 Pilot 權限</h3>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '12px' }}>
             <div>
-              <div style={{ fontSize: '12px', color: '#666' }}>回測執行上限</div>
+              <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>回測執行上限</div>
               <div style={{ fontSize: '18px', fontWeight: 600 }}>{entitlement.research_run_limit}</div>
             </div>
             <div>
-              <div style={{ fontSize: '12px', color: '#666' }}>AI 使用上限</div>
+              <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>AI 使用上限</div>
               <div style={{ fontSize: '18px', fontWeight: 600 }}>{entitlement.ai_usage_limit}</div>
             </div>
             <div>
-              <div style={{ fontSize: '12px', color: '#666' }}>匯出上限</div>
+              <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>匯出上限</div>
               <div style={{ fontSize: '18px', fontWeight: 600 }}>{entitlement.export_limit}</div>
             </div>
             <div>
-              <div style={{ fontSize: '12px', color: '#666' }}>歷史重播模擬上限</div>
+              <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>歷史重播模擬上限</div>
               <div style={{ fontSize: '18px', fontWeight: 600 }}>{entitlement.forward_simulation_limit}</div>
             </div>
             <div>
-              <div style={{ fontSize: '12px', color: '#666' }}>支援等級</div>
+              <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>支援等級</div>
               <div style={{ fontSize: '18px', fontWeight: 600 }}>{entitlement.support_tier}</div>
             </div>
             <div>
-              <div style={{ fontSize: '12px', color: '#666' }}>到期日</div>
+              <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>到期日</div>
               <div style={{ fontSize: '18px', fontWeight: 600 }}>
                 {entitlement.expiry_date ? new Date(entitlement.expiry_date).toLocaleDateString('zh-Hant') : '無限期'}
               </div>
@@ -186,28 +185,28 @@ export default function PilotApplicationPage() {
             >
               {getStatusLabel(application.status)}
             </span>
-            <span style={{ color: '#666', fontSize: '14px' }}>
+            <span style={{ color: 'var(--text-muted)', fontSize: '14px' }}>
               提交於 {new Date(application.created_at).toLocaleDateString('zh-Hant')}
             </span>
           </div>
-          <div style={{ fontSize: '14px', color: '#444' }}>
+          <div style={{ fontSize: '14px', color: 'var(--text-primary)' }}>
             <p>申請類型：{USER_TYPE_OPTIONS.find(o => o.value === application.intended_user_type)?.label || application.intended_user_type}</p>
           </div>
         </div>
       ) : (
         <div className="card">
           <h3 style={{ marginBottom: '20px' }}>提交 Pilot 申請</h3>
-          <p style={{ color: '#666', marginBottom: '20px', fontSize: '14px' }}>
+          <p style={{ color: 'var(--text-secondary)', marginBottom: '20px', fontSize: '14px' }}>
             填寫以下資訊以申請加入試點計劃。我們不會要求任何券商帳戶或敏感財務資料。
           </p>
 
           {error && (
-            <div style={{ padding: '12px', backgroundColor: '#f8d7da', color: '#721c24', borderRadius: '6px', marginBottom: '16px' }}>
+            <div style={{ padding: '12px', backgroundColor: 'rgba(239,68,68,0.12)', border: '1px solid var(--negative)', color: 'var(--text-primary)', borderRadius: '6px', marginBottom: '16px' }}>
               {error}
             </div>
           )}
           {success && (
-            <div style={{ padding: '12px', backgroundColor: '#d4edda', color: '#155724', borderRadius: '6px', marginBottom: '16px' }}>
+            <div style={{ padding: '12px', backgroundColor: 'rgba(34,197,94,0.12)', border: '1px solid var(--positive)', color: 'var(--text-primary)', borderRadius: '6px', marginBottom: '16px' }}>
               {success}
             </div>
           )}
@@ -318,5 +317,6 @@ export default function PilotApplicationPage() {
         </div>
       )}
     </div>
+    </AppShell>
   );
 }
