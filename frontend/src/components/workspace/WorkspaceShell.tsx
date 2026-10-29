@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Panel, PanelGroup, PanelResizeHandle, type ImperativePanelHandle } from 'react-resizable-panels';
-import { api } from '@/lib/api';
+import { api, ApiError } from '@/lib/api';
 import AppShell from '@/components/shell/AppShell';
 import WorkspaceContextBar, { type ContextPortfolio } from '@/components/shell/WorkspaceContextBar';
 import { useOperationalStatus } from '@/components/shell/useOperationalStatus';
@@ -39,6 +39,7 @@ export default function WorkspaceShell() {
   const [bars, setBars] = useState<BarsResponse | null>(null);
   const [barsLoading, setBarsLoading] = useState(false);
   const [barsError, setBarsError] = useState('');
+  const [symbolInvalid, setSymbolInvalid] = useState(false);
   const [detail, setDetail] = useState<InstrumentDetail | null>(null);
   /**
    * The dataset window the user explicitly chose to view when their normal range
@@ -365,6 +366,7 @@ export default function WorkspaceShell() {
     let cancelled = false;
     setBarsLoading(true);
     setBarsError('');
+    setSymbolInvalid(false);
     (async () => {
       try {
         const data = await api.instruments.bars(symbol, reqWindow.start, reqWindow.end);
@@ -376,6 +378,7 @@ export default function WorkspaceShell() {
         if (!cancelled) {
           setBars(null);
           setBarsError(err instanceof Error ? err.message : '無法載入數據');
+          setSymbolInvalid(err instanceof ApiError && err.status === 404);
         }
       } finally {
         if (!cancelled) setBarsLoading(false);
@@ -415,8 +418,15 @@ export default function WorkspaceShell() {
   const onSelectSymbol = (instrumentId: string) => {
     // A period chosen for the old symbol says nothing about the new one.
     setSamplePeriod(null);
+    setSymbolInvalid(false);
     setLayout({ symbol: instrumentId });
     setMobileDrawer(false);
+  };
+
+  const recoverFromInvalidSymbol = () => {
+    setSamplePeriod(null);
+    setSymbolInvalid(false);
+    setLayout({ symbol: DEFAULT_LAYOUT.symbol });
   };
 
   const addCurrentToWatchlist = async () => {
@@ -790,8 +800,35 @@ export default function WorkspaceShell() {
     <>
       <InstrumentHeader data={bars ?? detail} loading={barsLoading} coverage={coverage} />
       {barsError ? (
-        <div className="ws-message-error" style={{ margin: 10 }}>
-          {barsError}
+        <div className="ws-message-error" style={{ margin: 10 }} data-testid="workspace-bars-error">
+          <div>
+            {symbolInvalid
+              ? `已儲存的標的「${symbol}」不存在，無法載入數據。`
+              : barsError}
+          </div>
+          {symbolInvalid && (
+            <div
+              data-testid="invalid-symbol-recovery"
+              style={{ marginTop: 8, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}
+            >
+              <button
+                type="button"
+                onClick={recoverFromInvalidSymbol}
+                style={{
+                  padding: '4px 10px',
+                  border: '1px solid currentColor',
+                  borderRadius: 4,
+                  background: 'transparent',
+                  color: 'inherit',
+                  cursor: 'pointer',
+                  fontSize: 12,
+                }}
+              >
+                改用預設標的（{DEFAULT_LAYOUT.symbol}）
+              </button>
+              <span style={{ fontSize: 12 }}>或在搜尋欄選擇其他標的</span>
+            </div>
+          )}
         </div>
       ) : (
         <div className="ws-panel" style={{ flex: 1, minHeight: 0, position: 'relative' }}>
