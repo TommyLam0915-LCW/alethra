@@ -164,13 +164,16 @@ def get_api_key_dependency():
     return _dependency
 
 
-def check_api_key_scope(scope_required: str):
-    """FastAPI dependency that verifies the API key has *scope_required*.
+def check_api_key_scope(scope_required: str, *accept: str):
+    """FastAPI dependency that verifies the API key holds a scope for this route.
 
     * If the request was authenticated via JWT, this dependency is a no-op
       (JWT users are considered fully privileged).
-    * If the request was authenticated via API key, the required scope must be
-      present in the key's scope list.
+    * If the request was authenticated via API key, one of *scope_required* or
+      the extra *accept* scopes must be present in the key's scope list. The
+      extras exist for the domain scopes the key UI offers (``inference``,
+      ``training``): a key minted for model inference can call the model
+      routes without also being handed the blanket ``read``/``write`` scopes.
     * If no scopes attribute is set (shouldn't happen), the request is denied.
 
     Usage::
@@ -180,7 +183,23 @@ def check_api_key_scope(scope_required: str):
             _=Depends(check_api_key_scope("write")),
             ...
         ):
+
+        @router.post("/models/{model_id}/predict")
+        def predict(..., _=Depends(check_api_key_scope("write", "inference"))):
+            ...
     """
+    accepted = [scope_required, *accept]
+
+    def _insufficient(scopes: list) -> HTTPException:
+        return HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error": "insufficient_scope",
+                "required_scope": scope_required,
+                "accepted_scopes": accepted,
+                "held_scopes": scopes,
+            },
+        )
 
     def _dependency(request: Request):
         # Distinguish three states:
@@ -188,14 +207,7 @@ def check_api_key_scope(scope_required: str):
         #   - attribute is None         → JWT auth → no scope restrictions
         #   - attribute is a list       → API key auth → enforce scopes
         if not hasattr(request.state, "api_key_scopes"):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail={
-                    "error": "insufficient_scope",
-                    "required_scope": scope_required,
-                    "held_scopes": [],
-                },
-            )
+            raise _insufficient([])
 
         scopes = request.state.api_key_scopes
 
@@ -203,16 +215,9 @@ def check_api_key_scope(scope_required: str):
         if scopes is None:
             return request
 
-        # API key authenticated — check for required scope
-        if scope_required not in scopes:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail={
-                    "error": "insufficient_scope",
-                    "required_scope": scope_required,
-                    "held_scopes": scopes,
-                },
-            )
+        # API key authenticated — check for any accepted scope
+        if not any(scope in scopes for scope in accepted):
+            raise _insufficient(scopes)
         return request
 
     return _dependency

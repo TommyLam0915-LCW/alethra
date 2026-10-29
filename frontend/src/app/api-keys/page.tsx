@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { api } from '@/lib/api';
+import { api, API_BASE_URL } from '@/lib/api';
 
 interface ApiKey {
   id: string;
@@ -18,16 +18,29 @@ interface ApiKey {
 interface CreatedKey {
   id: string;
   name: string;
-  key: string;
+  raw_key: string;
   key_prefix: string;
   scopes?: string[];
 }
 
+// Every scope below is enforced somewhere in the API today. An unchecked scope
+// grants nothing: a key with no scopes is refused on the model and paper routes.
 const SCOPE_OPTIONS = [
-  { value: 'research_run', label: '研究執行' },
-  { value: 'execution', label: '交易執行' },
-  { value: 'inference', label: '模型推論' },
-  { value: 'training', label: '模型訓練' },
+  { value: 'read', label: '讀取', description: '列出與查看你的模型、訓練任務及 AI 額度' },
+  { value: 'write', label: '寫入', description: '訓練、推論與模擬交易等所有寫入操作' },
+  { value: 'inference', label: '模型推論', description: '只做模型推論與讀取，不能排程訓練' },
+  { value: 'training', label: '模型訓練', description: '排程、查詢、取消訓練並管理模型，不能推論' },
+];
+
+const ENDPOINTS = [
+  { action: '列出我的模型', method: 'GET', path: '/api/v1/ml/models', scopes: 'read、inference 或 training' },
+  { action: '模型詳情', method: 'GET', path: '/api/v1/ml/models/{model_id}', scopes: 'read、inference 或 training' },
+  { action: '最新推論', method: 'POST', path: '/api/v1/ml/models/{model_id}/predict-latest', scopes: 'write 或 inference' },
+  { action: '指定期間推論', method: 'POST', path: '/api/v1/ml/models/{model_id}/predict?start_date=…&end_date=…', scopes: 'write 或 inference' },
+  { action: '排程訓練', method: 'POST', path: '/api/v1/ml/train?instrument_id=US:AAPL', scopes: 'write 或 training' },
+  { action: '查詢訓練任務', method: 'GET', path: '/api/v1/training/jobs/{job_id}', scopes: 'read、inference 或 training' },
+  { action: '取消訓練任務', method: 'POST', path: '/api/v1/training/jobs/{job_id}/cancel', scopes: 'write 或 training' },
+  { action: '查詢 AI 額度', method: 'GET', path: '/api/v1/ml/entitlement', scopes: 'read、inference 或 training' },
 ];
 
 export default function ApiKeysPage() {
@@ -95,7 +108,7 @@ export default function ApiKeysPage() {
   const handleCopy = async () => {
     if (!justCreated) return;
     try {
-      await navigator.clipboard.writeText(justCreated.key);
+      await navigator.clipboard.writeText(justCreated.raw_key);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {
@@ -149,6 +162,58 @@ export default function ApiKeysPage() {
 
       <div className="disclaimer">
         <strong>說明：</strong>API 金鑰提供對 Alethra 演示環境的程式化存取。
+        金鑰只會顯示一次；撤銷後立即失效。金鑰不能再用來建立其他金鑰。
+      </div>
+
+      <div className="card" data-testid="api-guide" style={{ marginBottom: '24px' }}>
+        <h2 style={{ marginBottom: '12px' }}>以程式呼叫你的個人模型</h2>
+        <p style={{ color: '#555', fontSize: '14px', marginBottom: '12px' }}>
+          在請求標頭帶上 <code>Authorization: Bearer &lt;你的 API 金鑰&gt;</code> 即可呼叫以下端點。
+          權限不足時會回傳 403，並列出此端點接受的權限。
+        </p>
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+            <thead>
+              <tr style={{ textAlign: 'left', borderBottom: '1px solid #e0e0e0' }}>
+                <th style={{ padding: '6px 8px' }}>動作</th>
+                <th style={{ padding: '6px 8px' }}>方法與路徑</th>
+                <th style={{ padding: '6px 8px' }}>需要權限</th>
+              </tr>
+            </thead>
+            <tbody>
+              {ENDPOINTS.map((ep) => (
+                <tr key={`${ep.method}-${ep.path}`} style={{ borderBottom: '1px solid #f0f0f0' }}>
+                  <td style={{ padding: '6px 8px' }}>{ep.action}</td>
+                  <td style={{ padding: '6px 8px', fontFamily: 'monospace' }}>
+                    {ep.method} {ep.path}
+                  </td>
+                  <td style={{ padding: '6px 8px', color: '#666' }}>{ep.scopes}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <pre
+          data-testid="api-guide-curl"
+          style={{
+            marginTop: '16px',
+            padding: '12px',
+            backgroundColor: '#1a1a2e',
+            color: '#e0e0e0',
+            borderRadius: '6px',
+            fontSize: '12px',
+            overflowX: 'auto',
+          }}
+        >
+{`curl -X POST "${API_BASE_URL}/api/v1/ml/models/<MODEL_ID>/predict-latest" \\
+  -H "Authorization: Bearer <你的 API 金鑰>"`}
+        </pre>
+        <ul style={{ marginTop: '12px', paddingLeft: '20px', color: '#555', fontSize: '13px', lineHeight: 1.8 }}>
+          <li>每次推論扣 1 個 AI 額度；額度不足時回傳 429。</li>
+          <li>排程訓練會先預留 1 個額度，成功後結算，失敗或取消則全額釋放。</li>
+          <li>每把金鑰有獨立的請求額度；超出時回傳 429 與 Retry-After。</li>
+          <li>模型輸出僅供研究用途，並非交易建議。</li>
+        </ul>
       </div>
 
       {/* Newly created key — shown ONCE */}
@@ -175,6 +240,7 @@ export default function ApiKeysPage() {
             }}
           >
             <code
+              data-testid="created-key-value"
               style={{
                 flex: 1,
                 padding: '12px 16px',
@@ -186,7 +252,7 @@ export default function ApiKeysPage() {
                 wordBreak: 'break-all',
               }}
             >
-              {justCreated.key}
+              {justCreated.raw_key}
             </code>
             <button
               onClick={handleCopy}
@@ -218,6 +284,7 @@ export default function ApiKeysPage() {
           </label>
           <input
             type="text"
+            data-testid="api-key-name"
             value={newName}
             onChange={(e) => setNewName(e.target.value)}
             placeholder="例如：我的研究腳本"
@@ -234,18 +301,25 @@ export default function ApiKeysPage() {
           <label style={{ display: 'block', marginBottom: '6px', fontWeight: 500 }}>
             權限範圍（選填）
           </label>
-          <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap' }}>
+          <div style={{ display: 'grid', gap: '8px' }}>
             {SCOPE_OPTIONS.map((opt) => (
               <label
                 key={opt.value}
-                style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }}
+                style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', cursor: 'pointer' }}
               >
                 <input
                   type="checkbox"
+                  data-testid={`scope-${opt.value}`}
                   checked={selectedScopes.includes(opt.value)}
                   onChange={() => toggleScope(opt.value)}
+                  style={{ marginTop: '3px' }}
                 />
-                {opt.label}
+                <span>
+                  <span style={{ fontWeight: 500 }}>{opt.label}</span>
+                  <span style={{ color: '#777', fontSize: '13px', marginLeft: '8px' }}>
+                    {opt.description}
+                  </span>
+                </span>
               </label>
             ))}
           </div>
@@ -257,6 +331,7 @@ export default function ApiKeysPage() {
           onClick={handleCreate}
           disabled={!newName.trim() || creating}
           className="btn btn-primary"
+          data-testid="api-key-create"
         >
           {creating ? '建立中...' : '建立金鑰'}
         </button>
@@ -284,7 +359,7 @@ export default function ApiKeysPage() {
       ) : (
         <div style={{ display: 'grid', gap: '16px' }}>
           {keys.map((key) => (
-            <div key={key.id} className="card">
+            <div key={key.id} className="card" data-testid={`api-key-${key.key_prefix}`}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start' }}>
                 <div style={{ flex: 1 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '8px' }}>
@@ -326,6 +401,7 @@ export default function ApiKeysPage() {
                     onClick={() => setRevokeTarget(key)}
                     className="btn btn-secondary"
                     style={{ color: '#c0392b', borderColor: '#c0392b' }}
+                    data-testid={`revoke-${key.key_prefix}`}
                   >
                     撤銷
                   </button>
@@ -376,6 +452,7 @@ export default function ApiKeysPage() {
                 className="btn btn-primary"
                 disabled={revoking}
                 style={{ backgroundColor: '#c0392b', borderColor: '#c0392b' }}
+                data-testid="revoke-confirm"
               >
                 {revoking ? '撤銷中...' : '確認撤銷'}
               </button>

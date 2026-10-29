@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { api, ApiError } from '@/lib/api';
+import { api, ApiError, API_BASE_URL } from '@/lib/api';
 import AppShell from '@/components/shell/AppShell';
 import PersonalizationPanel from '@/components/training/PersonalizationPanel';
 
@@ -91,6 +91,14 @@ function describeMlRefusal(err: unknown, fallback: string): string {
   return (err as any)?.message || fallback;
 }
 
+// The card header shows a truncated id; a caller needs the whole one.
+function modelApiSnippet(modelId: string): string {
+  return [
+    `curl -X POST "${API_BASE_URL}/api/v1/ml/models/${modelId}/predict-latest" \\`,
+    '  -H "Authorization: Bearer <你的 API 金鑰>"',
+  ].join('\n');
+}
+
 export default function TrainingPage() {
   const router = useRouter();
   const [jobs, setJobs] = useState<TrainingJob[]>([]);
@@ -119,6 +127,7 @@ export default function TrainingPage() {
   const [expandedModelId, setExpandedModelId] = useState<string | null>(null);
   const [latestPredictions, setLatestPredictions] = useState<Record<string, any>>({});
   const [deletingModelId, setDeletingModelId] = useState<string | null>(null);
+  const [copiedModelApi, setCopiedModelApi] = useState<string | null>(null);
 
   const hasActiveJobs = jobs.some((job) => ACTIVE_JOB_STATUSES.has(job.status));
   const quotaExhausted = quota !== null && quota.remaining !== null && quota.remaining <= 0;
@@ -258,6 +267,21 @@ export default function TrainingPage() {
       alert(err?.message || '刪除模型失敗');
     } finally {
       setDeletingModelId(null);
+    }
+  };
+
+  const handleCopyModelApi = async (modelId: string) => {
+    try {
+      await navigator.clipboard.writeText(modelApiSnippet(modelId));
+      setCopiedModelApi(modelId);
+      setTimeout(() => {
+        setCopiedModelApi((current) => (current === modelId ? null : current));
+      }, 2000);
+    } catch (err) {
+      // Clipboard access can be denied (insecure origin, permission); the
+      // snippet is still on screen to select by hand.
+      console.error('Copy model API snippet failed:', err);
+      setCopiedModelApi(null);
     }
   };
 
@@ -904,6 +928,38 @@ export default function TrainingPage() {
                             {model.training_job_id || '未記錄（舊模型 artifact 無任務欄位）'}
                           </span>
                         </div>
+                      </div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', margin: '16px 0 8px', gap: '12px' }}>
+                        <h4 style={{ margin: 0, fontSize: '14px', color: 'var(--text-secondary)' }}>以 API 呼叫此模型</h4>
+                        <button
+                          onClick={() => handleCopyModelApi(model.model_id)}
+                          className="btn btn-secondary"
+                          style={{ padding: '4px 12px', fontSize: '12px' }}
+                          data-testid={`model-api-copy-${model.model_id}`}
+                        >
+                          {copiedModelApi === model.model_id ? '已複製' : '複製指令'}
+                        </button>
+                      </div>
+                      <pre
+                        data-testid={`model-api-${model.model_id}`}
+                        style={{
+                          backgroundColor: 'var(--surface-2)',
+                          border: '1px solid var(--border-strong)',
+                          color: 'var(--text-primary)',
+                          padding: '12px',
+                          borderRadius: '4px',
+                          fontSize: '13px',
+                          overflow: 'auto',
+                          margin: 0,
+                        }}
+                      >
+                        {modelApiSnippet(model.model_id)}
+                      </pre>
+                      <div style={{ marginTop: '8px', fontSize: '12px', color: 'var(--text-muted)' }}>
+                        需要具備「模型推論」或「寫入」權限的 API 金鑰（於{' '}
+                        <Link href="/api-keys" style={{ color: 'var(--primary)' }}>API 金鑰</Link>
+                        {' '}頁建立）。每次呼叫扣 1 個 AI 額度，額度不足時回傳 429；
+                        僅供研究用途，非交易建議。
                       </div>
                     </div>
                   )}

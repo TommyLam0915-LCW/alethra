@@ -3,9 +3,10 @@
 import uuid
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.database import get_db
 from app.auth.jwt import get_current_user
 from app.auth.entitlements import (
@@ -16,6 +17,7 @@ from app.auth.entitlements import (
     get_quota_status,
 )
 from app.auth.api_keys import check_api_key_scope
+from app.auth.rate_limit import api_key_rate_limit_dependency
 from app.models.training import TrainingJob
 from app.models.user import User
 from app.services.ml_training import (
@@ -26,7 +28,28 @@ from app.ml.trainer import list_models, load_model, delete_model
 from app.ml.predictor import predict, predict_latest
 from app.providers import get_data_provider
 
-router = APIRouter(prefix="/ml", tags=["ml-training"])
+_settings = get_settings()
+
+# The personal model API is reachable with an API key; budget each key the same
+# way the personal paper API does so one script cannot starve the others.
+router = APIRouter(
+    prefix="/ml",
+    tags=["ml-training"],
+    dependencies=[
+        Depends(
+            api_key_rate_limit_dependency(
+                max_requests=_settings.api_key_rate_limit_requests,
+                window_seconds=_settings.api_key_rate_limit_window_seconds,
+            )
+        )
+    ],
+)
+
+
+def _caller_via(request: Request) -> str:
+    """Who invoked this route: an interactive session or a programmatic key."""
+    scopes = getattr(request.state, "api_key_scopes", None)
+    return "jwt" if scopes is None else "api_key"
 
 
 @router.post("/train")
@@ -37,7 +60,7 @@ def start_ml_training(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     current_user: User = Depends(require_entitlement(quota_type="ai_usage")),
-    _scope_check=Depends(check_api_key_scope("write")),
+    _scope_check=Depends(check_api_key_scope("write", "training")),
     db: Session = Depends(get_db),
 ):
     """Queue an ML training job for the durable training worker.
@@ -106,7 +129,7 @@ def start_ml_training(
 @router.get("/entitlement")
 def get_ml_entitlement(
     current_user: User = Depends(get_current_user),
-    _scope_check=Depends(check_api_key_scope("read")),
+    _scope_check=Depends(check_api_key_scope("read", "inference", "training")),
     db: Session = Depends(get_db),
 ):
     """AI-usage quota state for the caller.
@@ -121,7 +144,7 @@ def get_ml_entitlement(
 @router.get("/models")
 def list_trained_models(
     current_user: User = Depends(get_current_user),
-    _scope_check=Depends(check_api_key_scope("read")),
+    _scope_check=Depends(check_api_key_scope("read", "inference", "training")),
     db: Session = Depends(get_db),
 ):
     """List all trained model artifacts owned by the current user.
@@ -174,7 +197,7 @@ def list_trained_models(
 def get_model_detail(
     model_id: str,
     current_user: User = Depends(get_current_user),
-    _scope_check=Depends(check_api_key_scope("read")),
+    _scope_check=Depends(check_api_key_scope("read", "inference", "training")),
 ):
     """Get detail for a specific trained model."""
     try:
@@ -197,7 +220,7 @@ def get_model_detail(
 def delete_trained_model(
     model_id: str,
     current_user: User = Depends(get_current_user),
-    _scope_check=Depends(check_api_key_scope("write")),
+    _scope_check=Depends(check_api_key_scope("write", "training")),
 ):
     """Delete a trained model artifact owned by the current user."""
     # Model IDs are UUIDs — rejecting non-UUID strings keeps the artifact
@@ -220,11 +243,12 @@ def delete_trained_model(
 @router.post("/models/{model_id}/predict")
 def run_prediction(
     model_id: str,
+    request: Request,
     instrument_id: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     current_user: User = Depends(get_current_user),
-    _scope_check=Depends(check_api_key_scope("write")),
+    _scope_check=Depends(check_api_key_scope("write", "inference")),
     db: Session = Depends(get_db),
 ):
     """Run prediction using a trained model.
@@ -296,6 +320,7 @@ def run_prediction(
             "data_nature": data_nature,
             "bars_count": len(bars),
             "prediction_type": "predict",
+            "via": _caller_via(request),
             # Lineage: this inference -> artifact -> training job.
             "model_id": model_id,
             "training_job_id": metadata.get("training_job_id"),
@@ -317,9 +342,10 @@ def run_prediction(
 @router.post("/models/{model_id}/predict-latest")
 def run_latest_prediction(
     model_id: str,
+    request: Request,
     instrument_id: Optional[str] = None,
     current_user: User = Depends(get_current_user),
-    _scope_check=Depends(check_api_key_scope("write")),
+    _scope_check=Depends(check_api_key_scope("write", "inference")),
     db: Session = Depends(get_db),
 ):
     """Get the latest prediction from a trained model.
@@ -381,6 +407,7 @@ def run_latest_prediction(
             "data_nature": data_nature,
             "bars_count": len(bars),
             "prediction_type": "predict-latest",
+            "via": _caller_via(request),
             # Lineage: this inference -> artifact -> training job.
             "model_id": model_id,
             "training_job_id": metadata.get("training_job_id"),

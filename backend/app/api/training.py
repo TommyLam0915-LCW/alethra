@@ -14,6 +14,7 @@ from app.models.experiment import Experiment
 from app.models.experiment_version import ExperimentVersion
 from app.models.training import TrainingJob, TrainingJobStatus
 from app.auth.jwt import get_current_user
+from app.auth.api_keys import check_api_key_scope
 from app.auth.entitlements import release_reservation
 from app.auth.safety import safety_control
 from app.models.kill_switch import KillSwitchScope
@@ -100,6 +101,7 @@ def create_training_job(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     _: None = Depends(safety_control(KillSwitchScope.training, "training")),
+    _scope_check=Depends(check_api_key_scope("write", "training")),
 ):
     """Create a training job (parameter sweep).
 
@@ -153,6 +155,7 @@ def get_training_job(
     job_id: UUID,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope("read", "training", "inference")),
 ):
     """Get a specific training job with results."""
     job = db.query(TrainingJob).filter(
@@ -169,6 +172,7 @@ def list_training_jobs(
     status_filter: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope("read", "training", "inference")),
 ):
     """List the current user's training jobs."""
     query = db.query(TrainingJob).filter(TrainingJob.user_id == current_user.id)
@@ -199,6 +203,7 @@ def cancel_training_job(
     job_id: UUID,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope("write", "training")),
 ):
     """Cancel a pending or running training job.
 
