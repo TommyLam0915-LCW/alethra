@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { api } from '@/lib/api';
+import { api, ApiError } from '@/lib/api';
 
 interface InferenceRun {
   id: string;
@@ -27,6 +27,7 @@ export default function InferencePage() {
     input_spec: '',
   });
   const [creating, setCreating] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   useEffect(() => {
     const token = localStorage.getItem('token');
@@ -52,9 +53,17 @@ export default function InferencePage() {
 
   const handleCreateRun = async (e: React.FormEvent) => {
     e.preventDefault();
+    setSubmitError(null);
     setCreating(true);
+    let inputSpec: unknown;
     try {
-      const inputSpec = formData.input_spec ? JSON.parse(formData.input_spec) : {};
+      inputSpec = formData.input_spec ? JSON.parse(formData.input_spec) : {};
+    } catch {
+      setSubmitError('輸入規格必須是有效 JSON，請修正後再提交（輸入內容已保留）。');
+      setCreating(false);
+      return;
+    }
+    try {
       await api.inference.createRun({
         model_version_id: formData.model_version_id,
         input_spec: inputSpec,
@@ -64,7 +73,8 @@ export default function InferencePage() {
       await loadRuns();
     } catch (err) {
       console.error('Failed to create run:', err);
-      alert('建立推論任務失敗');
+      const detail = err instanceof ApiError ? err.message : '建立推論任務失敗';
+      setSubmitError(`${detail}（輸入內容已保留，可直接重試）`);
     } finally {
       setCreating(false);
     }
@@ -164,7 +174,7 @@ export default function InferencePage() {
               <textarea
                 value={formData.input_spec}
                 onChange={(e) => setFormData({ ...formData, input_spec: e.target.value })}
-                placeholder='{"symbol": "BTC-USD", "indicators": ["sma", "rsi"]}'
+                placeholder='{"symbol": "US:AAPL", "start_date": "2024-01-02", "end_date": "2024-01-31"}'
                 rows={6}
                 style={{
                   width: '100%',
@@ -180,6 +190,11 @@ export default function InferencePage() {
             <button type="submit" className="btn btn-primary" disabled={creating}>
               {creating ? '建立中...' : '建立任務'}
             </button>
+            {submitError && (
+              <p role="alert" style={{ marginTop: '12px', color: '#721c24', fontSize: '14px' }}>
+                {submitError}
+              </p>
+            )}
           </form>
         </div>
       )}
@@ -241,6 +256,10 @@ export default function InferencePage() {
                   {run.output_signals && (
                     <>
                       <h4 style={{ marginBottom: '8px', fontSize: '14px', color: '#666' }}>輸出訊號</h4>
+                      <p style={{ marginBottom: '8px', fontSize: '13px', color: '#666' }}>
+                        每個訊號的 confidence 為規則式運算的固定顯示值（0.5 / 0.7 / 1.0），
+                        並非機率、準確率或可信度；本頁未提供任何經校準的預測值。
+                      </p>
                       <pre style={{
                         backgroundColor: '#f8f9fa',
                         padding: '12px',
