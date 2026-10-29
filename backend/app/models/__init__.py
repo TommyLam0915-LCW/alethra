@@ -103,6 +103,11 @@ from app.models.personalization import (
     PersonalizationConsent,
     PERSONALIZATION_TRAINING_PURPOSE,
 )
+from app.models.personal_model_selection import (
+    PersonalModelComparisonRun,
+    PersonalModelSelection,
+    PersonalModelSelectionAction,
+)
 from app.models.robustness import (
     RobustnessStudy,
     RobustnessAttempt,
@@ -221,6 +226,9 @@ __all__ = [
     "PersonalizationSnapshotStatus",
     "PersonalizationConsent",
     "PERSONALIZATION_TRAINING_PURPOSE",
+    "PersonalModelComparisonRun",
+    "PersonalModelSelection",
+    "PersonalModelSelectionAction",
     "RobustnessStudy",
     "RobustnessAttempt",
     "STUDY_KINDS",

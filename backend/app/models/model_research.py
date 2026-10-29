@@ -34,6 +34,10 @@ class EvaluationType(str, enum.Enum):
     forward_simulation = "forward_simulation"
     methodology_review = "methodology_review"
     behavior_consistency = "behavior_consistency"
+    # Two immutable personal model versions evaluated on comparable evidence.
+    # The evaluation rows keep the artifact hash, snapshot checksum and split,
+    # so the stored numbers stay bound to what actually produced them.
+    model_comparison = "model_comparison"
 
 
 class EvaluatorType(str, enum.Enum):

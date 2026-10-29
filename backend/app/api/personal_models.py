@@ -34,8 +34,22 @@ from app.ml.personal_trainer import (
 )
 from app.models.model_research import ModelResearchRecord, ModelType, ModelVersion
 from app.models.personal_dataset import PersonalizationDatasetSnapshot
+from app.models.personal_model_selection import (
+    PersonalModelComparisonRun,
+    PersonalModelSelection,
+    PersonalModelSelectionAction,
+)
 from app.models.user import User
 from app.services import emit_event
+from app.services.model_comparison import (
+    ComparisonRefused,
+    compare_contracts,
+    evaluate_pair,
+    existing_run,
+    latest_selection,
+    list_selections,
+    record_selection,
+)
 from app.services.personal_dataset import (
     DatasetRefused,
     create_snapshot,
@@ -603,3 +617,447 @@ def predict_with_record_alias(
         current_user=current_user,
         alias_used=alias_used,
     )
+
+
+# ---------------------------------------------------------------------------
+# Model evaluation and selection center
+# ---------------------------------------------------------------------------
+
+
+class ComparisonRequest(BaseModel):
+    version_a_id: uuid.UUID
+    version_b_id: uuid.UUID
+    operation_key: Optional[str] = Field(default=None, min_length=8, max_length=128)
+
+
+class SelectionRequest(BaseModel):
+    rationale: str = Field(min_length=2, max_length=1000)
+    comparison_run_id: Optional[uuid.UUID] = None
+
+
+class RollbackRequest(BaseModel):
+    rationale: Optional[str] = Field(default=None, max_length=1000)
+
+
+def _comparison_refused(exc: ComparisonRefused) -> HTTPException:
+    return HTTPException(
+        status_code=409,
+        detail={
+            "code": exc.code,
+            "message_zh": exc.message_zh,
+            "details": exc.details,
+        },
+    )
+
+
+def _selection_payload(
+    selection: PersonalModelSelection, versions: dict
+) -> dict:
+    def _number(version_id):
+        version = versions.get(version_id)
+        return version.version_number if version else None
+
+    return {
+        "selection_id": str(selection.id),
+        "action": selection.action.value,
+        "record_id": str(selection.record_id),
+        "version_id": str(selection.version_id),
+        "version_number": _number(selection.version_id),
+        "previous_version_id": (
+            str(selection.previous_version_id)
+            if selection.previous_version_id
+            else None
+        ),
+        "previous_version_number": _number(selection.previous_version_id),
+        "comparison_run_id": (
+            str(selection.comparison_run_id)
+            if selection.comparison_run_id
+            else None
+        ),
+        "rationale": selection.rationale,
+        "created_at": selection.created_at.isoformat()
+        if selection.created_at
+        else None,
+    }
+
+
+@router.get("/models/comparability")
+def personal_model_comparability(
+    version_a: uuid.UUID,
+    version_b: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope(*READ_SCOPES)),
+    db: Session = Depends(get_db),
+):
+    """Read-only comparability report. Never consumes quota."""
+    va, ra = _owned_version(db, version_a, current_user)
+    vb, rb = _owned_version(db, version_b, current_user)
+    return compare_contracts(db, current_user.id, va, vb, ra, rb)
+
+
+@router.post("/models/comparisons")
+def create_personal_model_comparison(
+    body: ComparisonRequest,
+    current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope(*WRITE_SCOPES)),
+    db: Session = Depends(get_db),
+):
+    """Evaluate two versions on comparable frozen evidence.
+
+    Consumes one ai_usage unit; a failed run is rolled back, so the reservation
+    is released. A repeated ``operation_key`` returns the stored result without
+    consuming quota again.
+    """
+    va, ra = _owned_version(db, body.version_a_id, current_user)
+    vb, rb = _owned_version(db, body.version_b_id, current_user)
+
+    if body.operation_key:
+        existing = existing_run(db, current_user.id, body.operation_key)
+        if existing is not None:
+            if (
+                existing.version_a_id != va.id
+                or existing.version_b_id != vb.id
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "operation_key_conflict",
+                        "message_zh": "此操作識別碼已用於另一組版本比較。",
+                    },
+                )
+            return {**existing.result_json, "idempotent_replay": True}
+
+    report = compare_contracts(db, current_user.id, va, vb, ra, rb)
+    if not report["comparable"]:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "not_comparable",
+                "message_zh": "兩個版本不可比；請先處理列出的差異。",
+                "reasons": report["not_comparable_reasons"],
+                "checks": report["checks"],
+            },
+        )
+
+    reservation = reserve_quota(db, current_user.id, "ai_usage")
+    try:
+        result = evaluate_pair(
+            db,
+            current_user.id,
+            va,
+            vb,
+            ra,
+            rb,
+            operation_key=body.operation_key,
+        )
+    except ComparisonRefused as exc:
+        # The reservation was never committed; rolling back releases it and
+        # discards any partial write.
+        db.rollback()
+        raise _comparison_refused(exc)
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "comparison_failed",
+                "message_zh": "比較失敗，已釋放本次額度，未寫入任何評估記錄。",
+            },
+        )
+
+    settle_reservation(db, reservation.id)
+    result["quota"] = {"quota_type": "ai_usage", "amount": 1, "settled": True}
+    db.commit()
+    return result
+
+
+@router.get("/comparisons")
+def list_personal_comparisons(
+    strategy_version_id: Optional[uuid.UUID] = None,
+    limit: int = 20,
+    current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope(*READ_SCOPES)),
+    db: Session = Depends(get_db),
+):
+    capped = max(1, min(int(limit), 50))
+    runs = (
+        db.query(PersonalModelComparisonRun)
+        .filter(PersonalModelComparisonRun.owner_id == current_user.id)
+        .order_by(PersonalModelComparisonRun.created_at.desc())
+        .limit(capped)
+        .all()
+    )
+    version_ids = set()
+    for run in runs:
+        version_ids.update({run.version_a_id, run.version_b_id})
+    versions = (
+        {
+            version.id: version
+            for version in db.query(ModelVersion)
+            .filter(ModelVersion.id.in_(version_ids))
+            .all()
+        }
+        if version_ids
+        else {}
+    )
+
+    out = []
+    for run in runs:
+        va = versions.get(run.version_a_id)
+        vb = versions.get(run.version_b_id)
+        if strategy_version_id:
+            strategies = {
+                str((version.model_specification_json or {}).get("strategy_version_id"))
+                for version in (va, vb)
+                if version is not None
+            }
+            if str(strategy_version_id) not in strategies:
+                continue
+        result = run.result_json or {}
+        out.append(
+            {
+                "comparison_run_id": str(run.id),
+                "record_id": str(run.record_id),
+                "mode": run.mode,
+                "created_at": run.created_at.isoformat()
+                if run.created_at
+                else None,
+                "version_a": {
+                    "model_version_id": str(run.version_a_id),
+                    "version_number": va.version_number if va else None,
+                },
+                "version_b": {
+                    "model_version_id": str(run.version_b_id),
+                    "version_number": vb.version_number if vb else None,
+                },
+                "same_evaluation_set": result.get("same_evaluation_set"),
+                "rankable": result.get("rankable"),
+                "summary_zh": result.get("summary_zh"),
+                "warnings": result.get("warnings") or [],
+                "delta": result.get("delta"),
+                "disagreement": result.get("disagreement"),
+            }
+        )
+    return {"comparisons": out}
+
+
+@router.get("/comparisons/{run_id}")
+def get_personal_comparison(
+    run_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope(*READ_SCOPES)),
+    db: Session = Depends(get_db),
+):
+    run = (
+        db.query(PersonalModelComparisonRun)
+        .filter(
+            PersonalModelComparisonRun.id == run_id,
+            PersonalModelComparisonRun.owner_id == current_user.id,
+        )
+        .first()
+    )
+    if run is None:
+        raise HTTPException(status_code=404, detail="Comparison not found")
+    return run.result_json
+
+
+@router.post("/models/{version_id}/select")
+def select_personal_model(
+    version_id: uuid.UUID,
+    body: SelectionRequest,
+    current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope(*WRITE_SCOPES)),
+    db: Session = Depends(get_db),
+):
+    version, record = _owned_version(db, version_id, current_user)
+    _assert_personal_version(version)
+
+    comparison_run = None
+    if body.comparison_run_id is not None:
+        comparison_run = (
+            db.query(PersonalModelComparisonRun)
+            .filter(
+                PersonalModelComparisonRun.id == body.comparison_run_id,
+                PersonalModelComparisonRun.owner_id == current_user.id,
+            )
+            .first()
+        )
+        if comparison_run is None:
+            raise HTTPException(status_code=404, detail="Comparison not found")
+        if version.id not in (
+            comparison_run.version_a_id,
+            comparison_run.version_b_id,
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "version_not_in_comparison",
+                    "message_zh": "此版本不屬於所引用的比較紀錄。",
+                },
+            )
+
+    if record.active_version_id == version.id:
+        return {
+            "already_active": True,
+            "selection": None,
+            "active_version": _version_payload(db, version, record),
+            "message_zh": "此版本已是使用中版本，沒有改動。",
+        }
+
+    previous = record.active_version_id
+    record.active_version_id = version.id
+    selection = record_selection(
+        db,
+        current_user.id,
+        record,
+        version,
+        rationale=body.rationale,
+        comparison_run_id=body.comparison_run_id,
+        previous_version_id=previous,
+    )
+    db.flush()
+    emit_event(
+        db,
+        entity_type="model_research_record",
+        entity_id=str(record.id),
+        event_type="personal_model_version_selected",
+        actor_id=current_user.id,
+        payload={
+            "from_version_id": str(previous) if previous else None,
+            "to_version_id": str(version.id),
+            "to_version_number": version.version_number,
+            "comparison_run_id": (
+                str(body.comparison_run_id)
+                if body.comparison_run_id
+                else None
+            ),
+            "rationale_saved": True,
+        },
+    )
+    db.commit()
+    db.refresh(selection)
+    db.refresh(version)
+    db.refresh(record)
+
+    versions = {version.id: version}
+    if previous:
+        previous_version = (
+            db.query(ModelVersion).filter(ModelVersion.id == previous).first()
+        )
+        if previous_version:
+            versions[previous_version.id] = previous_version
+
+    return {
+        "already_active": False,
+        "selection": _selection_payload(selection, versions),
+        "active_version": _version_payload(db, version, record),
+        "message_zh": "已切換使用中版本；舊版本的 artifact、評估與歷史推論保持不變。",
+    }
+
+
+@router.post("/records/{record_id}/rollback")
+def rollback_personal_model(
+    record_id: uuid.UUID,
+    body: Optional[RollbackRequest] = None,
+    current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope(*WRITE_SCOPES)),
+    db: Session = Depends(get_db),
+):
+    record = _owned_record(db, record_id, current_user)
+    latest = latest_selection(db, current_user.id, record.id)
+    if latest is None or latest.previous_version_id is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "no_previous_version",
+                "message_zh": "沒有可回退的版本；此模型尚未有切換紀錄。",
+            },
+        )
+
+    target = (
+        db.query(ModelVersion)
+        .filter(
+            ModelVersion.id == latest.previous_version_id,
+            ModelVersion.model_research_record_id == record.id,
+        )
+        .first()
+    )
+    if target is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "previous_version_missing",
+                "message_zh": "上一個版本已不存在，未執行回退。",
+            },
+        )
+    _assert_personal_version(target)
+
+    current = record.active_version_id
+    if current == target.id:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "already_at_previous_version",
+                "message_zh": "目前已在此版本，沒有改動。",
+            },
+        )
+
+    record.active_version_id = target.id
+    selection = PersonalModelSelection(
+        owner_id=current_user.id,
+        record_id=record.id,
+        version_id=target.id,
+        previous_version_id=current,
+        comparison_run_id=None,
+        action=PersonalModelSelectionAction.rollback,
+        rationale=(body.rationale if body and body.rationale else None),
+    )
+    db.add(selection)
+    db.flush()
+    emit_event(
+        db,
+        entity_type="model_research_record",
+        entity_id=str(record.id),
+        event_type="personal_model_version_rolled_back",
+        actor_id=current_user.id,
+        payload={
+            "from_version_id": str(current) if current else None,
+            "to_version_id": str(target.id),
+            "to_version_number": target.version_number,
+        },
+    )
+    db.commit()
+    db.refresh(selection)
+    db.refresh(target)
+    db.refresh(record)
+
+    versions = {target.id: target}
+    if current:
+        current_version = (
+            db.query(ModelVersion).filter(ModelVersion.id == current).first()
+        )
+        if current_version:
+            versions[current_version.id] = current_version
+
+    return {
+        "selection": _selection_payload(selection, versions),
+        "active_version": _version_payload(db, target, record),
+        "message_zh": "已回退到上一個版本；沒有刪除任何版本、artifact 或歷史推論。",
+    }
+
+
+@router.get("/records/{record_id}/selections")
+def get_personal_selections(
+    record_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope(*READ_SCOPES)),
+    db: Session = Depends(get_db),
+):
+    record = _owned_record(db, record_id, current_user)
+    return {
+        "record_id": str(record.id),
+        "active_version_id": (
+            str(record.active_version_id) if record.active_version_id else None
+        ),
+        "selections": list_selections(db, current_user.id, record.id),
+    }
