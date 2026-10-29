@@ -30,6 +30,7 @@ from app.api.schemas import (
 )
 from app.engine.backtest import compute_config_hash, run_backtest
 from app.services import emit_event
+from app.services.experiment_record import build_experiment_record
 from app.method_checks import evaluate_checks, MethodReviewResponse
 from app.method_checks.loader import load_review_data
 
@@ -709,150 +710,51 @@ def list_notes(
     return notes
 
 
+def _owned_experiment(db: Session, experiment_id: UUID, user_id: UUID) -> Experiment:
+    experiment = db.query(Experiment).filter(
+        Experiment.id == experiment_id,
+        Experiment.owner_id == user_id
+    ).first()
+    if not experiment:
+        raise HTTPException(status_code=404, detail="Experiment not found")
+    return experiment
+
+
+@router.get("/{experiment_id}/record")
+def get_experiment_record(
+    experiment_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Read-only view of the same record the export file contains.
+
+    Reading the panel must not create an export event; only downloading does.
+    """
+    experiment = _owned_experiment(db, experiment_id, current_user.id)
+    return build_experiment_record(db, experiment)
+
+
 @router.get("/{experiment_id}/export")
 def export_experiment(
     experiment_id: UUID,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    from app.models.research_run import ResearchRun, RunStatus
-    from app.lib.brand import get_brand
-
-    experiment = db.query(Experiment).filter(
-        Experiment.id == experiment_id,
-        Experiment.owner_id == current_user.id
-    ).first()
-    if not experiment:
-        raise HTTPException(status_code=404, detail="Experiment not found")
-
-    versions = db.query(ExperimentVersion).filter(
-        ExperimentVersion.experiment_id == experiment_id
-    ).order_by(ExperimentVersion.version_number.asc()).all()
-
-    current_version = None
-    for v in versions:
-        if v.id == experiment.current_version_id:
-            current_version = v
-            break
-    if not current_version and versions:
-        current_version = versions[-1]
-
-    if not current_version:
-        raise HTTPException(status_code=404, detail="No version found")
-
-    all_runs = db.query(ResearchRun).join(ExperimentVersion).filter(
-        ExperimentVersion.experiment_id == experiment_id
-    ).order_by(ResearchRun.started_at.desc()).all()
-
-    latest_run = None
-    for r in all_runs:
-        if r.status == RunStatus.completed:
-            latest_run = r
-            break
-
-    version_ids = [str(v.id) for v in versions]
-
-    from app.models.research_run import ResearchRun
-    run_ids = [str(r.id) for r in db.query(ResearchRun.id).join(
-        ExperimentVersion, ResearchRun.experiment_version_id == ExperimentVersion.id
-    ).filter(
-        ExperimentVersion.experiment_id == experiment_id
-    ).all()]
-
-    note_ids = [str(n.id) for n in db.query(ResearchNote.id).filter(
-        ResearchNote.experiment_id == experiment_id
-    ).all()]
-
-    entity_ids = [str(experiment.id)] + version_ids + run_ids + note_ids
-    events = db.query(AuditEvent).filter(
-        AuditEvent.entity_id.in_(entity_ids)
-    ).order_by(AuditEvent.created_at.asc()).all()
-
-    notes = db.query(ResearchNote).filter(
-        ResearchNote.experiment_id == experiment_id
-    ).order_by(ResearchNote.created_at.asc()).all()
+    experiment = _owned_experiment(db, experiment_id, current_user.id)
+    record = build_experiment_record(db, experiment)
 
     emit_event(db,
         entity_type="experiment", entity_id=str(experiment.id),
         event_type="export_generated", actor_id=current_user.id,
-        payload={"version_count": len(versions), "run_count": len(all_runs)})
+        payload={
+            "version_count": record["coverage"]["versions"],
+            "run_count": record["coverage"]["runs"],
+            "schema_version": record["schema_version"],
+        })
 
     db.commit()
 
-    brand = get_brand()
-
-    return {
-        "experiment": {
-            "id": str(experiment.id),
-            "title": experiment.title,
-            "original_idea": experiment.original_idea,
-            "hypothesis": experiment.hypothesis,
-            "falsification_conditions": experiment.falsification_conditions,
-            "research_type": experiment.research_type,
-            "status": experiment.status,
-        },
-        "version_history": [
-            {
-                "id": str(v.id),
-                "version_number": v.version_number,
-                "config_hash": v.config_hash,
-                "change_reason": v.change_reason,
-                "created_at": v.created_at.isoformat() if v.created_at else None,
-                "strategy_spec": v.strategy_spec,
-            }
-            for v in versions
-        ],
-        "current_version": {
-            "id": str(current_version.id),
-            "version_number": current_version.version_number,
-            "config_hash": current_version.config_hash,
-            "strategy_spec": current_version.strategy_spec,
-        },
-        "runs": [
-            {
-                "id": str(r.id),
-                "engine_version": r.engine_version,
-                "config_hash": r.config_hash,
-                "dataset_checksum": r.dataset_checksum,
-                "status": r.status,
-                "metrics": r.metrics,
-                "warnings": r.warnings,
-                "methodology": r.methodology_json,
-                "started_at": r.started_at.isoformat() if r.started_at else None,
-                "completed_at": r.completed_at.isoformat() if r.completed_at else None,
-            }
-            for r in all_runs
-        ],
-        "events": [
-            {
-                "id": str(e.id),
-                "event_type": e.event_type,
-                "entity_type": e.entity_type,
-                "entity_id": e.entity_id,
-                "actor_type": e.actor_type,
-                "payload": e.payload_json,
-                "recorded_before_outcome": e.recorded_before_outcome,
-                "rules_locked": e.rules_locked,
-                "data_cutoff_at": e.data_cutoff_at,
-                "created_at": e.created_at.isoformat() if e.created_at else None,
-            }
-            for e in events
-        ],
-        "notes": [
-            {
-                "id": str(n.id),
-                "content": n.content,
-                "version_id": str(n.version_id) if n.version_id else None,
-                "created_at": n.created_at.isoformat() if n.created_at else None,
-            }
-            for n in notes
-        ],
-        "methodology": latest_run.methodology_json if latest_run else None,
-        "disclaimer": brand.disclaimer,
-        "disclaimer_zh": brand.disclaimer_zh,
-        "disclaimer_short": brand.disclaimer_short,
-        "disclaimer_short_zh": brand.disclaimer_short_zh,
-    }
+    return record
 
 
 @router.get("/{experiment_id}/method-review", response_model=MethodReviewResponse)

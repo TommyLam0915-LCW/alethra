@@ -8,6 +8,7 @@ import { describeRunStatus } from '@/lib/runStatus';
 import { brand } from '@/lib/brand';
 import RevisionPanel from '@/components/experiments/RevisionPanel';
 import RobustnessPanel from '@/components/experiments/RobustnessPanel';
+import ResearchRecordPanel from '@/components/experiments/ResearchRecordPanel';
 
 interface Experiment {
   id: string;
@@ -140,6 +141,7 @@ export default function ExperimentDetailPage() {
   const [methodReviewLoading, setMethodReviewLoading] = useState(false);
   const [selectedRuns, setSelectedRuns] = useState<string[]>([]);
   const [savedComparisons, setSavedComparisons] = useState<any[]>([]);
+  const [dataVersion, setDataVersion] = useState(0);
 
   useEffect(() => {
     const token = localStorage.getItem('token');
@@ -168,6 +170,7 @@ export default function ExperimentDetailPage() {
       setNotes(notesData);
       setMethodReview(reviewData);
       setSavedComparisons(savedComparisonsData);
+      setDataVersion((v) => v + 1);
     } catch (err) {
       setError('載入失敗');
     } finally {
@@ -960,6 +963,8 @@ export default function ExperimentDetailPage() {
           </div>
         )}
       </div>
+
+      <ResearchRecordPanel experimentId={experimentId} refreshToken={dataVersion} />
 
       {/* Saved Comparisons */}
       {savedComparisons.length > 0 && (
