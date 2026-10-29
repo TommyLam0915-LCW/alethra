@@ -305,6 +305,19 @@ export const api = {
       apiFetch(`/api/v1/model-research/${recordId}/versions`),
     createVersion: (recordId: string, data: any) =>
       apiFetch(`/api/v1/model-research/${recordId}/versions`, { method: 'POST', body: JSON.stringify(data) }),
+    createVersionFromStrategy: (
+      recordId: string,
+      data: { experiment_version_id: string; model_type?: string; note?: string },
+    ) =>
+      apiFetch(`/api/v1/model-research/${recordId}/versions/from-strategy`, { method: 'POST', body: JSON.stringify(data) }),
+    compareVersions: (recordId: string, versionA: string, versionB: string) =>
+      apiFetch(
+        `/api/v1/model-research/${recordId}/versions/compare?version_a_id=${versionA}&version_b_id=${versionB}`,
+      ),
+    setActiveVersion: (recordId: string, data: { version_id: string; reason?: string }) =>
+      apiFetch(`/api/v1/model-research/${recordId}/active-version`, { method: 'POST', body: JSON.stringify(data) }),
+    rollback: (recordId: string, data: { to_version_id: string; reason: string }) =>
+      apiFetch(`/api/v1/model-research/${recordId}/rollback`, { method: 'POST', body: JSON.stringify(data) }),
     lockVersion: (recordId: string, versionId: string) =>
       apiFetch(`/api/v1/model-research/${recordId}/versions/${versionId}/lock`, { method: 'POST' }),
     revokeVersion: (recordId: string, versionId: string, reason: string) =>

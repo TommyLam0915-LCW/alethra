@@ -627,6 +627,7 @@ class ModelResearchRecordResponse(BaseModel):
     status: str
     allowed_asset_universe: Optional[list]
     allowed_research_actions: Optional[list]
+    active_version_id: Optional[UUID] = None
     created_at: datetime
     updated_at: datetime
 
@@ -642,6 +643,25 @@ class ModelVersionCreate(BaseModel):
     linked_experiment_version_ids: Optional[List[UUID]] = None
     linked_dataset_snapshot_ids: Optional[List[UUID]] = None
     linked_simulation_session_ids: Optional[List[UUID]] = None
+
+
+class ModelVersionFromStrategy(BaseModel):
+    experiment_version_id: UUID
+    model_type: str = Field(
+        default="rule_based",
+        pattern="^(rule_based|prompt_based_research_assistant|future_external_model_reference)$",
+    )
+    note: Optional[str] = Field(None, max_length=500)
+
+
+class ActiveVersionSet(BaseModel):
+    version_id: UUID
+    reason: Optional[str] = Field(None, max_length=500)
+
+
+class ModelVersionRollback(BaseModel):
+    to_version_id: UUID
+    reason: str = Field(..., min_length=1, max_length=500)
 
 
 class ModelVersionResponse(BaseModel):

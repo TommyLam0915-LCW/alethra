@@ -70,10 +70,17 @@ class ModelResearchRecord(Base):
     status = Column(SAEnum(ModelStatus), default=ModelStatus.draft, nullable=False)
     allowed_asset_universe = Column(JSONB, nullable=True)
     allowed_research_actions = Column(JSONB, nullable=True)
+    active_version_id = Column(UUID(as_uuid=True), ForeignKey("model_versions.id"), nullable=True)
     created_at = Column(DateTime, default=utcnow, nullable=False)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
-    versions = relationship("ModelVersion", back_populates="model_research_record", order_by="ModelVersion.version_number")
+    versions = relationship(
+        "ModelVersion",
+        back_populates="model_research_record",
+        order_by="ModelVersion.version_number",
+        foreign_keys="ModelVersion.model_research_record_id",
+    )
+    active_version = relationship("ModelVersion", foreign_keys=[active_version_id])
     evaluations = relationship("ModelEvaluation", back_populates="model_research_record")
 
 
@@ -98,7 +105,11 @@ class ModelVersion(Base):
     revocation_reason = Column(Text, nullable=True)
     model_card_id = Column(UUID(as_uuid=True), ForeignKey("model_cards.id"), nullable=True)
 
-    model_research_record = relationship("ModelResearchRecord", back_populates="versions")
+    model_research_record = relationship(
+        "ModelResearchRecord",
+        back_populates="versions",
+        foreign_keys=[model_research_record_id],
+    )
     model_card = relationship("ModelCard", foreign_keys=[model_card_id])
     evaluations = relationship("ModelEvaluation", back_populates="model_version")
 

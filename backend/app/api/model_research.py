@@ -5,6 +5,8 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.user import User
+from app.models.experiment import Experiment
+from app.models.experiment_version import ExperimentVersion
 from app.models.model_research import (
     ModelResearchRecord,
     ModelStatus,
@@ -21,6 +23,9 @@ from app.api.schemas import (
     ModelResearchRecordUpdate,
     ModelResearchRecordResponse,
     ModelVersionCreate,
+    ModelVersionFromStrategy,
+    ActiveVersionSet,
+    ModelVersionRollback,
     ModelVersionResponse,
     ModelEvaluationCreate,
     ModelEvaluationResponse,
@@ -36,6 +41,48 @@ from app.services import emit_event
 
 router = APIRouter(prefix="/model-research", tags=["model-research"])
 
+_MISSING = object()
+SPEC_DIFF_LIMIT = 200
+
+
+def _iso(value: Optional[datetime]) -> Optional[str]:
+    return value.isoformat() if value else None
+
+
+def _flatten_spec(value, prefix: str = "") -> dict:
+    """Flatten nested spec JSON into {dotted.path: leaf} for comparison."""
+    if isinstance(value, dict):
+        flat = {}
+        for key in sorted(value):
+            child = f"{prefix}.{key}" if prefix else str(key)
+            flat.update(_flatten_spec(value[key], child))
+        return flat
+    return {prefix: value}
+
+
+def _spec_changes(spec_a: dict, spec_b: dict):
+    flat_a = _flatten_spec(spec_a or {})
+    flat_b = _flatten_spec(spec_b or {})
+    changes = []
+    for path in sorted(set(flat_a) | set(flat_b)):
+        before = flat_a.get(path, _MISSING)
+        after = flat_b.get(path, _MISSING)
+        if before == after:
+            continue
+        if before is _MISSING:
+            kind = "added"
+        elif after is _MISSING:
+            kind = "removed"
+        else:
+            kind = "changed"
+        changes.append({
+            "path": path,
+            "kind": kind,
+            "a": None if before is _MISSING else before,
+            "b": None if after is _MISSING else after,
+        })
+    return changes[:SPEC_DIFF_LIMIT], len(changes) > SPEC_DIFF_LIMIT
+
 
 def _get_record_with_ownership(
     record_id: UUID, db: Session, current_user: User
@@ -46,6 +93,58 @@ def _get_record_with_ownership(
     if record.owner_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not authorized")
     return record
+
+
+def _require_editable(record: ModelResearchRecord) -> None:
+    if record.status not in (ModelStatus.draft, ModelStatus.researching):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot add versions when record status is '{record.status.value}'",
+        )
+
+
+def _insert_model_version(
+    db: Session,
+    record: ModelResearchRecord,
+    current_user: User,
+    *,
+    model_type: str,
+    model_specification_json: dict,
+    linked_experiment_version_ids: Optional[List[UUID]] = None,
+    source: Optional[str] = None,
+) -> ModelVersion:
+    existing_count = db.query(ModelVersion).filter(
+        ModelVersion.model_research_record_id == record.id
+    ).count()
+
+    version = ModelVersion(
+        model_research_record_id=record.id,
+        version_number=existing_count + 1,
+        model_type=model_type,
+        model_specification_json=model_specification_json,
+        linked_experiment_version_ids=(
+            [str(v) for v in linked_experiment_version_ids]
+            if linked_experiment_version_ids else None
+        ),
+    )
+    db.add(version)
+    db.flush()
+
+    payload = {
+        "record_id": str(record.id),
+        "version_number": version.version_number,
+    }
+    if source:
+        payload["source"] = source
+    emit_event(
+        db,
+        entity_type="model_version",
+        entity_id=version.id,
+        event_type="model_version_created",
+        actor_id=current_user.id,
+        payload=payload,
+    )
+    return version
 
 
 # ── ModelResearchRecord CRUD ──────────────────────────────────────────
@@ -162,42 +261,85 @@ def create_model_version(
     current_user: User = Depends(get_current_user),
 ):
     record = _get_record_with_ownership(record_id, db, current_user)
+    _require_editable(record)
 
-    if record.status not in (ModelStatus.draft, ModelStatus.researching):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Cannot add versions when record status is '{record.status.value}'",
-        )
-
-    existing_count = db.query(ModelVersion).filter(
-        ModelVersion.model_research_record_id == record_id
-    ).count()
-
-    version = ModelVersion(
-        model_research_record_id=record.id,
-        version_number=existing_count + 1,
+    version = _insert_model_version(
+        db,
+        record,
+        current_user,
         model_type=payload.model_type,
         model_specification_json=payload.model_specification_json,
-        prompt_version=payload.prompt_version,
-        input_schema_version=payload.input_schema_version,
-        output_schema_version=payload.output_schema_version,
-        linked_experiment_version_ids=[str(v) for v in payload.linked_experiment_version_ids] if payload.linked_experiment_version_ids else None,
-        linked_dataset_snapshot_ids=[str(v) for v in payload.linked_dataset_snapshot_ids] if payload.linked_dataset_snapshot_ids else None,
-        linked_simulation_session_ids=[str(v) for v in payload.linked_simulation_session_ids] if payload.linked_simulation_session_ids else None,
+        linked_experiment_version_ids=payload.linked_experiment_version_ids,
     )
-    db.add(version)
-    db.flush()
+    version.prompt_version = payload.prompt_version
+    version.input_schema_version = payload.input_schema_version
+    version.output_schema_version = payload.output_schema_version
+    version.linked_dataset_snapshot_ids = (
+        [str(v) for v in payload.linked_dataset_snapshot_ids]
+        if payload.linked_dataset_snapshot_ids else None
+    )
+    version.linked_simulation_session_ids = (
+        [str(v) for v in payload.linked_simulation_session_ids]
+        if payload.linked_simulation_session_ids else None
+    )
 
-    emit_event(
+    db.commit()
+    db.refresh(version)
+    return version
+
+
+@router.post(
+    "/{record_id}/versions/from-strategy",
+    response_model=ModelVersionResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_model_version_from_strategy(
+    record_id: UUID,
+    payload: ModelVersionFromStrategy,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Freeze one of the caller's own strategy versions into a model version.
+
+    The strategy spec is copied, never referenced live, so later revisions of
+    the experiment cannot silently change what this version represents.
+    """
+    record = _get_record_with_ownership(record_id, db, current_user)
+    _require_editable(record)
+
+    source = (
+        db.query(ExperimentVersion)
+        .join(Experiment, ExperimentVersion.experiment_id == Experiment.id)
+        .filter(
+            ExperimentVersion.id == payload.experiment_version_id,
+            Experiment.owner_id == current_user.id,
+        )
+        .first()
+    )
+    if not source:
+        raise HTTPException(status_code=404, detail="Experiment version not found")
+
+    experiment = db.query(Experiment).filter(Experiment.id == source.experiment_id).first()
+    model_specification_json = {
+        "source": "strategy_version",
+        "experiment_id": str(source.experiment_id),
+        "experiment_title": experiment.title if experiment else None,
+        "experiment_version_id": str(source.id),
+        "experiment_version_number": source.version_number,
+        "strategy_spec": source.strategy_spec,
+        "config_hash": source.config_hash,
+        "change_reason": source.change_reason,
+        "note": payload.note,
+    }
+
+    version = _insert_model_version(
         db,
-        entity_type="model_version",
-        entity_id=version.id,
-        event_type="model_version_created",
-        actor_id=current_user.id,
-        payload={
-            "record_id": str(record_id),
-            "version_number": version.version_number,
-        },
+        record,
+        current_user,
+        model_type=payload.model_type,
+        model_specification_json=model_specification_json,
+        linked_experiment_version_ids=[source.id],
+        source="strategy_version",
     )
 
     db.commit()
@@ -215,6 +357,77 @@ def list_model_versions(
     return db.query(ModelVersion).filter(
         ModelVersion.model_research_record_id == record_id
     ).order_by(ModelVersion.version_number).all()
+
+
+@router.get("/{record_id}/versions/compare")
+def compare_model_versions(
+    record_id: UUID,
+    version_a_id: UUID,
+    version_b_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Side-by-side view of two versions of the same record.
+
+    The response lists differences only; it deliberately contains no ranking
+    or recommendation, so a comparison cannot be mistaken for proof that one
+    version is better.
+    """
+    record = _get_record_with_ownership(record_id, db, current_user)
+    if version_a_id == version_b_id:
+        raise HTTPException(status_code=400, detail="Choose two different versions")
+
+    versions = db.query(ModelVersion).filter(
+        ModelVersion.id.in_([version_a_id, version_b_id]),
+        ModelVersion.model_research_record_id == record.id,
+    ).all()
+    by_id = {v.id: v for v in versions}
+    version_a = by_id.get(version_a_id)
+    version_b = by_id.get(version_b_id)
+    if not version_a or not version_b:
+        raise HTTPException(status_code=404, detail="Model version not found in this record")
+
+    def _summary(version: ModelVersion) -> dict:
+        return {
+            "id": str(version.id),
+            "version_number": version.version_number,
+            "model_type": version.model_type.value,
+            "created_at": _iso(version.created_at),
+            "locked_at": _iso(version.locked_at),
+            "revoked_at": _iso(version.revoked_at),
+            "is_active": record.active_version_id == version.id,
+        }
+
+    evaluations = db.query(ModelEvaluation).filter(
+        ModelEvaluation.model_version_id.in_([version_a.id, version_b.id])
+    ).order_by(ModelEvaluation.evaluation_date).all()
+
+    def _eval_entry(evaluation: ModelEvaluation) -> dict:
+        return {
+            "id": str(evaluation.id),
+            "evaluation_type": evaluation.evaluation_type.value,
+            "result_summary": evaluation.result_summary,
+            "data_cutoff_at": evaluation.data_cutoff_at,
+            "engine_version": evaluation.engine_version,
+            "evaluator": evaluation.evaluator.value,
+        }
+
+    changes, truncated = _spec_changes(
+        version_a.model_specification_json, version_b.model_specification_json
+    )
+
+    return {
+        "record_id": str(record.id),
+        "version_a": _summary(version_a),
+        "version_b": _summary(version_b),
+        "spec_changes": changes,
+        "spec_changes_truncated": truncated,
+        "evaluations": {
+            "a": [_eval_entry(e) for e in evaluations if e.model_version_id == version_a.id],
+            "b": [_eval_entry(e) for e in evaluations if e.model_version_id == version_b.id],
+        },
+        "note": "比較只陳列兩個版本的差異；系統不會自動判定哪個版本更好。",
+    }
 
 
 @router.get(
@@ -235,6 +448,123 @@ def get_model_version(
     if not version:
         raise HTTPException(status_code=404, detail="Model version not found")
     return version
+
+
+@router.post("/{record_id}/active-version", response_model=ModelResearchRecordResponse)
+def set_active_model_version(
+    record_id: UUID,
+    payload: ActiveVersionSet,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Point the record at the version the owner currently uses.
+
+    Repeating the same choice is a no-op (and emits no event), so a retried
+    request cannot produce a second switch in the history.
+    """
+    record = _get_record_with_ownership(record_id, db, current_user)
+    version = db.query(ModelVersion).filter(
+        ModelVersion.id == payload.version_id,
+        ModelVersion.model_research_record_id == record.id,
+    ).first()
+    if not version:
+        raise HTTPException(status_code=404, detail="Model version not found in this record")
+    if version.revoked_at is not None:
+        raise HTTPException(status_code=400, detail="Cannot activate a revoked version")
+
+    if record.active_version_id == version.id:
+        return record
+
+    previous_id = record.active_version_id
+    previous = (
+        db.query(ModelVersion).filter(ModelVersion.id == previous_id).first()
+        if previous_id else None
+    )
+
+    record.active_version_id = version.id
+
+    emit_event(
+        db,
+        entity_type="model_research_record",
+        entity_id=record.id,
+        event_type="model_active_version_set",
+        actor_id=current_user.id,
+        payload={
+            "from_version_id": str(previous_id) if previous_id else None,
+            "from_version_number": previous.version_number if previous else None,
+            "to_version_id": str(version.id),
+            "to_version_number": version.version_number,
+            "reason": payload.reason,
+        },
+    )
+
+    db.commit()
+    db.refresh(record)
+    return record
+
+
+@router.post("/{record_id}/rollback", response_model=ModelResearchRecordResponse)
+def rollback_model_version(
+    record_id: UUID,
+    payload: ModelVersionRollback,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Move the active pointer back to an older version.
+
+    The rollback is recorded as an event with its reason; nothing is deleted
+    or rewritten. Choosing the already-active version is a no-op.
+    """
+    record = _get_record_with_ownership(record_id, db, current_user)
+    reason = payload.reason.strip()
+    if not reason:
+        raise HTTPException(status_code=400, detail="Rollback reason is required")
+
+    target = db.query(ModelVersion).filter(
+        ModelVersion.id == payload.to_version_id,
+        ModelVersion.model_research_record_id == record.id,
+    ).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="Model version not found in this record")
+    if target.revoked_at is not None:
+        raise HTTPException(status_code=400, detail="Cannot roll back to a revoked version")
+
+    if record.active_version_id == target.id:
+        return record
+    if not record.active_version_id:
+        raise HTTPException(status_code=400, detail="No active version to roll back from")
+
+    current = db.query(ModelVersion).filter(
+        ModelVersion.id == record.active_version_id
+    ).first()
+    if current is None:
+        raise HTTPException(status_code=409, detail="Active version no longer exists; set an active version first")
+    if target.version_number >= current.version_number:
+        raise HTTPException(
+            status_code=400,
+            detail="Rollback target must be older than the active version",
+        )
+
+    record.active_version_id = target.id
+
+    emit_event(
+        db,
+        entity_type="model_research_record",
+        entity_id=record.id,
+        event_type="model_version_rolled_back",
+        actor_id=current_user.id,
+        payload={
+            "from_version_id": str(current.id),
+            "from_version_number": current.version_number,
+            "to_version_id": str(target.id),
+            "to_version_number": target.version_number,
+            "reason": reason,
+        },
+    )
+
+    db.commit()
+    db.refresh(record)
+    return record
 
 
 @router.post(
@@ -287,7 +617,7 @@ def revoke_model_version(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    _get_record_with_ownership(record_id, db, current_user)
+    record = _get_record_with_ownership(record_id, db, current_user)
     version = db.query(ModelVersion).filter(
         ModelVersion.id == version_id,
         ModelVersion.model_research_record_id == record_id,
@@ -301,6 +631,10 @@ def revoke_model_version(
     version.revoked_at = datetime.now(timezone.utc).replace(tzinfo=None)
     version.revocation_reason = reason
 
+    cleared_active = record.active_version_id == version.id
+    if cleared_active:
+        record.active_version_id = None
+
     emit_event(
         db,
         entity_type="model_version",
@@ -310,6 +644,7 @@ def revoke_model_version(
         payload={
             "version_number": version.version_number,
             "reason": reason,
+            "cleared_active": cleared_active,
         },
     )
 
