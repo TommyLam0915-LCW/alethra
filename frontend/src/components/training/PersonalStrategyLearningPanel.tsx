@@ -160,6 +160,149 @@ interface Prediction {
 
 type EditorMode = 'correct' | 'exclude' | null;
 
+interface ComparabilityCheck {
+  code: string;
+  ok: boolean;
+  required: boolean;
+  message_zh: string;
+  detail?: unknown;
+}
+
+interface ComparabilityResponse {
+  comparable: boolean;
+  same_evaluation_set: boolean;
+  checks: ComparabilityCheck[];
+  not_comparable_reasons: Array<{ code: string; message_zh: string; detail?: unknown }>;
+  quota?: { quota_type: string; amount: number };
+  note_zh?: string;
+}
+
+interface ComparisonMetrics {
+  test_size: number;
+  accuracy: number;
+  macro_f1: number;
+  weighted_f1: number;
+  per_class: Record<
+    string,
+    { precision: number; recall: number; f1: number; support: number }
+  >;
+  confusion_matrix: { labels: string[]; matrix: number[][] };
+  class_distribution: Record<string, number>;
+}
+
+interface ComparisonWindow {
+  index: number;
+  start_decision_instant: string | null;
+  end_decision_instant: string | null;
+  n_rows: number;
+  n_groups: number;
+  accuracy: number;
+  macro_f1: number;
+  class_distribution: Record<string, number>;
+  insufficient: boolean;
+  insufficient_reasons: string[];
+}
+
+interface ComparisonVersion {
+  model_version_id: string;
+  version_number: number;
+  model_type: string;
+  artifact_sha256: string;
+  artifact_verified: boolean;
+  snapshot_id: string;
+  snapshot_checksum: string;
+  trained_at: string | null;
+  is_active: boolean;
+  revoked: boolean;
+  evaluation_set: {
+    test_size?: number;
+    date_range_start?: string | null;
+    date_range_end?: string | null;
+    start_decision_instant?: string | null;
+    end_decision_instant?: string | null;
+    data_cutoff_at?: string | null;
+    test_start_event_id?: string;
+    test_end_event_id?: string;
+  };
+  metrics: ComparisonMetrics;
+  baseline: { label?: string; accuracy?: number } | null;
+  windows: ComparisonWindow[];
+  warnings: string[];
+  evaluation_record_id?: string;
+}
+
+interface ComparisonResult {
+  comparison_run_id: string;
+  mode: 'same_evaluation_set' | 'per_version_test_window';
+  comparable: boolean;
+  same_evaluation_set: boolean;
+  rankable: boolean;
+  checks: ComparabilityCheck[];
+  versions: { a: ComparisonVersion; b: ComparisonVersion };
+  delta: {
+    accuracy: number;
+    macro_f1: number;
+    direction: string;
+    note_zh: string;
+  } | null;
+  disagreement: {
+    count: number;
+    share: number;
+    n_rows: number;
+    note_zh: string;
+  } | null;
+  warnings: string[];
+  caveats_zh: string[];
+  summary_zh: string;
+  evaluation_record_ids: Record<string, string>;
+  created_at: string;
+  operation_key?: string | null;
+  idempotent_replay?: boolean;
+  quota?: { quota_type: string; amount: number; settled?: boolean };
+  not_for: string[];
+}
+
+interface SelectionEntry {
+  selection_id: string;
+  action: 'select' | 'rollback';
+  version_id: string;
+  version_number: number | null;
+  previous_version_id: string | null;
+  previous_version_number: number | null;
+  comparison_run_id: string | null;
+  rationale: string | null;
+  created_at: string | null;
+}
+
+interface SelectionResponse {
+  already_active: boolean;
+  selection: SelectionEntry | null;
+  active_version: PersonalModel;
+  message_zh?: string;
+}
+
+interface SelectionHistoryResponse {
+  record_id: string;
+  active_version_id: string | null;
+  selections: SelectionEntry[];
+}
+
+interface ComparisonSummaryEntry {
+  comparison_run_id: string;
+  record_id: string;
+  mode: string;
+  created_at: string | null;
+  version_a: { model_version_id: string; version_number: number | null };
+  version_b: { model_version_id: string; version_number: number | null };
+  same_evaluation_set: boolean | null;
+  rankable: boolean | null;
+  summary_zh: string | null;
+  warnings: string[];
+  delta: ComparisonResult['delta'];
+  disagreement: ComparisonResult['disagreement'];
+}
+
+
 const EXCLUSION_REASONS: Array<{ value: string; label: string }> = [
   { value: 'data_entry_error', label: '輸入錯誤' },
   { value: 'test_trade', label: '純測試交易' },
@@ -189,6 +332,16 @@ const WARNING_LABELS: Record<string, string> = {
   mixed_market_features: '市場特徵混合真實與合成資料',
 };
 
+const WINDOW_REASON_LABELS: Record<string, string> = {
+  small_window: '此期間樣本偏少',
+  missing_class_in_window: '此期間缺少部分類別',
+};
+
+const SELECTION_ACTION_LABELS: Record<string, string> = {
+  select: '選用',
+  rollback: '回退',
+};
+
 function actionLabel(value: string | null): string {
   if (!value) return '—';
   return ACTION_LABELS[value] ?? value;
@@ -197,6 +350,22 @@ function actionLabel(value: string | null): string {
 function shortId(value: string | null | undefined): string {
   return value ? `${value.slice(0, 8)}…` : '—';
 }
+
+function formatScore(value: number | null | undefined): string {
+  return typeof value === 'number' ? value.toFixed(3) : '—';
+}
+
+const thStyle = {
+  textAlign: 'left' as const,
+  padding: '3px 6px',
+  borderBottom: '1px solid var(--border)',
+  fontWeight: 500,
+};
+
+const tdStyle = {
+  padding: '3px 6px',
+  borderBottom: '1px solid var(--border)',
+};
 
 function describeFailure(err: unknown, fallback: string): string {
   if (err instanceof ApiError) {
@@ -233,6 +402,15 @@ export default function PersonalStrategyLearningPanel() {
     as_of_date: '',
   });
   const [prediction, setPrediction] = useState<Prediction | null>(null);
+
+  const [compA, setCompA] = useState('');
+  const [compB, setCompB] = useState('');
+  const [comparability, setComparability] = useState<ComparabilityResponse | null>(null);
+  const [comparison, setComparison] = useState<ComparisonResult | null>(null);
+  const [rationale, setRationale] = useState('');
+  const [selections, setSelections] = useState<SelectionEntry[]>([]);
+  const [activeVersionId, setActiveVersionId] = useState<string | null>(null);
+  const [comparisons, setComparisons] = useState<ComparisonSummaryEntry[]>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -278,7 +456,25 @@ export default function PersonalStrategyLearningPanel() {
         ? current
         : snapshotRows[0]?.snapshot_id ?? '',
     );
-    setModels((modelsBody as { models: PersonalModel[] }).models);
+    const modelRows = (modelsBody as { models: PersonalModel[] }).models;
+    setModels(modelRows);
+    const recordId = modelRows[0]?.record_id;
+    if (recordId) {
+      const [comparisonsBody, selectionsBody] = await Promise.all([
+        api.ml.listPersonalComparisons(id),
+        api.ml.listPersonalSelections(recordId),
+      ]);
+      setComparisons(
+        (comparisonsBody as { comparisons: ComparisonSummaryEntry[] }).comparisons ?? [],
+      );
+      const history = selectionsBody as SelectionHistoryResponse;
+      setSelections(history.selections ?? []);
+      setActiveVersionId(history.active_version_id ?? null);
+    } else {
+      setComparisons([]);
+      setSelections([]);
+      setActiveVersionId(null);
+    }
   }, []);
 
   useEffect(() => {
@@ -302,6 +498,24 @@ export default function PersonalStrategyLearningPanel() {
       if (jobTimer.current) clearTimeout(jobTimer.current);
     };
   }, []);
+
+  useEffect(() => {
+    const ids = models.map((model) => model.model_version_id);
+    if (ids.length === 0) {
+      if (compA) setCompA('');
+      if (compB) setCompB('');
+      return;
+    }
+    // Keep an explicit choice across refreshes: comparing resets nothing, and a
+    // reload must not silently turn B into A.
+    const nextA = compA && ids.includes(compA) ? compA : ids[0];
+    const nextB =
+      compB && ids.includes(compB) && compB !== nextA
+        ? compB
+        : ids.find((id) => id !== nextA) ?? '';
+    if (nextA !== compA) setCompA(nextA);
+    if (nextB !== compB) setCompB(nextB);
+  }, [models, compA, compB]);
 
   const pollJob = useCallback(
     async (jobId: string) => {
@@ -459,6 +673,151 @@ export default function PersonalStrategyLearningPanel() {
       setNotice(`已將版本 ${model.version_number} 設為使用中版本。`);
     } catch (err) {
       setError(describeFailure(err, '無法啟用此模型版本'));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const checkComparability = async () => {
+    if (!compA || !compB) {
+      setError('請先選擇兩個模型版本作比較。');
+      return;
+    }
+    setBusy('comparability');
+    setError(null);
+    setNotice(null);
+    setComparison(null);
+    try {
+      const body = (await api.ml.checkPersonalModelComparability(
+        compA,
+        compB,
+      )) as ComparabilityResponse;
+      setComparability(body);
+      setNotice(
+        body.comparable
+          ? body.same_evaluation_set
+            ? '兩個版本可比，並共用同一評估集。'
+            : '兩個版本可比，但測試窗口不同；只可並列參考，不可以排名。'
+          : '兩個版本目前不可比；原因已列在下方。',
+      );
+    } catch (err) {
+      setError(describeFailure(err, '無法檢查版本可比性'));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const runComparison = async () => {
+    if (!compA || !compB) {
+      setError('請先選擇兩個模型版本作比較。');
+      return;
+    }
+    setBusy('comparison');
+    setError(null);
+    setNotice(null);
+    try {
+      const body = (await api.ml.runPersonalModelComparison(
+        compA,
+        compB,
+      )) as ComparisonResult;
+      setComparison(body);
+      setComparability({
+        comparable: body.comparable,
+        same_evaluation_set: body.same_evaluation_set,
+        checks: body.checks,
+        not_comparable_reasons: [],
+      });
+      setNotice(
+        body.idempotent_replay
+          ? '已回傳先前保存的比較結果，沒有再扣額度。'
+          : '比較完成；結果與評估記錄已保存，耗用 1 個 AI 使用額度。',
+      );
+      if (versionId) await loadStrategy(versionId);
+    } catch (err) {
+      setError(describeFailure(err, '版本比較未完成'));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const selectVersion = async (role: 'a' | 'b') => {
+    const targetId = role === 'a' ? compA : compB;
+    const target = models.find((model) => model.model_version_id === targetId);
+    if (!target) {
+      setError('請先選擇要使用的版本。');
+      return;
+    }
+    if (rationale.trim().length < 2) {
+      setError('選用版本需要填寫理由（至少 2 個字）。');
+      return;
+    }
+    const runMatchesTarget =
+      comparison &&
+      [comparison.versions.a.model_version_id, comparison.versions.b.model_version_id].includes(
+        targetId,
+      )
+        ? comparison.comparison_run_id
+        : null;
+    setBusy(`select-${role}`);
+    setError(null);
+    setNotice(null);
+    try {
+      const body = (await api.ml.selectPersonalModel(targetId, {
+        rationale: rationale.trim(),
+        comparison_run_id: runMatchesTarget,
+      })) as SelectionResponse;
+      setNotice(body.message_zh ?? `已選用版本 ${target.version_number}。`);
+      setRationale('');
+      if (versionId) await loadStrategy(versionId);
+    } catch (err) {
+      setError(describeFailure(err, '無法切換使用中版本'));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const rollbackVersion = async () => {
+    const recordId = models[0]?.record_id;
+    if (!recordId) {
+      setError('找不到可回退的模型記錄。');
+      return;
+    }
+    setBusy('rollback');
+    setError(null);
+    setNotice(null);
+    try {
+      const body = (await api.ml.rollbackPersonalModel(
+        recordId,
+        rationale.trim() || null,
+      )) as { selection: SelectionEntry; active_version: PersonalModel; message_zh?: string };
+      setNotice(body.message_zh ?? '已回退到上一個版本。');
+      setRationale('');
+      if (versionId) await loadStrategy(versionId);
+    } catch (err) {
+      setError(describeFailure(err, '無法回退版本'));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const loadSavedComparison = async (runId: string) => {
+    setBusy(`load-${runId}`);
+    setError(null);
+    setNotice(null);
+    try {
+      const body = (await api.ml.getPersonalComparison(runId)) as ComparisonResult;
+      setComparison(body);
+      setCompA(body.versions.a.model_version_id);
+      setCompB(body.versions.b.model_version_id);
+      setComparability({
+        comparable: body.comparable,
+        same_evaluation_set: body.same_evaluation_set,
+        checks: body.checks,
+        not_comparable_reasons: [],
+      });
+      setNotice('已載入先前保存的比較結果。');
+    } catch (err) {
+      setError(describeFailure(err, '無法載入已保存的比較'));
     } finally {
       setBusy(null);
     }
@@ -1169,6 +1528,348 @@ export default function PersonalStrategyLearningPanel() {
               </div>
             )}
           </div>
+          <div
+            data-testid="pl-compare"
+            style={{ marginTop: '22px', paddingTop: '16px', borderTop: '1px solid var(--border)' }}
+          >
+            <strong style={{ fontSize: '14px' }}>5. 版本比較與選用</strong>
+            <p style={{ margin: '6px 0 0', fontSize: '12px', color: 'var(--text-secondary)' }}>
+              只比較同一任務、同一策略範圍、同一特徵與同一評估方法的個人模型版本。可比性檢查屬唯讀、不扣額度；
+              執行比較會在凍結快照的測試列上重新載入 artifact 並計算指標，消耗 1 個 AI 使用額度。
+              分數只反映模仿本人已確認決策的能力，不是投資回報，也不代表越用越準。
+            </p>
+
+            {models.length < 2 ? (
+              <p style={{ margin: '10px 0 0', fontSize: '13px', color: 'var(--text-secondary)' }}>
+                此策略目前只有 {models.length} 個模型版本；至少需要兩個版本才能比較與選用。
+              </p>
+            ) : (
+              <>
+                <div
+                  style={{
+                    marginTop: '10px',
+                    display: 'flex',
+                    gap: '12px',
+                    alignItems: 'end',
+                    flexWrap: 'wrap',
+                    fontSize: '12px',
+                  }}
+                >
+                  <label style={{ display: 'grid', gap: '4px' }}>
+                    <span style={{ color: 'var(--text-muted)' }}>版本 A</span>
+                    <select
+                      data-testid="pl-compare-a"
+                      value={compA}
+                      onChange={(event) => {
+                        setCompA(event.target.value);
+                        setComparability(null);
+                        setComparison(null);
+                      }}
+                      style={{ minWidth: '200px', padding: '5px 8px' }}
+                    >
+                      {models.map((model) => (
+                        <option key={model.model_version_id} value={model.model_version_id}>
+                          版本 {model.version_number}
+                          {model.is_active ? ' · 使用中' : ''}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label style={{ display: 'grid', gap: '4px' }}>
+                    <span style={{ color: 'var(--text-muted)' }}>版本 B</span>
+                    <select
+                      data-testid="pl-compare-b"
+                      value={compB}
+                      onChange={(event) => {
+                        setCompB(event.target.value);
+                        setComparability(null);
+                        setComparison(null);
+                      }}
+                      style={{ minWidth: '200px', padding: '5px 8px' }}
+                    >
+                      {models.map((model) => (
+                        <option key={model.model_version_id} value={model.model_version_id}>
+                          版本 {model.version_number}
+                          {model.is_active ? ' · 使用中' : ''}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <button
+                    type="button"
+                    className="btn"
+                    data-testid="pl-compare-check"
+                    onClick={checkComparability}
+                    disabled={busy !== null || !compA || !compB}
+                  >
+                    檢查可比性（免費）
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    data-testid="pl-compare-run"
+                    onClick={runComparison}
+                    disabled={busy !== null || !compA || !compB}
+                  >
+                    {busy === 'comparison' ? '比較中…' : '執行比較（消耗 1 AI 額度）'}
+                  </button>
+                </div>
+
+                {comparability && (
+                  <div data-testid="pl-compare-checks" style={{ marginTop: '10px', fontSize: '12px' }}>
+                    <div
+                      style={{
+                        fontWeight: 600,
+                        color: comparability.comparable ? 'var(--positive)' : 'var(--warning)',
+                      }}
+                    >
+                      {comparability.comparable ? '可比' : '不可比'}
+                      {comparability.comparable &&
+                        (comparability.same_evaluation_set
+                          ? ' · 同一評估集'
+                          : ' · 各自測試窗口（只可並列參考）')}
+                    </div>
+                    <ul style={{ margin: '6px 0 0', paddingLeft: '18px', color: 'var(--text-secondary)' }}>
+                      {comparability.checks.map((check) => (
+                        <li
+                          key={check.code}
+                          style={{
+                            color: check.ok
+                              ? 'var(--text-secondary)'
+                              : check.required
+                                ? 'var(--warning)'
+                                : 'var(--text-muted)',
+                          }}
+                        >
+                          {check.ok ? '✓' : '✗'} {check.message_zh}
+                          {!check.required && !check.ok ? '（非必要）' : ''}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {comparison && (
+                  <div data-testid="pl-comparison-result" style={{ marginTop: '14px' }}>
+                    <div
+                      style={{
+                        display: 'flex',
+                        gap: '8px',
+                        flexWrap: 'wrap',
+                        alignItems: 'center',
+                        fontSize: '12px',
+                      }}
+                    >
+                      <strong>{comparison.summary_zh}</strong>
+                      <span
+                        style={{
+                          padding: '1px 8px',
+                          borderRadius: '10px',
+                          border: '1px solid currentColor',
+                          color: comparison.rankable ? 'var(--positive)' : 'var(--text-secondary)',
+                        }}
+                      >
+                        {comparison.mode === 'same_evaluation_set' ? '同一評估集' : '各自測試窗口'}
+                      </span>
+                      {!comparison.rankable && (
+                        <span style={{ color: 'var(--warning)' }}>不可排名：兩邊測試列不同</span>
+                      )}
+                      {comparison.idempotent_replay && (
+                        <span style={{ color: 'var(--text-muted)' }}>重複請求，已回傳保存結果</span>
+                      )}
+                    </div>
+
+                    <div
+                      style={{
+                        marginTop: '10px',
+                        display: 'grid',
+                        gap: '12px',
+                        gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))',
+                      }}
+                    >
+                      <ComparisonVersionCard label="A" version={comparison.versions.a} />
+                      <ComparisonVersionCard label="B" version={comparison.versions.b} />
+                    </div>
+
+                    {comparison.delta && (
+                      <div
+                        data-testid="pl-comparison-delta"
+                        style={{ marginTop: '10px', fontSize: '12px' }}
+                      >
+                        <strong>差值（A − B）：</strong> 準確率{' '}
+                        {comparison.delta.accuracy >= 0 ? '+' : ''}
+                        {comparison.delta.accuracy.toFixed(4)} · macro F1{' '}
+                        {comparison.delta.macro_f1 >= 0 ? '+' : ''}
+                        {comparison.delta.macro_f1.toFixed(4)}
+                        <div style={{ color: 'var(--text-muted)', marginTop: '2px' }}>
+                          {comparison.delta.note_zh}
+                        </div>
+                      </div>
+                    )}
+
+                    {comparison.disagreement && (
+                      <div style={{ marginTop: '6px', fontSize: '12px', color: 'var(--text-secondary)' }}>
+                        不一致：{comparison.disagreement.count}／{comparison.disagreement.n_rows} 列（
+                        {(comparison.disagreement.share * 100).toFixed(1)}%）。
+                        {comparison.disagreement.note_zh}
+                      </div>
+                    )}
+
+                    {comparison.warnings.length > 0 && (
+                      <div style={{ marginTop: '6px', fontSize: '12px', color: 'var(--warning)' }}>
+                        警告：{comparison.warnings.map((code) => WARNING_LABELS[code] ?? code).join(' · ')}
+                      </div>
+                    )}
+
+                    <ul
+                      style={{
+                        margin: '8px 0 0',
+                        paddingLeft: '18px',
+                        fontSize: '12px',
+                        color: 'var(--text-muted)',
+                      }}
+                    >
+                      {comparison.caveats_zh.map((caveat) => (
+                        <li key={caveat}>{caveat}</li>
+                      ))}
+                    </ul>
+                    <div style={{ marginTop: '6px', fontSize: '12px', color: 'var(--text-muted)' }}>
+                      不適用於：{comparison.not_for.join('、')}。
+                    </div>
+                  </div>
+                )}
+
+                <div
+                  style={{
+                    marginTop: '14px',
+                    paddingTop: '12px',
+                    borderTop: '1px dashed var(--border)',
+                    fontSize: '12px',
+                  }}
+                >
+                  <strong>選用或回退版本</strong>
+                  <div style={{ marginTop: '6px', color: 'var(--text-muted)' }}>
+                    切換使用中版本不會刪除任何版本、artifact 或已保存的評估；使用中別名推論會回傳解析後的固定版本。
+                  </div>
+                  <label style={{ display: 'grid', gap: '4px', marginTop: '8px' }}>
+                    <span style={{ color: 'var(--text-muted)' }}>選用理由（至少 2 個字，會永久保存）</span>
+                    <textarea
+                      data-testid="pl-selection-rationale"
+                      value={rationale}
+                      onChange={(event) => setRationale(event.target.value)}
+                      rows={2}
+                      style={{ padding: '6px 8px', resize: 'vertical' }}
+                    />
+                  </label>
+                  <div style={{ marginTop: '8px', display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                    <button
+                      type="button"
+                      className="btn"
+                      data-testid="pl-select-a"
+                      onClick={() => selectVersion('a')}
+                      disabled={busy !== null || !comparison}
+                    >
+                      選用版本 A
+                    </button>
+                    <button
+                      type="button"
+                      className="btn"
+                      data-testid="pl-select-b"
+                      onClick={() => selectVersion('b')}
+                      disabled={busy !== null || !comparison}
+                    >
+                      選用版本 B
+                    </button>
+                    <button
+                      type="button"
+                      className="btn"
+                      data-testid="pl-rollback"
+                      onClick={rollbackVersion}
+                      disabled={busy !== null || !selections[0]?.previous_version_id}
+                    >
+                      回退到上一個版本
+                    </button>
+                  </div>
+                  {activeVersionId && (
+                    <div style={{ marginTop: '6px', color: 'var(--text-secondary)' }}>
+                      目前使用中：版本{' '}
+                      {models.find((model) => model.model_version_id === activeVersionId)
+                        ?.version_number ?? shortId(activeVersionId)}
+                    </div>
+                  )}
+                </div>
+
+                {comparisons.length > 0 && (
+                  <div style={{ marginTop: '14px', fontSize: '12px' }}>
+                    <strong>已保存的比較</strong>
+                    <div style={{ display: 'grid', gap: '6px', marginTop: '6px' }}>
+                      {comparisons.slice(0, 5).map((run) => (
+                        <div
+                          key={run.comparison_run_id}
+                          data-testid={`pl-comparison-history-${run.comparison_run_id}`}
+                          style={{
+                            display: 'flex',
+                            gap: '8px',
+                            flexWrap: 'wrap',
+                            alignItems: 'center',
+                            padding: '6px 8px',
+                            border: '1px solid var(--border)',
+                            borderRadius: '6px',
+                          }}
+                        >
+                          <span style={{ fontFamily: 'monospace', color: 'var(--text-muted)' }}>
+                            {shortId(run.comparison_run_id)}
+                          </span>
+                          <span>
+                            版本 {run.version_a.version_number ?? '—'} vs{' '}
+                            {run.version_b.version_number ?? '—'}
+                          </span>
+                          <span style={{ color: run.rankable ? 'var(--positive)' : 'var(--text-muted)' }}>
+                            {run.rankable ? '同一評估集' : '各自測試窗口'}
+                          </span>
+                          <span style={{ color: 'var(--text-muted)' }}>
+                            {run.created_at ? run.created_at.slice(0, 19).replace('T', ' ') : '—'}
+                          </span>
+                          <button
+                            type="button"
+                            className="btn"
+                            data-testid={`pl-comparison-load-${run.comparison_run_id}`}
+                            onClick={() => loadSavedComparison(run.comparison_run_id)}
+                            disabled={busy !== null}
+                          >
+                            載入結果
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {selections.length > 0 && (
+                  <div style={{ marginTop: '12px', fontSize: '12px' }}>
+                    <strong>版本選用紀錄</strong>
+                    <div style={{ display: 'grid', gap: '4px', marginTop: '6px' }}>
+                      {selections.map((entry) => (
+                        <div
+                          key={entry.selection_id}
+                          data-testid={`pl-selection-${entry.selection_id}`}
+                          style={{ color: 'var(--text-secondary)' }}
+                        >
+                          {entry.created_at ? entry.created_at.slice(0, 19).replace('T', ' ') : '—'} ·{' '}
+                          {SELECTION_ACTION_LABELS[entry.action] ?? entry.action} 版本{' '}
+                          {entry.version_number ?? shortId(entry.version_id)}
+                          {entry.previous_version_number !== null
+                            ? `（原版本 ${entry.previous_version_number}）`
+                            : ''}
+                          {entry.rationale ? ` · 理由：${entry.rationale}` : ''}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
         </>
       )}
     </section>
@@ -1180,6 +1881,147 @@ function Metric({ label, value }: { label: string; value: number | string }) {
     <div style={{ padding: '8px 10px', border: '1px solid var(--border)', borderRadius: '6px' }}>
       <div style={{ color: 'var(--text-muted)', fontSize: '11px' }}>{label}</div>
       <div style={{ fontSize: '15px', fontWeight: 600, marginTop: '2px' }}>{value}</div>
+    </div>
+  );
+}
+
+function ComparisonVersionCard({
+  label,
+  version,
+}: {
+  label: string;
+  version: ComparisonVersion;
+}) {
+  const metrics = version.metrics;
+  const matrix = metrics.confusion_matrix;
+  return (
+    <div
+      data-testid={`pl-comparison-version-${label}`}
+      style={{
+        padding: '12px',
+        border: '1px solid var(--border)',
+        borderRadius: '8px',
+        background: 'var(--surface-2)',
+        fontSize: '12px',
+        minWidth: 0,
+      }}
+    >
+      <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+        <strong>
+          {label} · 版本 {version.version_number}
+        </strong>
+        <span style={{ color: 'var(--text-muted)' }}>{version.model_type}</span>
+        {version.is_active && <span style={{ color: 'var(--positive)' }}>使用中</span>}
+        {version.revoked && <span style={{ color: 'var(--warning)' }}>已撤銷</span>}
+        <span style={{ fontFamily: 'monospace', color: 'var(--text-muted)' }}>
+          artifact {shortId(version.artifact_sha256)}
+          {version.artifact_verified ? '（已核對）' : '（未核對）'}
+        </span>
+      </div>
+
+      <div style={{ marginTop: '6px', color: 'var(--text-secondary)' }}>
+        測試列 {metrics.test_size} 筆 · 準確率 {formatScore(metrics.accuracy)} · macro F1{' '}
+        {formatScore(metrics.macro_f1)} · weighted F1 {formatScore(metrics.weighted_f1)}
+        {version.baseline && typeof version.baseline.accuracy === 'number'
+          ? ` · 訓練基線 ${formatScore(version.baseline.accuracy)}`
+          : ''}
+      </div>
+      <div style={{ marginTop: '4px', color: 'var(--text-muted)' }}>
+        測試期 {version.evaluation_set.date_range_start ?? '—'} 至{' '}
+        {version.evaluation_set.date_range_end ?? '—'} · 資料截止{' '}
+        {version.evaluation_set.data_cutoff_at ?? '—'} · 快照 {shortId(version.snapshot_checksum)}
+      </div>
+
+      <div style={{ marginTop: '8px', overflowX: 'auto' }}>
+        <table style={{ borderCollapse: 'collapse', fontSize: '11px', minWidth: '320px' }}>
+          <thead>
+            <tr style={{ color: 'var(--text-muted)' }}>
+              <th style={thStyle}>類別</th>
+              <th style={thStyle}>精確率</th>
+              <th style={thStyle}>召回率</th>
+              <th style={thStyle}>F1</th>
+              <th style={thStyle}>樣本</th>
+            </tr>
+          </thead>
+          <tbody>
+            {Object.entries(metrics.per_class).map(([className, row]) => (
+              <tr key={className}>
+                <td style={tdStyle}>{actionLabel(className)}</td>
+                <td style={tdStyle}>{formatScore(row.precision)}</td>
+                <td style={tdStyle}>{formatScore(row.recall)}</td>
+                <td style={tdStyle}>{formatScore(row.f1)}</td>
+                <td style={tdStyle}>{row.support}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div style={{ marginTop: '8px' }}>
+        <div style={{ color: 'var(--text-muted)' }}>混淆矩陣（列＝實際，欄＝預測）</div>
+        <div style={{ overflowX: 'auto', marginTop: '4px' }}>
+          <table style={{ borderCollapse: 'collapse', fontSize: '11px' }}>
+            <thead>
+              <tr>
+                <th style={thStyle}></th>
+                {matrix.labels.map((rowLabel) => (
+                  <th key={rowLabel} style={thStyle}>
+                    {actionLabel(rowLabel)}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {matrix.matrix.map((row, rowIndex) => (
+                <tr key={matrix.labels[rowIndex]}>
+                  <th style={thStyle}>{actionLabel(matrix.labels[rowIndex])}</th>
+                  {row.map((count, columnIndex) => (
+                    <td key={matrix.labels[columnIndex]} style={tdStyle}>
+                      {count}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {version.windows.length > 0 && (
+        <div style={{ marginTop: '8px' }}>
+          <div style={{ color: 'var(--text-muted)' }}>分期間表現（測試期內按決策時點分組）</div>
+          <div style={{ display: 'grid', gap: '6px', marginTop: '4px' }}>
+            {version.windows.map((window) => (
+              <div
+                key={window.index}
+                data-testid={`pl-comparison-window-${label}-${window.index}`}
+                style={{ padding: '6px 8px', border: '1px solid var(--border)', borderRadius: '6px' }}
+              >
+                <div style={{ color: 'var(--text-secondary)' }}>
+                  期間 {window.index}：{window.start_decision_instant ?? '—'} →{' '}
+                  {window.end_decision_instant ?? '—'} · {window.n_rows} 列／{window.n_groups} 組
+                </div>
+                <div>
+                  準確率 {formatScore(window.accuracy)} · macro F1 {formatScore(window.macro_f1)}
+                </div>
+                {window.insufficient && (
+                  <div style={{ color: 'var(--warning)' }}>
+                    {window.insufficient_reasons
+                      .map((code) => WINDOW_REASON_LABELS[code] ?? code)
+                      .join(' · ')}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {version.warnings.length > 0 && (
+        <div style={{ marginTop: '6px', color: 'var(--warning)' }}>
+          警告：{version.warnings.map((code) => WARNING_LABELS[code] ?? code).join(' · ')}
+        </div>
+      )}
     </div>
   );
 }

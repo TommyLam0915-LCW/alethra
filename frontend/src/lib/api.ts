@@ -621,6 +621,46 @@ export const api = {
         method: 'POST',
         body: JSON.stringify(data),
       }),
+    checkPersonalModelComparability: (versionAId: string, versionBId: string) => {
+      const qs = `?version_a=${encodeURIComponent(versionAId)}&version_b=${encodeURIComponent(versionBId)}`;
+      return apiFetch(`/api/v1/ml/personal/models/comparability${qs}`);
+    },
+    runPersonalModelComparison: (
+      versionAId: string,
+      versionBId: string,
+      operationKey?: string,
+    ) =>
+      apiFetch('/api/v1/ml/personal/models/comparisons', {
+        method: 'POST',
+        body: JSON.stringify({
+          version_a_id: versionAId,
+          version_b_id: versionBId,
+          ...(operationKey ? { operation_key: operationKey } : {}),
+        }),
+      }),
+    listPersonalComparisons: (strategyVersionId?: string) => {
+      const qs = strategyVersionId
+        ? `?strategy_version_id=${encodeURIComponent(strategyVersionId)}`
+        : '';
+      return apiFetch(`/api/v1/ml/personal/comparisons${qs}`);
+    },
+    getPersonalComparison: (runId: string) =>
+      apiFetch(`/api/v1/ml/personal/comparisons/${runId}`),
+    selectPersonalModel: (
+      versionId: string,
+      data: { rationale: string; comparison_run_id?: string | null },
+    ) =>
+      apiFetch(`/api/v1/ml/personal/models/${versionId}/select`, {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    rollbackPersonalModel: (recordId: string, rationale?: string | null) =>
+      apiFetch(`/api/v1/ml/personal/records/${recordId}/rollback`, {
+        method: 'POST',
+        body: JSON.stringify(rationale ? { rationale } : {}),
+      }),
+    listPersonalSelections: (recordId: string) =>
+      apiFetch(`/api/v1/ml/personal/records/${recordId}/selections`),
   },
   billing: {
     listPlans: () => apiFetch('/api/v1/plans'),
