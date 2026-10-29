@@ -44,9 +44,12 @@ from app.models.paper_portfolio import (
 class PaperExecutionError(Exception):
     """A fill that must not be booked. Carries the reason for the journal."""
 
-    def __init__(self, message: str):
+    def __init__(self, message: str, code: str = "execution_refused"):
         super().__init__(message)
         self.message = message
+        # Stable machine-readable cause so a durable refusal record does not
+        # have to be re-derived from an English message later.
+        self.code = code
 
 
 def _utcnow() -> datetime:
@@ -95,7 +98,7 @@ def book_fill(
 
     if order.side == OrderSide.BUY:
         if float(portfolio.current_virtual_cash) + net_cash_change < 0:
-            raise PaperExecutionError("Insufficient cash for order")
+            raise PaperExecutionError("Insufficient cash for order", code="insufficient_cash")
 
         portfolio.current_virtual_cash = round(
             float(portfolio.current_virtual_cash) + net_cash_change, 4
@@ -129,7 +132,8 @@ def book_fill(
             # came from nothing. The order-creation risk check rejects this too;
             # this guard is what stops any other caller from booking it.
             raise PaperExecutionError(
-                f"Cannot sell {quantity} — only hold {held}"
+                f"Cannot sell {quantity} — only hold {held}",
+                code="insufficient_position",
             )
 
         portfolio.current_virtual_cash = round(
@@ -384,13 +388,16 @@ def apply_rule_decision(
         db.flush()
         return {
             "order_id": str(order.id),
+            "decision_id": str(decision.id),
             "status": OrderStatus.rejected.value,
             "blocked_reason": exc.message,
+            "reason_code": exc.code,
         }
 
     db.flush()
     return {
         "order_id": str(order.id),
+        "decision_id": str(decision.id),
         "fill_id": str(fill.id),
         "status": OrderStatus.filled.value,
         "side": side,
@@ -440,4 +447,9 @@ def _record_blocked(
     )
     db.add(decision)
     db.flush()
-    return {"status": "not_executed", "blocked_reason": reason}
+    return {
+        "status": "not_executed",
+        "blocked_reason": reason,
+        # Stable identity for the refusal so the audit event can point at it.
+        "decision_id": str(decision.id),
+    }

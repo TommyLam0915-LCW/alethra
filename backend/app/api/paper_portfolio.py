@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 import csv
 import io
+import uuid
 from typing import Any, Dict, Iterable, List, Optional
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
@@ -268,6 +269,14 @@ def _evaluate_direct_order(
     )
 
 
+class _FillRefused(HTTPException):
+    """A fill rejected before it could be booked, carrying its reason code."""
+
+    def __init__(self, detail: str, code: str):
+        super().__init__(status_code=400, detail=detail)
+        self.code = code
+
+
 def _simulate_fill(
     order: PaperOrder,
     portfolio: PaperPortfolio,
@@ -306,7 +315,7 @@ def _simulate_fill(
             fill_reason=fill_reason,
         )
     except PaperExecutionError as exc:
-        raise HTTPException(status_code=400, detail=exc.message)
+        raise _FillRefused(exc.message, exc.code)
 
 
 @router.post("", response_model=PaperPortfolioResponse, status_code=status.HTTP_201_CREATED)
@@ -468,12 +477,19 @@ def create_order(
             data_cutoff_at=bar["date"] if bar is not None else None,
         )
         db.add(rejected)
+        db.flush()
         emit_event(
             db,
             entity_type="paper_portfolio", entity_id=portfolio.id,
             event_type="order_rejected", actor_id=current_user.id, actor_type=actor_type,
             data_cutoff_at=bar["date"] if bar is not None else None,
             payload={
+                # Identity of the rejected record itself, so the refusal is
+                # traceable without guessing which order it belonged to.
+                "order_id": str(rejected.id),
+                "decision_id": None,
+                "idempotency_key": payload.idempotency_key,
+                "rejection_code": risk.code,
                 "asset_id": payload.asset_id,
                 "side": payload.side,
                 "quantity": payload.quantity,
@@ -530,9 +546,37 @@ def create_order(
 
     try:
         _simulate_fill(order, portfolio, bar, db)
-    except HTTPException:
+    except _FillRefused as refusal:
+        # The fill could not be paid for, so the order/decision rows are rolled
+        # back with the cash movement. The refusal still has to be durable and
+        # attributable, so it is journaled as its own committed event under an
+        # operation identity rather than disappearing with the rollback.
+        operation_id = str(uuid.uuid4())
+        portfolio_id_snapshot = str(portfolio.id)
+        bar_date = bar["date"]
         db.rollback()
-        raise
+        emit_event(
+            db,
+            entity_type="paper_portfolio", entity_id=portfolio_id_snapshot,
+            event_type="order_rejected_before_persist",
+            actor_id=current_user.id, actor_type=actor_type,
+            data_cutoff_at=bar_date,
+            payload={
+                "operation_id": operation_id,
+                "order_id": None,
+                "decision_id": None,
+                "asset_id": payload.asset_id,
+                "side": payload.side,
+                "quantity": payload.quantity,
+                "reason": refusal.detail,
+                "reason_code": refusal.code,
+                "actor_type": actor_type,
+                "execution_date": bar_date,
+                "idempotency_key": payload.idempotency_key,
+            },
+        )
+        db.commit()
+        raise HTTPException(status_code=refusal.status_code, detail=refusal.detail)
 
     emit_event(
         db,

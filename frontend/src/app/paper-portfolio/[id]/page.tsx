@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
+import AppShell from '@/components/shell/AppShell';
 
 interface ValuationBasis {
   mode: string;
@@ -41,6 +42,7 @@ interface Position {
 
 interface Order {
   id: string;
+  decision_id: string | null;
   asset_id: string;
   side: string;
   quantity: number;
@@ -77,7 +79,7 @@ const DECISION_TYPE_LABELS: Record<string, { label: string; color: string; bg: s
   entry: { label: '進場', color: '#155724', bg: '#d4edda' },
   exit: { label: '出場', color: '#721c24', bg: '#f8d7da' },
   pause: { label: '暫停', color: '#856404', bg: '#fff3cd' },
-  retire: { label: '退休', color: '#666', bg: '#e2e3e5' },
+  retire: { label: '退休', color: 'var(--text-secondary)', bg: '#e2e3e5' },
   override_request: { label: '覆寫', color: '#856404', bg: '#fff3cd' },
 };
 
@@ -107,6 +109,13 @@ const ORDER_STATUS_LABELS: Record<string, { label: string; color: string; bg: st
   filled: { label: '已成交', color: '#155724', bg: '#d4edda' },
   cancelled: { label: '已取消', color: '#666', bg: '#f5f5f5' },
   rejected: { label: '已拒絕', color: '#721c24', bg: '#f8d7da' },
+};
+
+/** OutcomeStatus on a decision is the record captured at submission time. */
+const OUTCOME_STATUS_LABELS: Record<string, string> = {
+  pending: '待評估',
+  evaluated: '已評估',
+  expired: '已到期未評估',
 };
 
 const TAB_LABELS: Record<string, string> = {
@@ -273,11 +282,19 @@ export default function PaperPortfolioDetailPage() {
   };
 
   if (loading) {
-    return <div style={{ padding: '2rem', textAlign: 'center' }}>載入中...</div>;
+    return (
+      <AppShell active="portfolios">
+        <div style={{ padding: '2rem', textAlign: 'center' }}>載入中...</div>
+      </AppShell>
+    );
   }
 
   if (!portfolio) {
-    return <div style={{ padding: '2rem' }}>組合不存在</div>;
+    return (
+      <AppShell active="portfolios">
+        <div style={{ padding: '2rem' }}>組合不存在</div>
+      </AppShell>
+    );
   }
 
   const statusStyle = STATUS_LABELS[portfolio.status] || STATUS_LABELS.active;
@@ -290,16 +307,17 @@ export default function PaperPortfolioDetailPage() {
   const closedPositions = positions.filter(p => p.status === 'closed');
 
   return (
+    <AppShell active="portfolios">
     <div style={{ maxWidth: '1000px', margin: '0 auto', padding: '2rem' }}>
       <div style={{ marginBottom: '1.5rem' }}>
-        <Link href="/paper-portfolio" style={{ color: '#0066cc', textDecoration: 'none' }}>
+        <Link href="/paper-portfolio" style={{ color: 'var(--primary)', textDecoration: 'none' }}>
           &larr; 返回組合列表
         </Link>
       </div>
 
       <div style={{
-        background: '#fff3cd', border: '1px solid #ffc107', borderRadius: '8px',
-        padding: '0.75rem', marginBottom: '1.5rem', fontSize: '0.8125rem', color: '#856404',
+        background: 'rgba(245, 158, 11, 0.12)', border: '1px solid var(--warning)', borderRadius: '8px',
+        padding: '0.75rem', marginBottom: '1.5rem', fontSize: '0.8125rem', color: 'var(--text-primary)',
       }}>
         <strong>免責聲明：</strong><br />
         模擬交易記錄基於既定假設的模擬執行，不構成投資建議。
@@ -312,8 +330,8 @@ export default function PaperPortfolioDetailPage() {
         <div
           data-testid="pp-intraday-badge"
           style={{
-            background: '#fde8ef', border: '1px solid #f5a3c0', borderRadius: '8px',
-            padding: '0.75rem', marginBottom: '1.5rem', fontSize: '0.8125rem', color: '#7a1f45',
+            background: 'rgba(139, 92, 246, 0.14)', border: '1px solid var(--purple)', borderRadius: '8px',
+            padding: '0.75rem', marginBottom: '1.5rem', fontSize: '0.8125rem', color: 'var(--text-primary)',
           }}
         >
           <strong>合成資料 · 歷史回放 · 非即時行情</strong>
@@ -330,8 +348,8 @@ export default function PaperPortfolioDetailPage() {
 
       {error && (
         <div data-testid="pp-error" style={{
-          background: '#f8d7da', border: '1px solid #f5c6cb', borderRadius: '8px',
-          padding: '0.75rem', marginBottom: '1rem', color: '#721c24', fontSize: '0.875rem',
+          background: 'rgba(239, 68, 68, 0.12)', border: '1px solid var(--negative)', borderRadius: '8px',
+          padding: '0.75rem', marginBottom: '1rem', color: 'var(--text-primary)', fontSize: '0.875rem',
         }}>
           {error}
         </div>
@@ -349,7 +367,7 @@ export default function PaperPortfolioDetailPage() {
               {statusStyle.label}
             </span>
           </div>
-          <div style={{ fontSize: '0.875rem', color: '#666' }}>
+          <div style={{ fontSize: '0.875rem', color: 'var(--text-secondary)' }}>
             建立於 {new Date(portfolio.created_at).toLocaleDateString('zh-Hant')}
           </div>
         </div>
@@ -394,24 +412,24 @@ export default function PaperPortfolioDetailPage() {
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '1rem', marginBottom: '2rem' }}>
-        <div style={{ background: 'white', border: '1px solid #e0e0e0', borderRadius: '8px', padding: '1rem' }}>
-          <div style={{ fontSize: '0.75rem', color: '#666', marginBottom: '0.25rem' }}>現金</div>
+        <div style={{ background: 'var(--surface-1)', border: '1px solid var(--border-strong)', borderRadius: '8px', padding: '1rem' }}>
+          <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '0.25rem' }}>現金</div>
           <div data-testid="pp-cash" style={{ fontSize: '1.25rem', fontWeight: 600 }}>
             {portfolio.currency} {portfolio.current_virtual_cash.toLocaleString(undefined, { minimumFractionDigits: 2 })}
           </div>
         </div>
-        <div style={{ background: 'white', border: '1px solid #e0e0e0', borderRadius: '8px', padding: '1rem' }}>
-          <div style={{ fontSize: '0.75rem', color: '#666', marginBottom: '0.25rem' }}>現金報酬（不含未實現）</div>
-          <div data-testid="pp-cash-return" style={{ fontSize: '1.25rem', fontWeight: 600, color: cashReturnPct >= 0 ? '#155724' : '#721c24' }}>
+        <div style={{ background: 'var(--surface-1)', border: '1px solid var(--border-strong)', borderRadius: '8px', padding: '1rem' }}>
+          <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '0.25rem' }}>現金報酬（不含未實現）</div>
+          <div data-testid="pp-cash-return" style={{ fontSize: '1.25rem', fontWeight: 600, color: cashReturnPct >= 0 ? 'var(--positive)' : 'var(--negative)' }}>
             {cashReturnPct >= 0 ? '+' : ''}{cashReturnPct.toFixed(2)}%
           </div>
         </div>
-        <div style={{ background: 'white', border: '1px solid #e0e0e0', borderRadius: '8px', padding: '1rem' }}>
-          <div style={{ fontSize: '0.75rem', color: '#666', marginBottom: '0.25rem' }}>持有部位</div>
+        <div style={{ background: 'var(--surface-1)', border: '1px solid var(--border-strong)', borderRadius: '8px', padding: '1rem' }}>
+          <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '0.25rem' }}>持有部位</div>
           <div data-testid="pp-open-position-count" style={{ fontSize: '1.25rem', fontWeight: 600 }}>{openPositions.length}</div>
         </div>
-        <div style={{ background: 'white', border: '1px solid #e0e0e0', borderRadius: '8px', padding: '1rem' }}>
-          <div style={{ fontSize: '0.75rem', color: '#666', marginBottom: '0.25rem' }}>決策次數</div>
+        <div style={{ background: 'var(--surface-1)', border: '1px solid var(--border-strong)', borderRadius: '8px', padding: '1rem' }}>
+          <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '0.25rem' }}>決策次數</div>
           <div style={{ fontSize: '1.25rem', fontWeight: 600 }}>{decisions.length}</div>
         </div>
       </div>
@@ -419,14 +437,14 @@ export default function PaperPortfolioDetailPage() {
       <div
         data-testid="pp-pnl-breakdown"
         style={{
-          background: 'white', border: '1px solid #e0e0e0', borderRadius: '8px',
+          background: 'var(--surface-1)', border: '1px solid var(--border-strong)', borderRadius: '8px',
           padding: '0.75rem 1rem', marginBottom: '1rem', fontSize: '0.8125rem',
         }}
       >
         <span data-testid="pp-realized-pnl">
           已實現損益 {portfolio.currency} {portfolio.total_realized_pnl.toFixed(2)}
         </span>
-        <span style={{ color: '#ccc', margin: '0 0.5rem' }}>|</span>
+        <span style={{ color: 'var(--border-strong)', margin: '0 0.5rem' }}>|</span>
         <span data-testid="pp-unrealized-pnl">
           未實現損益 {hasUnrealized
             ? `${portfolio.currency} ${(unrealized as number).toFixed(2)}`
@@ -438,8 +456,8 @@ export default function PaperPortfolioDetailPage() {
         <div
           data-testid="pp-valuation-basis"
           style={{
-            background: '#f8f9fa', border: '1px solid #e0e0e0', borderRadius: '8px',
-            padding: '0.75rem 1rem', marginBottom: '1.5rem', fontSize: '0.75rem', color: '#666',
+            background: 'var(--surface-1)', border: '1px solid var(--border-strong)', borderRadius: '8px',
+            padding: '0.75rem 1rem', marginBottom: '1.5rem', fontSize: '0.75rem', color: 'var(--text-secondary)',
           }}
         >
           <strong>估值依據：</strong>
@@ -451,7 +469,7 @@ export default function PaperPortfolioDetailPage() {
         </div>
       )}
 
-      <div style={{ display: 'flex', gap: '0', marginBottom: '1.5rem', borderBottom: '2px solid #e0e0e0' }}>
+      <div style={{ display: 'flex', gap: '0', marginBottom: '1.5rem', borderBottom: '1px solid var(--border-strong)' }}>
         {(['overview', 'positions', 'orders', 'decisions'] as const).map((tab) => (
           <button
             key={tab}
@@ -459,8 +477,8 @@ export default function PaperPortfolioDetailPage() {
             onClick={() => setActiveTab(tab)}
             style={{
               padding: '0.75rem 1.5rem', background: 'none', border: 'none',
-              borderBottom: activeTab === tab ? '2px solid #0066cc' : '2px solid transparent',
-              color: activeTab === tab ? '#0066cc' : '#666',
+              borderBottom: activeTab === tab ? '2px solid var(--primary)' : '2px solid transparent',
+              color: activeTab === tab ? 'var(--primary)' : 'var(--text-secondary)',
               fontWeight: activeTab === tab ? 600 : 400,
               cursor: 'pointer', fontSize: '0.9375rem', marginBottom: '-2px',
             }}
@@ -474,7 +492,8 @@ export default function PaperPortfolioDetailPage() {
         <div>
           {portfolio.status !== 'retired' && portfolio.status !== 'completed' && (
             <div style={{
-              background: '#f8f9fa', borderRadius: '8px', padding: '1.5rem', marginBottom: '1.5rem',
+              background: 'var(--surface-1)', border: '1px solid var(--border-strong)',
+              borderRadius: '8px', padding: '1.5rem', marginBottom: '1.5rem',
             }}>
               <h2 style={{ fontSize: '1.1rem', marginBottom: '1rem' }}>新增模擬委託（示範數據通道）</h2>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
@@ -484,7 +503,7 @@ export default function PaperPortfolioDetailPage() {
                     data-testid="pp-asset"
                     value={orderForm.asset_id}
                     onChange={(e) => setOrderField('asset_id', e.target.value)}
-                    style={{ width: '100%', padding: '0.5rem', border: '1px solid #ddd', borderRadius: '4px' }}
+                    style={{ width: '100%', padding: '0.5rem', border: '1px solid var(--border-strong)', background: 'var(--surface-2)', color: 'var(--text-primary)', borderRadius: '4px' }}
                   >
                     <option value="" disabled>— 請選擇標的 —</option>
                     <option value="DEMO-ALPHA">DEMO-ALPHA（示範數據，合成）</option>
@@ -498,7 +517,7 @@ export default function PaperPortfolioDetailPage() {
                     data-testid="pp-side"
                     value={orderForm.side}
                     onChange={(e) => setOrderField('side', e.target.value)}
-                    style={{ width: '100%', padding: '0.5rem', border: '1px solid #ddd', borderRadius: '4px' }}
+                    style={{ width: '100%', padding: '0.5rem', border: '1px solid var(--border-strong)', background: 'var(--surface-2)', color: 'var(--text-primary)', borderRadius: '4px' }}
                   >
                     <option value="BUY">買入</option>
                     <option value="SELL">賣出</option>
@@ -511,7 +530,7 @@ export default function PaperPortfolioDetailPage() {
                     data-testid="pp-quantity"
                     value={orderForm.quantity}
                     onChange={(e) => setOrderField('quantity', e.target.value)}
-                    style={{ width: '100%', padding: '0.5rem', border: '1px solid #ddd', borderRadius: '4px' }}
+                    style={{ width: '100%', padding: '0.5rem', border: '1px solid var(--border-strong)', background: 'var(--surface-2)', color: 'var(--text-primary)', borderRadius: '4px' }}
                   />
                 </div>
                 <div>
@@ -520,7 +539,7 @@ export default function PaperPortfolioDetailPage() {
                     data-testid="pp-confidence"
                     value={orderForm.self_reported_confidence}
                     onChange={(e) => setOrderField('self_reported_confidence', e.target.value)}
-                    style={{ width: '100%', padding: '0.5rem', border: '1px solid #ddd', borderRadius: '4px' }}
+                    style={{ width: '100%', padding: '0.5rem', border: '1px solid var(--border-strong)', background: 'var(--surface-2)', color: 'var(--text-primary)', borderRadius: '4px' }}
                   >
                     <option value="low">低</option>
                     <option value="medium">中</option>
@@ -529,27 +548,27 @@ export default function PaperPortfolioDetailPage() {
                 </div>
                 <div style={{ gridColumn: '1 / -1' }}>
                   <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.8125rem' }}>
-                    理由 <span style={{ color: '#dc3545' }}>*</span>
+                    理由 <span style={{ color: 'var(--negative)' }}>*</span>
                   </label>
                   <textarea
                     data-testid="pp-rationale"
                     value={orderForm.rationale}
                     onChange={(e) => setOrderField('rationale', e.target.value)}
                     rows={2}
-                    style={{ width: '100%', padding: '0.5rem', border: '1px solid #ddd', borderRadius: '4px', resize: 'vertical' }}
+                    style={{ width: '100%', padding: '0.5rem', border: '1px solid var(--border-strong)', background: 'var(--surface-2)', color: 'var(--text-primary)', borderRadius: '4px', resize: 'vertical' }}
                     placeholder="為什麼做這個決定？"
                   />
                 </div>
                 <div style={{ gridColumn: '1 / -1' }}>
                   <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.8125rem' }}>
-                    預期結果 <span style={{ color: '#dc3545' }}>*</span>
+                    預期結果 <span style={{ color: 'var(--negative)' }}>*</span>
                   </label>
                   <textarea
                     data-testid="pp-expected-outcome"
                     value={orderForm.expected_outcome}
                     onChange={(e) => setOrderField('expected_outcome', e.target.value)}
                     rows={2}
-                    style={{ width: '100%', padding: '0.5rem', border: '1px solid #ddd', borderRadius: '4px', resize: 'vertical' }}
+                    style={{ width: '100%', padding: '0.5rem', border: '1px solid var(--border-strong)', background: 'var(--surface-2)', color: 'var(--text-primary)', borderRadius: '4px', resize: 'vertical' }}
                     placeholder="你預期會發生什麼？"
                   />
                 </div>
@@ -560,7 +579,7 @@ export default function PaperPortfolioDetailPage() {
                     data-testid="pp-timeframe-days"
                     value={orderForm.expected_timeframe_days}
                     onChange={(e) => setOrderField('expected_timeframe_days', e.target.value)}
-                    style={{ width: '100%', padding: '0.5rem', border: '1px solid #ddd', borderRadius: '4px' }}
+                    style={{ width: '100%', padding: '0.5rem', border: '1px solid var(--border-strong)', background: 'var(--surface-2)', color: 'var(--text-primary)', borderRadius: '4px' }}
                     placeholder="例如 30"
                   />
                 </div>
@@ -571,12 +590,12 @@ export default function PaperPortfolioDetailPage() {
                     data-testid="pp-falsification"
                     value={orderForm.falsification_condition}
                     onChange={(e) => setOrderField('falsification_condition', e.target.value)}
-                    style={{ width: '100%', padding: '0.5rem', border: '1px solid #ddd', borderRadius: '4px' }}
+                    style={{ width: '100%', padding: '0.5rem', border: '1px solid var(--border-strong)', background: 'var(--surface-2)', color: 'var(--text-primary)', borderRadius: '4px' }}
                     placeholder="什麼情況能證明這個決定是錯的？"
                   />
                 </div>
               </div>
-              <p style={{ margin: '1rem 0 0', fontSize: '0.8125rem', color: '#666' }}>
+              <p style={{ margin: '1rem 0 0', fontSize: '0.8125rem', color: 'var(--text-secondary)' }}>
                 這條通道只接受 DEMO-* 示範資產，且送出後即以示範價格成交 — 這是示範數據，不是真實行情。
                 真實標的（例如 US:AAPL）請於工作區的「手動模擬單」提交：那裡提交的是 pending 掛單，
                 由重放時鐘在下一根可執行 K 線成交，決策時間與執行時間分開記錄。
@@ -600,11 +619,11 @@ export default function PaperPortfolioDetailPage() {
 
           <h2 style={{ fontSize: '1.1rem', marginBottom: '0.75rem' }}>持有部位</h2>
           {openPositions.length === 0 ? (
-            <div style={{ padding: '1rem', color: '#666', fontSize: '0.875rem' }}>尚無持有部位</div>
+            <div style={{ padding: '1rem', color: 'var(--text-secondary)', fontSize: '0.875rem' }}>尚無持有部位</div>
           ) : (
             <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: '1.5rem' }}>
               <thead>
-                <tr style={{ borderBottom: '2px solid #e0e0e0' }}>
+                <tr style={{ borderBottom: '1px solid var(--border-strong)' }}>
                   <th style={{ textAlign: 'left', padding: '0.5rem', fontSize: '0.8125rem' }}>標的</th>
                   <th style={{ textAlign: 'right', padding: '0.5rem', fontSize: '0.8125rem' }}>數量</th>
                   <th style={{ textAlign: 'right', padding: '0.5rem', fontSize: '0.8125rem' }}>平均成本</th>
@@ -623,8 +642,8 @@ export default function PaperPortfolioDetailPage() {
                       style={{
                         padding: '0.5rem', textAlign: 'right',
                         color: pos.unrealized_pnl === null
-                          ? '#666'
-                          : (pos.unrealized_pnl >= 0 ? '#155724' : '#721c24'),
+                          ? 'var(--text-secondary)'
+                          : (pos.unrealized_pnl >= 0 ? 'var(--positive)' : 'var(--negative)'),
                       }}
                     >
                       {pos.unrealized_pnl === null ? '—' : pos.unrealized_pnl.toFixed(2)}
@@ -641,11 +660,11 @@ export default function PaperPortfolioDetailPage() {
         <div>
           <h2 style={{ fontSize: '1.1rem', marginBottom: '0.75rem' }}>所有部位</h2>
           {positions.length === 0 ? (
-            <div style={{ padding: '1rem', color: '#666' }}>尚無部位</div>
+            <div style={{ padding: '1rem', color: 'var(--text-secondary)' }}>尚無部位</div>
           ) : (
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
               <thead>
-                <tr style={{ borderBottom: '2px solid #e0e0e0' }}>
+                <tr style={{ borderBottom: '1px solid var(--border-strong)' }}>
                   <th style={{ textAlign: 'left', padding: '0.5rem', fontSize: '0.8125rem' }}>標的</th>
                   <th style={{ textAlign: 'right', padding: '0.5rem', fontSize: '0.8125rem' }}>數量</th>
                   <th style={{ textAlign: 'right', padding: '0.5rem', fontSize: '0.8125rem' }}>平均成本</th>
@@ -662,7 +681,7 @@ export default function PaperPortfolioDetailPage() {
                     <td style={{ padding: '0.5rem', textAlign: 'right' }}>{pos.average_entry_price.toFixed(4)}</td>
                     <td style={{
                       padding: '0.5rem', textAlign: 'right',
-                      color: (pos.realized_pnl || 0) >= 0 ? '#155724' : '#721c24',
+                      color: (pos.realized_pnl || 0) >= 0 ? 'var(--positive)' : 'var(--negative)',
                     }}>
                       {pos.realized_pnl !== null ? pos.realized_pnl.toFixed(2) : '-'}
                     </td>
@@ -675,7 +694,7 @@ export default function PaperPortfolioDetailPage() {
                         {pos.status === 'open' ? '持有中' : '已關閉'}
                       </span>
                     </td>
-                    <td style={{ padding: '0.5rem', textAlign: 'right', fontSize: '0.8125rem', color: '#666' }}>
+                    <td style={{ padding: '0.5rem', textAlign: 'right', fontSize: '0.8125rem', color: 'var(--text-secondary)' }}>
                       {new Date(pos.opened_at).toLocaleDateString('zh-Hant')}
                     </td>
                   </tr>
@@ -690,11 +709,11 @@ export default function PaperPortfolioDetailPage() {
         <div>
           <h2 style={{ fontSize: '1.1rem', marginBottom: '0.75rem' }}>委託記錄</h2>
           {orders.length === 0 ? (
-            <div style={{ padding: '1rem', color: '#666' }}>尚無委託</div>
+            <div style={{ padding: '1rem', color: 'var(--text-secondary)' }}>尚無委託</div>
           ) : (
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
               <thead>
-                <tr style={{ borderBottom: '2px solid #e0e0e0' }}>
+                <tr style={{ borderBottom: '1px solid var(--border-strong)' }}>
                   <th style={{ textAlign: 'left', padding: '0.5rem', fontSize: '0.8125rem' }}>標的</th>
                   <th style={{ textAlign: 'left', padding: '0.5rem', fontSize: '0.8125rem' }}>來源</th>
                   <th style={{ textAlign: 'center', padding: '0.5rem', fontSize: '0.8125rem' }}>方向</th>
@@ -708,10 +727,10 @@ export default function PaperPortfolioDetailPage() {
                 {orders.map((o) => (
                   <tr key={o.id} data-testid={`pp-order-${o.asset_id}-${o.status}`} style={{ borderBottom: '1px solid #f0f0f0' }}>
                     <td data-testid="pp-order-asset" style={{ padding: '0.5rem', fontWeight: 500 }}>{o.asset_id}</td>
-                    <td data-testid="pp-order-actor" style={{ padding: '0.5rem', fontSize: '0.8125rem', color: '#666' }}>
+                    <td data-testid="pp-order-actor" style={{ padding: '0.5rem', fontSize: '0.8125rem', color: 'var(--text-secondary)' }}>
                       {ACTOR_LABELS[o.actor_type] || o.actor_type}
                       {o.data_cutoff_at && (
-                        <span data-testid="pp-order-cutoff" style={{ display: 'block', fontSize: '0.6875rem', color: '#999' }}>
+                        <span data-testid="pp-order-cutoff" style={{ display: 'block', fontSize: '0.6875rem', color: 'var(--text-muted)' }}>
                           {o.actor_type === 'system'
                             ? '重播日期'
                             : o.actor_type === 'api_key'
@@ -723,7 +742,7 @@ export default function PaperPortfolioDetailPage() {
                     </td>
                     <td data-testid="pp-order-side" style={{
                       padding: '0.5rem', textAlign: 'center',
-                      color: o.side === 'BUY' ? '#155724' : '#721c24',
+                      color: o.side === 'BUY' ? 'var(--positive)' : 'var(--negative)',
                       fontWeight: 600, fontSize: '0.8125rem',
                     }}>
                       {SIDE_LABELS[o.side] || o.side}
@@ -738,10 +757,10 @@ export default function PaperPortfolioDetailPage() {
                         {ORDER_STATUS_LABELS[o.status]?.label ?? o.status}
                       </span>
                     </td>
-                    <td style={{ padding: '0.5rem', fontSize: '0.8125rem', color: '#666', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    <td style={{ padding: '0.5rem', fontSize: '0.8125rem', color: 'var(--text-secondary)', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       {o.rationale || '-'}
                     </td>
-                    <td style={{ padding: '0.5rem', textAlign: 'right', fontSize: '0.8125rem', color: '#666' }}>
+                    <td style={{ padding: '0.5rem', textAlign: 'right', fontSize: '0.8125rem', color: 'var(--text-secondary)' }}>
                       {new Date(o.created_at).toLocaleDateString('zh-Hant')}
                     </td>
                   </tr>
@@ -756,14 +775,17 @@ export default function PaperPortfolioDetailPage() {
         <div>
           <h2 style={{ fontSize: '1.1rem', marginBottom: '0.75rem' }}>決策記錄</h2>
           {decisions.length === 0 ? (
-            <div style={{ padding: '1rem', color: '#666' }}>尚無決策記錄</div>
+            <div style={{ padding: '1rem', color: 'var(--text-secondary)' }}>尚無決策記錄</div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
               {decisions.map((d) => {
                 const typeStyle = DECISION_TYPE_LABELS[d.decision_type] || DECISION_TYPE_LABELS.no_action;
+                const linkedOrder = orders
+                  .filter((o) => o.decision_id === d.id)
+                  .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))[0] ?? null;
                 return (
                   <div key={d.id} style={{
-                    padding: '1rem', background: 'white', border: '1px solid #e0e0e0',
+                    padding: '1rem', background: 'var(--surface-1)', border: '1px solid var(--border-strong)',
                     borderRadius: '8px', borderLeft: `4px solid ${typeStyle.color}`,
                   }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start', marginBottom: '0.5rem' }}>
@@ -775,7 +797,7 @@ export default function PaperPortfolioDetailPage() {
                         }}>
                           {typeStyle.label}
                         </span>
-                        <span data-testid="pp-decision-actor" style={{ fontSize: '0.75rem', color: '#999' }}>
+                        <span data-testid="pp-decision-actor" style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
                           {ACTOR_LABELS[d.actor_type] || d.actor_type}
                         </span>
                         {d.risk_flags?.auto_execution && (
@@ -804,7 +826,7 @@ export default function PaperPortfolioDetailPage() {
                         }}>
                           {CONFIDENCE_LABELS[d.self_reported_confidence] || d.self_reported_confidence}
                         </span>
-                        <span style={{ fontSize: '0.75rem', color: '#999' }}>
+                        <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
                           {new Date(d.decision_time).toLocaleString('zh-Hant')}
                         </span>
                       </div>
@@ -812,13 +834,13 @@ export default function PaperPortfolioDetailPage() {
                     {d.risk_flags?.blocked_reason && (
                       <div data-testid="pp-decision-blocked-reason" style={{
                         fontSize: '0.8125rem', marginBottom: '0.5rem', padding: '0.5rem 0.75rem',
-                        background: '#fff3cd', color: '#856404', borderRadius: '4px',
+                        background: 'rgba(245, 158, 11, 0.12)', color: 'var(--warning)', borderRadius: '4px',
                       }}>
                         <strong>未成交原因：</strong>{d.risk_flags.blocked_reason}
                       </div>
                     )}
                     {d.risk_flags?.exit_reason && !d.risk_flags?.blocked_reason && (
-                      <div data-testid="pp-decision-exit-reason" style={{ fontSize: '0.8125rem', color: '#666', marginBottom: '0.5rem' }}>
+                      <div data-testid="pp-decision-exit-reason" style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)', marginBottom: '0.5rem' }}>
                         <strong>出場原因：</strong>{d.risk_flags.exit_reason}
                       </div>
                     )}
@@ -826,19 +848,31 @@ export default function PaperPortfolioDetailPage() {
                       <div style={{ fontSize: '0.875rem', marginBottom: '0.5rem' }}>{d.rationale}</div>
                     )}
                     {d.expected_outcome && (
-                      <div style={{ fontSize: '0.8125rem', color: '#666', marginBottom: '0.25rem' }}>
+                      <div style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)', marginBottom: '0.25rem' }}>
                         <strong>預期：</strong>{d.expected_outcome}
                         {d.expected_timeframe_days && `（${d.expected_timeframe_days} 天）`}
                       </div>
                     )}
                     {d.falsification_condition && (
-                      <div style={{ fontSize: '0.8125rem', color: '#856404' }}>
+                      <div style={{ fontSize: '0.8125rem', color: 'var(--warning)' }}>
                         <strong>推翻條件：</strong>{d.falsification_condition}
                       </div>
                     )}
-                    <div style={{ marginTop: '0.5rem', fontSize: '0.75rem', color: '#999' }}>
-                      結果：{d.outcome_status}
+                    <div data-testid="pp-decision-outcome" style={{ marginTop: '0.5rem', fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                      提交時結果記錄：{OUTCOME_STATUS_LABELS[d.outcome_status] ?? d.outcome_status}
+                      {' '}（提交當刻的欄位，不是目前委託狀態）
                     </div>
+                    {linkedOrder ? (
+                      <div data-testid="pp-decision-linked-order" style={{ marginTop: '0.25rem', fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                        目前委託狀態：
+                        {ORDER_STATUS_LABELS[linkedOrder.status]?.label ?? linkedOrder.status}
+                        {' '}（委託建立於 {new Date(linkedOrder.created_at).toLocaleDateString('zh-Hant')}）
+                      </div>
+                    ) : (
+                      <div data-testid="pp-decision-no-order" style={{ marginTop: '0.25rem', fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                        無對應的紙上委託記錄
+                      </div>
+                    )}
                   </div>
                 );
               })}
@@ -847,5 +881,6 @@ export default function PaperPortfolioDetailPage() {
         </div>
       )}
     </div>
+    </AppShell>
   );
 }

@@ -391,3 +391,127 @@ class TestNoExternalBrokerFields:
             column_lower = column.lower()
             for keyword in broker_keywords:
                 assert keyword not in column_lower, f"Column '{column}' contains broker-related keyword '{keyword}'"
+
+
+class TestRefusedFillStaysOnTheRecord:
+    """A fill the cash cannot cover is rolled back, not silently forgotten."""
+
+    def test_cash_that_clears_the_cap_but_not_the_fill_is_journaled(self, client, auth_headers):
+        """DEMO-BETA opens at 100.0 and closes at 99.5.
+
+        Cash of 99.8 clears the position-size check (valued at the close) but
+        cannot pay the slippage-and-commission-adjusted fill. The order,
+        decision and fill rows must roll back together, and the refusal must
+        survive as its own committed audit event with an operation identity.
+        """
+        from tests.conftest import TestSession
+        from uuid import UUID
+        from app.models.audit_event import AuditEvent
+        from app.models.paper_portfolio import DecisionRecord, PaperFill, PaperOrder
+
+        resp = client.post("/api/v1/paper-portfolio", headers=auth_headers, json={
+            "initial_virtual_cash": 99.8,
+            "currency": "USD",
+        })
+        assert resp.status_code == 201, resp.text
+        portfolio_id = resp.json()["id"]
+
+        resp = client.post(f"/api/v1/paper-portfolio/{portfolio_id}/orders", headers=auth_headers, json={
+            "asset_id": "DEMO-BETA",
+            "side": "BUY",
+            "quantity": 1,
+            "order_type": "market",
+            "rationale": "Cash clears the cap but not the fill",
+            "expected_outcome": "Should be refused at fill",
+            "self_reported_confidence": "high",
+            "idempotency_key": "refused-fill-1",
+        })
+        assert resp.status_code == 400, resp.text
+        assert "insufficient cash" in resp.json()["detail"].lower()
+
+        db = TestSession()
+        try:
+            assert db.query(PaperOrder).filter(
+                PaperOrder.portfolio_id == UUID(portfolio_id)
+            ).count() == 0
+            assert db.query(PaperFill).filter(
+                PaperFill.paper_order_id.isnot(None)
+            ).count() == 0
+            assert db.query(DecisionRecord).filter(
+                DecisionRecord.paper_portfolio_id == UUID(portfolio_id)
+            ).count() == 0
+
+            # Nothing was booked, so no order_created event may exist either.
+            assert db.query(AuditEvent).filter(
+                AuditEvent.entity_id == str(portfolio_id),
+                AuditEvent.event_type == "order_created",
+            ).count() == 0
+
+            events = db.query(AuditEvent).filter(
+                AuditEvent.entity_id == str(portfolio_id),
+                AuditEvent.event_type == "order_rejected_before_persist",
+            ).all()
+            assert len(events) == 1
+            payload = events[0].payload_json
+            assert payload["reason_code"] == "insufficient_cash"
+            assert payload["idempotency_key"] == "refused-fill-1"
+            assert payload["asset_id"] == "DEMO-BETA"
+            assert payload["side"] == "BUY"
+            assert payload["quantity"] == 1
+            assert payload["operation_id"]
+            assert payload["order_id"] is None
+            assert payload["decision_id"] is None
+        finally:
+            db.close()
+
+        account = client.get(f"/api/v1/paper-portfolio/{portfolio_id}", headers=auth_headers)
+        assert account.json()["current_virtual_cash"] == pytest.approx(99.8)
+
+    def test_risk_refusal_is_journaled_with_its_own_identity(self, client, auth_headers):
+        """A refused order is durable and attributable, not just a 400."""
+        from tests.conftest import TestSession
+        from uuid import UUID
+        from app.models.audit_event import AuditEvent
+        from app.models.paper_portfolio import PaperOrder
+
+        resp = client.post("/api/v1/paper-portfolio", headers=auth_headers, json={
+            "initial_virtual_cash": 10000.0,
+            "currency": "USD",
+        })
+        assert resp.status_code == 201, resp.text
+        portfolio_id = resp.json()["id"]
+
+        resp = client.post(f"/api/v1/paper-portfolio/{portfolio_id}/orders", headers=auth_headers, json={
+            "asset_id": "DEMO-BETA",
+            "side": "SELL",
+            "quantity": 5,
+            "order_type": "market",
+            "rationale": "Selling what the account does not hold",
+            "expected_outcome": "Should be refused by risk",
+            "self_reported_confidence": "high",
+            "idempotency_key": "refused-risk-1",
+        })
+        assert resp.status_code == 400, resp.text
+        assert "risk check failed" in resp.json()["detail"].lower()
+
+        db = TestSession()
+        try:
+            rejected = db.query(PaperOrder).filter(
+                PaperOrder.portfolio_id == UUID(portfolio_id)
+            ).all()
+            assert len(rejected) == 1
+            assert rejected[0].status.value == "rejected"
+
+            events = db.query(AuditEvent).filter(
+                AuditEvent.entity_id == str(portfolio_id),
+                AuditEvent.event_type == "order_rejected",
+            ).all()
+            assert len(events) == 1
+            payload = events[0].payload_json
+            assert payload["order_id"] == str(rejected[0].id)
+            assert payload["idempotency_key"] == "refused-risk-1"
+            assert payload["rejection_code"]
+            assert payload["asset_id"] == "DEMO-BETA"
+        finally:
+            db.close()
+
