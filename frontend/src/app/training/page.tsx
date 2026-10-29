@@ -6,6 +6,7 @@ import Link from 'next/link';
 import { api, ApiError, API_BASE_URL } from '@/lib/api';
 import AppShell from '@/components/shell/AppShell';
 import PersonalizationPanel from '@/components/training/PersonalizationPanel';
+import PersonalStrategyLearningPanel from '@/components/training/PersonalStrategyLearningPanel';
 
 interface TrainingJob {
   id: string;
@@ -402,6 +403,7 @@ export default function TrainingPage() {
         </div>
 
         <PersonalizationPanel />
+        <PersonalStrategyLearningPanel />
 
         {showForm && (
           <div className="card" style={{ marginBottom: '24px' }}>

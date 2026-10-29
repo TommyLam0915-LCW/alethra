@@ -66,7 +66,6 @@ interface Eligibility {
 
 const STATUS_LABELS: Record<string, string> = {
   AVAILABLE: '已提供',
-  NOT_IMPLEMENTED: '尚未建立',
 };
 
 export default function PersonalizationPanel() {
@@ -173,7 +172,7 @@ export default function PersonalizationPanel() {
         <div>
           <h2 style={{ margin: 0, fontSize: '18px' }}>能力分類與個人化</h2>
           <p style={{ color: 'var(--text-secondary)', margin: '6px 0 0', fontSize: '13px' }}>
-            三個能力分開標示。個人化模型尚未建立，本區只提供訓練資格檢查與同意範圍。
+            三個能力分開標示。本區只提供訓練資格檢查與同意範圍；決策覆核、建立專屬模型與推論在下方「個人策略學習」。
           </p>
         </div>
       </div>

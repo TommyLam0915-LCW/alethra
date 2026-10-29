@@ -30,6 +30,7 @@ export function formatErrorDetail(detail: unknown): string {
   if (detail && typeof detail === 'object') {
     const obj = detail as Record<string, unknown>;
     if (typeof obj.message === 'string' && obj.message.trim()) return obj.message;
+    if (typeof obj.message_zh === 'string' && obj.message_zh.trim()) return obj.message_zh;
     if (typeof obj.error === 'string' && obj.error.trim()) return obj.error;
     return JSON.stringify(detail);
   }
@@ -551,6 +552,75 @@ export const api = {
       }),
     revokePersonalizationConsent: () =>
       apiFetch('/api/v1/ml/personalization/consent', { method: 'DELETE' }),
+    reviewDecisions: (strategyVersionId?: string) => {
+      const qs = strategyVersionId
+        ? `?strategy_version_id=${encodeURIComponent(strategyVersionId)}`
+        : '';
+      return apiFetch(`/api/v1/decision-review${qs}`);
+    },
+    reviewDecision: (eventId: string) => apiFetch(`/api/v1/decision-review/${eventId}`),
+    labelRevisions: (eventId: string) =>
+      apiFetch(`/api/v1/decision-review/${eventId}/labels`),
+    recordDecisionLabel: (
+      eventId: string,
+      data: {
+        state: 'confirmed' | 'excluded';
+        action_label?: string | null;
+        note?: string | null;
+        exclusion_reason?: string | null;
+      },
+    ) =>
+      apiFetch(`/api/v1/decision-review/${eventId}/labels`, {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    previewPersonalSnapshot: (strategyVersionId: string) =>
+      apiFetch('/api/v1/ml/personal/snapshots/preview', {
+        method: 'POST',
+        body: JSON.stringify({ strategy_version_id: strategyVersionId }),
+      }),
+    createPersonalSnapshot: (strategyVersionId: string) =>
+      apiFetch('/api/v1/ml/personal/snapshots', {
+        method: 'POST',
+        body: JSON.stringify({ strategy_version_id: strategyVersionId }),
+      }),
+    listPersonalSnapshots: (strategyVersionId?: string) => {
+      const qs = strategyVersionId
+        ? `?strategy_version_id=${encodeURIComponent(strategyVersionId)}`
+        : '';
+      return apiFetch(`/api/v1/ml/personal/snapshots${qs}`);
+    },
+    getPersonalSnapshot: (snapshotId: string) =>
+      apiFetch(`/api/v1/ml/personal/snapshots/${snapshotId}`),
+    startPersonalTrainingJob: (snapshotId: string, modelType = 'logistic_regression') =>
+      apiFetch('/api/v1/ml/personal/training-jobs', {
+        method: 'POST',
+        body: JSON.stringify({ snapshot_id: snapshotId, model_type: modelType }),
+      }),
+    listPersonalModels: (strategyVersionId?: string) => {
+      const qs = strategyVersionId
+        ? `?strategy_version_id=${encodeURIComponent(strategyVersionId)}`
+        : '';
+      return apiFetch(`/api/v1/ml/personal/models${qs}`);
+    },
+    activatePersonalModel: (versionId: string) =>
+      apiFetch(`/api/v1/ml/personal/models/${versionId}/activate`, { method: 'POST' }),
+    predictPersonalModel: (
+      versionId: string,
+      data: { instrument_id: string; as_of_date: string },
+    ) =>
+      apiFetch(`/api/v1/ml/personal/models/${versionId}/predict`, {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    predictPersonalViaRecord: (
+      recordId: string,
+      data: { instrument_id: string; as_of_date: string },
+    ) =>
+      apiFetch(`/api/v1/ml/personal/records/${recordId}/predict`, {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
   },
   billing: {
     listPlans: () => apiFetch('/api/v1/plans'),
