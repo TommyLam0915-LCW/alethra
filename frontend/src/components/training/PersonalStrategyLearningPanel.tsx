@@ -134,6 +134,66 @@ interface PersonalJob {
   completed_at: string | null;
 }
 
+interface JourneyFact {
+  label_zh: string;
+  value_zh: string;
+}
+
+interface JourneyItem {
+  code: string;
+  text_zh: string;
+  clear?: boolean;
+}
+
+interface JourneyAction {
+  kind: string;
+  label_zh: string;
+  detail_zh: string;
+}
+
+interface JourneyStep {
+  key: string;
+  title_zh: string;
+  state: string;
+  summary_zh: string;
+  facts?: JourneyFact[];
+  notes_zh?: string[];
+  items?: JourneyItem[];
+  action?: JourneyAction;
+}
+
+interface JourneyWorker {
+  state: string;
+  label_zh: string;
+  detail_zh: string;
+  waiting_reason_zh?: string | null;
+  last_beat_at?: string | null;
+  pending_jobs: number;
+  running_jobs: number;
+}
+
+interface JourneyResponse {
+  strategy_version_id: string;
+  generated_at: string;
+  counts: {
+    total_current_decisions: number;
+    confirmed: number;
+    excluded: number;
+    unreviewed: number;
+    usable_rows: number;
+    minimum_usable_rows: number;
+    snapshots: number;
+    training_jobs: number;
+    model_versions: number;
+  };
+  consent: { id: string | null; in_scope: boolean; consent_version: string | null };
+  steps: JourneyStep[];
+  missing: JourneyItem[];
+  next_action: JourneyAction;
+  worker: JourneyWorker;
+  not_claimed: string[];
+}
+
 interface Prediction {
   resolved_version: {
     model_version_id: string;
@@ -404,6 +464,15 @@ const SELECTION_ACTION_LABELS: Record<string, string> = {
   rollback: '回退',
 };
 
+const WORKER_STATE_COLORS: Record<string, string> = {
+  idle: 'var(--positive)',
+  working: 'var(--positive)',
+  offline: 'var(--warning)',
+  stale: 'var(--warning)',
+  error: 'var(--warning)',
+  unknown: 'var(--text-muted)',
+};
+
 function actionLabel(value: string | null): string {
   if (!value) return '—';
   return ACTION_LABELS[value] ?? value;
@@ -411,6 +480,14 @@ function actionLabel(value: string | null): string {
 
 function shortId(value: string | null | undefined): string {
   return value ? `${value.slice(0, 8)}…` : '—';
+}
+
+function formatWhen(value: string | null | undefined): string {
+  if (!value) return '—';
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime())
+    ? '—'
+    : parsed.toLocaleString('zh-HK', { hour12: false });
 }
 
 function formatScore(value: number | null | undefined): string {
@@ -441,6 +518,7 @@ export default function PersonalStrategyLearningPanel() {
   const [versionId, setVersionId] = useState('');
   const [review, setReview] = useState<ReviewResponse | null>(null);
   const [preview, setPreview] = useState<SnapshotBody | null>(null);
+  const [journey, setJourney] = useState<JourneyResponse | null>(null);
   const [snapshots, setSnapshots] = useState<SnapshotBody[]>([]);
   const [models, setModels] = useState<PersonalModel[]>([]);
   const [loading, setLoading] = useState(true);
@@ -502,14 +580,16 @@ export default function PersonalStrategyLearningPanel() {
   }, []);
 
   const loadStrategy = useCallback(async (id: string) => {
-    const [reviewBody, previewBody, snapshotsBody, modelsBody] = await Promise.all([
+    const [reviewBody, previewBody, snapshotsBody, modelsBody, journeyBody] = await Promise.all([
       api.ml.reviewDecisions(id),
       api.ml.previewPersonalSnapshot(id),
       api.ml.listPersonalSnapshots(id),
       api.ml.listPersonalModels(id),
+      api.ml.personalJourney(id),
     ]);
     setReview(reviewBody as ReviewResponse);
     setPreview(previewBody as SnapshotBody);
+    setJourney(journeyBody as JourneyResponse);
     const snapshotRows: SnapshotBody[] = (snapshotsBody as { snapshots: SnapshotBody[] })
       .snapshots;
     setSnapshots(snapshotRows);
@@ -586,8 +666,15 @@ export default function PersonalStrategyLearningPanel() {
         setJob(body);
         if (body.status === 'pending' || body.status === 'running') {
           jobTimer.current = setTimeout(() => pollJob(jobId), 3000);
-        } else if (versionId) {
-          await loadStrategy(versionId);
+        } else {
+          setNotice(
+            body.status === 'completed'
+              ? '訓練完成；新模型版本已加入下方清單，下一步可設為使用中版本。'
+              : body.status === 'failed'
+                ? '訓練失敗；詳情見下方狀態，原有決策與快照未有改動。'
+                : '訓練工作已取消；已預約的 AI 額度會釋放。',
+          );
+          if (versionId) await loadStrategy(versionId);
         }
       } catch (err) {
         setError(describeFailure(err, '無法讀取訓練工作狀態'));
@@ -701,6 +788,7 @@ export default function PersonalStrategyLearningPanel() {
         completed_at: null,
       });
       setNotice('訓練工作已排隊；此環境需要 worker 執行，完成後會自動更新。');
+      if (versionId) await refresh(versionId);
       pollJob(body.job_id);
     } catch (err) {
       setError(describeFailure(err, '無法建立訓練工作'));
@@ -979,6 +1067,132 @@ export default function PersonalStrategyLearningPanel() {
       {notice && (
         <div data-testid="pl-notice" style={{ marginTop: '12px', fontSize: '13px', color: 'var(--text-secondary)' }}>
           {notice}
+        </div>
+      )}
+
+      {versionId && journey && (
+        <div
+          data-testid="pl-journey"
+          style={{ marginTop: '22px', paddingTop: '16px', borderTop: '1px solid var(--border)' }}
+        >
+          <div style={{ display: 'flex', gap: '12px', alignItems: 'baseline', flexWrap: 'wrap' }}>
+            <strong style={{ fontSize: '14px' }}>整體進度</strong>
+            <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+              由伺服器按目前狀態整理；只描述工程進度，不評價模型是否有效或是否有利潤。
+            </span>
+          </div>
+
+          <div
+            data-testid="pl-journey-worker"
+            style={{
+              marginTop: '10px',
+              display: 'flex',
+              gap: '10px',
+              flexWrap: 'wrap',
+              alignItems: 'center',
+              padding: '8px 10px',
+              border: '1px solid var(--border)',
+              borderRadius: '8px',
+              background: 'var(--surface-2)',
+              fontSize: '12px',
+            }}
+          >
+            <span
+              style={{
+                display: 'inline-block',
+                width: '8px',
+                height: '8px',
+                borderRadius: '999px',
+                background: WORKER_STATE_COLORS[journey.worker.state] ?? 'var(--text-muted)',
+              }}
+            />
+            <strong>{journey.worker.label_zh}</strong>
+            <span style={{ color: 'var(--text-secondary)' }}>{journey.worker.detail_zh}</span>
+            <span style={{ color: 'var(--text-muted)' }}>
+              待處理 {journey.worker.pending_jobs} · 執行中 {journey.worker.running_jobs}
+            </span>
+            {journey.worker.last_beat_at && (
+              <span style={{ color: 'var(--text-muted)' }}>
+                最後心跳 {formatWhen(journey.worker.last_beat_at)}
+              </span>
+            )}
+          </div>
+          {journey.worker.waiting_reason_zh && (
+            <div
+              data-testid="pl-journey-waiting"
+              style={{ marginTop: '6px', fontSize: '12px', color: 'var(--warning)' }}
+            >
+              等待原因：{journey.worker.waiting_reason_zh}
+            </div>
+          )}
+
+          <div style={{ marginTop: '12px', display: 'grid', gap: '8px' }}>
+            {journey.steps.map((step) => (
+              <div
+                key={step.key}
+                data-testid={`pl-journey-${step.key}`}
+                style={{
+                  padding: '10px 12px',
+                  border: '1px solid var(--border)',
+                  borderRadius: '8px',
+                  background: step.key === 'next' ? 'var(--surface-2)' : 'transparent',
+                  fontSize: '12px',
+                }}
+              >
+                <div style={{ display: 'flex', gap: '8px', alignItems: 'baseline', flexWrap: 'wrap' }}>
+                  <strong style={{ fontSize: '13px' }}>{step.title_zh}</strong>
+                  {step.summary_zh !== (step.action?.label_zh ?? null) &&
+                    !(step.items ?? []).some((item) => item.text_zh === step.summary_zh) && (
+                      <span style={{ color: 'var(--text-secondary)' }}>{step.summary_zh}</span>
+                    )}
+                </div>
+                {step.facts && step.facts.length > 0 && (
+                  <div
+                    style={{
+                      marginTop: '6px',
+                      display: 'flex',
+                      gap: '14px',
+                      flexWrap: 'wrap',
+                      color: 'var(--text-muted)',
+                    }}
+                  >
+                    {step.facts.map((fact) => (
+                      <span key={fact.label_zh}>
+                        {fact.label_zh}：{fact.value_zh}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                {step.notes_zh && step.notes_zh.length > 0 && (
+                  <div style={{ marginTop: '6px', color: 'var(--text-muted)' }}>
+                    {step.notes_zh.join('；')}
+                  </div>
+                )}
+                {step.items && step.items.length > 0 && (
+                  <ul style={{ margin: '6px 0 0', paddingLeft: '18px', color: 'var(--text-secondary)' }}>
+                    {step.items.map((item) => (
+                      <li key={item.code} style={{ color: item.clear ? 'var(--positive)' : 'var(--text-secondary)' }}>
+                        {item.text_zh}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {step.key === 'next' && step.action && (
+                  <div
+                    data-testid="pl-journey-next-action"
+                    style={{ marginTop: '6px', display: 'grid', gap: '2px' }}
+                  >
+                    <span style={{ color: 'var(--text-secondary)' }}>{step.action.label_zh}</span>
+                    <span style={{ color: 'var(--text-muted)' }}>{step.action.detail_zh}</span>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+
+          <p style={{ margin: '8px 0 0', fontSize: '11px', color: 'var(--text-muted)' }}>
+            {journey.not_claimed.join(' ')}
+          </p>
         </div>
       )}
 

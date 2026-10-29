@@ -574,6 +574,10 @@ export const api = {
         method: 'POST',
         body: JSON.stringify(data),
       }),
+    personalJourney: (strategyVersionId: string) =>
+      apiFetch(
+        `/api/v1/ml/personal/journey?strategy_version_id=${encodeURIComponent(strategyVersionId)}`,
+      ),
     previewPersonalSnapshot: (strategyVersionId: string) =>
       apiFetch('/api/v1/ml/personal/snapshots/preview', {
         method: 'POST',

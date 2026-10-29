@@ -18,6 +18,7 @@ The worker will:
 Multiple workers can run concurrently; each job is claimed by exactly
 one worker via row-level locking.
 """
+import json
 import logging
 import os
 import signal
@@ -56,6 +57,39 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 # Graceful shutdown flag
 _shutdown_requested = False
+
+# Optional liveness file. The candidate launcher sets
+# TRAINING_WORKER_HEARTBEAT_PATH so the read-only journey endpoint can tell a
+# queued job apart from a job nobody will ever pick up. Unset means no file is
+# written and the status surface honestly reports "unknown".
+_HEARTBEAT = {
+    "started_at": utcnow(),
+    "poll_interval_seconds": None,
+}
+
+
+def write_heartbeat(state: str, **extra) -> None:
+    """Atomically publish worker liveness for readers in other processes."""
+    path = os.environ.get("TRAINING_WORKER_HEARTBEAT_PATH")
+    if not path:
+        return
+    body = {
+        "pid": os.getpid(),
+        "state": state,
+        "started_at": _HEARTBEAT["started_at"].isoformat(),
+        "beat_at": utcnow().isoformat(),
+        "poll_interval_seconds": _HEARTBEAT["poll_interval_seconds"],
+        **extra,
+    }
+    try:
+        directory = os.path.dirname(os.path.abspath(path))
+        os.makedirs(directory, exist_ok=True)
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(body, handle)
+        os.replace(tmp, path)
+    except OSError as exc:
+        logger.warning("Unable to write worker heartbeat to %s: %s", path, exc)
 
 
 def _signal_handler(signum, frame):
@@ -278,29 +312,40 @@ def worker_loop(poll_interval: float = 5.0) -> None:
     """Main worker loop — poll for jobs and execute them."""
     logger.info("Training worker started")
     logger.info(f"Poll interval: {poll_interval}s")
+    _HEARTBEAT["poll_interval_seconds"] = poll_interval
+    write_heartbeat("idle")
 
     while not _shutdown_requested:
         db = SessionLocal()
         try:
-            reclaim_stale_running_jobs(db)
+            reclaimed = reclaim_stale_running_jobs(db)
             job = claim_pending_job(db)
 
             if job:
                 job_id = job.id
+                write_heartbeat(
+                    "working",
+                    current_job_id=str(job_id),
+                    reclaimed=reclaimed,
+                )
                 db.close()
                 execute_job(job_id)
+                write_heartbeat("idle", reclaimed=reclaimed)
             else:
+                write_heartbeat("idle", reclaimed=reclaimed)
                 db.close()
                 time.sleep(poll_interval)
 
         except Exception as exc:
             logger.error(f"Worker loop error: {exc}", exc_info=True)
+            write_heartbeat("error", error=str(exc))
             try:
                 db.close()
             except:
                 pass
             time.sleep(poll_interval)
 
+    write_heartbeat("stopped")
     logger.info("Training worker stopped")
 
 

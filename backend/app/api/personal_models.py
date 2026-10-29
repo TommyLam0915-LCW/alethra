@@ -62,6 +62,7 @@ from app.services.personal_dataset import (
     preview_snapshot,
     snapshot_payload,
 )
+from app.services.personal_journey import JourneyRefused, build_journey
 from app.services.personal_training import (
     PERSONAL_TRAINING_TYPE,
     create_personal_training_job,
@@ -223,6 +224,27 @@ def preview_dataset_snapshot(
         return preview_snapshot(db, current_user.id, body.strategy_version_id)
     except DatasetRefused as exc:
         raise _refuse(exc)
+
+
+@router.get("/journey")
+def personal_journey(
+    strategy_version_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope(*READ_SCOPES)),
+    db: Session = Depends(get_db),
+):
+    """Read-only five-step journey plus worker/queue state.
+
+    Answers 研究緊甚麼 / 做過甚麼 / 得到甚麼 / 仲缺甚麼 / 下一步做甚麼
+    from server state. Never consumes quota, never writes.
+    """
+    try:
+        return build_journey(db, current_user.id, strategy_version_id)
+    except JourneyRefused as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": exc.code, "message_zh": exc.message_zh},
+        )
 
 
 @router.post("/snapshots", status_code=201)

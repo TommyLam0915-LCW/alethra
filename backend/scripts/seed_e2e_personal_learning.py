@@ -71,6 +71,7 @@ from app.models.simulation import SimulationSession, SimulationStatus
 from app.models.training import TrainingJob
 from app.models.user import User, UserType
 from app.services.decision_labels import record_label
+from app.services.personalization import grant_consent
 
 EMAIL = os.environ.get("E2E_EMAIL")
 PASSWORD = os.environ.get("E2E_PASSWORD")
@@ -371,6 +372,13 @@ with Session(engine) as session:
             )
             event_count += 1
 
+    # Candidate fixtures pre-grant consent so the owner can open one URL and
+    # walk the analytical path without a separate authorisation detour. The
+    # tracked E2E journey leaves this unset and grants consent through the UI.
+    consent_granted = os.environ.get("E2E_GRANT_CONSENT") == "1"
+    if consent_granted:
+        grant_consent(session, user.id, [version.id])
+
     session.commit()
 
 print("Seeded disposable personal-learning E2E data")
@@ -381,4 +389,5 @@ print(f"  instrument     : {INSTRUMENT} ({PROVIDER}, synthetic)")
 print(f"  bars           : {len(BARS)} ({BARS[0]} -> {BARS[-1]})")
 print(f"  decisions      : {event_count} across {DECISION_DAYS} decision instants")
 print(f"  labels         : {event_count} confirmed")
+print(f"  consent        : {'granted (fixture)' if consent_granted else 'not granted'}")
 print(f"  predict_as_of  : {BARS[120].isoformat()}")
