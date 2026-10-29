@@ -1,0 +1,1 @@
+participant_id,session_datetime,account_role,device_viewport,task_id,task_name,unaided_complete,prompt_levels_used,time_mmss,backtrack_misclick_count,error_or_abandon,data_misconception,participant_quote,blocked_main_work,moderator_notes
