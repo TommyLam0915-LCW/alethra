@@ -170,6 +170,9 @@ def test_journey_walks_snapshot_job_model_and_active_version(
     assert body["worker"]["pending_jobs"] == 1
     assert "worker 未確認在運行" in body["worker"]["waiting_reason_zh"]
     assert body["jobs"][0]["job_id"] == job_id
+    # Naive app timestamps must carry an offset so a browser in any timezone
+    # reads the real instant instead of treating UTC as local time.
+    assert body["jobs"][0]["created_at"].endswith("+00:00")
 
     _run_worker_job(uuid.UUID(job_id))
 
@@ -316,6 +319,8 @@ def test_worker_status_reports_offline_stale_and_idle(tmp_path, monkeypatch):
     idle = _worker_status([pending], [])
     assert idle["state"] == "idle"
     assert "下次輪詢會處理" in idle["waiting_reason_zh"]
+    # The heartbeat is written as naive UTC; the payload must say so.
+    assert idle["last_beat_at"].endswith("+00:00")
 
     stale_claim = TrainingJob(
         id=uuid.uuid4(),

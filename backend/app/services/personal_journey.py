@@ -16,7 +16,7 @@ Nothing here writes, charges quota or fabricates progress.
 import json
 import os
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
@@ -62,11 +62,27 @@ def _short_id(value: Optional[str]) -> str:
 
 
 def _fmt_instant(value: Any) -> Optional[str]:
+    """Serialize an instant with an explicit UTC offset (app times are naive UTC)."""
     if value is None:
         return None
     if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
         return value.isoformat()
     return str(value)
+
+
+def _as_utc_iso(value: Any) -> Optional[str]:
+    """Normalize a stored ISO string to an offset-bearing UTC instant."""
+    if value is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return str(value)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.isoformat()
 
 
 def _owned_version(
@@ -231,7 +247,7 @@ def _worker_status(pending_jobs: List[TrainingJob], running_jobs: List[TrainingJ
                     age = None
             interval = heartbeat.get("poll_interval_seconds") or 5
             stale_after = max(30.0, 3.0 * float(interval))
-            status["last_beat_at"] = beat_raw
+            status["last_beat_at"] = _as_utc_iso(beat_raw)
             status["current_job_id"] = heartbeat.get("current_job_id")
             status["worker_pid"] = heartbeat.get("pid")
 
@@ -722,8 +738,8 @@ def build_journey(
                 "snapshot_id": job_spec.get("snapshot_id"),
                 "created_at": _fmt_instant(job.created_at),
                 "completed_at": _fmt_instant(job.completed_at),
-                "claimed_at": job_spec.get("claimed_at"),
-                "reclaimed_at": job_spec.get("reclaimed_at"),
+                "claimed_at": _as_utc_iso(job_spec.get("claimed_at")),
+                "reclaimed_at": _as_utc_iso(job_spec.get("reclaimed_at")),
                 "error_details": job.error_details,
                 "model_version_id": str(model_version.id) if model_version else None,
             }

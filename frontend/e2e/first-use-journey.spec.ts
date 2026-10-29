@@ -144,9 +144,9 @@ test('empty account: concrete entries, no fake progress', async ({ page }) => {
 
   const status = page.locator('[data-testid="personalization-status"]');
   await expect(status).toBeVisible();
-  await expect(status).not.toContainText('資料門檻已符合');
-  // No consent and no decisions is a hard blocker, not a quality shortfall.
-  await expect(status).toContainText('不符合（見下方原因）');
+  await expect(status).not.toContainText('已達建議資料充分性門檻');
+  // No consent and no decisions is a training blocker, not a sufficiency gap.
+  await expect(status).toContainText('未達可訓練條件（見下方原因）');
   await expect(status).not.toContainText('已拒絕訓練');
   await expect(page.locator('[data-testid="pl-journey-worker"]')).toHaveCount(0);
 
@@ -161,10 +161,10 @@ test('thin account: consent is opt-in and the journey self-syncs', async ({ page
   await openTraining(page);
   await expect(page.locator('[data-testid="pl-journey"]')).toBeVisible();
 
-  // Missing consent is a hard blocker; the badge must name the reason area
+  // Missing consent is a training blocker; the badge must name the reason area
   // instead of claiming a blanket refusal.
   const eligibilityBadge = page.locator('[data-testid="personalization-status"]');
-  await expect(eligibilityBadge).toContainText('不符合（見下方原因）');
+  await expect(eligibilityBadge).toContainText('未達可訓練條件（見下方原因）');
   await expect(eligibilityBadge).not.toContainText('已拒絕訓練');
 
   // Repeatable across runs: revoke a grant left by an earlier run via the UI.
@@ -221,23 +221,26 @@ test('thin account: consent is opt-in and the journey self-syncs', async ({ page
   await expect(nextAction).toContainText('同意');
 });
 
-test('quality-only ineligibility is not described as a refusal', async ({ page }) => {
+test('data-sufficiency shortfall is not described as a refusal or a failed model', async ({
+  page,
+}) => {
   test.skip(!READY, SKIP_REASON);
 
-  // Route-level fixture: the eligibility response fails only a stricter quality
-  // bar while the snapshot builder would still accept the dataset. The panel
-  // must not claim the system refused training, and no account is mutated.
+  // Route-level fixture: the eligibility response fails only a recommended
+  // data-sufficiency bar while the snapshot builder would still accept the
+  // dataset. The panel must not claim the system refused training or that the
+  // model failed a quality test, and no account is mutated.
   await page.route('**/api/v1/ml/personalization/eligibility', (route) =>
     route.fulfill({
       json: {
         capability_status: 'ENGINEERING_CHAIN_READY',
-        capability_status_zh: 'route fixture — quality bar only',
+        capability_status_zh: 'route fixture — 建議資料充分性未達',
         eligible: false,
         status: 'NOT_ELIGIBLE',
         reasons: [
           {
             code: 'INSUFFICIENT_DISTINCT_SESSIONS',
-            message_zh: '工作階段數量未達較嚴格品質門檻。',
+            message_zh: '工作階段數量未達建議資料充分性門檻。',
             measured: 3,
             requirement: 30,
           },
@@ -273,10 +276,10 @@ test('quality-only ineligibility is not described as a refusal', async ({ page }
   await openTraining(page);
 
   const badge = page.locator('[data-testid="personalization-status"]');
-  await expect(badge).toContainText('未達較嚴格品質門檻');
+  await expect(badge).toContainText('尚未達建議資料充分性門檻');
   await expect(badge).not.toContainText('已拒絕訓練');
-  await expect(badge).not.toContainText('資料門檻已符合');
-  await expect(page.getByText('系統不會代你宣稱訓練已被拒絕')).toBeVisible();
+  await expect(badge).not.toContainText('已達建議資料充分性門檻');
+  await expect(page.getByText('未達不代表模型已被判定失敗')).toBeVisible();
 });
 
 test('thin account: a queued job is restored after reload and blocks duplicate training', async ({

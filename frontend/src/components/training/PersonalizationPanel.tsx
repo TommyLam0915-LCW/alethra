@@ -174,9 +174,10 @@ export default function PersonalizationPanel() {
   };
 
   // Training is gated by the snapshot builder (consent in scope, enough
-  // confirmed decisions, usable rows), not by every stricter quality bar listed
-  // below. Saying "refused" whenever a quality bar is unmet claimed a refusal
-  // that the train control does not actually make.
+  // confirmed decisions, usable rows), not by every stricter data-sufficiency
+  // bar listed below. Saying "refused" whenever a sufficiency bar is unmet
+  // claimed a refusal the train control does not make, and implied the model
+  // had failed a quality test it was never run against.
   const trainingBlockers = new Set([
     'CONSENT_MISSING',
     'CONSENT_SCOPE_EMPTY',
@@ -188,10 +189,10 @@ export default function PersonalizationPanel() {
     eligibility.reasons.some((reason) => trainingBlockers.has(reason.code));
   const eligibilityLabel = eligibility
     ? eligibility.eligible
-      ? '資料門檻已符合'
+      ? '已達建議資料充分性門檻'
       : blockedBeforeTraining
-        ? '不符合（見下方原因）'
-        : '未達較嚴格品質門檻'
+        ? '未達可訓練條件（見下方原因）'
+        : '尚未達建議資料充分性門檻'
     : '';
 
   return (
@@ -274,8 +275,9 @@ export default function PersonalizationPanel() {
 
         {eligibility && !eligibility.eligible && (
           <p style={{ margin: '8px 0 0', fontSize: '12px', color: 'var(--text-secondary)' }}>
-            訓練能否開始，以建立快照時的檢查為準：同意範圍、已確認決策數與可用資料。
-            下方另列較嚴格的品質門檻；只未達這些門檻時，系統不會代你宣稱訓練已被拒絕，但模型證據會較弱。
+            三件事分開判斷：能否提交訓練，以建立快照時的檢查為準（同意範圍、已確認決策數、可用資料）；
+            資料是否足以作較可靠評估，看下方列出的工作階段數、決策時點數與類別覆蓋，屬建議資料充分性門檻，
+            未達不代表模型已被判定失敗；模型實際表現只在訓練完成後的比較與評估中呈現。
           </p>
         )}
 
