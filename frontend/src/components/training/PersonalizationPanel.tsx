@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import Link from 'next/link';
 import { api } from '@/lib/api';
 
 interface Capability {
@@ -130,6 +131,10 @@ export default function PersonalizationPanel() {
     setSelected(next);
   };
 
+  const announceConsentChange = () => {
+    window.dispatchEvent(new Event('alethra:consent-changed'));
+  };
+
   const grant = async () => {
     if (!acknowledged || checked.length === 0 || busy) return;
     setBusy(true);
@@ -141,6 +146,7 @@ export default function PersonalizationPanel() {
       setSelected(null);
       setAcknowledged(false);
       setNotice('已記錄個人化訓練同意。資格檢查仍會逐項判斷資料是否足夠。');
+      announceConsentChange();
     } catch (err) {
       setError(err instanceof Error ? err.message : '無法記錄同意');
     } finally {
@@ -159,12 +165,34 @@ export default function PersonalizationPanel() {
       setSelected(null);
       setAcknowledged(false);
       setNotice('已撤銷個人化訓練同意。已撤銷的資料不再計入資格。');
+      announceConsentChange();
     } catch (err) {
       setError(err instanceof Error ? err.message : '無法撤銷同意');
     } finally {
       setBusy(false);
     }
   };
+
+  // Training is gated by the snapshot builder (consent in scope, enough
+  // confirmed decisions, usable rows), not by every stricter quality bar listed
+  // below. Saying "refused" whenever a quality bar is unmet claimed a refusal
+  // that the train control does not actually make.
+  const trainingBlockers = new Set([
+    'CONSENT_MISSING',
+    'CONSENT_SCOPE_EMPTY',
+    'INSUFFICIENT_CONFIRMED_DECISIONS',
+  ]);
+  const blockedBeforeTraining =
+    eligibility !== null &&
+    !eligibility.eligible &&
+    eligibility.reasons.some((reason) => trainingBlockers.has(reason.code));
+  const eligibilityLabel = eligibility
+    ? eligibility.eligible
+      ? '資料門檻已符合'
+      : blockedBeforeTraining
+        ? '不符合（見下方原因）'
+        : '未達較嚴格品質門檻'
+    : '';
 
   return (
     <section className="card" data-testid="personalization-panel" style={{ marginBottom: '32px' }}>
@@ -218,6 +246,7 @@ export default function PersonalizationPanel() {
       </div>
 
       <div
+        id="personalization-eligibility"
         data-testid="personalization-eligibility"
         style={{
           marginTop: '20px',
@@ -238,10 +267,17 @@ export default function PersonalizationPanel() {
                 color: eligibility.eligible ? 'var(--positive)' : 'var(--warning)',
               }}
             >
-              {eligibility.eligible ? '資料門檻已符合' : '不符合（已拒絕訓練）'}
+              {eligibilityLabel}
             </span>
           )}
         </div>
+
+        {eligibility && !eligibility.eligible && (
+          <p style={{ margin: '8px 0 0', fontSize: '12px', color: 'var(--text-secondary)' }}>
+            訓練能否開始，以建立快照時的檢查為準：同意範圍、已確認決策數與可用資料。
+            下方另列較嚴格的品質門檻；只未達這些門檻時，系統不會代你宣稱訓練已被拒絕，但模型證據會較弱。
+          </p>
+        )}
 
         {error && (
           <div className="ws-message-error" style={{ marginTop: '10px' }}>{error}</div>
@@ -267,7 +303,7 @@ export default function PersonalizationPanel() {
               }}
             >
               <Metric label="已記錄決策" value={eligibility.dataset.total_recorded_events} />
-              <Metric label="可用標籤" value={eligibility.dataset.eligible_events} />
+              <Metric label="同意範圍內具理由" value={eligibility.dataset.eligible_events} />
               <Metric label="工作階段" value={eligibility.dataset.distinct_sessions} />
               <Metric label="決策時點" value={eligibility.dataset.distinct_snapshot_dates} />
               <Metric
@@ -304,9 +340,18 @@ export default function PersonalizationPanel() {
               </p>
 
               {scopeOptionIds.length === 0 ? (
-                <p data-testid="personalization-no-strategies" style={{ margin: 0, fontSize: '13px', color: 'var(--text-secondary)' }}>
-                  此帳號尚無可授權的策略版本。先建立並保存一個策略版本，才會有可勾選的同意範圍。
-                </p>
+                <div data-testid="personalization-no-strategies" style={{ margin: 0 }}>
+                  <p style={{ margin: 0, fontSize: '13px', color: 'var(--text-secondary)' }}>
+                    此帳號尚無可授權的策略版本。先建立並保存一個策略版本，才會有可勾選的同意範圍。
+                  </p>
+                  <Link
+                    href="/experiments/new"
+                    data-testid="personalization-no-strategies-link"
+                    style={{ display: 'inline-block', marginTop: '8px', fontSize: '13px', color: 'var(--primary)' }}
+                  >
+                    建立第一個策略實驗
+                  </Link>
+                </div>
               ) : (
                 <div style={{ display: 'grid', gap: '8px' }}>
                   {scopeOptionIds.map((versionId) => {
