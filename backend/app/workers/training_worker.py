@@ -36,6 +36,10 @@ from app.models.kill_switch import KillSwitchScope
 from app.services.kill_switch import is_kill_switch_active
 from app.services.training import run_parameter_sweep
 from app.services.ml_training import execute_ml_training
+from app.services.personal_training import (
+    PERSONAL_TRAINING_TYPE,
+    execute_personal_training,
+)
 from app.auth.entitlements import settle_reservation, release_reservation
 from app.lib.timeutil import utcnow
 
@@ -164,6 +168,16 @@ def _is_ml_job(job: TrainingJob) -> bool:
     return (job.strategy_spec_snapshot or {}).get("training_type") == "ml_model"
 
 
+def _is_personal_job(job: TrainingJob) -> bool:
+    return (
+        job.strategy_spec_snapshot or {}
+    ).get("training_type") == PERSONAL_TRAINING_TYPE
+
+
+def _is_quota_tracked_ml_job(job: TrainingJob) -> bool:
+    return _is_ml_job(job) or _is_personal_job(job)
+
+
 def _quota_reservation_id(job: TrainingJob) -> Optional[uuid.UUID]:
     raw = (job.strategy_spec_snapshot or {}).get("quota_reservation_id")
     if not raw:
@@ -216,7 +230,14 @@ def run_claimed_job(db, job_id) -> None:
 
     logger.info(f"Executing job {job_id} (experiment {job.experiment_id})")
 
-    if _is_ml_job(job):
+    if _is_personal_job(job):
+        execute_personal_training(db, job.id)
+        db.commit()
+        if job.status == TrainingJobStatus.completed:
+            _settle_ml_quota(db, job)
+        else:
+            _release_ml_quota(db, job)
+    elif _is_ml_job(job):
         execute_ml_training(db, job.id)
         db.commit()
         if job.status == TrainingJobStatus.completed:
@@ -246,7 +267,7 @@ def execute_job(job_id: int) -> None:
             job.error_details = str(exc)
             job.completed_at = utcnow()
             db.commit()
-            if _is_ml_job(job):
+            if _is_quota_tracked_ml_job(job):
                 _release_ml_quota(db, job)
 
     finally:

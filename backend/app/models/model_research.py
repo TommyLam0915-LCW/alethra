@@ -23,6 +23,10 @@ class ModelType(str, enum.Enum):
     rule_based = "rule_based"
     prompt_based_research_assistant = "prompt_based_research_assistant"
     future_external_model_reference = "future_external_model_reference"
+    # A real scikit-learn artifact trained on the owner's confirmed decisions.
+    # It is never a rule spec, and inference code must load it as an ML
+    # artifact rather than reading model_specification_json directly.
+    personal_decision_model = "personal_decision_model"
 
 
 class EvaluationType(str, enum.Enum):

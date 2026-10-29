@@ -41,7 +41,7 @@ MIN_DISTINCT_SNAPSHOT_DATES = 60
 MIN_PER_ACTION = 30
 MIN_FEATURE_COVERAGE_RATIO = 0.95
 
-CAPABILITY_STATUS = "NOT_IMPLEMENTED"
+CAPABILITY_STATUS = "AVAILABLE"
 
 
 def get_active_consent(
@@ -422,8 +422,9 @@ def evaluate_eligibility(
         "label_zh": "個人化模型",
         "capability_status": CAPABILITY_STATUS,
         "capability_status_zh": (
-            "尚未建立：本輪沒有以個人決策資料訓練的模型，也沒有消費端；"
-            "不以市場資料模型或規則檢查冒充。"
+            "已建立工程鏈：以你親自確認、具同意範圍的決策訓練專屬模型，"
+            "資料不足、同意不符或版本撤銷時直接拒絕；"
+            "分數只代表模型模仿你本人決策的能力，不代表回報、市場方向或愈用愈準。"
         ),
         "eligible": dataset_eligible,
         "status": "ELIGIBLE" if dataset_eligible else "NOT_ELIGIBLE",
@@ -545,8 +546,9 @@ def capabilities(db: Session, owner_id: uuid.UUID) -> List[Dict[str, Any]]:
             "status": CAPABILITY_STATUS,
             "description_zh": (
                 "以明確同意、可追溯的個人決策資料訓練，學習該用戶在特定策略下的"
-                "決策偏好。資料不足時直接拒絕，不以 A 或 B 冒充。"
+                "決策偏好。資料不足時直接拒絕，不以 A 或 B 冒充；"
+                "推論結果只描述決策選擇，不是市場方向或投資建議。"
             ),
-            "surface": "本頁 · 個人化訓練資格",
+            "surface": "本頁 · 個人化訓練資格與個人策略學習",
         },
     ]

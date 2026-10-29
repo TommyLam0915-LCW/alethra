@@ -128,7 +128,7 @@ class TestEligibilityRefusal:
 
         assert body["eligible"] is False
         assert body["status"] == "NOT_ELIGIBLE"
-        assert body["capability_status"] == "NOT_IMPLEMENTED"
+        assert body["capability_status"] == "AVAILABLE"
         assert "NO_RECORDED_DECISIONS" in _codes(body)
         assert "CONSENT_MISSING" in _codes(body)
         assert body["dataset"]["total_recorded_events"] == 0
@@ -146,7 +146,7 @@ class TestEligibilityRefusal:
         assert set(caps) == {"market_model", "rule_check", "personalization"}
         assert caps["market_model"]["status"] == "AVAILABLE"
         assert caps["rule_check"]["status"] == "AVAILABLE"
-        assert caps["personalization"]["status"] == "NOT_IMPLEMENTED"
+        assert caps["personalization"]["status"] == "AVAILABLE"
 
     def test_future_snapshot_blocks_dataset(self, client, auth_headers):
         owner_id = _current_user_id()
