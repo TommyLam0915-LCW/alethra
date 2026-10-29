@@ -94,6 +94,13 @@ from app.models.personalization import (
     PersonalizationConsent,
     PERSONALIZATION_TRAINING_PURPOSE,
 )
+from app.models.robustness import (
+    RobustnessStudy,
+    RobustnessAttempt,
+    STUDY_KINDS,
+    STUDY_STATUSES,
+    ATTEMPT_STATUSES,
+)
 
 __all__ = [
     "User",
@@ -200,4 +207,9 @@ __all__ = [
     "HumanDecisionExecutionStatus",
     "PersonalizationConsent",
     "PERSONALIZATION_TRAINING_PURPOSE",
+    "RobustnessStudy",
+    "RobustnessAttempt",
+    "STUDY_KINDS",
+    "STUDY_STATUSES",
+    "ATTEMPT_STATUSES",
 ]

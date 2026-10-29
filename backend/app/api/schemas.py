@@ -1343,3 +1343,26 @@ class HumanDecisionResponse(BaseModel):
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class RobustnessConfig(BaseModel):
+    """Bounded knobs for a robustness study. Never a free-form grid."""
+
+    slices: int = Field(3, ge=2, le=4)
+    folds: int = Field(2, ge=2, le=3)
+    train_ratio: float = Field(0.6, ge=0.5, le=0.8)
+    gap_bars: int = Field(1, ge=0, le=5)
+    max_attempts: int = Field(12, ge=1, le=24)
+
+
+class RobustnessPlanRequest(BaseModel):
+    version_id: UUID
+    kind: str = Field(
+        ...,
+        pattern="^(cost_scenarios|period_slices|parameter_sensitivity|walk_forward)$",
+    )
+    config: Optional[RobustnessConfig] = None
+
+
+class RobustnessStudyCreate(RobustnessPlanRequest):
+    request_id: Optional[UUID] = None

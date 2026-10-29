@@ -169,6 +169,36 @@ export const api = {
         { method: 'PATCH', body: JSON.stringify(data) }
       ),
   },
+  robustness: {
+    plan: (
+      experimentId: string,
+      data: { version_id: string; kind: string; config?: Record<string, number> }
+    ) =>
+      apiFetch(`/api/v1/experiments/${experimentId}/robustness/plan`, {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    create: (
+      experimentId: string,
+      data: {
+        version_id: string;
+        kind: string;
+        config?: Record<string, number>;
+        request_id?: string;
+      }
+    ) =>
+      apiFetch(`/api/v1/experiments/${experimentId}/robustness`, {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    list: (experimentId: string) =>
+      apiFetch(`/api/v1/experiments/${experimentId}/robustness`),
+    get: (studyId: string) => apiFetch(`/api/v1/robustness/${studyId}`),
+    run: (studyId: string) =>
+      apiFetch(`/api/v1/robustness/${studyId}/run`, { method: 'POST' }),
+    cancel: (studyId: string) =>
+      apiFetch(`/api/v1/robustness/${studyId}/cancel`, { method: 'POST' }),
+  },
   savedComparisons: {
     create: (data: {
       experiment_id: string;

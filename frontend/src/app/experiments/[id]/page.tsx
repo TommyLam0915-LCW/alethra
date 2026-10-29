@@ -7,6 +7,7 @@ import { api } from '@/lib/api';
 import { describeRunStatus } from '@/lib/runStatus';
 import { brand } from '@/lib/brand';
 import RevisionPanel from '@/components/experiments/RevisionPanel';
+import RobustnessPanel from '@/components/experiments/RobustnessPanel';
 
 interface Experiment {
   id: string;
@@ -109,6 +110,9 @@ const EVENT_LABELS: Record<string, string> = {
   strategy_locked: '策略鎖定',
   research_note_added: '研究筆記新增',
   revision_outcome_recorded: '修訂結果記錄',
+  robustness_study_started: '穩健性研究開始',
+  robustness_study_completed: '穩健性研究完成',
+  robustness_study_stopped: '穩健性研究停止',
   export_generated: '匯出產生',
 };
 
@@ -482,6 +486,15 @@ export default function ExperimentDetailPage() {
           currentVersionId={experiment.current_version_id}
           versions={versions}
           runs={runs}
+          onChanged={loadData}
+        />
+      )}
+
+      {versions.length > 0 && (
+        <RobustnessPanel
+          experimentId={experimentId}
+          currentVersionId={experiment.current_version_id}
+          versions={versions}
           onChanged={loadData}
         />
       )}
@@ -906,6 +919,7 @@ export default function ExperimentDetailPage() {
             onClick={() => setShowTimeline(!showTimeline)}
             className="btn"
             style={{ backgroundColor: '#eaeaea', fontSize: '13px' }}
+            data-testid="exp-timeline-toggle"
           >
             {showTimeline ? '收合' : '展開'}
           </button>

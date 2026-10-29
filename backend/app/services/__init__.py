@@ -19,6 +19,7 @@ EVENTS_BEFORE_OUTCOME = {
     "simulation_advanced",
     "simulation_paused",
     "simulation_resumed",
+    "robustness_study_started",
 }
 
 EVENTS_AFTER_OUTCOME = {
@@ -28,6 +29,8 @@ EVENTS_AFTER_OUTCOME = {
     "export_generated",
     "simulation_completed",
     "simulation_retired",
+    "robustness_study_completed",
+    "robustness_study_stopped",
 }
 
 
