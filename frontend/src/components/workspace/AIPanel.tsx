@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { api } from '@/lib/api';
+import { ApiError, api } from '@/lib/api';
 
 interface AIStatus {
   provider: string;
@@ -44,6 +44,10 @@ interface MemoryOption {
   privacy_scope: string;
 }
 
+const ACTIVE_CONVERSATION_KEY = 'alethra.ai.activeConversationId';
+
+type ContextKind = 'research_draft_ids' | 'memory_ids';
+
 export default function AIPanel({ currentSymbol }: { currentSymbol: string }) {
   const [status, setStatus] = useState<AIStatus | null>(null);
   const [conversations, setConversations] = useState<AIConversationSummary[]>([]);
@@ -57,6 +61,10 @@ export default function AIPanel({ currentSymbol }: { currentSymbol: string }) {
   const [ctxOpen, setCtxOpen] = useState(false);
   const [draftOptions, setDraftOptions] = useState<DraftOption[]>([]);
   const [memoryOptions, setMemoryOptions] = useState<MemoryOption[]>([]);
+  const [ctxSelection, setCtxSelection] = useState<{ research_draft_ids: string[]; memory_ids: string[] }>({
+    research_draft_ids: [],
+    memory_ids: [],
+  });
   const [draftFormFor, setDraftFormFor] = useState<string | null>(null);
   const [draftTitle, setDraftTitle] = useState('');
   const [draftHypothesis, setDraftHypothesis] = useState('');
@@ -70,11 +78,37 @@ export default function AIPanel({ currentSymbol }: { currentSymbol: string }) {
       const data = await api.aiAssistant.listConversations();
       const list = Array.isArray(data) ? data : [];
       setConversations(list);
-      setActiveId((prev) => (prev && list.some((c) => c.id === prev) ? prev : list[0]?.id ?? null));
+      setActiveId((prev) => {
+        // Restore the thread the user was reading before a reload, then the
+        // already-selected one, and only then fall back to the newest thread.
+        const stored = typeof window !== 'undefined' ? window.localStorage.getItem(ACTIVE_CONVERSATION_KEY) : null;
+        for (const candidate of [prev, stored]) {
+          if (candidate && list.some((c) => c.id === candidate)) return candidate;
+        }
+        return list[0]?.id ?? null;
+      });
     } catch {
       setConversations([]);
     }
   }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (activeId) window.localStorage.setItem(ACTIVE_CONVERSATION_KEY, activeId);
+    else window.localStorage.removeItem(ACTIVE_CONVERSATION_KEY);
+  }, [activeId]);
+
+  // Seed the context checkboxes from the server when the thread changes. While
+  // the thread stays open the local selection is authoritative so two quick
+  // checkbox clicks cannot overwrite each other with a stale copy.
+  useEffect(() => {
+    const conv = conversations.find((c) => c.id === activeId);
+    setCtxSelection({
+      research_draft_ids: conv?.context.research_draft_ids || [],
+      memory_ids: conv?.context.memory_ids || [],
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeId]);
 
   const loadStatus = useCallback(async () => {
     try {
@@ -114,7 +148,21 @@ export default function AIPanel({ currentSymbol }: { currentSymbol: string }) {
 
   const newConversation = async () => {
     try {
-      const created = await api.aiAssistant.createConversation({ context: { instrument_symbols: [currentSymbol] } });
+      let created;
+      try {
+        created = await api.aiAssistant.createConversation(
+          currentSymbol ? { context: { instrument_symbols: [currentSymbol] } } : {}
+        );
+      } catch (err) {
+        // A saved layout symbol can outlive the instrument catalogue. The thread
+        // itself is still usable, so create it without the unknown symbol and
+        // say which context was dropped instead of blocking the + button.
+        const unknownSymbol =
+          err instanceof ApiError && err.status === 400 && /instrument/i.test(err.message);
+        if (!unknownSymbol) throw err;
+        created = await api.aiAssistant.createConversation({});
+        setPanelError(`目前標的 ${currentSymbol} 不在可辨識的清單，已建立不含標的脈絡的對話。`);
+      }
       await loadConversations();
       setActiveId(created.id);
       setMessages([]);
@@ -175,24 +223,25 @@ export default function AIPanel({ currentSymbol }: { currentSymbol: string }) {
     }
   };
 
-  const toggleContextId = (kind: 'research_draft_ids' | 'memory_ids', id: string) => {
+  const toggleContext = async (kind: ContextKind, id: string) => {
     if (!activeConversation) return;
-    const current = activeConversation.context[kind] || [];
-    return current.includes(id) ? current.filter((x) => x !== id) : [...current, id];
-  };
-
-  const saveContext = async (kind: 'research_draft_ids' | 'memory_ids', ids: string[]) => {
-    if (!activeConversation) return;
+    const current = ctxSelection[kind];
+    const nextSelection = {
+      ...ctxSelection,
+      [kind]: current.includes(id) ? current.filter((x) => x !== id) : [...current, id],
+    };
+    setCtxSelection(nextSelection);
     try {
       await api.aiAssistant.updateConversation(activeConversation.id, {
         context: {
-          research_draft_ids: kind === 'research_draft_ids' ? ids : activeConversation.context.research_draft_ids || [],
-          memory_ids: kind === 'memory_ids' ? ids : activeConversation.context.memory_ids || [],
+          research_draft_ids: nextSelection.research_draft_ids,
+          memory_ids: nextSelection.memory_ids,
           instrument_symbols: activeConversation.context.instrument_symbols || [],
         },
       });
       await loadConversations();
     } catch (err) {
+      setCtxSelection(ctxSelection);
       setPanelError(err instanceof Error ? err.message : '無法更新脈絡');
     }
   };
@@ -200,11 +249,12 @@ export default function AIPanel({ currentSymbol }: { currentSymbol: string }) {
   const send = async () => {
     const content = input.trim();
     if (!content || !activeId || sending) return;
+    const optimisticId = `local-${Date.now()}`;
     setSending(true);
     setPanelError('');
     setMessages((prev) => [
       ...prev,
-      { id: `local-${Date.now()}`, role: 'user', content, status: 'completed', created_at: new Date().toISOString() },
+      { id: optimisticId, role: 'user', content, status: 'completed', created_at: new Date().toISOString() },
     ]);
     setInput('');
     try {
@@ -213,7 +263,12 @@ export default function AIPanel({ currentSymbol }: { currentSymbol: string }) {
       if (typeof reply.quota_used === 'number') setQuotaUsed(reply.quota_used);
       await loadConversations();
     } catch (err) {
+      // The turn was refused (quota/entitlement/network): drop the optimistic
+      // bubble and put the text back so the user does not lose what they typed.
+      setMessages((prev) => prev.filter((m) => m.id !== optimisticId));
+      setInput((current) => (current ? current : content));
       setPanelError(err instanceof Error ? err.message : '傳送失敗');
+      loadConversations();
     } finally {
       setSending(false);
     }
@@ -247,8 +302,8 @@ export default function AIPanel({ currentSymbol }: { currentSymbol: string }) {
   };
 
   const ctxSymbols = activeConversation?.context.instrument_symbols || [];
-  const ctxDraftCount = activeConversation?.context.research_draft_ids?.length || 0;
-  const ctxMemoryCount = activeConversation?.context.memory_ids?.length || 0;
+  const ctxDraftCount = ctxSelection.research_draft_ids.length;
+  const ctxMemoryCount = ctxSelection.memory_ids.length;
 
   return (
     <div className="ws-ai-panel" data-testid="ai-panel">
@@ -270,6 +325,7 @@ export default function AIPanel({ currentSymbol }: { currentSymbol: string }) {
           className="ws-ai-select"
           value={activeId ?? ''}
           onChange={(e) => setActiveId(e.target.value || null)}
+          aria-label="選擇 AI 對話"
           data-testid="ai-conversation-select"
         >
           {conversations.length === 0 && <option value="">（尚無對話）</option>}
@@ -279,13 +335,32 @@ export default function AIPanel({ currentSymbol }: { currentSymbol: string }) {
             </option>
           ))}
         </select>
-        <button className="ws-icon-btn" title="新對話" onClick={newConversation} data-testid="ai-new-conversation">
-          ＋
+        <button
+          className="ws-icon-btn"
+          title="新對話"
+          aria-label="新對話"
+          onClick={newConversation}
+          data-testid="ai-new-conversation"
+          style={{ whiteSpace: 'nowrap' }}
+        >
+          ＋ 新對話
         </button>
-        <button className="ws-icon-btn" title="刪除此對話" onClick={deleteConversation} disabled={!activeId}>
+        <button
+          className="ws-icon-btn"
+          title="刪除此對話"
+          aria-label="刪除此對話"
+          onClick={deleteConversation}
+          disabled={!activeId}
+        >
           ✕
         </button>
       </div>
+
+      {conversations.length === 0 && (
+        <div className="ws-muted" data-testid="ai-conversation-hint">
+          尚無對話：按「＋ 新對話」建立第一個研究對話。
+        </div>
+      )}
 
       <div className="ws-ai-context">
         {ctxSymbols.map((s) => (
@@ -293,10 +368,24 @@ export default function AIPanel({ currentSymbol }: { currentSymbol: string }) {
         ))}
         {ctxDraftCount > 0 && <span className="ws-chip">草稿×{ctxDraftCount}</span>}
         {ctxMemoryCount > 0 && <span className="ws-chip">記憶×{ctxMemoryCount}</span>}
-        <button className="ws-icon-btn" title="把目前工具加入 AI 脈絡" onClick={addCurrentSymbol} disabled={!activeId}>
-          ＋{currentSymbol}
-        </button>
-        <button className="ws-icon-btn" title="編輯研究脈絡" onClick={openContextEditor} disabled={!activeId}>
+        {currentSymbol && (
+          <button
+            className="ws-icon-btn"
+            title={`把目前標的 ${currentSymbol} 加入 AI 脈絡`}
+            aria-label={`把目前標的 ${currentSymbol} 加入 AI 脈絡`}
+            onClick={addCurrentSymbol}
+            disabled={!activeId}
+          >
+            ＋ {currentSymbol}
+          </button>
+        )}
+        <button
+          className="ws-icon-btn"
+          title="選擇要提供給 AI 的研究草稿與個人記憶"
+          aria-label="編輯研究脈絡"
+          onClick={openContextEditor}
+          disabled={!activeId}
+        >
           脈絡
         </button>
       </div>
@@ -309,8 +398,8 @@ export default function AIPanel({ currentSymbol }: { currentSymbol: string }) {
             <label key={d.id} className="ws-ai-ctx-item">
               <input
                 type="checkbox"
-                checked={(activeConversation.context.research_draft_ids || []).includes(d.id)}
-                onChange={() => saveContext('research_draft_ids', toggleContextId('research_draft_ids', d.id) || [])}
+                checked={ctxSelection.research_draft_ids.includes(d.id)}
+                onChange={() => toggleContext('research_draft_ids', d.id)}
               />
               <span className="ws-ai-ctx-label">{d.title}</span>
             </label>
@@ -321,8 +410,8 @@ export default function AIPanel({ currentSymbol }: { currentSymbol: string }) {
             <label key={m.id} className="ws-ai-ctx-item">
               <input
                 type="checkbox"
-                checked={(activeConversation.context.memory_ids || []).includes(m.id)}
-                onChange={() => saveContext('memory_ids', toggleContextId('memory_ids', m.id) || [])}
+                checked={ctxSelection.memory_ids.includes(m.id)}
+                onChange={() => toggleContext('memory_ids', m.id)}
               />
               <span className="ws-ai-ctx-label">{m.content.slice(0, 40)}</span>
             </label>
@@ -333,7 +422,12 @@ export default function AIPanel({ currentSymbol }: { currentSymbol: string }) {
       <div className="ws-ai-advisory">⚠ AI 回覆僅供研究參考，不構成交易授權</div>
 
       <div className="ws-ai-thread" ref={threadRef} data-testid="ai-thread">
-        {messages.length === 0 && <div className="ws-muted ws-ai-empty">開始一段研究對話（當前供應商：{status?.provider ?? '未知'}）</div>}
+        {messages.length === 0 && (
+          <div className="ws-muted ws-ai-empty">
+            按「＋ 新對話」建立或選擇一段對話；再用「脈絡」加入研究草稿、記憶與標的。
+            （當前供應商：{status?.provider ?? '未知'}）
+          </div>
+        )}
         {messages.map((m) => (
           <div key={m.id} className={`ws-ai-msg ${m.role === 'user' ? 'ws-ai-msg-user' : 'ws-ai-msg-assistant'} ${m.status === 'error' ? 'ws-ai-msg-error' : ''}`}>
             <div className="ws-ai-msg-content">{m.content}</div>

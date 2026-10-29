@@ -134,10 +134,30 @@ def _message_dict(message: AIMessage) -> Dict[str, Any]:
     }
 
 
+DEFAULT_CONVERSATION_TITLE = "新對話"
+MAX_DERIVED_TITLE_LENGTH = 40
+
+
+def _display_title(conversation: AIConversation) -> str:
+    """Title for the conversation picker.
+
+    Older threads were created with the placeholder title and never renamed;
+    derive a readable title from the first user turn so the picker is usable
+    without rewriting stored data.
+    """
+    if conversation.title.strip() not in ("", DEFAULT_CONVERSATION_TITLE):
+        return conversation.title
+    for message in conversation.messages:
+        text = " ".join(message.content.split())
+        if message.role == "user" and text:
+            return text[:MAX_DERIVED_TITLE_LENGTH]
+    return conversation.title
+
+
 def _conversation_dict(conversation: AIConversation, with_messages: bool) -> Dict[str, Any]:
     data: Dict[str, Any] = {
         "id": str(conversation.id),
-        "title": conversation.title,
+        "title": _display_title(conversation),
         "context": conversation.context or {},
         "created_at": conversation.created_at.isoformat(),
         "updated_at": conversation.updated_at.isoformat(),
@@ -365,7 +385,7 @@ def list_conversations(
     return [
         {
             "id": str(c.id),
-            "title": c.title,
+            "title": _display_title(c),
             "context": c.context or {},
             "created_at": c.created_at.isoformat(),
             "updated_at": c.updated_at.isoformat(),
@@ -463,6 +483,13 @@ def send_message(
     )
     db.add(user_message)
     db.flush()
+
+    # A thread created from the workspace opens with the placeholder title;
+    # the first user turn is the most useful thing to call it.
+    if conversation.title.strip() in ("", DEFAULT_CONVERSATION_TITLE):
+        first_turn = " ".join(payload.content.split())
+        if first_turn:
+            conversation.title = first_turn[:MAX_DERIVED_TITLE_LENGTH]
 
     history = [
         {"role": m.role, "content": m.content}

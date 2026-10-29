@@ -663,3 +663,69 @@ class TestAIDraftProposal:
             json={"title": "x", "source_message_id": str(uuid.uuid4())},
         )
         assert resp.status_code == 404
+
+
+# ── Conversation titles (picker usability) ─────────────────────────────────
+
+class TestConversationTitles:
+    def _create(self, client, auth_headers, title=None):
+        payload = {"title": title} if title else {}
+        return client.post("/api/v1/ai/conversations", headers=auth_headers, json=payload).json()
+
+    def _send(self, client, auth_headers, conversation_id, content):
+        return client.post(
+            f"/api/v1/ai/conversations/{conversation_id}/messages",
+            headers=auth_headers,
+            json={"content": content},
+        )
+
+    def _titles(self, client, auth_headers):
+        listed = client.get("/api/v1/ai/conversations", headers=auth_headers).json()
+        return {c["id"]: c["title"] for c in listed}
+
+    def test_first_message_titles_conversation(self, client, auth_headers):
+        conv = self._create(client, auth_headers)
+        assert conv["title"] == "新對話"
+
+        assert self._send(
+            client, auth_headers, conv["id"], "  AAPL 近期動能如何？比較 20 與 60 日均線  "
+        ).status_code == 200
+
+        assert self._titles(client, auth_headers)[conv["id"]] == "AAPL 近期動能如何？比較 20 與 60 日均線"
+
+    def test_later_messages_do_not_retitle(self, client, auth_headers):
+        conv = self._create(client, auth_headers)
+        self._send(client, auth_headers, conv["id"], "第一個問題")
+        self._send(client, auth_headers, conv["id"], "第二個問題")
+
+        assert self._titles(client, auth_headers)[conv["id"]] == "第一個問題"
+
+    def test_explicit_title_is_kept(self, client, auth_headers):
+        conv = self._create(client, auth_headers, title="研究：AAPL 動能")
+        self._send(client, auth_headers, conv["id"], "補充問題")
+
+        assert self._titles(client, auth_headers)[conv["id"]] == "研究：AAPL 動能"
+
+    def test_legacy_placeholder_title_derived_from_first_user_turn(
+        self, client, auth_headers, client_db
+    ):
+        from app.models.ai_conversation import AIConversation, AIMessage
+
+        conv = self._create(client, auth_headers)
+        # Simulate a thread stored before auto-titling existed: placeholder
+        # title plus a user turn that never renamed it.
+        row = client_db.query(AIConversation).filter(
+            AIConversation.id == uuid.UUID(conv["id"])
+        ).first()
+        assert row is not None
+        row.title = "新對話"
+        client_db.add(
+            AIMessage(conversation_id=row.id, role="user", content="舊對話的第一個問題")
+        )
+        client_db.commit()
+
+        assert self._titles(client, auth_headers)[conv["id"]] == "舊對話的第一個問題"
+        detail = client.get(
+            f"/api/v1/ai/conversations/{conv['id']}", headers=auth_headers
+        ).json()
+        assert detail["title"] == "舊對話的第一個問題"
