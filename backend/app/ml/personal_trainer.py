@@ -9,6 +9,8 @@ Evaluation semantics kept explicit in the artifact:
 
 * the split is a single chronological hold-out (train → validation → test),
   labelled ``chronological_holdout`` — not a fixed-strategy period study;
+* the split is group-aware: rows sharing one decision instant stay whole in
+  one segment, so a simultaneous decision is never half-train, half-test;
 * hyper-parameters are fixed per model type, so no per-fold selection is
   claimed (``selection_source`` says so);
 * the label is the action recorded at decision time, so no forward-looking
@@ -40,9 +42,10 @@ from sklearn.metrics import (
 from sklearn.preprocessing import StandardScaler
 
 from app.lib.timeutil import utcnow
-from app.ml.trainer import ARTIFACTS_DIR, temporal_split
+from app.ml.trainer import ARTIFACTS_DIR
 
 PERSONAL_TASK_TYPE = "personal_decision_mimicry"
+SPLIT_GROUP_KEY = "decision_instant"
 PERSONAL_ARTIFACTS_DIR = os.path.join(ARTIFACTS_DIR, "personal")
 PERSONAL_WORDING_ZH = "模型估計你在此策略下的決策選擇"
 
@@ -127,6 +130,68 @@ def _matrix(rows: List[dict], feature_names: List[str]) -> np.ndarray:
     return np.array(values)
 
 
+def _split_group_key(row: dict) -> str:
+    """Identity of the moment a decision was taken, oldest-first sortable.
+
+    Rows from a snapshot carry the server-recorded ``decision_instant``. Rows
+    handed to the trainer directly fall back to the snapshot date, then to the
+    recording time, so simultaneous decisions still land in one group.
+    """
+    for field in (SPLIT_GROUP_KEY, "snapshot_date", "decided_at"):
+        value = row.get(field)
+        if value:
+            return str(value)
+    return str(row.get("decision_event_id"))
+
+
+def grouped_temporal_split(
+    group_sizes: List[int],
+    train_ratio: float = 0.7,
+    val_ratio: float = 0.15,
+) -> Tuple[List[int], List[int], List[int], Dict[str, int]]:
+    """Chronological split that never cuts through one decision-instant group.
+
+    ``group_sizes`` are ordered oldest-first. Each segment starts on a group
+    boundary, so every row sharing an instant lands whole in one segment; a
+    simultaneous decision cannot be half training evidence and half test.
+    """
+    total = sum(group_sizes)
+    train_target = total * train_ratio
+    val_target = total * (train_ratio + val_ratio)
+
+    train_groups: List[int] = []
+    val_groups: List[int] = []
+    test_groups: List[int] = []
+    start = 0
+    for number, size in enumerate(group_sizes):
+        if start < train_target:
+            train_groups.append(number)
+        elif start < val_target:
+            val_groups.append(number)
+        else:
+            test_groups.append(number)
+        start += size
+
+    bounds: List[int] = []
+    cursor = 0
+    for size in group_sizes:
+        bounds.append(cursor)
+        cursor += size
+
+    def _rows(groups: List[int]) -> List[int]:
+        indices: List[int] = []
+        for number in groups:
+            indices.extend(range(bounds[number], bounds[number] + group_sizes[number]))
+        return indices
+
+    return (
+        _rows(train_groups),
+        _rows(val_groups),
+        _rows(test_groups),
+        {"train": len(train_groups), "val": len(val_groups), "test": len(test_groups)},
+    )
+
+
 def train_personal_model(
     rows: List[dict],
     feature_names: List[str],
@@ -157,8 +222,23 @@ def train_personal_model(
         )
 
     ordered = sorted(
-        rows, key=lambda row: (row.get("decided_at") or "", row.get("decision_event_id") or "")
+        rows,
+        key=lambda row: (
+            _split_group_key(row),
+            row.get("decided_at") or "",
+            row.get("decision_event_id") or "",
+        ),
     )
+    group_sizes: List[int] = []
+    previous_key: Optional[str] = None
+    for row in ordered:
+        key = _split_group_key(row)
+        if group_sizes and key == previous_key:
+            group_sizes[-1] += 1
+        else:
+            group_sizes.append(1)
+            previous_key = key
+
     labels: List[str] = sorted({row["action_label"] for row in ordered})
     if len(labels) < 2:
         raise PersonalTrainingRefused(
@@ -170,7 +250,9 @@ def train_personal_model(
     X = _matrix(ordered, feature_names)
     y = np.array([row["action_label"] for row in ordered])
 
-    train_idx, val_idx, test_idx = temporal_split(len(ordered), train_ratio, val_ratio)
+    train_idx, val_idx, test_idx, groups_per_segment = grouped_temporal_split(
+        group_sizes, train_ratio, val_ratio
+    )
     if (
         len(train_idx) < MIN_TRAIN_ROWS
         or len(val_idx) < MIN_VAL_ROWS
@@ -288,6 +370,10 @@ def train_personal_model(
         "label_definition": label_definition or {},
         "split": {
             "kind": "chronological_holdout",
+            "group_aware": True,
+            "group_key": SPLIT_GROUP_KEY,
+            "n_groups": len(group_sizes),
+            "groups_per_segment": groups_per_segment,
             "train_ratio": train_ratio,
             "val_ratio": val_ratio,
             "selection_source": "fixed_hyperparameters_per_model_type",

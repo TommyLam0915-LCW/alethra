@@ -1356,6 +1356,7 @@ class HumanDecisionResponse(BaseModel):
     server_step_number: int
     server_snapshot_date: str
     server_data_cutoff_at: str
+    decision_instant: Optional[datetime] = None
     execution_status: str
     supersedes_event_id: Optional[UUID]
     metadata_json: Optional[Dict[str, Any]]

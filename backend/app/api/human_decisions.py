@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timedelta
 from typing import List, Optional
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -20,9 +20,40 @@ from app.api.schemas import (
     HumanDecisionResponse,
 )
 from app.lib.timeutil import utcnow
+from app.engine.intraday import INTRADAY_TIMEFRAMES
 from app.services import emit_event
 
 router = APIRouter(prefix="/human-decisions", tags=["human-decisions"])
+
+_BAR_DURATION = {
+    "1m": timedelta(minutes=1),
+    "5m": timedelta(minutes=5),
+    "15m": timedelta(minutes=15),
+    "30m": timedelta(minutes=30),
+    "1h": timedelta(hours=1),
+}
+
+
+def _decision_instant(session: SimulationSession, spec: dict) -> Optional[datetime]:
+    """When the decision happened on the simulation's market clock.
+
+    A daily replay cursor at date D means the owner has observed the completed
+    bar for D, so the instant is the end of D. An intraday cursor points at the
+    bar's start timestamp, so the instant is that bar's close. The wall clock is
+    never used: the decision's as-of boundary is the market clock it was made on.
+    """
+    timeframe = session.timeframe or "1d"
+    if timeframe in INTRADAY_TIMEFRAMES and session.current_bar_timestamp is not None:
+        return session.current_bar_timestamp + _BAR_DURATION[timeframe]
+
+    raw_date = (session.current_snapshot_date or spec.get("start_date") or "").strip()
+    try:
+        day = date.fromisoformat(raw_date)
+    except (ValueError, TypeError):
+        return None
+    if session.current_snapshot_date:
+        day = day + timedelta(days=1)
+    return datetime.combine(day, time.min)
 
 
 def _get_session_with_ownership(
@@ -62,6 +93,7 @@ def _derive_server_context(
         "step_number": step_number,
         "snapshot_date": snapshot_date,
         "data_cutoff_at": data_cutoff_at,
+        "decision_instant": _decision_instant(session, spec),
     }
 
 
@@ -79,6 +111,7 @@ def _event_to_response(event: HumanDecisionEvent) -> HumanDecisionResponse:
         server_step_number=event.server_step_number,
         server_snapshot_date=event.server_snapshot_date,
         server_data_cutoff_at=event.server_data_cutoff_at,
+        decision_instant=event.decision_instant,
         execution_status=event.execution_status.value if isinstance(event.execution_status, HumanDecisionExecutionStatus) else event.execution_status,
         supersedes_event_id=event.supersedes_event_id,
         metadata_json=event.metadata_json,
@@ -127,6 +160,7 @@ def create_human_decision(
         server_step_number=ctx["step_number"],
         server_snapshot_date=ctx["snapshot_date"],
         server_data_cutoff_at=ctx["data_cutoff_at"],
+        decision_instant=ctx["decision_instant"],
         execution_status=HumanDecisionExecutionStatus.record_only,
         metadata_json=body.metadata,
         supersedes_event_id=None,
@@ -210,8 +244,20 @@ def correct_human_decision(
     if not original:
         raise HTTPException(status_code=404, detail="Human decision event not found")
 
-    session = _get_session_with_ownership(original.simulation_session_id, db, current_user)
-    ctx = _derive_server_context(session, db)
+    _get_session_with_ownership(original.simulation_session_id, db, current_user)
+
+    # A correction is another label revision of the SAME decision, so it keeps
+    # the original's server context and as-of instant. Re-deriving from the
+    # session would move the sample to a later cursor and change what the owner
+    # could have observed when they actually decided.
+    ctx = {
+        "strategy_version_id": original.server_strategy_version_id,
+        "instrument_id": original.server_instrument_id,
+        "step_number": original.server_step_number,
+        "snapshot_date": original.server_snapshot_date,
+        "data_cutoff_at": original.server_data_cutoff_at,
+        "decision_instant": original.decision_instant,
+    }
 
     correction = HumanDecisionEvent(
         owner_id=current_user.id,
@@ -225,6 +271,7 @@ def correct_human_decision(
         server_step_number=ctx["step_number"],
         server_snapshot_date=ctx["snapshot_date"],
         server_data_cutoff_at=ctx["data_cutoff_at"],
+        decision_instant=ctx["decision_instant"],
         execution_status=HumanDecisionExecutionStatus.record_only,
         metadata_json={**(body.metadata or {}), "correction_reason": body.correction_reason},
         supersedes_event_id=original.id,

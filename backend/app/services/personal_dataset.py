@@ -14,7 +14,8 @@ lowered to make a build succeed.
 import hashlib
 import json
 import uuid
-from datetime import date
+from collections import Counter
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
@@ -24,10 +25,12 @@ from app.models.decision_label import DecisionLabelState
 from app.models.experiment import Experiment
 from app.models.experiment_version import ExperimentVersion
 from app.models.human_decision import HumanDecisionEvent
+from app.models.market_data import MarketDataBar
 from app.models.personal_dataset import (
     PersonalizationDatasetSnapshot,
     PersonalizationSnapshotStatus,
 )
+from app.models.simulation import SimulationSession
 from app.services.decision_labels import latest_labels
 from app.services.market_data_storage import MarketDataStorage
 from app.services.personalization import (
@@ -40,6 +43,29 @@ TASK_TYPE = "personal_decision_mimicry"
 FEATURE_SCHEMA_VERSION = "ohlcv-technical-v1"
 FEATURE_LOOKBACK_WINDOWS = [5, 10, 20]
 MIN_FEATURE_BARS = max(FEATURE_LOOKBACK_WINDOWS) + 2
+SAMPLING_CONTRACT_VERSION = "as-of-bar-close-v1"
+
+# A daily bar is final only after its session has closed. Without an exchange
+# calendar we use the next calendar day 00:00 UTC, which is later than the cash
+# close of every exchange this product stores (US, HK, JP, UK). The rule is
+# deliberately bar-close based, not date based.
+DAILY_BAR_CLOSE_OFFSET = timedelta(days=1)
+
+
+def daily_bar_available_at(bar_date: date) -> datetime:
+    """Earliest instant a daily bar may be read as complete."""
+    return datetime.combine(bar_date + DAILY_BAR_CLOSE_OFFSET, time.min)
+
+
+def sampling_contract() -> Dict[str, Any]:
+    return {
+        "version": SAMPLING_CONTRACT_VERSION,
+        "as_of_rule": "bar_close_time",
+        "daily_bar_available_at": "next_calendar_day_00:00_utc",
+        "decision_instant_source": "server_recorded_market_clock",
+        "legacy_decision_instant_fallback": "start_of_snapshot_date",
+        "split_grouping": "decision_instant",
+    }
 
 LABEL_DEFINITION = {
     "task_type": TASK_TYPE,
@@ -138,22 +164,86 @@ def _resolve_consent(
     return consent, in_scope
 
 
+def _normalize_instant(value: Optional[datetime]) -> Optional[datetime]:
+    if value is None:
+        return None
+    if value.tzinfo is not None:
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value
+
+
+def _daily_bars_visible_by(
+    db: Session,
+    instrument_id: str,
+    cutoff: datetime,
+    provider_id: Optional[str],
+) -> List[MarketDataBar]:
+    """Daily bars whose close was known by ``cutoff``, one provider only.
+
+    Bars stored for a 5-minute timeframe share one ``bar_date``; selecting the
+    midnight-timestamp rows keeps exactly one daily bar per date. Mixing two
+    providers would duplicate dates, so one provider is bound explicitly (the
+    session's provider when known, otherwise the provider covering the most
+    daily bars, with a deterministic tie-break).
+    """
+    rows = (
+        db.query(MarketDataBar)
+        .filter(
+            MarketDataBar.instrument_id == instrument_id,
+            MarketDataBar.bar_date <= cutoff.date(),
+        )
+        .order_by(MarketDataBar.bar_date, MarketDataBar.provider_id)
+        .all()
+    )
+    daily = [
+        row
+        for row in rows
+        if row.bar_timestamp == datetime.combine(row.bar_date, time.min)
+    ]
+    if not daily:
+        return []
+
+    if provider_id:
+        selected = provider_id
+    else:
+        counts = Counter(row.provider_id for row in daily)
+        selected = sorted(counts.items(), key=lambda item: (-item[1], item[0]))[0][0]
+
+    by_date: Dict[date, MarketDataBar] = {}
+    for row in daily:
+        if row.provider_id != selected:
+            continue
+        by_date.setdefault(row.bar_date, row)
+
+    return [
+        row
+        for bar_date, row in sorted(by_date.items())
+        if daily_bar_available_at(bar_date) <= cutoff
+    ]
+
+
 def _features_as_of(
     db: Session,
     instrument_id: str,
     snapshot_date: str,
+    *,
+    as_of_instant: Optional[datetime] = None,
+    provider_id: Optional[str] = None,
 ) -> Tuple[Optional[Dict[str, float]], Optional[List[str]], Optional[str], Optional[str]]:
-    """Features visible at the decision snapshot.
+    """Features visible at the decision instant.
 
-    Reads only stored bars dated at or before ``snapshot_date``. Returns
+    Only daily bars that had already closed by ``as_of_instant`` are read. When
+    the instant is absent (legacy rows, date-only prediction) the decision is
+    treated as taken at the start of ``snapshot_date``, so that day's bar is
+    never used before its close. Returns
     ``(features, feature_names, feature_bar_date, exclusion_code)``.
     """
     end = _parse_date(snapshot_date)
     if end is None:
         return None, None, None, "invalid_context"
 
-    storage = MarketDataStorage(db)
-    stored = storage.get_bars(instrument_id=instrument_id, end_date=end)
+    cutoff = _normalize_instant(as_of_instant) or datetime.combine(end, time.min)
+    stored = _daily_bars_visible_by(db, instrument_id, cutoff, provider_id)
     if len(stored) < MIN_FEATURE_BARS:
         return None, None, None, "missing_market_data"
 
@@ -175,8 +265,12 @@ def _features_as_of(
         return None, None, None, "missing_features"
 
     feature_bar_date = valid_dates[-1]
-    # Defensive cutoff check: the chosen row cannot be from the future.
-    if feature_bar_date > snapshot_date:
+    feature_day = _parse_date(feature_bar_date)
+    if feature_day is None:
+        return None, None, None, "missing_features"
+    # Defensive cutoffs: the chosen row cannot be from the future, and its bar
+    # must have closed by the decision instant.
+    if feature_day > end or daily_bar_available_at(feature_day) > cutoff:
         return None, None, None, "future_leakage"
 
     row = dict(zip(feature_names, features[-1]))
@@ -184,10 +278,20 @@ def _features_as_of(
 
 
 def features_as_of(
-    db: Session, instrument_id: str, as_of_date: str
+    db: Session,
+    instrument_id: str,
+    as_of_date: str,
+    *,
+    as_of_instant: Optional[datetime] = None,
 ) -> Tuple[Optional[Dict[str, float]], Optional[List[str]], Optional[str], Optional[str]]:
-    """Public wrapper: features visible at a decision snapshot date."""
-    return _features_as_of(db, instrument_id, as_of_date)
+    """Public wrapper: features visible at a decision instant or date.
+
+    ``as_of_instant`` is the server-recorded decision instant. Without it the
+    decision is read conservatively as happening at the start of ``as_of_date``.
+    """
+    return _features_as_of(
+        db, instrument_id, as_of_date, as_of_instant=as_of_instant
+    )
 
 
 def _canonical_checksum(
@@ -201,6 +305,55 @@ def _canonical_checksum(
     }
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _source_key(event: HumanDecisionEvent) -> Tuple[Any, ...]:
+    """Identity of the raw decision an event records.
+
+    Two events with the same session, step, instrument, snapshot, action,
+    quantity and rationale are the same decision submitted twice, not two
+    samples. A correction keeps the original's context and is linked by
+    ``supersedes_event_id``; it never reaches this grouping together with the
+    original because the original is already superseded.
+    """
+    action = event.action.value if hasattr(event.action, "value") else str(event.action)
+    return (
+        str(event.simulation_session_id),
+        event.server_step_number,
+        (event.server_instrument_id or "").strip(),
+        (event.server_snapshot_date or "").strip(),
+        action,
+        event.quantity,
+        (event.rationale or "").strip(),
+    )
+
+
+def _dedupe_source_events(
+    events: List[HumanDecisionEvent],
+    labels: Dict[uuid.UUID, Any],
+) -> Tuple[List[HumanDecisionEvent], int]:
+    """Keep one event per raw decision, preferring a reviewed one."""
+    groups: Dict[Tuple[Any, ...], List[HumanDecisionEvent]] = {}
+    order: List[Tuple[Any, ...]] = []
+    for event in events:
+        key = _source_key(event)
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(event)
+
+    kept: List[HumanDecisionEvent] = []
+    dropped = 0
+    for key in order:
+        group = groups[key]
+        if len(group) == 1:
+            kept.append(group[0])
+            continue
+        reviewed = [event for event in group if event.id in labels]
+        pool = reviewed or group
+        kept.append(max(pool, key=lambda event: (event.created_at, str(event.id))))
+        dropped += len(group) - 1
+    return kept, dropped
 
 
 def _assemble(
@@ -226,12 +379,27 @@ def _assemble(
     )
     superseded = _superseded_ids(all_events)
     current = [event for event in all_events if event.id not in superseded]
+    superseded_revisions = len(all_events) - len(current)
     labels = latest_labels(db, owner_id, [event.id for event in current])
+    current, duplicate_events_ignored = _dedupe_source_events(current, labels)
+
+    session_ids = {event.simulation_session_id for event in current}
+    sessions = (
+        {
+            session.id: session
+            for session in db.query(SimulationSession)
+            .filter(SimulationSession.id.in_(session_ids))
+            .all()
+        }
+        if session_ids
+        else {}
+    )
 
     exclusion_breakdown: Dict[str, int] = {}
+    instant_sources: Dict[str, int] = {}
     rows: List[dict] = []
     feature_names: Optional[List[str]] = None
-    feature_cache: Dict[Tuple[str, str], tuple] = {}
+    feature_cache: Dict[Tuple[str, str, Optional[str]], tuple] = {}
     instruments: set = set()
 
     for event in current:
@@ -260,9 +428,26 @@ def _assemble(
             _exclude("invalid_label")
             continue
 
-        cache_key = (instrument, snapshot_date)
+        instant = _normalize_instant(event.decision_instant)
+        instant_source = "recorded"
+        if instant is None:
+            # Legacy rows carry no market-clock instant. Treat the decision as
+            # happening at the start of its snapshot date, so that date's daily
+            # bar (not yet closed) is never used.
+            instant = datetime.combine(_parse_date(snapshot_date), time.min)
+            instant_source = "legacy_date_start"
+        session = sessions.get(event.simulation_session_id)
+        provider_id = getattr(session, "provider_id", None)
+
+        cache_key = (instrument, instant.isoformat(), provider_id)
         if cache_key not in feature_cache:
-            feature_cache[cache_key] = _features_as_of(db, instrument, snapshot_date)
+            feature_cache[cache_key] = _features_as_of(
+                db,
+                instrument,
+                snapshot_date,
+                as_of_instant=instant,
+                provider_id=provider_id,
+            )
         features, names, feature_bar_date, exclusion = feature_cache[cache_key]
         if exclusion:
             _exclude(exclusion)
@@ -276,6 +461,7 @@ def _assemble(
             continue
 
         instruments.add(instrument)
+        instant_sources[instant_source] = instant_sources.get(instant_source, 0) + 1
         rows.append(
             {
                 "decision_event_id": str(event.id),
@@ -284,6 +470,8 @@ def _assemble(
                 "strategy_version_id": str(strategy_version_id),
                 "instrument_id": instrument,
                 "snapshot_date": snapshot_date,
+                "decision_instant": instant.isoformat(),
+                "decision_instant_source": instant_source,
                 "feature_bar_date": feature_bar_date,
                 "data_cutoff_at": cutoff or snapshot_date,
                 "decided_at": event.created_at.isoformat(),
@@ -365,10 +553,15 @@ def _assemble(
         "data_cutoff_at": max(data_cutoffs) if data_cutoffs else None,
         "checksum": checksum,
         "data_nature_by_instrument": nature_by_instrument,
+        "sampling": {
+            "contract": sampling_contract(),
+            "decision_instant_sources": instant_sources,
+        },
         "reasons": reasons,
         "can_build": not reasons,
         "total_current_decisions": len(current),
-        "superseded_revisions": len(all_events) - len(current),
+        "superseded_revisions": superseded_revisions,
+        "duplicate_source_events_ignored": duplicate_events_ignored,
     }
 
 
@@ -392,6 +585,9 @@ def _payload(assembled: Dict[str, Any], snapshot: Optional[PersonalizationDatase
         },
         "total_current_decisions": assembled["total_current_decisions"],
         "superseded_revisions": assembled["superseded_revisions"],
+        "duplicate_source_events_ignored": assembled["duplicate_source_events_ignored"],
+        "sampling_contract": assembled["sampling"]["contract"],
+        "decision_instant_sources": assembled["sampling"]["decision_instant_sources"],
         "included_count": len(assembled["rows"]),
         "excluded_count": sum(assembled["exclusion_breakdown"].values()),
         "exclusion_breakdown": assembled["exclusion_breakdown"],
@@ -449,6 +645,7 @@ def create_snapshot(
             **LABEL_DEFINITION,
             "feature_schema_version": FEATURE_SCHEMA_VERSION,
             "data_nature_by_instrument": assembled["data_nature_by_instrument"],
+            "sampling_contract": assembled["sampling"]["contract"],
         },
         exclusion_breakdown_json=assembled["exclusion_breakdown"],
         class_distribution_json=assembled["class_distribution"],
@@ -467,6 +664,7 @@ def create_snapshot(
 def snapshot_payload(snapshot: PersonalizationDatasetSnapshot) -> Dict[str, Any]:
     label_definition = dict(snapshot.label_definition_json or {})
     data_nature = label_definition.pop("data_nature_by_instrument", {})
+    stored_contract = label_definition.pop("sampling_contract", None)
     feature_schema_version = label_definition.pop(
         "feature_schema_version", FEATURE_SCHEMA_VERSION
     )
@@ -490,6 +688,7 @@ def snapshot_payload(snapshot: PersonalizationDatasetSnapshot) -> Dict[str, Any]
         "feature_names": snapshot.feature_names_json or [],
         "label_definition": label_definition,
         "data_nature_by_instrument": data_nature,
+        "sampling_contract": stored_contract,
         "checksum": snapshot.checksum,
         "created_at": snapshot.created_at.isoformat() if snapshot.created_at else None,
         "note": "訓練只會使用此快照內已凍結嘅資料列；重新匯出或更新資料不會改變此快照。",

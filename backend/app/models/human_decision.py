@@ -41,6 +41,10 @@ class HumanDecisionEvent(Base):
     server_step_number = Column(Integer, nullable=False)
     server_snapshot_date = Column(String(10), nullable=False)
     server_data_cutoff_at = Column(String(10), nullable=False)
+    # UTC instant on the simulation's market clock when the owner decided, set
+    # server-side. NULL on legacy rows; the dataset builder then treats the
+    # decision as taken at the start of its snapshot date (conservative).
+    decision_instant = Column(DateTime, nullable=True)
 
     execution_status = Column(
         SAEnum(HumanDecisionExecutionStatus),

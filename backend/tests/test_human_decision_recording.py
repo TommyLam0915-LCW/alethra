@@ -1410,3 +1410,46 @@ class TestAuditAtomicity:
             "No correction audit should persist after audit failure"
         )
 
+
+
+# ---------------------------------------------------------------------------
+# AE2. The server records the decision instant on the market clock.
+# ---------------------------------------------------------------------------
+
+
+def test_AE2_decision_instant_is_market_clock_not_wall_clock(client, auth_headers):
+    """An unadvanced daily session yields the start of its snapshot date, and a
+    correction inherits that instant instead of stamping a new wall-clock one."""
+    exp_id, version_id = _create_experiment(client, auth_headers, "Test AE2")
+    _lock_experiment(client, auth_headers, exp_id)
+    session_id = _create_session(client, auth_headers, version_id)
+
+    created = client.post("/api/v1/human-decisions", headers=auth_headers, json={
+        "simulation_session_id": session_id,
+        "idempotency_key": "test-ae2-orig",
+        "action": "buy",
+        "quantity": 10.0,
+        "rationale": "Market clock check",
+    })
+    assert created.status_code == 201, created.text
+    body = created.json()
+    assert body["decision_instant"] is not None
+    # Not advanced: the cursor is absent, so the instant is the start of the
+    # session's snapshot date (conservative; that day's bar never used).
+    assert body["decision_instant"].startswith(body["server_snapshot_date"])
+    assert body["decision_instant"].endswith("T00:00:00")
+
+    corrected = client.post(
+        f"/api/v1/human-decisions/{body['id']}/correct",
+        headers=auth_headers,
+        json={
+            "action": "sell",
+            "quantity": 5.0,
+            "rationale": "Correction keeps the same market instant",
+            "correction_reason": "Reviewed the timing",
+        },
+    )
+    assert corrected.status_code == 201, corrected.text
+    correction = corrected.json()
+    assert correction["server_snapshot_date"] == body["server_snapshot_date"]
+    assert correction["decision_instant"] == body["decision_instant"]
