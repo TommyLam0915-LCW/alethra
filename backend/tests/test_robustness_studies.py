@@ -619,3 +619,47 @@ class TestQuotaAndOwnership:
         assert client.get(
             f"/api/v1/experiments/{exp['id']}/robustness", headers=other
         ).status_code == 404
+
+    def test_expired_entitlement_is_not_reported_as_startable(
+        self, client, auth_headers
+    ):
+        """Plan and create must agree: remaining units are not enough alone.
+
+        An expired entitlement still has 100 unused research runs. The dry run
+        used to say ``ready`` and the create endpoint then refused, so a user
+        was told a study could start when it could not.
+        """
+        from datetime import timedelta
+
+        from app.lib.timeutil import utcnow
+        from app.models.pilot import PilotEntitlement
+
+        _grant_research_runs(100)
+        db = TestSession()
+        try:
+            entitlement = (
+                db.query(PilotEntitlement)
+                .filter(PilotEntitlement.user_id == _user_id())
+                .one()
+            )
+            entitlement.expiry_date = utcnow() - timedelta(days=1)
+            db.commit()
+        finally:
+            db.close()
+
+        exp = _create_experiment(client, auth_headers)
+        plan_resp = _plan(
+            client, auth_headers, exp["id"], exp["current_version_id"],
+            "period_slices",
+        )
+        assert plan_resp.status_code == 200, plan_resp.text
+        plan = plan_resp.json()
+        assert plan["quota"]["remaining"] == 100
+        assert plan["quota"]["entitlement_active"] is False
+        assert plan["ready"] is False
+
+        created = _create_study(
+            client, auth_headers, exp["id"], exp["current_version_id"],
+            "period_slices",
+        )
+        assert created.status_code == 403, created.text

@@ -267,6 +267,64 @@ class TestWorkerQuotaLifecycle:
         assert reservation.status == "settled"
 
 
+    def test_cancel_after_claim_stops_training_and_releases_quota(
+        self, client, auth_headers, monkeypatch
+    ):
+        """A running-job cancel is committed by the API process.
+
+        The worker claimed the row before the cancel, so only a database read
+        can see it. Training must not run and the quota must be released.
+        """
+        train_calls = []
+
+        def fail_if_trained(*args, **kwargs):
+            train_calls.append(kwargs)
+            raise AssertionError("train_model must not run for a cancelled job")
+
+        monkeypatch.setattr("app.services.ml_training.train_model", fail_if_trained)
+
+        data = self._train(client, auth_headers)
+        user_id = self._get_user_id()
+
+        from app.workers.training_worker import claim_pending_job, run_claimed_job
+        from tests.conftest import TestSession
+
+        db = TestSession()
+        try:
+            claimed = claim_pending_job(db)
+            assert claimed is not None
+            assert str(claimed.id) == data["job_id"]
+        finally:
+            db.close()
+
+        resp = client.post(
+            f"/api/v1/training/jobs/{data['job_id']}/cancel", headers=auth_headers
+        )
+        assert resp.status_code == 200, resp.text
+
+        db = TestSession()
+        try:
+            run_claimed_job(db, uuid.UUID(data["job_id"]))
+        finally:
+            db.close()
+
+        db = TestSession()
+        try:
+            job = db.query(TrainingJob).filter(
+                TrainingJob.id == uuid.UUID(data["job_id"])
+            ).first()
+            assert job.status == TrainingJobStatus.cancelled, job.error_details
+            assert job.cancelled_at is not None
+            assert job.completed_at is not None
+        finally:
+            db.close()
+
+        assert train_calls == []
+        reservation = self._reservation(user_id)
+        assert reservation.status == "released"
+        assert self._used_count(user_id) == 0
+
+
 class TestLatestDataWindows:
     """predict-latest / prediction windows must use latest available data."""
 

@@ -501,9 +501,11 @@ def check_quota(
 
     Returns dict with 'allowed', 'used', 'limit', 'remaining'.
     """
-    from app.models.quota import QuotaCounter
+    from sqlalchemy import func
+
+    from app.models.quota import QuotaCounter, QuotaReservation
     from app.models.pilot import PilotEntitlement
-    from app.auth.entitlements import QUOTA_TYPE_MAP
+    from app.auth.entitlements import QUOTA_TYPE_MAP, check_entitlement_active
 
     reverse_map = {v: k for k, v in QUOTA_TYPE_MAP.items()}
     limit_name = quota_type if quota_type in reverse_map else QUOTA_TYPE_MAP.get(
@@ -519,10 +521,10 @@ def check_quota(
     if entitlement is None:
         # No entitlement - use free plan limits
         limit = FREE_PLAN_ENTITLEMENT.get(limit_name, 0)
+        entitlement_active = True
     else:
         limit = getattr(entitlement, limit_name, None)
-        if limit is None:
-            return {"allowed": True, "used": 0, "limit": None, "remaining": None}
+        entitlement_active = check_entitlement_active(entitlement)
 
     # Counters are written under the mapped key; reserve/settle only write
     # period="lifetime", so fall back to it when the requested period has no row.
@@ -538,14 +540,40 @@ def check_quota(
             QuotaCounter.period == "lifetime",
         ).first()
 
-    used = counter.used if counter else 0
-    remaining = max(0, limit - used)
+    # In-flight reservations consume allowance exactly as they do in
+    # reserve_quota(); reporting only ``used`` made this endpoint disagree
+    # with /ml/entitlement while a job was queued.
+    reserved = int(
+        db.query(func.coalesce(func.sum(QuotaReservation.amount), 0))
+        .filter(
+            QuotaReservation.user_id == user_id,
+            QuotaReservation.quota_type == counter_type,
+            QuotaReservation.status == "reserved",
+        )
+        .scalar()
+        or 0
+    )
 
+    used = counter.used if counter else 0
+
+    if limit is None:
+        return {
+            "allowed": entitlement_active,
+            "used": used,
+            "limit": None,
+            "remaining": None,
+            "reserved": reserved,
+            "entitlement_active": entitlement_active,
+        }
+
+    remaining = max(0, limit - used - reserved)
     return {
-        "allowed": used < limit,
+        "allowed": entitlement_active and (used + reserved) < limit,
         "used": used,
         "limit": limit,
         "remaining": remaining,
+        "reserved": reserved,
+        "entitlement_active": entitlement_active,
     }
 
 

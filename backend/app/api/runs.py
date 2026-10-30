@@ -48,11 +48,35 @@ def create_run(
     )
 
 
+# Every execution-affecting setting a revision can change. Metadata the authoring
+# surface does not edit (schema_version, currency, approval stamps) is excluded so
+# it cannot pose as a research change.
 COMPARE_FIELDS = [
-    "template_type", "asset_ids", "start_date", "end_date",
-    "initial_cash", "commission_rate", "slippage_rate",
-    "signal_parameters", "benchmark_id",
+    "template_type", "asset_ids", "frequency", "timeframe", "session",
+    "start_date", "end_date", "initial_cash", "commission_rate",
+    "slippage_rate", "benchmark_id", "signal_parameters", "entry_rule",
+    "exit_rule", "sizing_rule", "risk_parameters", "execution_timing",
 ]
+
+# A version stored before a field existed must read the same as one that stores
+# the schema default, otherwise comparing it with a new version reports a change
+# the user never made.
+FIELD_DEFAULTS = {
+    "frequency": "1d",
+    "timeframe": "1d",
+    "session": None,
+    "signal_parameters": {},
+    "entry_rule": {},
+    "exit_rule": {},
+    "sizing_rule": {},
+    "risk_parameters": {},
+    "execution_timing": {"execute_at": "next_open"},
+}
+
+
+def _compare_value(spec: dict, field: str):
+    value = spec.get(field)
+    return FIELD_DEFAULTS.get(field) if value is None else value
 
 
 @router.get("/versions/compare", response_model=VersionDiffResponse)
@@ -83,8 +107,8 @@ def compare_versions(
 
     diffs = []
     for field in COMPARE_FIELDS:
-        val_a = spec_a.get(field)
-        val_b = spec_b.get(field)
+        val_a = _compare_value(spec_a, field)
+        val_b = _compare_value(spec_b, field)
         if val_a != val_b:
             diffs.append(VersionDiffEntry(field=field, old_value=val_a, new_value=val_b))
 

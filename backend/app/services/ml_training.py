@@ -17,6 +17,7 @@ from app.providers import get_data_provider
 from app.services.market_data_storage import MarketDataStorage
 from app.ml.trainer import train_model, load_model, list_models
 from app.lib.timeutil import utcnow
+from app.services.job_control import stop_if_cancelled
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +139,48 @@ def get_recent_bars_for_prediction(
     )
 
 
+def resolve_training_window(
+    db: Session,
+    provider: Any,
+    instrument_id: str,
+    start_date: Optional[str],
+    end_date: Optional[str],
+) -> Tuple[str, str]:
+    """Fill a missing window from the provider's advertised/stored range."""
+    if not start_date or not end_date:
+        date_range = provider.get_date_range()
+        real_range = date_range.get("real_instruments_range", {})
+        start_date = start_date or real_range.get("min", "2024-01-02")
+        end_date = end_date or _latest_available_end_date(
+            db, provider, instrument_id
+        ).isoformat()
+    return start_date, end_date
+
+
+def prepare_training_data(
+    db: Session,
+    provider: Any,
+    instrument_id: str,
+    start_date: str,
+    end_date: str,
+) -> Tuple[List[Any], str, str]:
+    """Load the bars for a training window, persisting provider-sourced ones.
+
+    ``MarketDataStorage.store_bars`` commits the session, which releases any
+    row lock the caller is holding. A caller that needs a lock to stay held
+    across job creation must take it again after this returns.
+    """
+    bars, data_source, data_nature = _get_bars_with_storage(
+        db, provider, instrument_id, start_date, end_date
+    )
+    if len(bars) < 60:
+        raise ValueError(
+            f"Insufficient data for {instrument_id}: got {len(bars)} bars, "
+            f"need at least 60 for ML training."
+        )
+    return bars, data_source, data_nature
+
+
 def create_ml_training_job(
     db: Session,
     user_id: uuid.UUID,
@@ -147,6 +190,7 @@ def create_ml_training_job(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     quota_reservation_id: Optional[uuid.UUID] = None,
+    prepared: Optional[Tuple[List[Any], str, str]] = None,
 ) -> TrainingJob:
     """Create an ML training job.
 
@@ -160,24 +204,22 @@ def create_ml_training_job(
     The training_type is stored in strategy_spec_snapshot as a marker.
     quota_reservation_id links the job to its two-phase quota reservation
     so the worker can settle (success) or release (failure) it.
+
+    ``prepared`` is the ``(bars, data_source, data_nature)`` triple from
+    ``prepare_training_data``. The idempotent route prepares data before
+    taking its insertion lock, because preparing may commit.
     """
     provider = get_data_provider()
 
-    if not start_date or not end_date:
-        date_range = provider.get_date_range()
-        real_range = date_range.get("real_instruments_range", {})
-        start_date = start_date or real_range.get("min", "2024-01-02")
-        end_date = end_date or _latest_available_end_date(
-            db, provider, instrument_id
-        ).isoformat()
-
-    bars, data_source, data_nature = _get_bars_with_storage(db, provider, instrument_id, start_date, end_date)
-    if len(bars) < 60:
-        raise ValueError(
-            f"Insufficient data for {instrument_id}: got {len(bars)} bars, "
-            f"need at least 60 for ML training."
+    if prepared is None:
+        start_date, end_date = resolve_training_window(
+            db, provider, instrument_id, start_date, end_date
+        )
+        prepared = prepare_training_data(
+            db, provider, instrument_id, start_date, end_date
         )
 
+    bars, data_source, data_nature = prepared
     spec: Dict[str, Any] = {
         "training_type": "ml_model",
         "instrument_id": instrument_id,
@@ -216,6 +258,11 @@ def execute_ml_training(
     if job.status not in (TrainingJobStatus.pending, TrainingJobStatus.running):
         raise ValueError(f"Job must be pending or running, got {job.status}")
 
+    # The cancel endpoint writes cancelled_at from the API process, so the
+    # worker must ask the database rather than trust its loaded copy.
+    if stop_if_cancelled(db, job):
+        return job
+
     job.status = TrainingJobStatus.running
     db.flush()
 
@@ -249,6 +296,12 @@ def execute_ml_training(
                 last_bar.isoformat() if hasattr(last_bar, "isoformat") else last_bar
             ),
         }
+
+        # Cancellation is honoured up to the moment the fit starts. Once
+        # train_model runs, the artifact and the job must agree, so the job
+        # completes rather than reporting a cancellation that produced a model.
+        if stop_if_cancelled(db, job):
+            return job
 
         result = train_model(
             bars=bar_dicts,

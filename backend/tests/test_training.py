@@ -8,8 +8,6 @@ from app.models.training import TrainingJob, TrainingJobStatus
 from app.services.training import (
     MAX_GRID_SIZE,
     run_parameter_sweep,
-    cancel_running_job,
-    _cancellation_flags,
 )
 
 
@@ -536,59 +534,56 @@ class TestFailedBacktestFiltering:
 
 
 class TestRunningStateCancel:
-    """Cancellation works for running jobs via cancellation flag."""
+    """Cancellation of running jobs crosses the API/worker process boundary."""
 
-    @patch("app.services.training.run_backtest")
-    def test_cancel_running_job_via_flag(self, mock_backtest, client, auth_headers):
-        """The sweep loop should stop early when the cancellation flag is set."""
-        def backtest_side_effect(strategy_spec):
-            return {
-                "run_status": "completed",
-                "metrics": {"total_return_pct": 1.0, "max_drawdown_pct": 0.5},
-                "errors": [],
-            }
-
-        mock_backtest.side_effect = backtest_side_effect
-
+    def test_cancel_running_job_records_cancelled_at(self, client, auth_headers):
+        """The cancel endpoint persists cancelled_at; the worker reads it later."""
         exp = _create_experiment(client, auth_headers)
 
-        # Create the job — it will be pending (async execution)
-        resp = client.post("/api/v1/training/jobs", headers=auth_headers, json={
-            "experiment_id": exp["id"],
-            "parameter_grid": {
-                "short_window": [3, 5],
-                "long_window": [15, 20],
-            },
-        })
-        job_id = resp.json()["id"]
-        assert resp.json()["status"] == "pending"
-
-        # Verify the cancellation mechanism works at the service level:
-        # set the flag for this job_id and verify cancel_running_job sets it.
-        from app.services.training import _cancellation_flags as flags
-        flags.clear()
-
-        # Call cancel_running_job and check it sets the flag
-        cancel_running_job(uuid.UUID(job_id))
-        assert flags.get(uuid.UUID(job_id)) is True
-        flags.clear()
-
-    def test_sweep_stops_when_cancelled(self, client, auth_headers):
-        """Verify that the sweep loop actually stops when the cancellation flag is set.
-
-        We create a pending job via the DB (without running the sweep), pre-set
-        the cancellation flag, then call run_parameter_sweep directly.  The sweep
-        should detect the flag before the first backtest and return immediately.
-        """
-        _cancellation_flags.clear()
-
-        exp = _create_experiment(client, auth_headers)
-
-        # Get a DB session from the test infrastructure
         from tests.conftest import TestSession
         db = TestSession()
         try:
-            # Query for the test user (created by auth_headers fixture)
+            from app.models.user import User
+            user = db.query(User).filter(User.email == "test@alethra.io").first()
+            assert user is not None
+
+            job = TrainingJob(
+                user_id=user.id,
+                experiment_id=uuid.UUID(exp["id"]),
+                parameter_grid={"short_window": [3, 5], "long_window": [15, 20]},
+                strategy_spec_snapshot={"template_type": "sma_crossover"},
+                status=TrainingJobStatus.running,
+            )
+            db.add(job)
+            db.commit()
+            job_id = str(job.id)
+        finally:
+            db.close()
+
+        resp = client.post(f"/api/v1/training/jobs/{job_id}/cancel", headers=auth_headers)
+        assert resp.status_code == 200, resp.text
+
+        db = TestSession()
+        try:
+            stored = db.query(TrainingJob).filter(TrainingJob.id == uuid.UUID(job_id)).first()
+            assert stored is not None
+            assert stored.cancelled_at is not None
+        finally:
+            db.close()
+
+    def test_sweep_stops_when_cancelled_in_database(self, client, auth_headers):
+        """A cancellation committed by another process stops the sweep.
+
+        The test writes cancelled_at directly, so it passes only if the sweep
+        reads the database rather than a process-local flag.
+        """
+        from app.lib.timeutil import utcnow
+
+        exp = _create_experiment(client, auth_headers)
+
+        from tests.conftest import TestSession
+        db = TestSession()
+        try:
             from app.models.user import User
             user = db.query(User).filter(User.email == "test@alethra.io").first()
             assert user is not None, "test user should exist"
@@ -603,15 +598,11 @@ class TestRunningStateCancel:
                     "signal_parameters": {"short_window": 5, "long_window": 20},
                 },
                 status=TrainingJobStatus.pending,
+                cancelled_at=utcnow(),
             )
             db.add(job)
-            db.flush()
+            db.commit()
 
-            # Pre-set cancellation flag
-            cancel_running_job(job.id)
-            assert _cancellation_flags.get(job.id) is True
-
-            # Run the sweep — should detect the flag before the first backtest
             with patch("app.services.training.run_backtest") as mock_bt:
                 mock_bt.return_value = {
                     "run_status": "completed",
@@ -623,12 +614,8 @@ class TestRunningStateCancel:
             assert result_job.status == TrainingJobStatus.cancelled
             assert result_job.cancelled_at is not None
             assert "cancelled" in (result_job.error_details or "").lower()
-            # The flag is checked BEFORE each backtest call, so 0 backtests ran
             mock_bt.assert_not_called()
-            # Flag should have been cleaned up
-            assert job.id not in _cancellation_flags
 
             db.rollback()
         finally:
             db.close()
-            _cancellation_flags.clear()

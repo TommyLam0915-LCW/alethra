@@ -272,6 +272,13 @@ def reserve_quota(
         raise ValueError("amount must be a positive integer")
 
     entitlement = get_entitlement(db, user_id)
+    # Entitlement is re-checked at the moment of use, not only at login or
+    # job creation: an expired or disabled pilot must not reserve new work.
+    if entitlement is not None and not check_entitlement_active(entitlement):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Entitlement expired or disabled.",
+        )
     limit = _get_limit(entitlement, quota_type)
 
     if limit is not None:
@@ -287,6 +294,22 @@ def reserve_quota(
             .with_for_update()
             .first()
         )
+        if counter is None:
+            # Nothing to lock yet, so two first-time reservations can both read
+            # used=reserved=0 and overspend the last unit. Serialize them on the
+            # user row (the same row the idempotent creation path locks) and
+            # re-read once we hold it.
+            db.query(User).filter(User.id == user_id).with_for_update().first()
+            counter = (
+                db.query(QuotaCounter)
+                .filter(
+                    QuotaCounter.user_id == user_id,
+                    QuotaCounter.quota_type == quota_type,
+                    QuotaCounter.period == "lifetime",
+                )
+                .with_for_update()
+                .first()
+            )
         used = counter.used if counter else 0
 
         # Lock all existing reservations for this user/quota_type to prevent

@@ -252,6 +252,54 @@ class TestQuotaStatus:
             get_quota_status(db, uuid4(), "nonexistent")
 
 
+class TestUsageQuotaMatchesEnforcement:
+    """The read-only /usage/quota view must report what reserve_quota enforces."""
+
+    def _user_with_limit(self, db, limit, expired=False):
+        from app.models.user import User
+
+        user = User(
+            id=uuid4(),
+            email=f"usage-{uuid4()}@example.com",
+            display_name="Test",
+            password_hash="x",
+        )
+        db.add(user)
+        db.flush()
+        db.add(
+            PilotEntitlement(
+                user_id=user.id,
+                pilot_access=True,
+                ai_usage_limit=limit,
+                expiry_date=(utcnow() - timedelta(days=1)) if expired else None,
+            )
+        )
+        db.flush()
+        return user
+
+    def test_remaining_subtracts_in_flight_reservation(self, db):
+        from app.auth.entitlements import reserve_quota
+        from app.services.billing import check_quota
+
+        user = self._user_with_limit(db, 2)
+        reserve_quota(db, user.id, "ai_usage")
+
+        status = check_quota(db, user.id, "ai_usage_limit")
+        assert status["used"] == 0
+        assert status["reserved"] == 1
+        assert status["remaining"] == 1
+        assert status["allowed"] is True
+        assert status["entitlement_active"] is True
+
+    def test_expired_entitlement_is_not_allowed(self, db):
+        from app.services.billing import check_quota
+
+        user = self._user_with_limit(db, 2, expired=True)
+        status = check_quota(db, user.id, "ai_usage_limit")
+        assert status["entitlement_active"] is False
+        assert status["allowed"] is False
+
+
 class TestAtomicConsume:
     def test_consume_multiple_times(self, db):
         user_id = uuid4()

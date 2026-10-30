@@ -39,6 +39,7 @@ from app.models.personal_dataset import (
 from app.models.training import TrainingJob, TrainingJobStatus
 from app.models.user import User
 from app.services import emit_event
+from app.services.job_control import stop_if_cancelled
 from app.services.personal_dataset import LABEL_DEFINITION, _canonical_checksum
 from app.services.personalization import get_active_consent, _scope_strategy_ids
 
@@ -167,13 +168,10 @@ def execute_personal_training(db: Session, job_id: uuid.UUID) -> TrainingJob:
     if job.status not in (TrainingJobStatus.pending, TrainingJobStatus.running):
         raise ValueError(f"Job must be pending or running, got {job.status}")
 
-    # The cancel endpoint marks a running job with cancelled_at but leaves the
-    # status running for the sweep loop to notice. This trainer has no sweep
-    # loop, so it must notice here: do not train, do not consume quota.
-    if job.cancelled_at is not None:
-        job.status = TrainingJobStatus.cancelled
-        job.completed_at = utcnow()
-        db.flush()
+    # The cancel endpoint runs in the API process; read cancelled_at from the
+    # database so a cancellation committed after this job row was loaded is
+    # still seen. Do not train and do not consume quota.
+    if stop_if_cancelled(db, job):
         return job
 
     job.status = TrainingJobStatus.running

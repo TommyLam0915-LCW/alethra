@@ -294,6 +294,14 @@ class TestPredictionSurfacesDataNature:
             def get_data_quality(self, instrument_id):
                 return {"data_nature": "synthetic", "adjustment": "not_applicable"}
 
+            def get_status(self):
+                return {
+                    "provider_id": self.provider_id,
+                    "provider_name": self.provider_name,
+                    "feed_mode": self.feed_mode,
+                    "available": True,
+                }
+
         monkeypatch.setattr(
             "app.services.ml_training.get_data_provider", lambda: _FakeProvider()
         )

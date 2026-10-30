@@ -12,7 +12,7 @@ another owner's data.
 import uuid
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -61,6 +61,13 @@ from app.services.personal_dataset import (
     features_as_of,
     preview_snapshot,
     snapshot_payload,
+)
+from app.services.job_control import (
+    IdempotencyConflict,
+    find_idempotent_job,
+    lock_user_for_idempotency,
+    request_fingerprint,
+    stamp_idempotency,
 )
 from app.services.personal_journey import JourneyRefused, build_journey
 from app.services.personal_training import (
@@ -336,6 +343,7 @@ def get_dataset_snapshot(
 @router.post("/training-jobs", status_code=202)
 def start_personal_training(
     body: TrainingJobRequest,
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
     current_user: User = Depends(get_current_user),
     _scope_check=Depends(check_api_key_scope(*WRITE_SCOPES)),
     db: Session = Depends(get_db),
@@ -353,6 +361,35 @@ def start_personal_training(
     except PersonalTrainingRefused as exc:
         raise _refuse(exc)
 
+    fingerprint = request_fingerprint(
+        {"snapshot_id": str(body.snapshot_id), "model_type": body.model_type}
+    )
+    if idempotency_key:
+        if not 8 <= len(idempotency_key) <= 128:
+            raise HTTPException(400, "Idempotency-Key must be 8-128 characters")
+        lock_user_for_idempotency(db, current_user.id)
+        try:
+            existing = find_idempotent_job(
+                db,
+                current_user.id,
+                idempotency_key,
+                fingerprint,
+                training_type=PERSONAL_TRAINING_TYPE,
+            )
+        except IdempotencyConflict as exc:
+            db.rollback()
+            raise HTTPException(409, {"error": "idempotency_conflict", "message": str(exc)})
+        if existing is not None:
+            db.commit()
+            return {
+                "job_id": str(existing.id),
+                "status": existing.status.value,
+                "training_type": PERSONAL_TRAINING_TYPE,
+                "snapshot_id": str(body.snapshot_id),
+                "poll_url": f"/api/v1/training/jobs/{existing.id}",
+                "message": "個人決策模型訓練工作已排隊。",
+            }
+
     reservation = reserve_quota(db, current_user.id, "ai_usage")
     try:
         job = create_personal_training_job(
@@ -365,6 +402,9 @@ def start_personal_training(
     except PersonalTrainingRefused as exc:
         db.rollback()
         raise _refuse(exc)
+
+    if idempotency_key:
+        stamp_idempotency(job, idempotency_key, fingerprint)
 
     db.commit()
     return {

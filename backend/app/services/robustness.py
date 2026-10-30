@@ -529,6 +529,9 @@ def build_plan(
     unlimited = bool(quota.get("unlimited"))
     remaining = quota.get("remaining")
     sufficient = unlimited or (remaining is not None and remaining >= estimated)
+    # An expired or disabled entitlement cannot start the study even when units
+    # remain, so the dry run must not report it as startable.
+    entitlement_active = bool(quota.get("entitlement_active", True))
 
     disclosures = _disclosures(kind, calendar, merged)
     requested = (spec.get("start_date"), spec.get("end_date"))
@@ -564,7 +567,7 @@ def build_plan(
         "selection_rule": SELECTION_RULES[kind],
         "disclosures": disclosures,
         "quota": {**quota, "required": estimated, "sufficient": sufficient},
-        "ready": sufficient,
+        "ready": sufficient and entitlement_active,
     }
 
 

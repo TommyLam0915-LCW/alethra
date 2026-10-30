@@ -460,6 +460,84 @@ class TestVersionComparison:
         assert cash_diff["old_value"] == 10000
         assert cash_diff["new_value"] == 50000
 
+    def _latest_version_id(self, client, auth_headers, eid, number):
+        versions = client.get(
+            f"/api/v1/experiments/{eid}/versions", headers=auth_headers
+        ).json()
+        return next(v["id"] for v in versions if v["version_number"] == number)
+
+    def test_compare_reports_risk_and_rule_changes(self, client, auth_headers):
+        """A revision that only changes risk/exit rules must still show a diff.
+
+        These fields are outside the original comparison list, so a stop-loss
+        change used to compare as "no difference" between two different rules.
+        """
+        exp = _make_experiment(client, auth_headers)
+        eid = exp["id"]
+        v1 = exp["current_version_id"]
+
+        modified_spec = {
+            **SPEC,
+            "risk_parameters": {"stop_loss_pct": 0.05},
+            "exit_rule": {"type": "stop_or_target", "target_pct": 0.1},
+        }
+        resp = client.put(
+            f"/api/v1/experiments/{eid}",
+            headers=auth_headers,
+            json={"strategy_spec": modified_spec, "change_reason": "Add risk exits"},
+        )
+        assert resp.status_code in (200, 201), resp.text
+
+        v2 = self._latest_version_id(client, auth_headers, eid, 2)
+        data = client.get(
+            f"/api/v1/versions/compare?v1={v1}&v2={v2}", headers=auth_headers
+        ).json()
+
+        diff_fields = {d["field"] for d in data["diffs"]}
+        assert "risk_parameters" in diff_fields
+        assert "exit_rule" in diff_fields
+
+    def test_compare_does_not_report_missing_defaults_as_changes(self, client, auth_headers):
+        """A version stored before a field existed is not a research change."""
+        import uuid as _uuid
+
+        from app.models.experiment_version import ExperimentVersion
+        from app.models.user import User
+        from tests.conftest import TestSession
+
+        exp = _make_experiment(client, auth_headers)
+        eid = exp["id"]
+        v1 = exp["current_version_id"]
+
+        legacy_spec = {
+            key: value
+            for key, value in SPEC.items()
+            if key not in (
+                "frequency", "entry_rule", "exit_rule", "sizing_rule",
+                "risk_parameters", "execution_timing",
+            )
+        }
+        db = TestSession()
+        try:
+            owner = db.query(User).filter(User.email == "test@alethra.io").one()
+            legacy = ExperimentVersion(
+                experiment_id=_uuid.UUID(eid),
+                version_number=2,
+                strategy_spec=legacy_spec,
+                created_by=owner.id,
+            )
+            db.add(legacy)
+            db.commit()
+            legacy_id = str(legacy.id)
+        finally:
+            db.close()
+
+        data = client.get(
+            f"/api/v1/versions/compare?v1={v1}&v2={legacy_id}",
+            headers=auth_headers,
+        ).json()
+        assert data["diffs"] == []
+
 
 class TestExportEndpoint:
     def test_export_contains_all_sections(self, client, auth_headers):

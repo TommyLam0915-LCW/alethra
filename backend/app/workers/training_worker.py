@@ -243,6 +243,13 @@ def _release_ml_quota(db, job: TrainingJob) -> None:
     try:
         release_reservation(db, reservation_id)
         db.commit()
+    except ValueError as exc:
+        # Already settled or released by another path (e.g. the cancel
+        # endpoint returning a queued unit): not a failure.
+        db.rollback()
+        logger.info(
+            f"Quota reservation {reservation_id} for job {job.id} already final: {exc}"
+        )
     except Exception as exc:
         db.rollback()
         logger.error(
@@ -260,6 +267,16 @@ def run_claimed_job(db, job_id) -> None:
     job = db.query(TrainingJob).filter(TrainingJob.id == job_id).first()
     if not job:
         logger.error(f"Job {job_id} not found")
+        return
+
+    if job.status not in (TrainingJobStatus.pending, TrainingJobStatus.running):
+        # Another process already settled this job — for example the cancel
+        # endpoint decided "pending" from a read taken before our claim
+        # committed "running", then wrote "cancelled" over it. Running it
+        # would raise and turn the cancellation into a failure, so stop here.
+        logger.info(f"Job {job_id} already {job.status.value}, not executing")
+        if job.status == TrainingJobStatus.cancelled and _is_quota_tracked_ml_job(job):
+            _release_ml_quota(db, job)
         return
 
     logger.info(f"Executing job {job_id} (experiment {job.experiment_id})")

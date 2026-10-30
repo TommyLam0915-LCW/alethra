@@ -3,7 +3,7 @@
 import uuid
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -20,9 +20,19 @@ from app.auth.api_keys import check_api_key_scope
 from app.auth.rate_limit import api_key_rate_limit_dependency
 from app.models.training import TrainingJob
 from app.models.user import User
+from app.services import ml_training as ml_training_service
 from app.services.ml_training import (
     create_ml_training_job,
     get_recent_bars_for_prediction,
+    prepare_training_data,
+    resolve_training_window,
+)
+from app.services.job_control import (
+    IdempotencyConflict,
+    find_idempotent_job,
+    lock_user_for_idempotency,
+    request_fingerprint,
+    stamp_idempotency,
 )
 from app.ml.trainer import list_models, load_model, delete_model
 from app.ml.predictor import predict, predict_latest
@@ -52,6 +62,17 @@ def _caller_via(request: Request) -> str:
     return "jwt" if scopes is None else "api_key"
 
 
+def _training_job_response(job, model_type: str, instrument_id: str) -> dict:
+    return {
+        "job_id": str(job.id),
+        "status": job.status.value,
+        "model_type": model_type,
+        "instrument_id": instrument_id,
+        "poll_url": f"/api/v1/training/jobs/{job.id}",
+        "message": "Training job queued for the durable training worker.",
+    }
+
+
 @router.post("/train")
 def start_ml_training(
     instrument_id: str,
@@ -59,6 +80,7 @@ def start_ml_training(
     experiment_id: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
     current_user: User = Depends(require_entitlement(quota_type="ai_usage")),
     _scope_check=Depends(check_api_key_scope("write", "training")),
     db: Session = Depends(get_db),
@@ -95,6 +117,69 @@ def start_ml_training(
         if not experiment:
             raise HTTPException(404, "Experiment not found")
 
+    fingerprint = request_fingerprint({
+        "instrument_id": instrument_id,
+        "model_type": model_type,
+        "experiment_id": experiment_id,
+        "start_date": start_date,
+        "end_date": end_date,
+    })
+
+    if idempotency_key:
+        if not 8 <= len(idempotency_key) <= 128:
+            raise HTTPException(400, "Idempotency-Key must be 8-128 characters")
+        # Serialize same-key retries for this user, then reuse the original job
+        # instead of queueing a second one and reserving quota twice.
+        lock_user_for_idempotency(db, current_user.id)
+        try:
+            existing = find_idempotent_job(
+                db,
+                current_user.id,
+                idempotency_key,
+                fingerprint,
+                training_type="ml_model",
+            )
+        except IdempotencyConflict as exc:
+            db.rollback()
+            raise HTTPException(409, {"error": "idempotency_conflict", "message": str(exc)})
+        if existing is not None:
+            db.commit()
+            return _training_job_response(existing, model_type, instrument_id)
+
+    # Data preparation can persist provider-sourced bars, and store_bars()
+    # commits — which would release the lock taken above mid-critical-section.
+    # Prepare first, then re-acquire the lock before the check-and-insert.
+    # Resolve the provider through the service module so the same seam is
+    # exercised by callers and tests alike.
+    provider = ml_training_service.get_data_provider()
+    start_date, end_date = resolve_training_window(
+        db, provider, instrument_id, start_date, end_date
+    )
+    try:
+        prepared = prepare_training_data(
+            db, provider, instrument_id, start_date, end_date
+        )
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(400, str(e))
+
+    if idempotency_key:
+        lock_user_for_idempotency(db, current_user.id)
+        try:
+            existing = find_idempotent_job(
+                db,
+                current_user.id,
+                idempotency_key,
+                fingerprint,
+                training_type="ml_model",
+            )
+        except IdempotencyConflict as exc:
+            db.rollback()
+            raise HTTPException(409, {"error": "idempotency_conflict", "message": str(exc)})
+        if existing is not None:
+            db.commit()
+            return _training_job_response(existing, model_type, instrument_id)
+
     reservation = reserve_quota(db, current_user.id, "ai_usage")
 
     try:
@@ -107,6 +192,7 @@ def start_ml_training(
             start_date=start_date,
             end_date=end_date,
             quota_reservation_id=reservation.id,
+            prepared=prepared,
         )
     except ValueError as e:
         # Reservation and job were flushed but never committed — rolling back
@@ -114,16 +200,12 @@ def start_ml_training(
         db.rollback()
         raise HTTPException(400, str(e))
 
+    if idempotency_key:
+        stamp_idempotency(job, idempotency_key, fingerprint)
+
     db.commit()
 
-    return {
-        "job_id": str(job.id),
-        "status": job.status.value,
-        "model_type": model_type,
-        "instrument_id": instrument_id,
-        "poll_url": f"/api/v1/training/jobs/{job.id}",
-        "message": "Training job queued for the durable training worker.",
-    }
+    return _training_job_response(job, model_type, instrument_id)
 
 
 @router.get("/entitlement")

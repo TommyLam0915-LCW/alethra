@@ -210,6 +210,59 @@ class TestReleaseReservation:
             release_reservation(db, fake_id)
 
 
+class TestReserveChecksEntitlementAtUse:
+    """An expired or disabled entitlement cannot reserve new work."""
+
+    def _user(self, db, **entitlement_kwargs):
+        from app.models.user import User
+        from app.lib.timeutil import utcnow
+        from datetime import timedelta
+
+        user = User(
+            id=uuid4(),
+            email=f"entitlement-{uuid4()}@example.com",
+            display_name="Test",
+            password_hash="x",
+        )
+        db.add(user)
+        db.flush()
+        kwargs = {"ai_usage_limit": 10}
+        kwargs.update(entitlement_kwargs)
+        db.add(PilotEntitlement(user_id=user.id, **kwargs))
+        db.flush()
+        return user
+
+    def test_expired_entitlement_cannot_reserve(self, db):
+        from app.lib.timeutil import utcnow
+        from datetime import timedelta
+
+        user = self._user(
+            db,
+            pilot_access=True,
+            expiry_date=utcnow() - timedelta(days=1),
+        )
+        with pytest.raises(HTTPException) as exc:
+            reserve_quota(db, user.id, "ai_usage")
+        assert exc.value.status_code == 403
+        assert (
+            db.query(QuotaReservation)
+            .filter(QuotaReservation.user_id == user.id)
+            .count()
+            == 0
+        )
+
+    def test_disabled_entitlement_cannot_reserve(self, db):
+        user = self._user(db, pilot_access=False)
+        with pytest.raises(HTTPException) as exc:
+            reserve_quota(db, user.id, "ai_usage")
+        assert exc.value.status_code == 403
+
+    def test_active_entitlement_still_reserves(self, db):
+        user = self._user(db, pilot_access=True)
+        reservation = reserve_quota(db, user.id, "ai_usage")
+        assert reservation.status == "reserved"
+
+
 class TestReservedTracking:
     def test_get_reserved_sum(self, db):
         user_id = uuid4()

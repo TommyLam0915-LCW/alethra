@@ -12,15 +12,11 @@ from app.models.experiment import Experiment
 from app.models.experiment_version import ExperimentVersion
 from app.engine.backtest import run_backtest
 from app.lib.timeutil import utcnow
+from app.services.job_control import stop_if_cancelled
 
 
 # Maximum number of grid combinations allowed per training job.
 MAX_GRID_SIZE = 1000
-
-# In-memory cancellation flags, checked by the sweep loop between iterations.
-# The cancel endpoint sets a flag here; the sweep loop reads it.
-# This avoids relying on DB session visibility across threads.
-_cancellation_flags: Dict[uuid.UUID, bool] = {}
 
 
 def _expand_grid(parameter_grid: Dict[str, List[Any]]) -> List[Dict[str, Any]]:
@@ -120,14 +116,10 @@ def run_parameter_sweep(
         results: List[Dict[str, Any]] = []
 
         for combo in combinations:
-            # ── Check cancellation flag between iterations ──────────
-            if _cancellation_flags.get(job_id):
-                job.status = TrainingJobStatus.cancelled
-                job.cancelled_at = utcnow()
-                job.completed_at = utcnow()
-                job.error_details = "Job cancelled by user"
-                _cancellation_flags.pop(job_id, None)
-                db.flush()
+            # ── Check cancellation between iterations ───────────────
+            # Cancellation is committed by the API process, so read it from
+            # the database instead of a process-local flag.
+            if stop_if_cancelled(db, job):
                 return job
 
             # Build strategy_spec by overlaying combo parameters onto base
@@ -196,11 +188,3 @@ def run_parameter_sweep(
     return job
 
 
-def cancel_running_job(job_id: uuid.UUID) -> None:
-    """Request cancellation of a running training job.
-
-    Sets an in-memory flag that the sweep loop checks between iterations.
-    The actual status transition to 'cancelled' happens inside the sweep
-    loop when it detects the flag.
-    """
-    _cancellation_flags[job_id] = True

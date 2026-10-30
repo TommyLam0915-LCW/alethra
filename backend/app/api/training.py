@@ -20,7 +20,6 @@ from app.auth.safety import safety_control
 from app.models.kill_switch import KillSwitchScope
 from app.services.training import (
     run_parameter_sweep,
-    cancel_running_job,
     _validate_grid,
     _expand_grid,
     MAX_GRID_SIZE,
@@ -229,9 +228,9 @@ def cancel_training_job(
         return job
 
     if job.status == TrainingJobStatus.running:
-        # Set cancellation flag — the sweep loop checks this between
-        # iterations and will transition the status to cancelled.
-        cancel_running_job(job.id)
+        # The worker runs in another process. It reads cancelled_at from the
+        # database and transitions the job itself, before the next grid
+        # iteration or before training starts.
         job.cancelled_at = utcnow()
         db.commit()
         db.refresh(job)
