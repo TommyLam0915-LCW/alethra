@@ -94,15 +94,15 @@ def resolve_session_portfolio(
     if not portfolios:
         raise LifecycleError(
             "no_linked_portfolio",
-            f"重放會話 {session.id} 沒有連接的模擬帳戶。掛單需要一個帳本去結算，"
-            "請先建立並綁定帳戶，再提交訂單。",
+            f"Replay session {session.id} has no linked paper portfolio. A pending order needs a "
+            "ledger to settle against, so create and bind an account before submitting one.",
         )
     if len(portfolios) > 1:
         raise LifecycleError(
             "ambiguous_portfolio_binding",
-            f"重放會話 {session.id} 綁定了 {len(portfolios)} 個模擬帳戶"
-            f"（{', '.join(sorted(str(p.id) for p in portfolios))}），"
-            "系統不會替你選一個來結算。請保留單一綁定。",
+            f"Replay session {session.id} is bound to {len(portfolios)} paper portfolios "
+            f"({', '.join(sorted(str(p.id) for p in portfolios))}). The system will not choose one "
+            "to settle against; keep a single binding.",
         )
     return portfolios[0]
 
@@ -305,7 +305,7 @@ def execute_due_orders(
                     "status": OrderStatus.pending.value,
                     "executed": False,
                     "blocker": BLOCKER_PORTFOLIO_PAUSED,
-                    "message": "帳戶已暫停，買入掛單保留但未執行。",
+                    "message": "The account is paused, so this buy order stays pending and is not executed.",
                 }
             )
             continue
@@ -440,8 +440,8 @@ def cancel_order(
     if order.status != OrderStatus.pending:
         raise LifecycleError(
             "not_cancellable",
-            f"訂單狀態為 '{order.status.value}'，只有未成交的 pending 掛單可以取消。"
-            "已成交的交易請用一筆反向訂單平倉。",
+            f"The order is '{order.status.value}'; only unfilled pending orders can be cancelled. "
+            "Close an executed position with an opposite order instead.",
         )
 
     stamp = _stamp(now)
@@ -629,8 +629,8 @@ def execution_view(
     if window is None:
         view["blockers"].append(BLOCKER_NO_QUOTE)
         view["waiting"] = {
-            "reason": "綁定的數據集在決策時點之後沒有可用的 bar — 掛單不會被成交，"
-            "會在小結時以過期（expired）結算，而不是悄悄消失。"
+            "reason": "The bound dataset has no bar after the decision basis, so this order cannot "
+            "fill and is settled as expired when the session is reviewed, not silently dropped."
         }
     else:
         view["next_window"] = {

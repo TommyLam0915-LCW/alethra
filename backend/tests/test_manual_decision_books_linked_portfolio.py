@@ -431,7 +431,7 @@ class TestSubmissionIsPendingNotExecuted:
         assert resp.status_code == 400, resp.text
         # No market time observed ⇒ no decision clock. Inventing the start date
         # would stamp a decision on a bar the replay then treats as consumed.
-        assert "advance" in resp.json()["detail"] or "先推進重放" in resp.json()["detail"]
+        assert "Advance the replay" in resp.json()["detail"]
 
         assert db_counts(orders=PaperOrder, fills=PaperFill, journal=DecisionRecord) == {
             "orders": 0, "fills": 0, "journal": 0
@@ -889,7 +889,7 @@ class TestCancelExpiryAndBlockers:
         assert body["order"]["decided_on_cutoff"] == B5
         assert body["execution"]["blockers"] == ["no_quote_on_window"]
         assert "next_window" not in body["execution"]
-        assert "過期" in body["execution"]["waiting"]["reason"]
+        assert "expired" in body["execution"]["waiting"]["reason"]
 
         exhausted = _advance(client, auth_headers, session_id)
         assert exhausted.status_code == 400, exhausted.text
@@ -986,7 +986,9 @@ class TestExecutionRefusalsAreAllOrNothing:
         order_id = resp.json()["order"]["order_id"]
         assert resp.json()["order"]["status"] == "pending"
         decision = replay_decisions(client, auth_headers, session_id)[-1]
-        assert decision["warnings"] and any("估算" in w for w in decision["warnings"])
+        assert decision["warnings"] and any(
+            "Estimated from the observed close" in w for w in decision["warnings"]
+        )
         # The estimate is against the observed close, and it is not a rejection.
         assert decision["decision_detail"]["book"]["paper_cash"] == pytest.approx(
             INITIAL_CASH, abs=1e-6
@@ -1311,7 +1313,7 @@ class TestBindingAndProvenance:
 
         resp = _submit(client, auth_headers, session_id, action="buy", quantity=20)
         assert resp.status_code == 400, resp.text
-        assert "沒有連接的模擬帳戶" in resp.json()["detail"]
+        assert "has no linked paper portfolio" in resp.json()["detail"]
 
         assert db_counts(orders=PaperOrder, fills=PaperFill, journal=DecisionRecord) == {
             "orders": 0, "fills": 0, "journal": 0
@@ -1336,7 +1338,7 @@ class TestBindingAndProvenance:
 
         resp = _submit(client, auth_headers, session_id, action="buy", quantity=20)
         assert resp.status_code == 400, resp.text
-        assert "不會替你選一個" in resp.json()["detail"]
+        assert "will not choose one to settle against" in resp.json()["detail"]
 
         assert db_counts(orders=PaperOrder, fills=PaperFill, journal=DecisionRecord) == {
             "orders": 0, "fills": 0, "journal": 0
@@ -1408,7 +1410,7 @@ class TestBindingAndProvenance:
 
         resp = _submit(client, auth_headers, ctx["session_id"], action="buy", quantity=20)
         assert resp.status_code == 400, resp.text
-        assert "不能再提交掛單" in resp.json()["detail"]
+        assert "cannot accept new orders" in resp.json()["detail"]
         assert db_counts(orders=PaperOrder, fills=PaperFill, journal=DecisionRecord) == {
             "orders": 0, "fills": 0, "journal": 0
         }

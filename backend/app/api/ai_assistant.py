@@ -63,10 +63,11 @@ MAX_CONTEXT_EXPERIMENTS = 10
 MAX_HISTORY_TURNS = 12
 
 SAFETY_PREAMBLE = (
-    "你是 Alethra 的個人 AI 研究助手。你只提供研究與教育性質的分析。"
-    "你絕不授權、執行或建議任何交易授權；任何交易決定都必須由用戶本人"
-    "經明確的意圖授權流程完成。回覆時引用用戶提供的脈絡（草稿、記憶、"
-    "工具符號、實驗），不得虛構市場數據。"
+    "You are Alethra's personal AI research assistant. You provide research and "
+    "educational analysis only. You never authorise, execute, or recommend any trade; "
+    "every trading decision must be made by the user through the explicit intent "
+    "authorisation flow. Cite the context the user supplies (drafts, memories, "
+    "instrument symbols, experiments) and never invent market data."
 )
 
 
@@ -134,7 +135,10 @@ def _message_dict(message: AIMessage) -> Dict[str, Any]:
     }
 
 
-DEFAULT_CONVERSATION_TITLE = "新對話"
+DEFAULT_CONVERSATION_TITLE = "New conversation"
+# Threads stored before the copy was English-first still carry this placeholder;
+# it must keep deriving a readable title from the first user turn.
+LEGACY_PLACEHOLDER_TITLES = {DEFAULT_CONVERSATION_TITLE, "新對話"}
 MAX_DERIVED_TITLE_LENGTH = 40
 
 
@@ -145,7 +149,7 @@ def _display_title(conversation: AIConversation) -> str:
     derive a readable title from the first user turn so the picker is usable
     without rewriting stored data.
     """
-    if conversation.title.strip() not in ("", DEFAULT_CONVERSATION_TITLE):
+    if conversation.title.strip() not in ("", *LEGACY_PLACEHOLDER_TITLES):
         return conversation.title
     for message in conversation.messages:
         text = " ".join(message.content.split())
@@ -214,7 +218,7 @@ def _validate_context_ownership(db: Session, ctx: ConversationContextSchema, use
                 detail={
                     "error": "memory_privacy_scope",
                     "ids": [str(m.id) for m in not_approved],
-                    "message": "僅 privacy_scope=approved_for_personal_ai 的記憶可用於個人 AI 脈絡",
+                    "message": "Only memories with privacy_scope=approved_for_personal_ai can be used as personal AI context",
                 },
             )
 
@@ -262,11 +266,11 @@ def _build_system_prompt(db: Session, conversation: AIConversation) -> str:
             .all()
         )
         if drafts:
-            lines = ["用戶選定的研究草稿："]
+            lines = ["Research drafts selected by the user:"]
             for d in drafts:
                 lines.append(
-                    f"- [draft:{d.id}] 標題：{d.title}｜狀態：{d.status.value}｜"
-                    f"假設：{(d.hypothesis or '未填')[:300]}"
+                    f"- [draft:{d.id}] title: {d.title} | status: {d.status.value} | "
+                    f"hypothesis: {(d.hypothesis or 'not filled')[:300]}"
                 )
             parts.append("\n".join(lines))
 
@@ -282,14 +286,14 @@ def _build_system_prompt(db: Session, conversation: AIConversation) -> str:
             .all()
         )
         if memories:
-            lines = ["用戶選定的個人研究記憶："]
+            lines = ["Personal research memories selected by the user:"]
             for m in memories:
                 lines.append(f"- [memory:{m.id}] {m.content[:400]}")
             parts.append("\n".join(lines))
 
     symbols = ctx.get("instrument_symbols") or []
     if symbols:
-        lines = ["用戶關注的工具："]
+        lines = ["Instruments the user follows:"]
         for s in symbols:
             instrument = get_instrument_by_id(str(s))
             if instrument is not None:
@@ -312,15 +316,16 @@ def _build_system_prompt(db: Session, conversation: AIConversation) -> str:
             .all()
         )
         if experiments:
-            lines = ["用戶選定的實驗："]
+            lines = ["Experiments selected by the user:"]
             for e in experiments:
                 lines.append(f"- [experiment:{e.id}] {getattr(e, 'name', '')}")
             parts.append("\n".join(lines))
 
     parts.append(
-        "回覆規則：簡潔、結構化、可引用上述 [draft:...] [memory:...] [symbol:...] "
-        "[experiment:...] 標籤。若需提議研究草稿，明確標示為「提議（待人工審核）」，"
-        "並說明這只是研究建議，不構成交易授權。"
+        "Reply rules: concise and structured; cite the [draft:...] [memory:...] "
+        "[symbol:...] [experiment:...] tags above. If you propose a research draft, "
+        "label it explicitly as \"proposal (awaiting human review)\" and state that it "
+        "is a research suggestion only, not a trading authorisation."
     )
     return "\n\n".join(parts)
 
@@ -345,7 +350,7 @@ def ai_status(
         "base_url": provider.base_url if provider.name == "openai_compatible" else None,
         "timeout_seconds": settings.ai_timeout_seconds,
         "max_output_tokens": settings.ai_max_output_tokens,
-        "advisory_notice": "AI 回覆僅供研究參考，不構成交易授權",
+        "advisory_notice": "AI replies are for research reference only and do not constitute a trading authorisation",
     }
 
 
@@ -405,7 +410,7 @@ def create_conversation(
     _validate_context_ownership(db, payload.context, current_user)
     conversation = AIConversation(
         user_id=current_user.id,
-        title=(payload.title or "新對話").strip() or "新對話",
+        title=(payload.title or DEFAULT_CONVERSATION_TITLE).strip() or DEFAULT_CONVERSATION_TITLE,
         context=payload.context.model_dump(mode="json"),
     )
     db.add(conversation)
@@ -508,7 +513,7 @@ def send_message(
         assistant = AIMessage(
             conversation_id=conversation.id,
             role="assistant",
-            content="（AI 供應商呼叫失敗，本次不計用量）",
+            content="(The AI provider call failed; this turn was not billed.)",
             status="error",
             error_detail=exc.message,
         )
@@ -626,5 +631,5 @@ def create_draft_from_conversation(
     from app.api.schemas import ResearchDraftResponse
     data = ResearchDraftResponse.model_validate(draft).model_dump(mode="json")
     data["source_conversation_id"] = str(conversation.id)
-    data["review_notice"] = "AI 提議草稿待人工審核；接受前不會用於任何執行流程"
+    data["review_notice"] = "AI-proposed draft awaiting human review; it is not used in any execution flow until accepted"
     return data

@@ -685,7 +685,7 @@ class TestConversationTitles:
 
     def test_first_message_titles_conversation(self, client, auth_headers):
         conv = self._create(client, auth_headers)
-        assert conv["title"] == "新對話"
+        assert conv["title"] == "New conversation"
 
         assert self._send(
             client, auth_headers, conv["id"], "  AAPL 近期動能如何？比較 20 與 60 日均線  "

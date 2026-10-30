@@ -189,7 +189,7 @@ def evaluate_risk(
         return RiskDecision(True, None, note, facts)
 
     if side not in ("BUY", "SELL"):
-        return refuse(CODE_UNSUPPORTED_SIDE, f"不支援的委託方向：{inputs.side!r}。")
+        return refuse(CODE_UNSUPPORTED_SIDE, f"Unsupported order side: {inputs.side!r}.")
 
     if inputs.portfolio_status in ("retired", "completed"):
         code = (
@@ -199,35 +199,41 @@ def evaluate_risk(
         )
         return refuse(
             code,
-            f"帳戶狀態為 '{inputs.portfolio_status}'，不接受任何新委託。",
+            f"This portfolio is '{inputs.portfolio_status}' and accepts no new orders.",
         )
 
     if side == "SELL":
         if float(inputs.quantity) - float(inputs.held_quantity) > 1e-9:
             return refuse(
                 CODE_QUANTITY_EXCEEDS_POSITION,
-                f"帳戶僅持有 {inputs.held_quantity:g} 股，不能賣出 {inputs.quantity:g} 股。",
+                f"The portfolio holds {inputs.held_quantity:g} shares; it cannot sell "
+                f"{inputs.quantity:g}.",
             )
-        return allow("平倉不受進場暫停、允許清單、每日次數與持倉上限限制。")
+        return allow(
+            "Exits are exempt from the entry pause, the allowlist, the daily entry "
+            "budget and the position cap."
+        )
 
     if inputs.portfolio_status == "paused":
         return refuse(
             CODE_PORTFOLIO_PAUSED,
-            "帳戶已暫停，不接受新的進場；平倉不受限制。請恢復帳戶後再提交。",
+            "This portfolio is paused and accepts no new entries; exits are unaffected. "
+            "Resume the portfolio and submit again.",
         )
 
     allowed = _effective_allowed(policy, lane_allowed_instruments)
     if allowed is not None and inputs.asset_id not in allowed:
         return refuse(
             CODE_INSTRUMENT_NOT_ALLOWED,
-            f"{inputs.asset_id} 不在目前風控允許的標的清單內，未建立委託。",
+            f"{inputs.asset_id} is not on the risk allowlist, so no order was created.",
         )
 
     if int(inputs.entries_on_date) >= policy.max_daily_entries:
         return refuse(
             CODE_DAILY_ENTRY_LIMIT,
-            f"{inputs.decision_date or '當日'} 的進場次數已達上限 "
-            f"{policy.max_daily_entries} 次；平倉與取消不受此限。",
+            f"The entry limit of {policy.max_daily_entries} for "
+            f"{inputs.decision_date or 'this trading day'} has been reached; exits and "
+            "cancellations are unaffected.",
         )
 
     # Below 100% the cap can bind, and binding it needs a valuation. At 100% a
@@ -237,7 +243,8 @@ def evaluate_risk(
         if inputs.price is None or inputs.open_positions_value is None:
             return refuse(
                 CODE_RISK_PRICE_UNAVAILABLE,
-                "無法取得決策時點的價格來計算持倉上限，因此不建立新的進場委託。",
+                "No price was available at decision time, so the position cap could not "
+                "be computed and no new entry order was created.",
             )
         order_value = float(inputs.quantity) * float(inputs.price)
         book_value = float(inputs.portfolio_cash) + float(inputs.open_positions_value)
@@ -248,11 +255,14 @@ def evaluate_risk(
         if order_value > policy.max_position_pct * book_value + 1e-9:
             return refuse(
                 CODE_POSITION_LIMIT,
-                f"此筆買入約 {order_value:,.2f}，會使單一持倉佔組合價值 "
-                f"{ratio:.2%}，超過上限 {policy.max_position_pct * 100:g}%。",
+                f"This buy of about {order_value:,.2f} would put a single position at "
+                f"{ratio:.2%} of portfolio value, above the "
+                f"{policy.max_position_pct * 100:g}% cap.",
             )
 
-    return allow("通過進場檢查；成交時仍會按當時現金與持股重新核定。")
+    return allow(
+        "Entry checks passed; cash and holdings are re-checked at fill time."
+    )
 
 
 def count_entries(

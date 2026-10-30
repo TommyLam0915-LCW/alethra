@@ -60,12 +60,13 @@ MAX_SENSITIVITY_PARAMS = 2
 MAX_WALK_FORWARD_CANDIDATES = 3
 
 SELECTION_RULES = {
-    "cost_scenarios": "不設選擇規則：列出全部成本情境，不以單一情境代表整體。",
-    "period_slices": "不設選擇規則：列出全部期間分段，不以最佳分段代表整體。",
-    "parameter_sensitivity": "不設選擇規則：列出全部單因子變動，不以最佳參數代表整體。",
+    "cost_scenarios": "No selection rule: every cost scenario is listed, and no single scenario stands in for the whole.",
+    "period_slices": "No selection rule: every period slice is listed, and the best slice does not stand in for the whole.",
+    "parameter_sensitivity": "No selection rule: every one-factor change is listed, and the best parameter does not stand in for the whole.",
     "walk_forward": (
-        "每折只在訓練期以總報酬最高者選參數（同分取最接近原設定者），"
-        "選定後才在之後的測試期量測一次；不會以測試期結果回頭挑選參數。"
+        "Each fold selects parameters on the training window by highest total return "
+        "(ties go to the setting closest to the original), then measures the selected "
+        "setting once on the following test window; test results are never used to pick parameters."
     ),
 }
 
@@ -77,7 +78,7 @@ class RobustnessRefused(Exception):
         if isinstance(reasons, str):
             reasons = [reasons]
         self.reasons = [r for r in reasons if r]
-        super().__init__("；".join(self.reasons))
+        super().__init__("; ".join(self.reasons))
 
 
 class QuotaExhausted(Exception):
@@ -98,7 +99,7 @@ def _calendar(db: Session, spec: Dict[str, Any]) -> Dict[str, Any]:
     asset_ids = list(spec.get("asset_ids") or [])
     start, end = spec.get("start_date"), spec.get("end_date")
     if not asset_ids or not start or not end:
-        raise RobustnessRefused("版本缺少資產或期間，無法建立研究計劃。")
+        raise RobustnessRefused("The version has no assets or no period, so a study plan cannot be built.")
 
     storage = MarketDataStorage(db)
     start_d = date.fromisoformat(start)
@@ -112,8 +113,9 @@ def _calendar(db: Session, spec: Dict[str, Any]) -> Dict[str, Any]:
     if have and len(have) != len(asset_ids):
         missing = [aid for aid in asset_ids if not stored[aid]]
         raise RobustnessRefused(
-            f"部分資產只有內建示範資料、部分已有儲存資料（缺少：{'、'.join(missing)}）。"
-            "穩健性研究要求一致的單一資料來源：請先為所有資產擷取資料，或改用同一來源的資產。"
+            f"Some assets only have built-in demo data while others have stored data "
+            f"(missing: {', '.join(missing)}). A robustness study needs one consistent data "
+            "source: fetch data for every asset first, or use assets from the same source."
         )
 
     if have:
@@ -123,8 +125,9 @@ def _calendar(db: Session, spec: Dict[str, Any]) -> Dict[str, Any]:
             providers = {b.provider_id for b in bars if b.provider_id}
             if len(providers) > 1:
                 raise RobustnessRefused(
-                    f"{aid} 在期間內有多個資料供應商（{'、'.join(sorted(providers))}）。"
-                    "穩健性研究需要綁定單一供應商，否則分段會混用兩個價格序列。"
+                    f"{aid} has more than one data provider in this period "
+                    f"({', '.join(sorted(providers))}). A robustness study must bind a single "
+                    "provider, otherwise slices would mix two price series."
                 )
             provider_ids |= providers
             dates.update(b.bar_date.isoformat() for b in bars)
@@ -146,8 +149,9 @@ def _calendar(db: Session, spec: Dict[str, Any]) -> Dict[str, Any]:
     missing = [aid for aid in asset_ids if aid not in demo]
     if missing:
         raise RobustnessRefused(
-            f"無法確定 {'、'.join(missing)} 的交易日曆：未有已儲存資料，亦不是內建示範資產。"
-            "請先擷取資料，再進行期間切分或 walk-forward。"
+            f"The trading calendar for {', '.join(missing)} cannot be determined: there is no "
+            "stored data and it is not a built-in demo asset. Fetch data first, then run "
+            "period slices or walk-forward."
         )
     dates = sorted(
         {
@@ -157,7 +161,7 @@ def _calendar(db: Session, spec: Dict[str, Any]) -> Dict[str, Any]:
         }
     )
     if not dates:
-        raise RobustnessRefused("此期間內沒有任何資料，無法建立研究計劃。")
+        raise RobustnessRefused("There is no data in this period, so a study plan cannot be built.")
     return {
         "source": "builtin_demo",
         "providers": ["builtin_demo"],
@@ -222,9 +226,9 @@ def _cost_cells(spec: Dict[str, Any]) -> List[Dict[str, Any]]:
                     cell_spec,
                     key=f"cost:c={c}:s={s}",
                     label=(
-                        "基準設定（原成本）"
+                        "Baseline settings (original costs)"
                         if is_base
-                        else f"手續費 {c * 100:.2f}% ／ 滑價 {s * 100:.2f}%"
+                        else f"Commission {c * 100:.2f}% / slippage {s * 100:.2f}%"
                     ),
                     role="baseline" if is_base else "scenario",
                     overrides={"commission_rate": c, "slippage_rate": s},
@@ -240,8 +244,9 @@ def _period_cells(spec: Dict[str, Any], dates: List[str], slices: int) -> List[D
     total = len(dates)
     if total < slices * need:
         raise RobustnessRefused(
-            f"交易日共有 {total} 日；切分為 {slices} 段時每段至少需要 {need} 日（此策略的訊號暖機需求），"
-            "所以分段後每段都不能產生訊號。請減少段數或延長期間。"
+            f"The period has {total} trading days; with {slices} slices each slice needs at "
+            f"least {need} days (the signal warm-up this strategy requires), so no slice could "
+            "produce a signal. Use fewer slices or a longer period."
         )
     base = total // slices
     remainder = total % slices
@@ -260,7 +265,7 @@ def _period_cells(spec: Dict[str, Any], dates: List[str], slices: int) -> List[D
             _cell(
                 cell_spec,
                 key=f"slice:{i + 1}",
-                label=f"第 {i + 1} 段：{chunk[0]} → {chunk[-1]}（{len(chunk)} 個交易日）",
+                label=f"Slice {i + 1}: {chunk[0]} → {chunk[-1]} ({len(chunk)} trading days)",
                 role="slice",
                 overrides={"start_date": chunk[0], "end_date": chunk[-1]},
                 start=chunk[0],
@@ -317,20 +322,20 @@ def _sensitivity_cells(spec: Dict[str, Any]) -> List[Dict[str, Any]]:
     template = spec.get("template_type")
     if not PARAM_BOUNDS.get(template):
         raise RobustnessRefused(
-            f"{template} 沒有可調的數值參數，無法進行單因子敏感度分析。"
-            "可改用期間切分、成本情境或 walk-forward。"
+            f"{template} has no numeric parameters to vary, so one-factor sensitivity "
+            "analysis is not available. Use period slices, cost scenarios or walk-forward instead."
         )
     variants = _sensitivity_variants(spec)
     if not variants:
         raise RobustnessRefused(
-            "以現有參數值加減 20% 後沒有合法組合（可能已到引擎允許的上下限），"
-            "無法建立單因子敏感度分析。"
+            "Varying the current parameters by 20% produces no valid combination (they may "
+            "already be at the engine's limits), so one-factor sensitivity analysis cannot be built."
         )
     cells = [
         _cell(
             copy.deepcopy(spec),
             key="param:base",
-            label="基準設定（原參數）",
+            label="Baseline settings (original parameters)",
             role="baseline",
             overrides={},
             start=spec["start_date"],
@@ -344,7 +349,7 @@ def _sensitivity_cells(spec: Dict[str, Any]) -> List[Dict[str, Any]]:
             _cell(
                 cell_spec,
                 key=f"param:{name}={value}",
-                label=f"{name} = {value}（原值 {spec.get('signal_parameters', {}).get(name)}）",
+                label=f"{name} = {value} (original {spec.get('signal_parameters', {}).get(name)})",
                 role="parameter",
                 overrides={name: value},
                 start=spec["start_date"],
@@ -386,8 +391,9 @@ def _walk_forward_cells(
         test = chunk[train_n + gap_bars :]
         if len(train) < need or len(test) < need:
             raise RobustnessRefused(
-                f"第 {i + 1} 折只有 {size} 個交易日：訓練期 {len(train)} 日、測試期 {len(test)} 日，"
-                f"而此策略每段至少需要 {need} 日。請減少折數或延長期間。"
+                f"Fold {i + 1} has only {size} trading days: {len(train)} for training and "
+                f"{len(test)} for testing, while this strategy needs at least {need} days per "
+                "window. Use fewer folds or a longer period."
             )
         windows.append((train, test))
 
@@ -406,7 +412,7 @@ def _walk_forward_cells(
                 _cell(
                     cell_spec,
                     key=f"{fold_id}:cand:{candidate['key']}",
-                    label=f"第 {i + 1} 折 訓練期 {train[0]} → {train[-1]}：{candidate['key']}",
+                    label=f"Fold {i + 1} training {train[0]} → {train[-1]}: {candidate['key']}",
                     role="selection",
                     overrides=candidate["overrides"],
                     start=train[0],
@@ -421,15 +427,15 @@ def _walk_forward_cells(
             _cell(
                 test_spec,
                 key=f"{fold_id}:test",
-                label=f"第 {i + 1} 折 測試期 {test[0]} → {test[-1]}",
+                label=f"Fold {i + 1} test {test[0]} → {test[-1]}",
                 role="measurement",
                 overrides={},
                 start=test[0],
                 end=test[-1],
                 fold=fold_id,
                 notes=(
-                    f"訓練期 {train[0]} → {train[-1]}；中間相隔 {gap_bars} 個交易日，"
-                    "該段不屬於訓練亦不屬於測試。"
+                    f"Training window {train[0]} → {train[-1]}; the {gap_bars} trading days in "
+                    "between belong to neither training nor testing."
                 ),
             )
         )
@@ -453,38 +459,42 @@ def _cells_for_kind(
             float(config["train_ratio"]),
             int(config["gap_bars"]),
         )
-    raise RobustnessRefused(f"不支援的研究種類：{kind}")
+    raise RobustnessRefused(f"Unsupported study kind: {kind}")
 
 
 def _disclosures(
     kind: str, calendar: Dict[str, Any], config: Dict[str, Any]
 ) -> List[str]:
     source_label = (
-        "已儲存市場資料"
+        "Stored market data"
         if calendar["source"] == "stored"
-        else "內建合成示範資料（非真實市場價格）"
+        else "Built-in synthetic demo data (not real market prices)"
     )
     disclosures = [
-        "全部嘗試（包括失敗與跳過）都會列出；不會只以最佳結果代表策略穩健性。",
-        f"資料日曆：{source_label}；{calendar['dates'][0]} → {calendar['dates'][-1]}"
-        f"，共 {len(calendar['dates'])} 個交易日。每個嘗試都會記錄實際使用的資料來源、"
-        "資料性質與資料集校驗碼。",
-        "研究不會新增、改寫或鎖定策略版本；每個嘗試都綁定來源版本，只量測、不改規則。",
+        "Every attempt, including failed and skipped ones, is listed; the best single result is not used to stand in for the strategy's robustness.",
+        f"Data calendar: {source_label}; {calendar['dates'][0]} → {calendar['dates'][-1]}"
+        f", {len(calendar['dates'])} trading days in total. Each attempt records the data source, "
+        "data nature and dataset checksum it actually used.",
+        "The study does not create, rewrite or lock strategy versions; every attempt is bound to the source version and only measures it without changing its rules.",
     ]
     if kind == "cost_scenarios":
-        disclosures.append("只改手續費與滑價，其餘設定與來源版本相同；每個情境都是一次獨立回測。")
+        disclosures.append(
+            "Only commission and slippage change; all other settings match the source version. Each scenario is a separate backtest."
+        )
     elif kind == "period_slices":
-        disclosures.append("分段連續且互不重疊；不同市況下的差異不是策略改動，也不代表未來表現。")
+        disclosures.append(
+            "Slices are contiguous and non-overlapping; differences across market conditions are not strategy changes and do not indicate future performance."
+        )
     elif kind == "parameter_sensitivity":
         disclosures.append(
-            "單因子 ±20% 變動，其餘參數固定；沒有做多參數聯合搜尋，"
-            "所以結果只反映該參數在目前值附近的敏感度。"
+            "One factor is varied by ±20% with all other parameters held fixed. There is no joint multi-parameter search, "
+            "so the results reflect only that parameter's sensitivity near its current value."
         )
     elif kind == "walk_forward":
         disclosures.append(
-            f"每折的訓練期與測試期在時間上分開，中間相隔 {int(config['gap_bars'])} 個交易日；"
-            f"測試期只在參數選定後量測一次。只有 {int(config['folds'])} 折，"
-            "不可把各折當作彼此獨立的重複實驗或統計樣本。"
+            f"Each fold separates the training window from the test window by {int(config['gap_bars'])} trading days; "
+            f"the test window is measured once, after parameters are chosen. With only {int(config['folds'])} folds, "
+            "do not treat the folds as independent repeats or as statistical samples."
         )
     return disclosures
 
@@ -506,23 +516,23 @@ def build_plan(
     frequency = spec.get("frequency") or "1d"
     if frequency != "1d":
         raise RobustnessRefused(
-            f"穩健性研究目前只支援日線策略；此版本是 {frequency}，不會自動降級為日線後再計算。"
+            f"Robustness studies currently support daily strategies only; this version runs at {frequency} and is not silently downgraded to daily before running."
         )
     template = spec.get("template_type")
     if template not in PARAM_BOUNDS:
-        raise RobustnessRefused(f"不支援的策略範本：{template}。")
+        raise RobustnessRefused(f"Unsupported strategy template: {template}.")
 
     calendar = _calendar(db, spec)
     cells = _cells_for_kind(kind, spec, calendar, merged)
     if not cells:
-        raise RobustnessRefused("此計劃沒有任何可執行的嘗試。")
+        raise RobustnessRefused("This plan has no executable attempts.")
 
     estimated = len(cells)
     max_attempts = int(merged["max_attempts"])
     if estimated > max_attempts:
         raise RobustnessRefused(
-            f"計劃需要 {estimated} 次回測，超過本次上限 {max_attempts} 次。"
-            f"請減少段數／折數，或明確提高上限（最多 {MAX_ATTEMPTS_HARD} 次）。"
+            f"This plan needs {estimated} backtests, which exceeds the cap of {max_attempts} for this study. "
+            f"Use fewer slices or folds, or raise the cap explicitly (maximum {MAX_ATTEMPTS_HARD})."
         )
 
     quota = get_quota_status(db, user.id, "research_run")
@@ -538,8 +548,8 @@ def build_plan(
     effective = (calendar["dates"][0], calendar["dates"][-1])
     if requested != effective:
         disclosures.append(
-            f"請求期間為 {requested[0]} → {requested[1]}，但期間內只有 "
-            f"{effective[0]} → {effective[1]} 的報價；分段以實際有報價的日期為準。"
+            f"The requested period is {requested[0]} → {requested[1]}, but quotes are only available for "
+            f"{effective[0]} → {effective[1]} within it; slices follow the dates that actually have quotes."
         )
 
     return {
@@ -649,7 +659,7 @@ def _run_cell(
             fresh = db.query(RobustnessAttempt).filter(RobustnessAttempt.id == attempt.id).first()
             if fresh is not None:
                 fresh.status = "skipped"
-                fresh.error_details = "研究執行額度不足，此嘗試沒有執行。"
+                fresh.error_details = "The research run quota ran out, so this attempt was not run."
                 fresh.completed_at = utcnow()
                 db.commit()
             raise QuotaExhausted(getattr(exc, "detail", None))
@@ -758,7 +768,7 @@ def _execute_walk_forward(
                 # not invent parameters and call the test result a measurement.
                 attempt.status = "skipped"
                 attempt.error_details = (
-                    "訓練期沒有可用的回測結果，因此沒有在測試期量測。"
+                    "The training window produced no usable backtest result, so nothing was measured on the test window."
                 )
                 attempt.completed_at = utcnow()
             db.commit()
@@ -885,7 +895,7 @@ def compute_aggregate(
         "worst_attempt": summarize(worst),
         "selection_rule": (study.plan or {}).get("selection_rule"),
         "note": (
-            "最佳單一結果不是穩健性證據：請同時看中位數、最差結果、分散程度與失敗次數。"
+            "The best single result is not robustness evidence: read the median, the worst result, the spread and the failure count together."
         ),
         "folds": folds,
     }
@@ -902,11 +912,13 @@ def execute_study(
     if study.status == "completed":
         return study
     if study.status == "cancelled":
-        raise RobustnessRefused("此研究已取消，不會再執行剩餘嘗試。")
+        raise RobustnessRefused(
+            "This study is cancelled, so no remaining attempts will be run."
+        )
 
     plan_cells = (study.plan or {}).get("cells") or []
     if not plan_cells:
-        raise RobustnessRefused("此研究沒有計劃內容，無法執行。")
+        raise RobustnessRefused("This study has no planned attempts, so it cannot be run.")
 
     study.status = "running"
     study.started_at = study.started_at or utcnow()
@@ -969,11 +981,13 @@ def execute_study(
         final_status = "cancelled"
     elif quota_stopped:
         final_status = "partial"
-        study.error_details = "研究執行額度不足，剩餘嘗試沒有執行；已完成的結果保留，可在額度恢復後續跑。"
+        study.error_details = (
+            "The research run quota ran out, so the remaining attempts were not run. Completed results are kept; you can resume once quota is restored."
+        )
     elif len(attempts) < len(plan_cells) or unresolved:
         final_status = "partial"
         if not study.error_details:
-            study.error_details = "部分嘗試未能執行，已完成的結果保留。"
+            study.error_details = "Some attempts did not run; completed results are kept."
     elif completed == len(attempts):
         final_status = "completed"
         study.completed_at = utcnow()

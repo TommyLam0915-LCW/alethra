@@ -122,18 +122,18 @@ class MockAIProvider(BaseAIProvider):
         referenced = re.findall(r"\[[A-Za-z]+:[^\]]+\]", system + last_user)
 
         lines = [
-            "（模擬 AI 助手 — 確定性回覆，不會呼叫外部 AI 服務）",
+            "(Mock AI assistant — deterministic reply, no external AI service is called)",
             "",
-            f"已收到你的問題：{last_user[:200]}",
+            f"Question received: {last_user[:200]}",
         ]
         if referenced:
-            lines.append(f"參考脈絡：{', '.join(referenced[:10])}")
+            lines.append(f"Context referenced: {', '.join(referenced[:10])}")
         lines += [
             "",
-            "建議下一步：",
-            "1. 將假設與可證偽條件寫成研究草稿（AI 僅提議，不構成交易授權）",
-            "2. 以歷史數據回測驗證，並檢視數據來源標示",
-            "3. 經你明確審核後才建立實驗",
+            "Suggested next steps:",
+            "1. Write the hypothesis and its falsifiable conditions into a research draft (the AI only proposes; this is not a trading authorisation)",
+            "2. Validate it with a historical backtest and check the data-source labels",
+            "3. Create an experiment only after your explicit review",
         ]
 
         content = "\n".join(lines)
@@ -151,7 +151,7 @@ class MockAIProvider(BaseAIProvider):
     def test_connection(self) -> ConnectionTestResult:
         return ConnectionTestResult(
             ok=True,
-            detail="模擬供應商已就緒（離線、確定性，無外部呼叫）",
+            detail="Mock provider is ready (offline, deterministic, no external calls)",
             latency_ms=1,
         )
 

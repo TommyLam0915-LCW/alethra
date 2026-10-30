@@ -77,7 +77,7 @@ def _refused(exc: RobustnessRefused) -> HTTPException:
         status_code=status.HTTP_400_BAD_REQUEST,
         detail={
             "error": "robustness_refused",
-            "message": "；".join(exc.reasons),
+            "message": "; ".join(exc.reasons),
             "reasons": exc.reasons,
         },
     )
@@ -159,9 +159,9 @@ def create_robustness_study(
                 "required": quota["required"],
                 "remaining": quota.get("remaining"),
                 "message": (
-                    f"此計劃需要 {quota['required']} 次研究執行，剩餘額度只有 "
-                    f"{quota.get('remaining')} 次，所以研究沒有開始。請減少嘗試數，"
-                    "或於「方案與用量」查看已用與上限。"
+                    f"This plan needs {quota['required']} research runs but only "
+                    f"{quota.get('remaining')} remain, so the study did not start. Reduce the number of attempts, "
+                    "or check used versus limit on the Plans and usage page."
                 ),
             },
         )
@@ -252,7 +252,7 @@ def cancel_robustness_study(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
                 "error": "study_finished",
-                "message": "此研究已結束，不能取消；已完成的嘗試與結果會保留。",
+                "message": "This study has finished and cannot be cancelled; completed attempts and results are kept.",
             },
         )
     study.status = "cancelled"

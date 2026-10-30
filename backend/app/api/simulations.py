@@ -1295,9 +1295,10 @@ def advance_simulation(
         raise HTTPException(
             status_code=400,
             detail=(
-                f"回放找不到綁定的數據集：{symbol}（提供者 {provider_id or '未綁定'}）在 "
-                f"{start_date} 至 {end_date} 沒有已儲存的 K 線。圖表、游標與成交必須讀同一個"
-                "數據集，因此不退回其他數據源。"
+                f"Replay cannot find the bound dataset: {symbol} (provider "
+                f"{provider_id or 'unbound'}) has no stored bars between "
+                f"{start_date} and {end_date}. The chart, cursor and fills must all "
+                "read the same dataset, so no other data source is substituted."
             ),
         )
 
@@ -1677,8 +1678,8 @@ def _submit_manual_order(
         raise HTTPException(
             status_code=400,
             detail=(
-                f"綁定的模擬帳戶狀態為 '{portfolio.status.value}'，不能再提交掛單。"
-                "請綁定一個進行中的帳戶。"
+                f"The bound paper portfolio is '{portfolio.status.value}' and cannot "
+                "accept new orders. Bind a portfolio that is still active."
             ),
         )
 
@@ -1738,8 +1739,9 @@ def _submit_manual_order(
         raise HTTPException(
             status_code=409,
             detail=(
-                "這個 idempotency_key 已在同一模擬帳戶留下訂單，系統不會再提交第二張。"
-                "請重新整理掛單列表確認既有訂單。"
+                "This idempotency_key already has an order in the same paper "
+                "portfolio; a second order is not submitted. Refresh the order "
+                "list to see the existing one."
             ),
         )
 
@@ -1797,8 +1799,10 @@ def _submit_manual_order(
     estimate: Optional[Dict[str, Any]] = None
     if observed_close is None:
         warnings.append(
-            f"綁定的數據集在 {cutoff} 沒有可讀的收盤價，無法在提交時估算成本；"
-            "所需現金將於執行 bar 的開盤價核定，不足時掛單會被拒絕而不會部分成交。"
+            f"The bound dataset has no readable close at {cutoff}, so cost cannot "
+            "be estimated at submission. The cash required is set at the execution "
+            "bar's open; if it is insufficient the order is rejected, never "
+            "partially filled."
         )
     elif side is OrderSide.BUY:
         needed = round(quantity * observed_close * (1 + slippage_rate) * (1 + commission_rate), 4)
@@ -1812,9 +1816,11 @@ def _submit_manual_order(
         }
         if needed > cash_now:
             warnings.append(
-                f"以已觀察收盤價 {round(observed_close, 4)} 估算，這筆買入約需 {needed}，"
-                f"而帳戶現有現金 {cash_now}。實際以執行 bar 的開盤價核定；"
-                "現金不足時掛單會被拒絕（rejected），不會部分成交。"
+                f"Estimated from the observed close of {round(observed_close, 4)}, "
+                f"this buy needs about {needed} against the account's current cash "
+                f"of {cash_now}. The actual amount is set by the execution bar's "
+                "open; if cash is insufficient the order is rejected, never "
+                "partially filled."
             )
 
     decision = DecisionRecord(
@@ -1863,8 +1869,9 @@ def _submit_manual_order(
         raise HTTPException(
             status_code=409,
             detail=(
-                "這個 idempotency_key 已被另一個請求寫入，系統不會提交第二張掛單。"
-                "請重新整理掛單列表確認既有訂單。"
+                "This idempotency_key was already written by another request; a "
+                "second order is not submitted. Refresh the order list to see the "
+                "existing one."
             ),
         )
 
@@ -1896,8 +1903,9 @@ def _submit_manual_order(
         "booked_at_submit": False,
         "order_id": str(order.id),
         "message": (
-            "掛單已提交，尚未成交。它會在綁定的數據集中第一個晚於 "
-            f"{cutoff} 的 bar，以該 bar 的開盤價執行；在此之前不計入持股，也不變動現金。"
+            "Order submitted and not yet filled. It will execute at the open of "
+            f"the first bar in the bound dataset after {cutoff}; until then it is "
+            "not counted as a holding and does not move cash."
         ),
     }
     return (DecisionType.blocked_action, rejection, order_info, execution_info, warnings)
@@ -2018,8 +2026,9 @@ def manual_decision(
         raise HTTPException(
             status_code=400,
             detail=(
-                "尚未觀察到任何 K 線，因此沒有可作為決策時點的市場時間。"
-                "請先推進重放（advance）看到第一根 bar，再提交掛單。"
+                "No bar has been observed yet, so there is no market time to use "
+                "as the decision basis. Advance the replay to the first bar, then "
+                "submit the order."
             ),
         )
 
@@ -2155,8 +2164,9 @@ def manual_decision(
         raise HTTPException(
             status_code=409,
             detail=(
-                "這個 idempotency_key 已被另一個請求寫入，系統不會提交第二張掛單。"
-                "請重新整理掛單列表確認既有訂單。"
+                "This idempotency_key was already written by another request; a "
+                "second order is not submitted. Refresh the order list to see the "
+                "existing one."
             ),
         )
     db.refresh(session)

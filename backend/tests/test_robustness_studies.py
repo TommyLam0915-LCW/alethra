@@ -188,8 +188,8 @@ class TestPlan:
             assert cell["overrides"]["commission_rate"] == cell["spec"]["commission_rate"]
 
         joined = " ".join(plan["disclosures"])
-        assert "不會只以最佳結果代表策略穩健性" in joined
-        assert "合成示範資料" in joined or "內建合成示範" in joined
+        assert "the best single result is not used to stand in for" in joined
+        assert "Built-in synthetic demo data (not real market prices)" in joined
 
         # Free plan has 5 research runs; a 9-cell study must say so up front.
         assert plan["quota"]["sufficient"] is False
@@ -237,7 +237,7 @@ class TestPlan:
         detail = resp.json()["detail"]
         assert detail["error"] == "robustness_refused"
         assert "21" in detail["message"]  # long_window 20 + 1
-        assert "延長期間" in detail["message"]
+        assert "longer period" in detail["message"]
 
     def test_walk_forward_refused_when_windows_too_short(self, client, auth_headers):
         exp = _create_experiment(client, auth_headers, spec=SMA_SPEC)
@@ -245,7 +245,7 @@ class TestPlan:
             client, auth_headers, exp["id"], exp["current_version_id"], "walk_forward"
         )
         assert resp.status_code == 400, resp.text
-        assert "訓練期" in resp.json()["detail"]["message"]
+        assert "for training" in resp.json()["detail"]["message"]
 
     def test_intraday_version_is_refused_not_downgraded(self, client, auth_headers):
         from app.models.experiment_version import ExperimentVersion
@@ -267,7 +267,7 @@ class TestPlan:
             client, auth_headers, exp["id"], exp["current_version_id"], "cost_scenarios"
         )
         assert resp.status_code == 400, resp.text
-        assert "不會自動降級" in resp.json()["detail"]["message"]
+        assert "not silently downgraded to daily" in resp.json()["detail"]["message"]
 
 
 class TestExecution:
@@ -314,7 +314,7 @@ class TestExecution:
         assert stats["count"] == 9
         assert stats["min"] <= stats["median"] <= stats["max"]
         assert stats["spread"] == pytest.approx(stats["max"] - stats["min"], abs=1e-4)
-        assert "最佳單一結果不是穩健性證據" in agg["note"]
+        assert "The best single result is not robustness evidence" in agg["note"]
         assert agg["selection_rule"]
 
         by_key = {a["cell_key"]: a for a in detail["attempts"]}
@@ -354,7 +354,7 @@ class TestExecution:
         # The demo series has no bar for 2024-02-14, so the last slice must stop
         # at the last date that actually has a quote inside the requested period.
         assert attempts[-1]["period_end"] == "2024-02-13"
-        disclosures = [c for c in detail["plan"]["disclosures"] if "只有" in c]
+        disclosures = [c for c in detail["plan"]["disclosures"] if "requested period" in c]
         assert any("2024-02-13" in c for c in disclosures)
 
         for attempt in attempts:
@@ -497,7 +497,7 @@ class TestExecution:
 
         blocked = _run(client, auth_headers, study_id)
         assert blocked.status_code == 400
-        assert "已取消" in blocked.json()["detail"]["message"]
+        assert "This study is cancelled" in blocked.json()["detail"]["message"]
         assert blocked.json()["detail"]["error"] == "robustness_refused"
 
         assert _quota_used() == 0
@@ -591,7 +591,7 @@ class TestQuotaAndOwnership:
         assert detail["error"] == "insufficient_quota"
         assert detail["required"] == 9
         assert detail["remaining"] == 5
-        assert "研究沒有開始" in detail["message"]
+        assert "the study did not start" in detail["message"]
 
         listed = client.get(
             f"/api/v1/experiments/{exp['id']}/robustness", headers=auth_headers
