@@ -125,6 +125,7 @@ export default function TrainingPage() {
   const [mlTraining, setMlTraining] = useState(false);
   const [mlResult, setMlResult] = useState<any>(null);
   const [mlError, setMlError] = useState<string | null>(null);
+  const [mlLoadError, setMlLoadError] = useState<string | null>(null);
   const [expandedModelId, setExpandedModelId] = useState<string | null>(null);
   const [latestPredictions, setLatestPredictions] = useState<Record<string, any>>({});
   const [deletingModelId, setDeletingModelId] = useState<string | null>(null);
@@ -214,8 +215,12 @@ export default function TrainingPage() {
       setMlInstruments(instData.instruments || []);
       setMlModels(modelData.models || []);
       setQuota(quotaData);
+      setMlLoadError(null);
     } catch (err) {
+      // Silent failure left the instrument picker, model list and quota card
+      // looking like an empty account instead of a failed request.
       console.error('Failed to load ML data:', err);
+      setMlLoadError('無法載入模型與額度資料；下方表單可能不完整。請重試。');
     }
   };
 
@@ -675,6 +680,18 @@ export default function TrainingPage() {
           <div className="disclaimer" style={{ marginBottom: '24px' }}>
             <strong>提醒：</strong>目前資料來源為模擬數據（演示模式），即使標的代碼是真實股票，價格仍是合成資料。模型結果僅供研究流程驗證，不代表真實市場績效。
           </div>
+
+          {mlLoadError && (
+            <div
+              className="alert alert-warning"
+              role="alert"
+              data-testid="ml-load-error"
+              style={{ display: 'flex', gap: '12px', alignItems: 'center', flexWrap: 'wrap', marginBottom: '24px' }}
+            >
+              <span>{mlLoadError}</span>
+              <button type="button" onClick={loadMLData} className="btn btn-secondary">重試</button>
+            </div>
+          )}
 
           {showMLForm && (
             <div className="card" style={{ marginBottom: '24px' }}>

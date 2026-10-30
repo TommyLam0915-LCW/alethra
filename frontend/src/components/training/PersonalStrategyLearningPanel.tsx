@@ -542,6 +542,12 @@ export default function PersonalStrategyLearningPanel() {
   const [editorAction, setEditorAction] = useState('hold');
   const [editorNote, setEditorNote] = useState('');
   const [editorReason, setEditorReason] = useState('data_entry_error');
+  // Append-only label revisions, fetched per decision on demand. The newest
+  // label alone hides how a decision was re-labelled.
+  const [revisionHistory, setRevisionHistory] = useState<Record<string, ReviewLabel[]>>({});
+  const [historyFor, setHistoryFor] = useState<string | null>(null);
+  const [historyBusy, setHistoryBusy] = useState<string | null>(null);
+  const loadedVersionRef = useRef<string | null>(null);
 
   const [selectedSnapshot, setSelectedSnapshot] = useState('');
   const [modelType, setModelType] = useState('logistic_regression');
@@ -591,6 +597,11 @@ export default function PersonalStrategyLearningPanel() {
   }, []);
 
   const loadStrategy = useCallback(async (id: string) => {
+    if (loadedVersionRef.current !== id) {
+      loadedVersionRef.current = id;
+      setRevisionHistory({});
+      setHistoryFor(null);
+    }
     const [reviewBody, previewBody, snapshotsBody, modelsBody, journeyBody] = await Promise.all([
       api.ml.reviewDecisions(id),
       api.ml.previewPersonalSnapshot(id),
@@ -755,6 +766,26 @@ export default function PersonalStrategyLearningPanel() {
     await loadStrategy(id);
   };
 
+  const toggleHistory = async (eventId: string) => {
+    if (historyFor === eventId) {
+      setHistoryFor(null);
+      return;
+    }
+    setHistoryFor(eventId);
+    if (revisionHistory[eventId]) return;
+    setHistoryBusy(eventId);
+    try {
+      const body = (await api.ml.labelRevisions(eventId)) as {
+        revisions: ReviewLabel[];
+      };
+      setRevisionHistory((prev) => ({ ...prev, [eventId]: body.revisions ?? [] }));
+    } catch (err) {
+      setError(describeFailure(err, '無法載入標籤修訂歷史'));
+    } finally {
+      setHistoryBusy(null);
+    }
+  };
+
   const runLabelAction = async (
     eventId: string,
     payload: {
@@ -771,6 +802,12 @@ export default function PersonalStrategyLearningPanel() {
     setNotice(null);
     try {
       await api.ml.recordDecisionLabel(eventId, payload);
+      setRevisionHistory((prev) => {
+        if (!(eventId in prev)) return prev;
+        const next = { ...prev };
+        delete next[eventId];
+        return next;
+      });
       await refresh(versionId);
       setEditorFor(null);
       setEditorMode(null);
@@ -1394,6 +1431,21 @@ export default function PersonalStrategyLearningPanel() {
                             {row.revision_count} 次修訂
                           </span>
                         )}
+                        {row.revision_count > 0 && (
+                          <button
+                            type="button"
+                            className="btn"
+                            data-testid={`pl-history-${row.decision_event_id}`}
+                            aria-expanded={historyFor === row.decision_event_id}
+                            onClick={() => toggleHistory(row.decision_event_id)}
+                            disabled={historyBusy === row.decision_event_id}
+                            style={{ fontSize: '11px', padding: '2px 8px' }}
+                          >
+                            {historyFor === row.decision_event_id
+                              ? '收起修訂歷史'
+                              : `查看修訂歷史 (${row.revision_count})`}
+                          </button>
+                        )}
                       </div>
 
                       {row.label?.action_overridden && (
@@ -1443,6 +1495,54 @@ export default function PersonalStrategyLearningPanel() {
                           標記排除
                         </button>
                       </div>
+
+                      {historyFor === row.decision_event_id && (
+                        <div
+                          data-testid={`pl-history-panel-${row.decision_event_id}`}
+                          style={{
+                            marginTop: '8px',
+                            padding: '8px 10px',
+                            border: '1px dashed var(--border)',
+                            borderRadius: '6px',
+                            display: 'grid',
+                            gap: '6px',
+                            color: 'var(--text-secondary)',
+                          }}
+                        >
+                          {historyBusy === row.decision_event_id ? (
+                            <span>載入修訂歷史…</span>
+                          ) : (revisionHistory[row.decision_event_id]?.length ?? 0) === 0 ? (
+                            <span>沒有修訂記錄。</span>
+                          ) : (
+                            revisionHistory[row.decision_event_id].map((rev) => (
+                              <div
+                                key={rev.id}
+                                data-testid={`pl-history-rev-${rev.id}`}
+                                style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}
+                              >
+                                <span style={{ color: 'var(--text-muted)' }}>
+                                  修訂 {rev.revision_number}
+                                </span>
+                                <span>
+                                  {rev.state === 'excluded'
+                                    ? '已排除'
+                                    : `已確認 · ${actionLabel(rev.action_label)}`}
+                                </span>
+                                {rev.action_overridden && (
+                                  <span>原記錄 {actionLabel(rev.recorded_action)}</span>
+                                )}
+                                {rev.exclusion_reason && <span>原因：{rev.exclusion_reason}</span>}
+                                {rev.note && <span>備註：{rev.note}</span>}
+                                <span style={{ color: 'var(--text-muted)' }}>
+                                  {rev.created_at
+                                    ? new Date(rev.created_at).toLocaleString('zh-Hant')
+                                    : '時間未知'}
+                                </span>
+                              </div>
+                            ))
+                          )}
+                        </div>
+                      )}
 
                       {active && editorMode === 'correct' && (
                         <div style={{ marginTop: '10px', display: 'grid', gap: '8px' }}>

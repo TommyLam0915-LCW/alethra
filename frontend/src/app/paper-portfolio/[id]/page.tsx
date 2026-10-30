@@ -185,6 +185,9 @@ export default function PaperPortfolioDetailPage() {
       setPositions(pos);
       setOrders(ord);
       setDecisions(dec);
+      // Clear a banner left over from an earlier failed load; callers that need
+      // to report a refusal set their message after this resolves.
+      setError('');
       if (p.simulation_session_id) {
         try {
           const s = await api.simulations.get(p.simulation_session_id);

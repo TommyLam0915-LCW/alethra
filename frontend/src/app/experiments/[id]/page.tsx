@@ -171,6 +171,8 @@ export default function ExperimentDetailPage() {
       setMethodReview(reviewData);
       setSavedComparisons(savedComparisonsData);
       setDataVersion((v) => v + 1);
+      // A reload that succeeded must not keep showing an earlier load failure.
+      setError('');
     } catch (err) {
       setError('載入失敗');
     } finally {

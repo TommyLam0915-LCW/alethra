@@ -40,6 +40,7 @@ export default function ModelResearchListPage() {
   const router = useRouter();
   const [records, setRecords] = useState<ModelRecord[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [newTitle, setNewTitle] = useState('');
   const [newPurpose, setNewPurpose] = useState('');
@@ -52,11 +53,16 @@ export default function ModelResearchListPage() {
   }, [router]);
 
   const loadRecords = async () => {
+    setLoading(true);
     try {
       const data = await api.modelResearch.list();
       setRecords(data);
-    } catch (err) {
+      setError(null);
+    } catch (err: any) {
+      // Console-only handling showed an empty list, which read as "no models"
+      // rather than "the request failed".
       console.error('Failed to load model records:', err);
+      setError(err?.message || '無法載入模型研究記錄。請稍後重試。');
     } finally {
       setLoading(false);
     }
@@ -74,9 +80,11 @@ export default function ModelResearchListPage() {
       setNewPurpose('');
       setNewDescription('');
       setShowCreate(false);
+      setError(null);
       loadRecords();
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to create record:', err);
+      setError(err?.message || '建立模型研究記錄失敗。');
     }
   };
 
@@ -100,6 +108,18 @@ export default function ModelResearchListPage() {
         <strong>提醒：</strong>模型研究記錄僅供研究追蹤使用。Alethra 不會執行任何真實交易，不提供買賣信號，不連接任何券商。
       </div>
 
+      {error && (
+        <div
+          className="alert alert-warning"
+          role="alert"
+          data-testid="model-records-error"
+          style={{ display: 'flex', gap: '12px', alignItems: 'center', flexWrap: 'wrap', marginBottom: '24px' }}
+        >
+          <span>{error}</span>
+          <button type="button" onClick={loadRecords} className="btn btn-secondary">重試</button>
+        </div>
+      )}
+
       {showCreate && (
         <div className="card" style={{ marginBottom: '24px' }}>
           <h3 style={{ marginBottom: '16px' }}>建立新模型研究記錄</h3>
@@ -121,7 +141,7 @@ export default function ModelResearchListPage() {
 
       {loading ? (
         <div className="card" style={{ textAlign: 'center', padding: '40px' }}>載入中...</div>
-      ) : records.length === 0 ? (
+      ) : records.length === 0 && !error ? (
         <div className="card" style={{ textAlign: 'center', padding: '60px' }}>
           <p style={{ color: '#666' }}>尚無模型研究記錄。點擊「建立模型」開始。</p>
         </div>

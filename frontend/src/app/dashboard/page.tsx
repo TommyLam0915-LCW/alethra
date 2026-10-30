@@ -76,6 +76,7 @@ function LatestRunCell({ run }: { run: LatestRun | null }) {
 export default function DashboardPage() {
   const [experiments, setExperiments] = useState<Experiment[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
 
   useEffect(() => {
@@ -83,11 +84,16 @@ export default function DashboardPage() {
   }, []);
 
   const loadExperiments = async () => {
+    setLoading(true);
     try {
       const data = await api.experiments.list();
       setExperiments(data);
+      setLoadError(null);
     } catch (err) {
+      // A failed load previously rendered as "no experiments yet", which read
+      // as an empty account instead of a failure.
       console.error('Failed to load experiments:', err);
+      setLoadError('無法載入實驗列表。請檢查連線後重試。');
     } finally {
       setLoading(false);
     }
@@ -171,7 +177,20 @@ export default function DashboardPage() {
 
         {/* Experiment list */}
         <div className="research-list">
-          {getSortedExperiments().length === 0 ? (
+          {loadError && (
+            <div
+              className="alert alert-warning"
+              role="alert"
+              data-testid="dashboard-load-error"
+              style={{ display: 'flex', gap: '12px', alignItems: 'center', flexWrap: 'wrap' }}
+            >
+              <span>{loadError}</span>
+              <button type="button" className="research-filter-btn" onClick={loadExperiments}>
+                重試
+              </button>
+            </div>
+          )}
+          {!loadError && (getSortedExperiments().length === 0 ? (
             <div className="research-empty">
               <h3>還沒有任何實驗</h3>
               <p>建立第一個實驗，記錄你的投資假設，追蹤測試結果，保存研究證據。</p>
@@ -224,7 +243,7 @@ export default function DashboardPage() {
                 })}
               </tbody>
             </table>
-          )}
+          ))}
         </div>
       </div>
     </AppShell>

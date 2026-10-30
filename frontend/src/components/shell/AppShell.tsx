@@ -32,6 +32,7 @@ const PRIMARY_NAV: NavItem[] = [
 
 const TOOL_LINKS = [
   { key: 'training' as NavKey, href: '/training', label: '訓練與模型', labelEn: 'Training & Models' },
+  { href: '/models', label: '模型研究記錄', labelEn: 'Model research records' },
   { key: 'market' as NavKey, href: '/market-data', label: '市場資料', labelEn: 'Market data' },
   { key: 'pilot' as NavKey, href: '/pilot', label: 'Pilot 計劃', labelEn: 'Pilot program' },
 ];

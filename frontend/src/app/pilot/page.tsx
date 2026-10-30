@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { api } from '@/lib/api';
+import { api, ApiError } from '@/lib/api';
 import AppShell from '@/components/shell/AppShell';
 
 interface Application {
@@ -38,6 +38,7 @@ export default function PilotApplicationPage() {
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
+  const [loadError, setLoadError] = useState('');
   const [success, setSuccess] = useState('');
 
   const [form, setForm] = useState({
@@ -60,18 +61,28 @@ export default function PilotApplicationPage() {
   }, [router]);
 
   const loadExistingData = async () => {
+    // 404 is the normal "nothing submitted yet" answer. Any other failure must
+    // not be disguised as "no application" — that hid auth/network problems.
+    const failures: string[] = [];
     try {
       const app = await api.pilot.getMyApplication();
       setApplication(app);
-    } catch {
-      // No application yet
+    } catch (err) {
+      if (!(err instanceof ApiError && err.status === 404)) {
+        failures.push('Pilot 申請狀態');
+      }
     }
     try {
       const ent = await api.pilot.getMyEntitlement();
       setEntitlement(ent);
-    } catch {
-      // No entitlement yet
+    } catch (err) {
+      if (!(err instanceof ApiError && err.status === 404)) {
+        failures.push('Pilot 權限');
+      }
     }
+    setLoadError(
+      failures.length > 0 ? `無法載入${failures.join('與')}資料。請檢查連線後重試。` : '',
+    );
     setLoading(false);
   };
 
@@ -134,6 +145,18 @@ export default function PilotApplicationPage() {
         <br />
         <em>Internal pilot pricing hypothesis — not public pricing and not market validated.</em>
       </div>
+
+      {loadError && (
+        <div
+          className="alert alert-warning"
+          role="alert"
+          data-testid="pilot-load-error"
+          style={{ display: 'flex', gap: '12px', alignItems: 'center', flexWrap: 'wrap', marginBottom: '24px' }}
+        >
+          <span>{loadError}</span>
+          <button type="button" onClick={loadExistingData} className="btn btn-secondary">重試</button>
+        </div>
+      )}
 
       {entitlement && (
         <div className="card" style={{ marginBottom: '24px', borderLeft: '4px solid var(--positive)' }}>

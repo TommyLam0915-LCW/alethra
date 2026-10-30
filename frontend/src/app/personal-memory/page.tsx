@@ -39,6 +39,7 @@ export default function PersonalMemoryPage() {
   const router = useRouter();
   const [memories, setMemories] = useState<MemoryRecord[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [typeFilter, setTypeFilter] = useState('');
   const [showCreate, setShowCreate] = useState(false);
 
@@ -60,8 +61,10 @@ export default function PersonalMemoryPage() {
     try {
       const data = await api.personalMemory.list(typeFilter || undefined);
       setMemories(data);
-    } catch (err) {
+      setError(null);
+    } catch (err: any) {
       console.error('Failed to load memories:', err);
+      setError(err?.message || '無法載入個人研究記憶。請稍後重試。');
     } finally {
       setLoading(false);
     }
@@ -82,27 +85,33 @@ export default function PersonalMemoryPage() {
       });
       setNewContent('');
       setShowCreate(false);
+      setError(null);
       loadMemories();
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to create memory:', err);
+      setError(err?.message || '新增記憶失敗。');
     }
   };
 
   const handleConfirm = async (id: string, confirmed: boolean) => {
     try {
       await api.personalMemory.confirm(id, confirmed);
+      setError(null);
       loadMemories();
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to confirm memory:', err);
+      setError(err?.message || (confirmed ? '確認記憶失敗。' : '拒絕記憶失敗。'));
     }
   };
 
   const handleDeactivate = async (id: string) => {
     try {
       await api.personalMemory.deactivate(id);
+      setError(null);
       loadMemories();
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to deactivate memory:', err);
+      setError(err?.message || '停用記憶失敗。');
     }
   };
 
@@ -110,9 +119,11 @@ export default function PersonalMemoryPage() {
     try {
       await api.personalMemory.setTrainingOptIn(id, trainingOptInValue);
       setTrainingOptInId(null);
+      setError(null);
       loadMemories();
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to set training opt-in:', err);
+      setError(err?.message || '更新一般模型訓練設定失敗。');
     }
   };
 
@@ -137,6 +148,18 @@ export default function PersonalMemoryPage() {
         系統不會在未經你明確確認的情況下，將任何偏好套用於研究流程。
         所有記憶預設為「僅私人」，你可選擇開放給個人 AI 工具使用。
       </div>
+
+      {error && (
+        <div
+          className="alert alert-warning"
+          role="alert"
+          data-testid="personal-memory-error"
+          style={{ display: 'flex', gap: '12px', alignItems: 'center', flexWrap: 'wrap', marginBottom: '20px' }}
+        >
+          <span>{error}</span>
+          <button type="button" onClick={loadMemories} className="btn btn-secondary">重試</button>
+        </div>
+      )}
 
       {showCreate && (
         <div className="card" style={{ marginBottom: '24px' }}>
@@ -198,7 +221,7 @@ export default function PersonalMemoryPage() {
 
       {loading ? (
         <div className="card" style={{ textAlign: 'center', padding: '40px' }}>載入中...</div>
-      ) : memories.length === 0 ? (
+      ) : memories.length === 0 && !error ? (
         <div className="card" style={{ textAlign: 'center', padding: '60px' }}>
           <p style={{ color: '#666' }}>尚無記憶記錄。點擊「新增記憶」開始。</p>
         </div>

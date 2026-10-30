@@ -202,6 +202,18 @@ test('desktop journey: consent -> review -> snapshot -> job -> version -> activa
     await expect(panel.getByTestId('pl-notice')).toContainText('已確認決策');
     await expect(panel.getByTestId(`pl-label-state-${decisionEventId}`)).toContainText('已確認');
 
+    // 1b. Label revisions are append-only; the row must expose the history, not
+    // only the newest label. The toggle is the product way to reach it.
+    const historyResponse = page.waitForResponse(
+      (res) =>
+        res.url().endsWith(`/api/v1/decision-review/${decisionEventId}/labels`) &&
+        res.request().method() === 'GET',
+    );
+    await panel.getByTestId(`pl-history-${decisionEventId}`).click();
+    expect((await historyResponse).status(), 'label revision history').toBe(200);
+    const historyPanel = panel.getByTestId(`pl-history-panel-${decisionEventId}`);
+    await expect(historyPanel).toContainText('修訂 1');
+
     // 2. Frozen snapshot — assert the POST response id, not card position.
     const snapshotResponse = page.waitForResponse(
       (res) =>
