@@ -39,10 +39,20 @@ export function useOperationalStatus(pollMs = 60_000): {
       }
     };
     load();
-    const timer = setInterval(load, pollMs);
+    // A hidden tab kept polling measured 2 requests per 70s on /workspace; the
+    // status cannot change visibly while hidden, so skip the tick and refresh
+    // once on return instead.
+    const timer = setInterval(() => {
+      if (!document.hidden) load();
+    }, pollMs);
+    const onVisible = () => {
+      if (!document.hidden) load();
+    };
+    document.addEventListener('visibilitychange', onVisible);
     return () => {
       cancelled = true;
       clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisible);
     };
   }, [pollMs]);
 

@@ -47,10 +47,19 @@ export default function StatusChips() {
       }
     };
     load();
-    const timer = setInterval(load, 60_000);
+    // Same hidden-tab rule as useOperationalStatus: no polling while the tab is
+    // not visible, one refresh when it comes back.
+    const timer = setInterval(() => {
+      if (!document.hidden) load();
+    }, 60_000);
+    const onVisible = () => {
+      if (!document.hidden) load();
+    };
+    document.addEventListener('visibilitychange', onVisible);
     return () => {
       cancelled = true;
       clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisible);
     };
   }, []);
 
