@@ -1,7 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 
-const API_BASE = 'http://localhost:8001';
-const FRONTEND_BASE = 'http://localhost:3001';
+const API_BASE = process.env.E2E_BACKEND_BASE ?? 'http://localhost:8001';
+const FRONTEND_BASE = process.env.E2E_FRONTEND_BASE ?? 'http://localhost:3001';
 
 const USER_A = {
   email: 'user_a_test@example.com',

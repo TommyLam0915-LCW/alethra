@@ -13,8 +13,8 @@
 
 import { test, expect } from '@playwright/test';
 
-const BACKEND_URL = 'http://localhost:8001';
-const FRONTEND_URL = 'http://localhost:3001';
+const BACKEND_URL = process.env.E2E_BACKEND_BASE ?? 'http://localhost:8001';
+const FRONTEND_URL = process.env.E2E_FRONTEND_BASE ?? 'http://localhost:3001';
 
 // Test account credentials (disposable)
 const TEST_EMAIL = 'backbone_test@example.com';

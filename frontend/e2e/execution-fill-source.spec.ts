@@ -8,7 +8,7 @@
 
 import { test, expect } from '@playwright/test';
 
-const FRONTEND_URL = 'http://localhost:3001';
+const FRONTEND_URL = process.env.E2E_FRONTEND_BASE ?? 'http://localhost:3001';
 const MOCK_TOKEN = 'mock-test-token';
 
 async function setupMockedPage(page: any, intents: any[]) {
