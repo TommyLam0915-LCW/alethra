@@ -212,7 +212,10 @@ test.describe('a program trading through the personal API is visible to its owne
   });
 
   test('the owner can click from the dashboard to the account their program traded', async () => {
-    const nav = page.getByTestId('nav-paper-portfolio');
+    // Paper accounts live under the shell's Tools menu; the dashboard must still
+    // offer a path that lands on the account list.
+    await page.getByTestId('tools-toggle').click();
+    const nav = page.getByRole('menuitem', { name: 'Paper portfolios' });
     await expect(nav, 'the dashboard must offer a path to the paper accounts').toBeVisible();
     await nav.click();
     await page.waitForURL('**/paper-portfolio');

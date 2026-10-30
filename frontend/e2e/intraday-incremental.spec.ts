@@ -235,20 +235,20 @@ test.describe('honest status labels', () => {
     const p = payload([candle(1)]);
     expect(dataAsOfLabel(p)).toBe('2026-10-01T14:06:00+00:00');
     expect(p.refresh.last_attempt_at).toBe('2026-10-01T14:06:00+00:00');
-    expect(dataAsOfLabel({ ...p, data_as_of: null })).toContain('尚無已收盤');
+    expect(dataAsOfLabel({ ...p, data_as_of: null })).toContain('no completed bars');
   });
 
   test('unverified interval is reported as a permission gap, not a success', () => {
     const view = describeStatus('unverified_interval');
     expect(view.tone).toBe('warn');
-    expect(view.detailZh).toContain('實際帳戶驗證');
-    expect(describeStatus('cache_fresh').labelZh).toContain('未重新請求');
+    expect(view.detail).toContain('real account');
+    expect(describeStatus('cache_fresh').label).toContain('no new request');
   });
 
   test('unknown holiday calendar is surfaced instead of guessing open/closed', () => {
-    expect(describeSession('unknown_holiday_calendar')).toBe('休市狀態未知（無假日曆）');
-    expect(describeSession('closed_holiday')).toBe('假日休市');
-    expect(describeSession('closed_weekend')).toBe('週末休市');
+    expect(describeSession('unknown_holiday_calendar')).toBe('Session unknown (no holiday calendar)');
+    expect(describeSession('closed_holiday')).toBe('Closed (holiday)');
+    expect(describeSession('closed_weekend')).toBe('Closed (weekend)');
   });
 
   test('integrity gaps are reported, not silently repaired', () => {
@@ -259,7 +259,7 @@ test.describe('honest status labels', () => {
       missing_intervals: 2,
       duplicate_timestamps: ['2026-10-01T14:03:00+00:00'],
     });
-    expect(summary).toContain('缺 2 根');
-    expect(summary).toContain('重複 1 個');
+    expect(summary).toContain('missing 2');
+    expect(summary).toContain('duplicate 1');
   });
 });

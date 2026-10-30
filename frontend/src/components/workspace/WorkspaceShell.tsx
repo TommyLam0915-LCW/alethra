@@ -190,8 +190,8 @@ export default function WorkspaceShell() {
             });
             setPortfolioHint(
               bound.length === 1 && list.length > 1
-                ? `有 ${list.length} 個組合，已依回放綁定選擇此一個`
-                : '目前只有一個組合'
+                ? `${list.length} portfolios found; this one was chosen by the replay binding`
+                : 'This is the only portfolio'
             );
           } else {
             // Several portfolios with no single replay binding: the workspace does
@@ -199,15 +199,15 @@ export default function WorkspaceShell() {
             setPortfolio(null);
             setPortfolioHint(
               list.length > 1
-                ? `有 ${list.length} 個組合且回放綁定不明確，未自動選擇 — 請在「手動模擬單」中選擇`
-                : '尚未建立模擬組合'
+                ? `${list.length} portfolios found and the replay binding is ambiguous, so none was auto-selected — choose one in Manual paper order`
+                : 'No paper portfolio created yet'
             );
           }
         }
       } catch {
         if (!cancelled) {
           setPortfolio(null);
-          setPortfolioHint('組合清單無法讀取');
+          setPortfolioHint('Portfolio list could not be loaded');
         }
       } finally {
         // The account is settled; the session its binding names is resolved by the
@@ -313,7 +313,7 @@ export default function WorkspaceShell() {
   const replayInstrumentMismatch = !!sessionInstrument && sessionInstrument !== symbol;
   const chartBarsEnd = replayInstrumentMismatch ? null : replayBarsEnd;
   const replayInstrumentNote = replayInstrumentMismatch
-    ? `此工作階段回放的是 ${sessionInstrument}，不同於目前圖表的 ${symbol}；圖表未依此游標裁切，送單也以同標的為前提。`
+    ? `This session replays ${sessionInstrument}, not the charted ${symbol}; the chart is not cut to this cursor, and orders assume the session instrument.`
     : null;
 
   const runReplayAction = async (action: 'advance' | 'pause' | 'resume') => {

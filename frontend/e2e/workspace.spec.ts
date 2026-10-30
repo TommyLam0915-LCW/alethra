@@ -682,8 +682,8 @@ test.describe('Workspace shell', () => {
     await expect(page.getByTestId('price-chart')).toBeVisible();
     await expect(page.getByTestId('chart-legend')).toContainText('AAPL');
     await expect(page.getByTestId('chart-nature-badge')).toHaveText('模擬數據');
-    await expect(page.getByTestId('status-chips')).toContainText('數據：演示數據');
-    await expect(page.getByTestId('status-chips')).toContainText('經紀：僅紙上模擬');
+    await expect(page.getByTestId('status-chips')).toContainText('Data: Demo data');
+    await expect(page.getByTestId('status-chips')).toContainText('Broker: Paper only');
     await expect(page.getByTestId('watchlist-panel')).toContainText('AAPL');
     await expect(page.getByTestId('details-panel')).toContainText('Apple Inc.');
     await expect(page.getByTestId('bottom-tabs')).toBeVisible();
@@ -1012,18 +1012,19 @@ test.describe('Workspace shell', () => {
     await page.goto(`${FRONTEND_URL}/workspace`);
     await page.waitForLoadState('networkidle');
 
-    await expect(page.getByRole('navigation', { name: '主要導覽', exact: true })).toBeHidden();
+    await expect(page.getByRole('navigation', { name: 'Primary', exact: true })).toBeHidden();
 
-    const bar = page.getByRole('navigation', { name: '主要導覽（行動裝置）' });
+    const bar = page.getByRole('navigation', { name: 'Primary (mobile)' });
     await expect(bar).toBeVisible();
-    await expect(bar.getByRole('link', { name: '工作台' })).toHaveAttribute('aria-current', 'page');
+    await expect(bar.getByRole('link', { name: 'Workspace' })).toHaveAttribute('aria-current', 'page');
 
     // Short labels, full destinations: no ellipsis, and URLs stay unchanged.
     const expected: Array<[string, string]> = [
-      ['工作台', '/workspace'],
-      ['策略', '/dashboard'],
-      ['組合', '/paper-portfolio'],
-      ['日誌', '/paper-portfolio?view=journal'],
+      ['Markets', '/market-data'],
+      ['Workspace', '/workspace'],
+      ['Research', '/dashboard'],
+      ['Models', '/models'],
+      ['Journal', '/paper-portfolio?view=journal'],
     ];
     for (const [label, href] of expected) {
       const item = bar.getByRole('link', { name: label });
@@ -1051,7 +1052,7 @@ test.describe('Workspace shell', () => {
     // Landscape phones get the top nav back instead of a shrunken bottom bar.
     await page.setViewportSize({ width: 844, height: 390 });
     await expect(bar).toBeHidden();
-    await expect(page.getByRole('navigation', { name: '主要導覽', exact: true })).toBeVisible();
+    await expect(page.getByRole('navigation', { name: 'Primary', exact: true })).toBeVisible();
   });
 
   test('mobile: watchlist drawer traps Tab and returns focus to its toggle', async ({ page }) => {
@@ -1804,9 +1805,9 @@ test.describe('Workspace shell', () => {
 
     // the persistent strip must not read as 「this chart is cut at 2024-…」
     await expect(page.getByTestId('ctx-replay-clock')).toContainText(REPLAY_CURSOR);
-    await expect(page.getByTestId('ctx-replay-mismatch')).toHaveText('游標非本標的');
+    await expect(page.getByTestId('ctx-replay-mismatch')).toHaveText('Cursor is on another instrument');
     await page.getByTestId('ctx-details-toggle').click();
-    await expect(page.getByTestId('ctx-replay-cut')).toContainText('圖表未依此游標裁切');
+    await expect(page.getByTestId('ctx-replay-cut')).toContainText('not cut to this cursor');
     await expect(page.getByTestId('ctx-replay-cut')).not.toHaveText(REPLAY_CURSOR);
   });
 
@@ -2361,7 +2362,15 @@ test.describe('Workspace shell', () => {
           .querySelector('[data-testid="price-chart"]')
           ?.closest('[data-panel-id]') as HTMLElement;
         const canvas = document.querySelector('.ws-chart-canvas') as HTMLElement;
-        const columnH = chartPanel.getBoundingClientRect().height + clip.height + 8;
+        // Measure the column exactly as the shell's ResizeObserver does — the group's
+        // own box — instead of reconstructing it from panel heights plus an assumed
+        // handle size. The vertical handle is 4px, so adding 8 overstated the column
+        // by 4px and could flip the roomy/compact threshold at 1280x800 by one pixel.
+        const groupWrapper = panel.closest('[data-panel-group]')
+          ?.parentElement as HTMLElement | null;
+        const columnH = groupWrapper
+          ? groupWrapper.getBoundingClientRect().height
+          : chartPanel.getBoundingClientRect().height + clip.height + 4;
         const chromeH = chartPanel.getBoundingClientRect().height - canvas.getBoundingClientRect().height;
         return {
           bandH: Math.round(clip.height),
@@ -2949,11 +2958,11 @@ test.describe('Workspace context semantics', () => {
     await page.goto(`${FRONTEND_URL}/workspace`);
     await page.waitForLoadState('networkidle');
 
-    await expect(page.getByTestId('status-data-mode')).toHaveText('數據：即時數據');
-    await expect(page.getByTestId('status-execution-scope')).toHaveText('執行範圍：紙上模擬');
-    await expect(page.getByTestId('status-broker-mode')).toHaveText('經紀：僅紙上模擬');
-    await expect(page.getByTestId('mode-badge')).toContainText('即時行情 · 紙上模擬');
-    await expect(page.getByTestId('mode-badge')).not.toContainText('實盤');
+    await expect(page.getByTestId('status-data-mode')).toHaveText('Data: Live data');
+    await expect(page.getByTestId('status-execution-scope')).toHaveText('Execution: Paper only');
+    await expect(page.getByTestId('status-broker-mode')).toHaveText('Broker: Paper only');
+    await expect(page.getByTestId('mode-badge')).toContainText('Live data · Paper only');
+    await expect(page.getByTestId('mode-badge')).not.toContainText('Live execution');
   });
 
   test('broker_mode=live is shown as a config reading, never as live execution', async ({
@@ -2974,17 +2983,17 @@ test.describe('Workspace context semantics', () => {
     await page.waitForLoadState('networkidle');
 
     // the raw value survives; nothing maps it to a safe-sounding label
-    await expect(page.getByTestId('status-broker-mode')).toContainText('live（原值）');
+    await expect(page.getByTestId('status-broker-mode')).toContainText('live (raw)');
     await expect(page.getByTestId('status-broker-mode')).toHaveClass(/ws-chip-warn/);
     // and it does not promote the execution scope or the badge
-    await expect(page.getByTestId('status-execution-scope')).toHaveText('執行範圍：紙上模擬');
-    await expect(page.getByTestId('mode-badge')).not.toContainText('實盤');
+    await expect(page.getByTestId('status-execution-scope')).toHaveText('Execution: Paper only');
+    await expect(page.getByTestId('mode-badge')).not.toContainText('Live execution');
 
     await page.getByTestId('ctx-system-toggle').click();
     const note = page.getByTestId('ctx-config-consistency');
-    await expect(note).toContainText('不一致');
-    await expect(note).toContainText('未確認');
-    await expect(note).toContainText('本頁面不提供實盤下單');
+    await expect(note).toContainText('mismatch');
+    await expect(note).toContainText('unconfirmed');
+    await expect(note).toContainText('does not place live orders');
   });
 
   test('missing current_virtual_cash shows 未提供 instead of a fabricated 0', async ({ page }) => {
@@ -3027,10 +3036,10 @@ test.describe('Workspace context semantics', () => {
     await page.waitForLoadState('networkidle');
     await openFormTab(page);
 
-    await expect(page.getByTestId('ctx-portfolio-identity')).toHaveText('未選擇模擬組合');
+    await expect(page.getByTestId('ctx-portfolio-identity')).toHaveText('No paper portfolio selected');
     await expect(page.getByTestId('ctx-portfolio-identity')).toHaveAttribute(
       'title',
-      /尚未建立模擬組合/
+      /No paper portfolio created yet/
     );
     await expect(page.getByTestId('order-account-context')).toContainText('未選擇模擬組合');
     await expect(page.getByTestId('order-blocked')).toContainText('尚未建立模擬投資組合');
@@ -3051,10 +3060,10 @@ test.describe('Workspace context semantics', () => {
     await openFormTab(page);
 
     // "active" is not a proxy for the account the user wants to operate
-    await expect(page.getByTestId('ctx-portfolio-identity')).toHaveText('未選擇模擬組合');
+    await expect(page.getByTestId('ctx-portfolio-identity')).toHaveText('No paper portfolio selected');
     await expect(page.getByTestId('ctx-portfolio-identity')).toHaveAttribute(
       'title',
-      /未自動選擇/
+      /none was auto-selected/
     );
     await expect(page.locator('#order-portfolio-select')).toHaveValue('');
     await expect(page.getByTestId('order-blocked')).toContainText('不自動代選');
@@ -3079,7 +3088,7 @@ test.describe('Workspace context semantics', () => {
     await openFormTab(page);
 
     await expect(page.getByTestId('ctx-portfolio-identity')).toContainText('pf-old');
-    await expect(page.getByTestId('ctx-portfolio-identity')).toContainText('（已完成）');
+    await expect(page.getByTestId('ctx-portfolio-identity')).toContainText('(Completed)');
     await expect(page.locator('#order-portfolio-select option[value="pf-old"]')).toContainText(
       '已完成'
     );
@@ -3137,7 +3146,7 @@ test.describe('Workspace context semantics', () => {
     await expect(page.getByTestId('order-target')).toContainText('受控執行器意向');
 
     await page.getByTestId('ctx-system-toggle').click();
-    await expect(page.getByTestId('ctx-system-panel')).toContainText('未綁定');
+    await expect(page.getByTestId('ctx-system-panel')).toContainText('Not bound');
     await expect(page.getByTestId('ctx-system-panel')).not.toContainText('sess-1');
   });
 
@@ -3252,13 +3261,13 @@ test.describe('Workspace context semantics', () => {
     await page.goto(`${FRONTEND_URL}/workspace`);
     await page.waitForLoadState('networkidle');
 
-    await expect(page.getByTestId('status-data-mode')).toHaveText('數據：未提供');
-    await expect(page.getByTestId('status-broker-mode')).toHaveText('經紀：未提供');
-    await expect(page.getByTestId('mode-badge')).not.toContainText('實盤');
+    await expect(page.getByTestId('status-data-mode')).toHaveText('Data: Not provided');
+    await expect(page.getByTestId('status-broker-mode')).toHaveText('Broker: Not provided');
+    await expect(page.getByTestId('mode-badge')).not.toContainText('Live execution');
 
     await page.getByTestId('ctx-system-toggle').click();
-    await expect(page.getByTestId('ctx-config-consistency')).toContainText('未能讀取');
-    await expect(page.getByTestId('ctx-system-panel')).toContainText('AI 配置');
+    await expect(page.getByTestId('ctx-config-consistency')).toContainText('could not be read');
+    await expect(page.getByTestId('ctx-system-panel')).toContainText('AI config');
   });
 
   test('switching account replaces the workspace context instead of carrying it over', async ({

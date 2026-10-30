@@ -50,24 +50,24 @@ interface ProviderStatus {
 }
 
 const DATA_NATURE_LABELS: Record<string, string> = {
-  synthetic: '模擬資料',
-  live: '即時資料',
-  delayed: '延遲資料',
-  unknown: '未知',
+  synthetic: 'Synthetic',
+  live: 'Live feed',
+  delayed: 'Delayed',
+  unknown: 'Unknown',
 };
 
 const ADJUSTMENT_LABELS: Record<string, string> = {
-  not_applicable: '不適用（模擬數據）',
-  unadjusted: '未調整',
-  adjusted: '已調整（股息/拆股）',
-  unknown: '未知（未確認）',
+  not_applicable: 'Not applicable (sample data)',
+  unadjusted: 'Unadjusted',
+  adjusted: 'Adjusted (dividends, splits)',
+  unknown: 'Unknown, not confirmed',
 };
 
 const HEALTH_LABELS: Record<string, string> = {
-  ok: '正常',
-  degraded: '異常（連續錯誤）',
-  rate_limited: '已達速率限制',
-  disconnected: '未連線',
+  ok: 'Operational',
+  degraded: 'Degraded (consecutive errors)',
+  rate_limited: 'Rate limited',
+  disconnected: 'Disconnected',
 };
 
 type MarketFilter = 'ALL' | 'US' | 'HK';
@@ -86,13 +86,24 @@ const controlStyle = (selected: boolean, tone: 'primary' | 'positive' = 'primary
     : 'var(--border-strong)',
   backgroundColor: selected
     ? tone === 'positive'
-      ? 'rgba(34,197,94,0.16)'
-      : 'rgba(59,130,246,0.16)'
+      ? 'rgba(79,199,155,0.14)'
+      : 'rgba(140,226,193,0.14)'
     : 'var(--surface-2)',
-  color: selected ? 'var(--text-white)' : 'var(--text-primary)',
+  color: selected ? (tone === 'positive' ? 'var(--positive-text)' : 'var(--primary-text)') : 'var(--text-primary)',
   cursor: 'pointer',
-  fontSize: '14px',
+  fontSize: '13px',
 });
+
+const sectionStyle = {
+  border: '1px solid var(--border-subtle)',
+  backgroundColor: 'var(--surface-1)',
+  borderRadius: '6px',
+  padding: '20px',
+  marginBottom: '20px',
+} as const;
+
+const labelStyle = { color: 'var(--text-secondary)', fontSize: '12px', marginBottom: '4px' } as const;
+const valueStyle = { fontSize: '14px', fontWeight: 500 } as const;
 
 export default function MarketDataPage() {
   const router = useRouter();
@@ -104,7 +115,6 @@ export default function MarketDataPage() {
   const [bars, setBars] = useState<Bar[]>([]);
   const [dataQuality, setDataQuality] = useState<DataQuality | null>(null);
   const [providerStatus, setProviderStatus] = useState<ProviderStatus | null>(null);
-  const [loading, setLoading] = useState(true);
   const [dataLoading, setDataLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -128,7 +138,6 @@ export default function MarketDataPage() {
   };
 
   const loadInstruments = async () => {
-    setLoading(true);
     try {
       const data = await api.instruments.list();
       const items: Instrument[] = data.instruments || [];
@@ -140,9 +149,7 @@ export default function MarketDataPage() {
       }
     } catch (err) {
       console.error('Failed to load instruments:', err);
-      setError('無法載入產品目錄');
-    } finally {
-      setLoading(false);
+      setError("Couldn't load the instrument list. Try again.");
     }
   };
 
@@ -171,7 +178,7 @@ export default function MarketDataPage() {
       }
     } catch (err) {
       console.error('Failed to load bar data:', err);
-      setError('無法載入市場資料');
+      setError("Couldn't load market data. Your selection is saved. Try again.");
     } finally {
       setDataLoading(false);
     }
@@ -194,36 +201,51 @@ export default function MarketDataPage() {
     setSelectedSymbol(e.target.value);
   };
 
-  const formatNumber = (num: number) => {
-    return num.toLocaleString('zh-Hant', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  };
+  const formatNumber = (num: number) =>
+    num.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+  const formatVolume = (num: number | null) => (num !== null ? num.toLocaleString('en-US') : '—');
 
   const maxClose = bars.length > 0 ? Math.max(...bars.map((b) => b.close)) : 0;
   const minClose = bars.length > 0 ? Math.min(...bars.map((b) => b.close)) : 0;
   const closeRange = maxClose - minClose || 1;
 
+  const asOf = dataQuality?.latest_bar_date ? formatDate(dataQuality.latest_bar_date) : null;
+
   return (
     <AppShell active="market">
-      <div className="container" style={{ paddingTop: '40px', paddingBottom: '40px' }}>
-        <div style={{ marginBottom: '30px', display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 16, flexWrap: 'wrap' }}>
-          <h1 style={{ margin: 0 }}>市場資料</h1>
-          <Link href="/market-data/intraday" className="ws-muted" style={{ fontSize: 13 }}>
-            盤中 K 線（內部測試，後端控制更新）
+      <div className="container" style={{ paddingTop: '32px', paddingBottom: '40px' }}>
+        <div
+          style={{
+            marginBottom: '24px',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'baseline',
+            gap: 16,
+            flexWrap: 'wrap',
+          }}
+        >
+          <div>
+            <h1 style={{ margin: 0, fontSize: '24px', fontWeight: 600 }}>Markets</h1>
+            <p style={{ margin: '6px 0 0', fontSize: '13px', color: 'var(--text-secondary)' }}>
+              Daily bars for listed instruments. Source, adjustment and freshness are shown with the data.
+            </p>
+          </div>
+          <Link href="/market-data/intraday" style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
+            Intraday bars · internal test
           </Link>
-        </div>
-
-        <div className="disclaimer" style={{ marginBottom: '24px' }}>
-          <strong>警告：</strong>所有數據均為模擬或演示數據 — 非即時市場資料。僅供研究用途。
         </div>
 
         {error && (
           <div
+            role="alert"
             style={{
-              backgroundColor: 'rgba(239,68,68,0.12)',
+              backgroundColor: 'rgba(226,99,110,0.1)',
               border: '1px solid var(--negative)',
               borderRadius: '6px',
-              padding: '16px',
-              marginBottom: '24px',
+              padding: '12px 16px',
+              marginBottom: '20px',
+              fontSize: '14px',
               color: 'var(--text-primary)',
             }}
           >
@@ -231,256 +253,309 @@ export default function MarketDataPage() {
           </div>
         )}
 
-        {providerStatus && (
-          <div className="card" style={{ marginBottom: '24px' }}>
-            <h3 style={{ marginBottom: '16px' }}>資料來源狀態</h3>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '16px' }}>
-              <div>
-                <div style={{ color: 'var(--text-secondary)', fontSize: '14px', marginBottom: '4px' }}>資料提供者</div>
-                <div style={{ fontSize: '16px', fontWeight: 500 }}>{providerStatus.provider_name}</div>
+        <section style={sectionStyle} aria-labelledby="data-source-heading">
+          <h2 id="data-source-heading" style={{ margin: '0 0 16px', fontSize: '15px', fontWeight: 600 }}>
+            Data source
+          </h2>
+          {providerStatus ? (
+            <>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '16px' }}>
+                <div>
+                  <div style={labelStyle}>Provider</div>
+                  <div style={valueStyle}>{providerStatus.provider_name}</div>
+                </div>
+                <div>
+                  <div style={labelStyle}>Feed</div>
+                  <div style={valueStyle}>
+                    {providerStatus.feed_mode === 'offline' ? 'Offline (simulated)' : providerStatus.feed_mode}
+                  </div>
+                </div>
+                <div>
+                  <div style={labelStyle}>Instruments</div>
+                  <div style={valueStyle}>{instruments.length} listed · 3 demo</div>
+                </div>
+                <div>
+                  <div style={labelStyle}>As of</div>
+                  <div style={valueStyle} className="num">
+                    {asOf ?? '—'}
+                  </div>
+                </div>
               </div>
-              <div>
-                <div style={{ color: 'var(--text-secondary)', fontSize: '14px', marginBottom: '4px' }}>資料模式</div>
+              {typeof providerStatus.status?.health === 'string' && providerStatus.status.health !== 'ok' && (
                 <div
-                  className={`status-pill status-${providerStatus.feed_mode === 'offline' ? 'warn' : 'ok'}`}
-                  style={{ padding: '4px 12px', fontSize: '14px' }}
+                  role="status"
+                  style={{
+                    marginTop: '16px',
+                    padding: '12px',
+                    backgroundColor: 'rgba(217,162,59,0.1)',
+                    border: '1px solid var(--warning)',
+                    borderRadius: '6px',
+                    fontSize: '13px',
+                    color: 'var(--text-primary)',
+                  }}
                 >
-                  {providerStatus.feed_mode === 'offline' ? '離線（模擬）' : providerStatus.feed_mode}
+                  <strong>Provider status: </strong>
+                  {HEALTH_LABELS[providerStatus.status.health] || providerStatus.status.health}
+                  {typeof providerStatus.status?.rate_limited_retry_after_seconds === 'number' &&
+                    providerStatus.status.rate_limited_retry_after_seconds > 0 &&
+                    ` · retry in ${providerStatus.status.rate_limited_retry_after_seconds}s`}
+                  {typeof providerStatus.status?.last_error === 'string' && (
+                    <div style={{ marginTop: '4px', color: 'var(--text-secondary)' }}>
+                      Last error: {providerStatus.status.last_error}
+                    </div>
+                  )}
                 </div>
-              </div>
-              <div>
-                <div style={{ color: 'var(--text-secondary)', fontSize: '14px', marginBottom: '4px' }}>可用產品</div>
-                <div style={{ fontSize: '16px', fontWeight: 500 }}>
-                  {instruments.length} 個真實產品 + 3 個演示產品
-                </div>
-              </div>
-            </div>
-            {typeof providerStatus.status?.health === 'string' && providerStatus.status.health !== 'ok' && (
-              <div
-                style={{
-                  marginTop: '16px',
-                  padding: '12px',
-                  backgroundColor: 'rgba(239,68,68,0.12)',
-                  border: '1px solid var(--negative)',
-                  borderRadius: '6px',
-                  fontSize: '14px',
-                  color: 'var(--text-primary)',
-                }}
-              >
-                <strong>提供者健康狀態：</strong>
-                {HEALTH_LABELS[providerStatus.status.health] || providerStatus.status.health}
-                {typeof providerStatus.status?.rate_limited_retry_after_seconds === 'number' &&
-                  providerStatus.status.rate_limited_retry_after_seconds > 0 &&
-                  ` — 建議 ${providerStatus.status.rate_limited_retry_after_seconds} 秒後重試`}
-                {typeof providerStatus.status?.last_error === 'string' && (
-                  <div style={{ marginTop: '4px', fontSize: '13px' }}>最近錯誤：{providerStatus.status.last_error}</div>
-                )}
-              </div>
-            )}
-          </div>
-        )}
+              )}
+            </>
+          ) : (
+            <div style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>Source details unavailable.</div>
+          )}
+        </section>
 
-        <div className="card" style={{ marginBottom: '24px' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', flexWrap: 'wrap', gap: '12px' }}>
-            <div style={{ display: 'flex', gap: '8px' }}>
-              <button onClick={() => setSourceTab('real')} style={controlStyle(sourceTab === 'real')}>
-                真實產品 (US/HK)
-              </button>
-              <button onClick={() => setSourceTab('demo')} style={controlStyle(sourceTab === 'demo')}>
-                演示產品
-              </button>
+        <section style={sectionStyle} aria-labelledby="market-data-heading">
+          <div
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              marginBottom: '16px',
+              flexWrap: 'wrap',
+              gap: '12px',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: '16px', flexWrap: 'wrap' }}>
+              <h2 id="market-data-heading" style={{ margin: 0, fontSize: '15px', fontWeight: 600 }}>
+                {sourceTab === 'real' ? 'Listed instruments' : 'Demo instruments'}
+              </h2>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <button onClick={() => setSourceTab('real')} style={controlStyle(sourceTab === 'real')}>
+                  Listed
+                </button>
+                <button onClick={() => setSourceTab('demo')} style={controlStyle(sourceTab === 'demo')}>
+                  Demo
+                </button>
+              </div>
             </div>
 
             {sourceTab === 'real' && (
-              <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+              <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
                 {(['ALL', 'US', 'HK'] as MarketFilter[]).map((m) => (
                   <button
                     key={m}
                     onClick={() => setMarketFilter(m)}
-                    style={{ ...controlStyle(marketFilter === m, 'positive'), fontSize: '13px', padding: '4px 12px' }}
+                    style={{ ...controlStyle(marketFilter === m, 'positive'), padding: '4px 12px' }}
                   >
-                    {m === 'ALL' ? '全部' : m === 'US' ? '美股' : '港股'}
+                    {m === 'ALL' ? 'All' : m === 'US' ? 'US' : 'HK'}
                   </button>
                 ))}
               </div>
             )}
           </div>
 
-          {sourceTab === 'real' ? (
-            <div style={{ marginBottom: '20px' }}>
-              <select
-                aria-label="選擇標的"
-                value={selectedSymbol}
-                onChange={handleSymbolChange}
-                style={{
-                  width: '100%',
-                  padding: '10px 12px',
-                  fontSize: '14px',
-                  border: '1px solid var(--border-strong)',
-                  borderRadius: '4px',
-                  backgroundColor: 'var(--surface-2)',
-                  color: 'var(--text-primary)',
-                }}
-              >
-                {filteredInstruments.map((inst) => (
+          <select
+            aria-label="Choose instrument"
+            value={selectedSymbol}
+            onChange={handleSymbolChange}
+            style={{
+              width: '100%',
+              padding: '9px 12px',
+              fontSize: '14px',
+              border: '1px solid var(--border-strong)',
+              borderRadius: '4px',
+              backgroundColor: 'var(--surface-2)',
+              color: 'var(--text-primary)',
+              marginBottom: '12px',
+            }}
+          >
+            {sourceTab === 'real'
+              ? filteredInstruments.map((inst) => (
                   <option key={inst.instrument_id} value={inst.instrument_id}>
                     {inst.instrument_id} — {inst.name} ({inst.market} · {inst.currency})
                   </option>
-                ))}
-              </select>
-
-              {selectedInstrument && (
-                <div style={{ marginTop: '12px', padding: '12px', backgroundColor: 'var(--surface-2)', border: '1px solid var(--border-strong)', borderRadius: '6px', fontSize: '14px' }}>
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '8px' }}>
-                    <div><span style={{ color: 'var(--text-secondary)' }}>交易所：</span>{selectedInstrument.exchange}</div>
-                    <div><span style={{ color: 'var(--text-secondary)' }}>資產類型：</span>{selectedInstrument.asset_type}</div>
-                    <div><span style={{ color: 'var(--text-secondary)' }}>貨幣：</span>{selectedInstrument.currency}</div>
-                    <div><span style={{ color: 'var(--text-secondary)' }}>時區：</span>{selectedInstrument.timezone}</div>
-                    <div>
-                      <span style={{ color: 'var(--text-secondary)' }}>每手股數：</span>
-                      {selectedInstrument.lot_size !== null
-                        ? `${selectedInstrument.lot_size}${selectedInstrument.lot_size_verified ? '' : '（未驗證）'}`
-                        : '未知'}
-                    </div>
-                    {dataQuality && (
-                      <>
-                        <div>
-                          <span style={{ color: 'var(--text-secondary)' }}>資料性質：</span>
-                          {DATA_NATURE_LABELS[dataQuality.data_nature] || dataQuality.data_nature}
-                        </div>
-                        <div>
-                          <span style={{ color: 'var(--text-secondary)' }}>調整狀態：</span>
-                          {ADJUSTMENT_LABELS[dataQuality.adjustment] || dataQuality.adjustment}
-                        </div>
-                        {dataQuality.latest_bar_date && (
-                          <div>
-                            <span style={{ color: 'var(--text-secondary)' }}>資料截至：</span>
-                            {formatDate(dataQuality.latest_bar_date)}
-                            {dataQuality.bar_age_days !== null && `（${dataQuality.bar_age_days} 天前）`}
-                          </div>
-                        )}
-                      </>
-                    )}
-                  </div>
-                  {(dataQuality?.note_zh || dataQuality?.note) && (
-                    <div style={{ marginTop: '8px', fontSize: '13px', color: 'var(--text-secondary)' }}>
-                      {dataQuality?.note_zh || dataQuality?.note}
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          ) : (
-            <div style={{ marginBottom: '20px' }}>
-              <select
-                aria-label="選擇標的"
-                value={selectedSymbol}
-                onChange={handleSymbolChange}
-                style={{
-                  width: '100%',
-                  padding: '10px 12px',
-                  fontSize: '14px',
-                  border: '1px solid var(--border-strong)',
-                  borderRadius: '4px',
-                  backgroundColor: 'var(--surface-2)',
-                  color: 'var(--text-primary)',
-                }}
-              >
-                {DEMO_SYMBOLS.map((symbol) => (
+                ))
+              : DEMO_SYMBOLS.map((symbol) => (
                   <option key={symbol} value={symbol}>
-                    {symbol}（合成數據）
+                    {symbol} (synthetic)
                   </option>
                 ))}
-              </select>
+          </select>
+
+          {sourceTab === 'real' && selectedInstrument && (
+            <div
+              style={{
+                padding: '12px 16px',
+                backgroundColor: 'var(--surface-2)',
+                border: '1px solid var(--border-subtle)',
+                borderRadius: '4px',
+                fontSize: '13px',
+                marginBottom: '20px',
+              }}
+            >
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '8px' }}>
+                <div>
+                  <span style={{ color: 'var(--text-secondary)' }}>Exchange </span>
+                  {selectedInstrument.exchange}
+                </div>
+                <div>
+                  <span style={{ color: 'var(--text-secondary)' }}>Asset type </span>
+                  {selectedInstrument.asset_type}
+                </div>
+                <div>
+                  <span style={{ color: 'var(--text-secondary)' }}>Currency </span>
+                  {selectedInstrument.currency}
+                </div>
+                <div>
+                  <span style={{ color: 'var(--text-secondary)' }}>Timezone </span>
+                  {selectedInstrument.timezone}
+                </div>
+                <div>
+                  <span style={{ color: 'var(--text-secondary)' }}>Lot size </span>
+                  {selectedInstrument.lot_size !== null
+                    ? `${selectedInstrument.lot_size.toLocaleString('en-US')}${
+                        selectedInstrument.lot_size_verified ? '' : ' (unverified)'
+                      }`
+                    : 'Unknown'}
+                </div>
+                {dataQuality && (
+                  <>
+                    <div>
+                      <span style={{ color: 'var(--text-secondary)' }}>Data </span>
+                      {DATA_NATURE_LABELS[dataQuality.data_nature] || dataQuality.data_nature}
+                    </div>
+                    <div>
+                      <span style={{ color: 'var(--text-secondary)' }}>Adjustment </span>
+                      {ADJUSTMENT_LABELS[dataQuality.adjustment] || dataQuality.adjustment}
+                    </div>
+                    {asOf && (
+                      <div>
+                        <span style={{ color: 'var(--text-secondary)' }}>As of </span>
+                        <span className="num">{asOf}</span>
+                        {dataQuality.bar_age_days !== null && ` · ${dataQuality.bar_age_days}d old`}
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+              {(dataQuality?.note || dataQuality?.note_zh) && (
+                <div style={{ marginTop: '8px', color: 'var(--text-secondary)' }}>
+                  {dataQuality?.note || dataQuality?.note_zh}
+                </div>
+              )}
             </div>
           )}
 
           {dataLoading ? (
-            <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-secondary)' }}>載入中...</div>
+            <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-secondary)', fontSize: '14px' }}>
+              Loading…
+            </div>
           ) : !latestBar ? (
-            <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-secondary)' }}>
-              尚無資料
+            <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-secondary)', fontSize: '14px' }}>
+              No bars available for this instrument.
             </div>
           ) : (
             <>
-              <div style={{ marginBottom: '32px' }}>
-                <h4 style={{ marginBottom: '16px', color: 'var(--text-primary)' }}>
-                  最新資料 — {selectedSymbol}
-                  {selectedInstrument && ` (${selectedInstrument.name})`}
+              <div style={{ marginBottom: '24px' }}>
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'baseline',
+                    gap: '12px',
+                    flexWrap: 'wrap',
+                    marginBottom: '12px',
+                  }}
+                >
+                  <h3 style={{ margin: 0, fontSize: '14px', fontWeight: 600 }}>
+                    Latest close — {selectedSymbol}
+                    {selectedInstrument && (
+                      <span style={{ color: 'var(--text-secondary)', fontWeight: 400 }}>
+                        {' '}
+                        · {selectedInstrument.name}
+                      </span>
+                    )}
+                  </h3>
                   {dataQuality?.is_stale && (
-                    <span
-                      className="status-pill status-warn"
-                      style={{ marginLeft: '12px', verticalAlign: 'middle' }}
-                    >
-                      資料已過期
-                      {dataQuality.bar_age_days !== null && `（${dataQuality.bar_age_days} 天未更新）`}
+                    <span className="status-pill status-warn" style={{ fontSize: '12px' }}>
+                      Stale
+                      {dataQuality.bar_age_days !== null && ` · no update for ${dataQuality.bar_age_days}d`}
                     </span>
                   )}
-                </h4>
+                </div>
                 <div
                   style={{
                     display: 'grid',
-                    gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))',
-                    gap: '16px',
-                    padding: '20px',
+                    gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))',
+                    gap: '12px',
+                    padding: '16px',
                     backgroundColor: 'var(--surface-2)',
-                    border: '1px solid var(--border-strong)',
-                    borderRadius: '6px',
+                    border: '1px solid var(--border-subtle)',
+                    borderRadius: '4px',
                   }}
                 >
-                  <div>
-                    <div style={{ color: 'var(--text-secondary)', fontSize: '12px', marginBottom: '4px' }}>日期</div>
-                    <div style={{ fontSize: '14px', fontWeight: 500 }}>{formatDate(latestBar.date)}</div>
-                  </div>
-                  <div>
-                    <div style={{ color: 'var(--text-secondary)', fontSize: '12px', marginBottom: '4px' }}>開盤價</div>
-                    <div style={{ fontSize: '14px', fontWeight: 500 }}>{formatNumber(latestBar.open)}</div>
-                  </div>
-                  <div>
-                    <div style={{ color: 'var(--text-secondary)', fontSize: '12px', marginBottom: '4px' }}>最高價</div>
-                    <div style={{ fontSize: '14px', fontWeight: 500, color: 'var(--positive)' }}>
-                      {formatNumber(latestBar.high)}
+                  {[
+                    { label: 'Date', value: formatDate(latestBar.date) },
+                    { label: 'Open', value: formatNumber(latestBar.open) },
+                    { label: 'High', value: formatNumber(latestBar.high), tone: 'positive' },
+                    { label: 'Low', value: formatNumber(latestBar.low), tone: 'negative' },
+                    { label: 'Close', value: formatNumber(latestBar.close) },
+                    { label: 'Volume', value: formatVolume(latestBar.volume) },
+                  ].map((item) => (
+                    <div key={item.label}>
+                      <div style={labelStyle}>{item.label}</div>
+                      <div
+                        className="num"
+                        style={{
+                          ...valueStyle,
+                          color:
+                            item.tone === 'positive'
+                              ? 'var(--positive-text)'
+                              : item.tone === 'negative'
+                                ? 'var(--negative-text)'
+                                : undefined,
+                        }}
+                      >
+                        {item.value}
+                      </div>
                     </div>
-                  </div>
-                  <div>
-                    <div style={{ color: 'var(--text-secondary)', fontSize: '12px', marginBottom: '4px' }}>最低價</div>
-                    <div style={{ fontSize: '14px', fontWeight: 500, color: 'var(--negative)' }}>
-                      {formatNumber(latestBar.low)}
-                    </div>
-                  </div>
-                  <div>
-                    <div style={{ color: 'var(--text-secondary)', fontSize: '12px', marginBottom: '4px' }}>收盤價</div>
-                    <div style={{ fontSize: '14px', fontWeight: 500 }}>{formatNumber(latestBar.close)}</div>
-                  </div>
-                  <div>
-                    <div style={{ color: 'var(--text-secondary)', fontSize: '12px', marginBottom: '4px' }}>成交量</div>
-                    <div style={{ fontSize: '14px', fontWeight: 500 }}>
-                      {latestBar.volume !== null ? latestBar.volume.toLocaleString('zh-Hant') : '—'}
-                    </div>
-                  </div>
+                  ))}
                 </div>
               </div>
 
               {bars.length > 0 && (
                 <>
-                  <div style={{ marginBottom: '32px' }}>
-                    <h4 style={{ marginBottom: '16px', color: 'var(--text-primary)' }}>收盤價走勢圖（模擬數據）</h4>
+                  <div style={{ marginBottom: '24px' }}>
                     <div
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'baseline',
+                        gap: '12px',
+                        marginBottom: '12px',
+                      }}
+                    >
+                      <h3 style={{ margin: 0, fontSize: '14px', fontWeight: 600 }}>Close · last 60 sessions</h3>
+                      <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
+                        {providerStatus ? providerStatus.provider_name : 'Source unavailable'}
+                        {asOf && ` · as of ${asOf}`}
+                      </span>
+                    </div>
+                    <div
+                      role="img"
+                      aria-label={`Close price for the last ${Math.min(bars.length, 60)} sessions`}
                       style={{
                         display: 'flex',
                         alignItems: 'flex-end',
                         gap: '2px',
-                        height: '200px',
-                        padding: '16px',
+                        height: '180px',
+                        padding: '12px',
                         backgroundColor: 'var(--surface-2)',
-                        borderRadius: '6px',
-                        border: '1px solid var(--border-strong)',
+                        borderRadius: '4px',
+                        border: '1px solid var(--border-subtle)',
                         overflow: 'hidden',
                       }}
                     >
                       {bars.slice(-60).map((bar, idx) => {
                         const heightPercent = ((bar.close - minClose) / closeRange) * 100;
-                        const height = Math.max(heightPercent, 5);
+                        const height = Math.max(heightPercent, 4);
                         return (
                           <div
                             key={idx}
@@ -490,15 +565,8 @@ export default function MarketDataPage() {
                               height: `${height}%`,
                               backgroundColor: 'var(--primary)',
                               borderRadius: '2px 2px 0 0',
-                              cursor: 'pointer',
                               transition: 'background-color 0.2s',
                               minWidth: '3px',
-                            }}
-                            onMouseEnter={(e) => {
-                              e.currentTarget.style.backgroundColor = 'var(--primary-solid)';
-                            }}
-                            onMouseLeave={(e) => {
-                              e.currentTarget.style.backgroundColor = 'var(--primary)';
                             }}
                           />
                         );
@@ -513,57 +581,74 @@ export default function MarketDataPage() {
                         color: 'var(--text-secondary)',
                       }}
                     >
-                      <span>最低: {formatNumber(minClose)}</span>
-                      <span>顯示最近 {Math.min(bars.length, 60)} 天</span>
-                      <span>最高: {formatNumber(maxClose)}</span>
+                      <span className="num">Low {formatNumber(minClose)}</span>
+                      <span>Last {Math.min(bars.length, 60)} sessions</span>
+                      <span className="num">High {formatNumber(maxClose)}</span>
                     </div>
                   </div>
 
                   <div>
-                    <h4 style={{ marginBottom: '16px', color: 'var(--text-primary)' }}>歷史資料表（最近 30 天）</h4>
+                    <h3 style={{ margin: '0 0 12px', fontSize: '14px', fontWeight: 600 }}>
+                      Daily bars · last 30 sessions
+                    </h3>
                     <div style={{ overflowX: 'auto' }}>
-                      <table
-                        style={{
-                          width: '100%',
-                          borderCollapse: 'collapse',
-                          fontSize: '14px',
-                        }}
-                      >
+                      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
                         <thead>
-                          <tr style={{ backgroundColor: 'var(--surface-2)', borderBottom: '2px solid var(--border-strong)', color: 'var(--text-secondary)' }}>
-                            <th style={{ padding: '12px', textAlign: 'left', fontWeight: 600 }}>日期</th>
-                            <th style={{ padding: '12px', textAlign: 'right', fontWeight: 600 }}>開盤價</th>
-                            <th style={{ padding: '12px', textAlign: 'right', fontWeight: 600 }}>最高價</th>
-                            <th style={{ padding: '12px', textAlign: 'right', fontWeight: 600 }}>最低價</th>
-                            <th style={{ padding: '12px', textAlign: 'right', fontWeight: 600 }}>收盤價</th>
-                            <th style={{ padding: '12px', textAlign: 'right', fontWeight: 600 }}>成交量</th>
+                          <tr
+                            style={{
+                              borderBottom: '1px solid var(--border-strong)',
+                              color: 'var(--text-secondary)',
+                            }}
+                          >
+                            <th style={{ padding: '10px 12px', textAlign: 'left', fontWeight: 500 }}>Date</th>
+                            <th style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 500 }}>Open</th>
+                            <th style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 500 }}>High</th>
+                            <th style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 500 }}>Low</th>
+                            <th style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 500 }}>Close</th>
+                            <th style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 500 }}>Volume</th>
                           </tr>
                         </thead>
                         <tbody>
-                          {bars.slice(-30).reverse().map((bar, idx) => (
-                            <tr
-                              key={idx}
-                              style={{
-                                borderBottom: '1px solid var(--border-strong)',
-                                backgroundColor: idx % 2 === 0 ? 'transparent' : 'var(--surface-2)',
-                              }}
-                            >
-                              <td style={{ padding: '12px' }}>{formatDate(bar.date)}</td>
-                              <td style={{ padding: '12px', textAlign: 'right' }}>{formatNumber(bar.open)}</td>
-                              <td style={{ padding: '12px', textAlign: 'right', color: 'var(--positive)' }}>
-                                {formatNumber(bar.high)}
-                              </td>
-                              <td style={{ padding: '12px', textAlign: 'right', color: 'var(--negative)' }}>
-                                {formatNumber(bar.low)}
-                              </td>
-                              <td style={{ padding: '12px', textAlign: 'right', fontWeight: 500 }}>
-                                {formatNumber(bar.close)}
-                              </td>
-                              <td style={{ padding: '12px', textAlign: 'right' }}>
-                                {bar.volume !== null ? bar.volume.toLocaleString('zh-Hant') : '—'}
-                              </td>
-                            </tr>
-                          ))}
+                          {bars
+                            .slice(-30)
+                            .reverse()
+                            .map((bar, idx) => (
+                              <tr
+                                key={idx}
+                                style={{
+                                  borderBottom: '1px solid var(--border-subtle)',
+                                  backgroundColor: idx % 2 === 0 ? 'transparent' : 'var(--surface-2)',
+                                }}
+                              >
+                                <td style={{ padding: '10px 12px' }} className="num">
+                                  {formatDate(bar.date)}
+                                </td>
+                                <td style={{ padding: '10px 12px', textAlign: 'right' }} className="num">
+                                  {formatNumber(bar.open)}
+                                </td>
+                                <td
+                                  style={{ padding: '10px 12px', textAlign: 'right', color: 'var(--positive-text)' }}
+                                  className="num"
+                                >
+                                  {formatNumber(bar.high)}
+                                </td>
+                                <td
+                                  style={{ padding: '10px 12px', textAlign: 'right', color: 'var(--negative-text)' }}
+                                  className="num"
+                                >
+                                  {formatNumber(bar.low)}
+                                </td>
+                                <td
+                                  style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 500 }}
+                                  className="num"
+                                >
+                                  {formatNumber(bar.close)}
+                                </td>
+                                <td style={{ padding: '10px 12px', textAlign: 'right' }} className="num">
+                                  {formatVolume(bar.volume)}
+                                </td>
+                              </tr>
+                            ))}
                         </tbody>
                       </table>
                     </div>
@@ -572,7 +657,11 @@ export default function MarketDataPage() {
               )}
             </>
           )}
-        </div>
+        </section>
+
+        <p style={{ margin: 0, fontSize: '12px', color: 'var(--text-muted)' }}>
+          Covered by the environment indicator. <Link href="/legal" style={{ color: 'var(--text-secondary)' }}>Data, execution and legal details</Link>
+        </p>
       </div>
     </AppShell>
   );

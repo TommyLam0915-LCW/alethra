@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import AppShell from '@/components/shell/AppShell';
 import IntradayChart from '@/components/market/IntradayChart';
@@ -20,10 +21,15 @@ import {
 } from '@/lib/intradayBars';
 
 const NATURE_LABELS: Record<string, string> = {
-  synthetic: '模擬資料',
-  live: '即時資料',
-  delayed: '延遲資料',
-  unknown: '未知（未驗證）',
+  synthetic: 'Synthetic',
+  live: 'Live feed',
+  delayed: 'Delayed',
+  unknown: 'Unknown (unverified)',
+};
+
+const DATA_RIGHTS_LABELS: Record<string, string> = {
+  INTERNAL_TEST_ONLY_NOT_CLEARED_FOR_REDISTRIBUTION:
+    'Internal test only — not cleared for redistribution',
 };
 
 function errorMessage(err: unknown): string {
@@ -34,16 +40,26 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   return (
     <div>
       <div style={{ color: 'var(--text-secondary)', fontSize: 12, marginBottom: 4 }}>{label}</div>
-      <div style={{ fontSize: 14 }}>{children}</div>
+      <div style={{ fontSize: 13 }}>{children}</div>
     </div>
   );
 }
 
 function toneStyle(tone: 'ok' | 'warn' | 'bad') {
-  if (tone === 'ok') return { color: '#36C7A0', borderColor: 'rgba(54,199,160,0.5)' };
-  if (tone === 'bad') return { color: '#FF7585', borderColor: 'rgba(255,117,133,0.5)' };
-  return { color: '#E8B65A', borderColor: 'rgba(232,182,90,0.5)' };
+  if (tone === 'ok')
+    return { color: 'var(--positive-text)', borderColor: 'rgba(79,199,155,0.5)' };
+  if (tone === 'bad')
+    return { color: 'var(--negative-text)', borderColor: 'rgba(226,99,110,0.5)' };
+  return { color: 'var(--warning-text)', borderColor: 'rgba(217,162,59,0.5)' };
 }
+
+const sectionStyle = {
+  border: '1px solid var(--border-subtle)',
+  backgroundColor: 'var(--surface-1)',
+  borderRadius: '6px',
+  padding: '20px',
+  marginBottom: '20px',
+} as const;
 
 export default function IntradayMarketPage() {
   const router = useRouter();
@@ -156,9 +172,9 @@ export default function IntradayMarketPage() {
       }
     };
 
-    // Available even while paused/hidden so the explicit "檢查一次" button can
-    // still issue one bounded read. The captured `paused`/`hidden` values keep
-    // that read from re-arming the loop.
+    // Available even while paused/hidden so the explicit check button can still
+    // issue one bounded read. The captured `paused`/`hidden` values keep that
+    // read from re-arming the loop.
     manualTickRef.current = run;
     if (!hidden && !paused) run();
     return () => {
@@ -187,37 +203,47 @@ export default function IntradayMarketPage() {
 
   return (
     <AppShell active="market">
-      <div className="container" style={{ paddingTop: 40, paddingBottom: 40 }}>
+      <div className="container" style={{ paddingTop: 32, paddingBottom: 40 }}>
         <div style={{ marginBottom: 20 }}>
-          <h1 style={{ margin: 0 }}>盤中行情（內部測試）</h1>
-          <div className="ws-muted" style={{ marginTop: 8 }}>
-            由後端控制上游請求；瀏覽器只讀取後端資料與狀態。此頁非公開行情展示。
+          <h1 style={{ margin: 0, fontSize: 24, fontWeight: 600 }}>Intraday bars · internal test</h1>
+          <div style={{ marginTop: 8, fontSize: 13, color: 'var(--text-secondary)' }}>
+            The backend controls upstream requests; the browser reads stored data and status only.
+            This is not a public market-data surface.
+            {payload?.data_rights && (
+              <>
+                {' '}
+                <span data-testid="intraday-data-rights">
+                  {DATA_RIGHTS_LABELS[payload.data_rights] ?? payload.data_rights}.
+                </span>{' '}
+                <Link href="/legal" style={{ color: 'var(--text-secondary)' }}>
+                  Data and execution details
+                </Link>
+              </>
+            )}
           </div>
-        </div>
-
-        <div className="disclaimer" style={{ marginBottom: 20 }}>
-          <strong>資料權利：</strong>
-          {payload?.data_rights_note_zh ??
-            '現階段只供已授權之本機／內部測試使用。擁有 API key 不等於可對外分發行情。'}
         </div>
 
         {capabilityError && (
           <div
+            role="alert"
             style={{
               border: '1px solid var(--negative)',
-              backgroundColor: 'rgba(239,68,68,0.12)',
+              backgroundColor: 'rgba(226,99,110,0.1)',
               borderRadius: 6,
-              padding: 16,
+              padding: 12,
               marginBottom: 20,
+              fontSize: 13,
             }}
           >
-            無法讀取後端能力資訊：{capabilityError}
+            Couldn&apos;t read backend capability: {capabilityError}
           </div>
         )}
 
         {capability && (
-          <div className="card" style={{ marginBottom: 20 }}>
-            <h3 style={{ marginTop: 0 }}>通道能力</h3>
+          <section style={sectionStyle} aria-labelledby="lane-heading">
+            <h2 id="lane-heading" style={{ margin: '0 0 16px', fontSize: 15, fontWeight: 600 }}>
+              Lane status
+            </h2>
             <div
               style={{
                 display: 'grid',
@@ -225,77 +251,74 @@ export default function IntradayMarketPage() {
                 gap: 16,
               }}
             >
-              <Field label="啟用">
-                {capability.enabled ? '已啟用' : '未啟用'}
-                {!capability.enabled && '（後端不會發出上游請求）'}
+              <Field label="Enabled">
+                {capability.enabled ? 'Yes' : 'No (no upstream requests are sent)'}
               </Field>
-              <Field label="供應商">
+              <Field label="Provider">
                 {capability.provider_name ?? capability.provider_id}
-                {capability.provider_connected ? '｜已連線' : '｜未連線'}
+                {capability.provider_connected ? ' · connected' : ' · not connected'}
               </Field>
-              <Field label="adapter 盤中支援">
-                {capability.adapter_supports_intraday ? '有' : '無'}
+              <Field label="Adapter intraday support">
+                {capability.adapter_supports_intraday ? 'Yes' : 'No'}
               </Field>
-              <Field label="宣告週期">
-                {declared.length > 0 ? declared.join('、') : '無'}
+              <Field label="Declared intervals">
+                {declared.length > 0 ? declared.join(', ') : 'None'}
               </Field>
-              <Field label="帳戶已驗證週期">
-                {verified.length > 0 ? verified.join('、') : '無（未驗證即不請求真實資料）'}
+              <Field label="Verified intervals">
+                {verified.length > 0 ? verified.join(', ') : 'None — unverified intervals are not requested'}
               </Field>
-              <Field label="最短更新間隔">
-                後端 {capability.refresh_seconds} 秒（下限 {capability.min_refresh_seconds} 秒）
+              <Field label="Minimum refresh">
+                {capability.refresh_seconds}s on the backend (floor {capability.min_refresh_seconds}s)
               </Field>
-              <Field label="本機請求預算">
-                {capability.budget.hour_used}/{capability.budget.hour_limit} 每小時、
-                {capability.budget.day_used}/{capability.budget.day_limit} 每日（程序範圍）
+              <Field label="Process request budget">
+                {capability.budget.hour_used}/{capability.budget.hour_limit} per hour,{' '}
+                {capability.budget.day_used}/{capability.budget.day_limit} per day
               </Field>
-              <Field label="即時性">
-                非即時（未驗證）；資料性質：{NATURE_LABELS[payload?.data_nature ?? 'unknown']}
+              <Field label="Real-time">
+                No (unverified) · data: {NATURE_LABELS[payload?.data_nature ?? 'unknown']}
               </Field>
-              <Field label="假日曆">
-                {capability.market_calendar_complete ? '已配置' : '未配置（休市狀態可能顯示未知）'}
+              <Field label="Holiday calendar">
+                {capability.market_calendar_complete ? 'Configured' : 'Not configured (session may read as unknown)'}
               </Field>
-              <Field label="允許標的">{capability.allowed_instruments.join('、') || '無'}</Field>
+              <Field label="Allowed instruments">
+                {capability.allowed_instruments.join(', ') || 'None'}
+              </Field>
             </div>
             {capability.provider_error && (
-              <div style={{ marginTop: 12, fontSize: 13, color: 'var(--text-secondary)' }}>
-                供應商設定：{capability.provider_error}
+              <div style={{ marginTop: 12, fontSize: 12, color: 'var(--text-secondary)' }}>
+                Provider configuration: {capability.provider_error}
               </div>
             )}
             {declared.length > 0 && verified.length === 0 && (
-              <div
-                style={{
-                  marginTop: 12,
-                  padding: 12,
-                  border: '1px solid rgba(232,182,90,0.5)',
-                  borderRadius: 6,
-                  fontSize: 13,
-                }}
-              >
-                adapter 宣告了週期，但尚未以實際帳戶驗證任何週期。未驗證前，後端只會回報
-                <code>unverified_interval</code>，不會把 adapter 支援當成可用權限。
+              <div style={{ marginTop: 12, fontSize: 12, color: 'var(--warning-text)' }}>
+                Intervals are declared but none has been verified against a real account. Until then the
+                backend returns <code>unverified_interval</code> instead of treating adapter support as
+                permission.
               </div>
             )}
-          </div>
+          </section>
         )}
 
-        <div className="card" style={{ marginBottom: 20 }}>
+        <section style={sectionStyle} aria-labelledby="series-heading">
+          <h2 id="series-heading" style={{ margin: '0 0 16px', fontSize: 15, fontWeight: 600 }}>
+            Series
+          </h2>
           <div
             style={{
               display: 'flex',
-              gap: 16,
+              gap: 12,
               flexWrap: 'wrap',
               alignItems: 'flex-end',
               marginBottom: 16,
             }}
           >
-            <label style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 13 }}>
-              標的
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 12, color: 'var(--text-secondary)' }}>
+              Instrument
               <select
-                aria-label="盤中標的"
+                aria-label="Intraday instrument"
                 value={instrumentId}
                 onChange={(e) => setInstrumentId(e.target.value)}
-                style={{ minWidth: 200, padding: '8px 10px' }}
+                style={{ minWidth: 200, padding: '7px 10px' }}
               >
                 {(capability?.allowed_instruments ?? []).map((id) => (
                   <option key={id} value={id}>
@@ -304,24 +327,24 @@ export default function IntradayMarketPage() {
                 ))}
               </select>
             </label>
-            <label style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 13 }}>
-              週期
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 12, color: 'var(--text-secondary)' }}>
+              Interval
               <select
-                aria-label="盤中週期"
+                aria-label="Intraday interval"
                 value={interval}
                 onChange={(e) => setInterval(e.target.value)}
-                style={{ minWidth: 140, padding: '8px 10px' }}
+                style={{ minWidth: 140, padding: '7px 10px' }}
               >
                 {intervalOptions.map((label) => (
                   <option key={label} value={label}>
                     {label}
-                    {verified.includes(label) ? '（已驗證）' : '（未驗證）'}
+                    {verified.includes(label) ? ' (verified)' : ' (unverified)'}
                   </option>
                 ))}
               </select>
             </label>
             <button type="button" className="ws-range-btn" onClick={recheckNow} data-testid="intraday-recheck">
-              立即檢查
+              Check now
             </button>
             <button
               type="button"
@@ -330,31 +353,33 @@ export default function IntradayMarketPage() {
               aria-pressed={paused}
               data-testid="intraday-pause-toggle"
             >
-              {paused ? '繼續更新' : '暫停更新'}
+              {paused ? 'Resume updates' : 'Pause updates'}
             </button>
-            <span className="ws-muted" data-testid="intraday-poll-state">
+            <span style={{ fontSize: 12, color: 'var(--text-secondary)' }} data-testid="intraday-poll-state">
               {hidden
-                ? '分頁隱藏，已暫停輪詢'
+                ? 'Tab hidden — polling paused'
                 : paused
-                  ? '使用者暫停，未安排下一次讀取'
+                  ? 'Paused by you — no next read scheduled'
                   : loading
-                    ? '讀取中…'
-                    : '輪詢中'}
+                    ? 'Reading…'
+                    : 'Polling'}
             </span>
           </div>
 
           {error && (
             <div
+              role="alert"
               style={{
                 border: '1px solid var(--negative)',
-                backgroundColor: 'rgba(239,68,68,0.12)',
+                backgroundColor: 'rgba(226,99,110,0.1)',
                 borderRadius: 6,
                 padding: 12,
                 marginBottom: 16,
                 fontSize: 13,
               }}
             >
-              讀取失敗：{error}（保留上一次已知資料，不會以模擬價格替代）
+              Couldn&apos;t refresh: {error}. The last known data is kept; nothing is replaced with
+              simulated prices.
             </div>
           )}
 
@@ -372,14 +397,14 @@ export default function IntradayMarketPage() {
               style={{
                 border: '1px solid',
                 borderRadius: 999,
-                padding: '4px 12px',
-                fontSize: 13,
+                padding: '3px 10px',
+                fontSize: 12,
                 ...actionTone,
               }}
             >
-              {statusView.labelZh}
+              {statusView.label}
             </span>
-            <span className="ws-muted">{statusView.detailZh}</span>
+            <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{statusView.detail}</span>
           </div>
 
           {payload && (
@@ -390,70 +415,88 @@ export default function IntradayMarketPage() {
                   gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
                   gap: 16,
                   padding: 16,
-                  border: '1px solid var(--border-strong)',
-                  borderRadius: 6,
+                  border: '1px solid var(--border-subtle)',
+                  borderRadius: 4,
                   backgroundColor: 'var(--surface-2)',
                   marginBottom: 16,
                 }}
               >
-                <Field label="標的">{payload.instrument.instrument_id}（{payload.instrument.name}）</Field>
-                <Field label="供應商">{payload.provider_id}</Field>
-                <Field label="週期">{payload.interval}（{payload.interval_minutes} 分鐘）</Field>
-                <Field label="資料截至（最新已收盤 K 線）">
-                  <span data-testid="intraday-data-as-of">{dataAsOfLabel(payload)}</span>
+                <Field label="Instrument">
+                  {payload.instrument.instrument_id} ({payload.instrument.name})
                 </Field>
-                <Field label="最近一次成功請求">
-                  {refresh?.last_success_at ? formatDateTime(refresh.last_success_at) : '—'}
+                <Field label="Provider">{payload.provider_id}</Field>
+                <Field label="Interval">
+                  {payload.interval} ({payload.interval_minutes} min)
                 </Field>
-                <Field label="最近一次請求">
-                  {refresh?.last_attempt_at ? formatDateTime(refresh.last_attempt_at) : '—'}
+                <Field label="Data as of (latest completed bar)">
+                  <span data-testid="intraday-data-as-of" className="num">
+                    {dataAsOfLabel(payload)}
+                  </span>
                 </Field>
-                <Field label="本次是否新增已收盤 K 線">
-                  {refresh?.last_success_added_bar ? '是' : '否'}
+                <Field label="Last successful request">
+                  <span className="num">
+                    {refresh?.last_success_at ? formatDateTime(refresh.last_success_at) : '—'}
+                  </span>
                 </Field>
-                <Field label="本次上游請求數">{refresh?.upstream_requests ?? 0}</Field>
-                <Field label="交易所時區">
-                  {payload.market.timezone}｜{describeSession(payload.market.session_status)}
+                <Field label="Last attempt">
+                  <span className="num">
+                    {refresh?.last_attempt_at ? formatDateTime(refresh.last_attempt_at) : '—'}
+                  </span>
                 </Field>
-                <Field label="序列完整性">
+                <Field label="New completed bar this request">
+                  {refresh?.last_success_added_bar ? 'Yes' : 'No'}
+                </Field>
+                <Field label="Upstream requests this read">{refresh?.upstream_requests ?? 0}</Field>
+                <Field label="Exchange timezone">
+                  {payload.market.timezone} · {describeSession(payload.market.session_status)}
+                </Field>
+                <Field label="Series integrity">
                   {integrity ? integritySummary(integrity) : '—'}
                 </Field>
               </div>
 
-              <div className="ws-muted" style={{ marginBottom: 12 }} data-testid="intraday-honesty-note">
-                「最近一次成功請求」不是「資料是新鮮的」。K 線時間以 UTC 的開盤時間表示；
-                HTTP 200 不代表即時行情，亦不代表已取得對外展示權利。
-                {' '}未完成 K 線以較淡顏色顯示：
-                {payload.series.forming_excluded_from_strategy ? '不納入策略輸入。' : ''}
+              <div
+                style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 12 }}
+                data-testid="intraday-honesty-note"
+              >
+                The last successful request is not the same as fresh data. Bars are timestamped at their
+                UTC open time; an HTTP 200 does not mean real-time data and does not grant the right to
+                redistribute it. Unfinished bars are drawn in a lighter tone
+                {payload.series.forming_excluded_from_strategy ? ' and excluded from strategy input' : ''}.
                 {!payload.market.holiday_calendar_complete &&
-                  ' 假日曆未配置：交易日的休市一律顯示為未知，不強行判定開市。'}
+                  ' No holiday calendar is configured, so session state is reported as unknown rather than assumed open.'}
               </div>
 
-              <div style={{ height: 420, border: '1px solid var(--border-strong)', borderRadius: 6 }}>
+              <div style={{ height: 420, border: '1px solid var(--border-subtle)', borderRadius: 4 }}>
                 <IntradayChart
                   payload={payload}
                   identityKey={seriesKey(payload.instrument.instrument_id, payload.interval)}
                 />
               </div>
 
-              <div className="ws-muted" style={{ marginTop: 12 }}>
-                顯示 {payload.series.completed.length} 根已收盤 K 線
-                {payload.series.forming ? ' + 1 根未完成' : ''}。時間語意：{payload.series.timestamp_semantics}
+              <div style={{ marginTop: 12, fontSize: 12, color: 'var(--text-secondary)' }}>
+                {payload.series.completed.length} completed bars
+                {payload.series.forming ? ' + 1 forming' : ''}. Timestamp semantics:{' '}
+                {payload.series.timestamp_semantics}.
               </div>
               {payload.provider_error && (
-                <div className="ws-muted" style={{ marginTop: 8 }}>
-                  供應商錯誤：{payload.provider_error}
+                <div style={{ marginTop: 8, fontSize: 12, color: 'var(--negative-text)' }}>
+                  Provider error: {payload.provider_error}
                 </div>
               )}
             </>
           )}
 
           {!payload && !loading && !error && capability && (
-            <div className="ws-muted" data-testid="intraday-no-data">
-              尚無回應。若通道未啟用或未驗證，後端會回報原因而不會提供模擬 K 線。
+            <div
+              style={{ fontSize: 13, color: 'var(--text-secondary)' }}
+              data-testid="intraday-no-data"
+            >
+              No response yet. If the lane is disabled or unverified, the backend reports the reason
+              instead of supplying simulated bars.
             </div>
           )}
-        </div>
+        </section>
       </div>
     </AppShell>
   );

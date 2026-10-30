@@ -101,7 +101,7 @@ async function login(page: Page): Promise<void> {
   await expect(zone).toBeVisible();
   await zone.locator('input[type="email"]').fill(ACCOUNT.email);
   await zone.locator('input[type="password"]').fill(ACCOUNT.password);
-  await page.getByRole('button', { name: '登入', exact: true }).click();
+  await page.getByRole('button', { name: 'Sign in', exact: true }).click();
   await page.waitForURL((url) => !url.pathname.startsWith('/login'), { timeout: 30000 });
 }
 

@@ -24,8 +24,8 @@ export interface ContextMeta {
 }
 
 const DATA_MODE_LABELS: Record<string, string> = {
-  demo: '演示數據',
-  live: '即時數據',
+  demo: 'Demo data',
+  live: 'Live data',
 };
 
 /**
@@ -34,47 +34,39 @@ const DATA_MODE_LABELS: Record<string, string> = {
  * mismatch notice instead of being promoted into an execution capability.
  */
 const BROKER_CONFIG_LABELS: Record<string, string> = {
-  'paper-only': '僅紙上模擬',
-  sandbox: '沙盒',
+  'paper-only': 'Paper only',
+  sandbox: 'Sandbox',
 };
 
 const AI_MODE_LABELS: Record<string, string> = {
-  mock: 'AI 模擬',
-  live: 'AI 即時',
+  mock: 'AI simulated',
+  live: 'AI live',
 };
 
 /** Backend PortfolioStatus — historical accounts remain viewable, only active ones order. */
 const PORTFOLIO_STATUS_LABELS: Record<string, string> = {
-  active: '進行中',
-  paused: '已暫停',
-  retired: '已停用',
-  completed: '已完成',
+  active: 'Active',
+  paused: 'Paused',
+  retired: 'Retired',
+  completed: 'Completed',
 };
 
-const UNAVAILABLE = '未提供';
+const UNAVAILABLE = 'Not provided';
 
 /**
  * This page's orders go to the replay manual-decision endpoint or the controlled
  * executor intent endpoint; both settle on the local paper ledger. That is what
- * licenses the 「紙上模擬」 execution scope here — not a broker config flag.
+ * licenses the "Paper only" execution scope here — not a broker config flag.
  */
-const EXECUTION_SCOPE = '紙上模擬';
+const EXECUTION_SCOPE = 'Paper only';
 
 type PanelKey = 'data' | 'system';
 
 function configValue(labels: Record<string, string>, value?: string | null): string {
   if (!value) return UNAVAILABLE;
-  return labels[value] ?? `${value}（原值）`;
+  return labels[value] ?? `${value} (raw)`;
 }
 
-/**
- * Inline context strip — content-led design.
- * Left: what the user is trading (portfolio identity, symbol) and how to read the
- * prices (data mode · execution scope, replay clock). Right: the three separate
- * facts an order depends on — 數據模式 / 執行範圍 / 系統經紀配置 — plus two
- * keyboard-operable disclosures: 資料詳情 for price provenance, 系統狀態 for
- * AI/usage and configuration-consistency notes.
- */
 export default function WorkspaceContextBar({
   symbol,
   name,
@@ -117,22 +109,22 @@ export default function WorkspaceContextBar({
         className="ctx-strip-portfolio"
         title={
           portfolio
-            ? `模擬組合 ${portfolio.id} · ${portfolio.status}${portfolioHint ? `｜${portfolioHint}` : ''}`
-            : portfolioHint ?? '未選擇模擬組合'
+            ? `Paper portfolio ${portfolio.id} · ${portfolio.status}${portfolioHint ? ` | ${portfolioHint}` : ''}`
+            : portfolioHint ?? 'No paper portfolio selected'
         }
         data-testid="ctx-portfolio-identity"
       >
         {portfolio
-          ? `${portfolio.currency} 組合 ${portfolio.id.slice(0, 8)}${
+          ? `${portfolio.currency} portfolio ${portfolio.id.slice(0, 8)}${
               portfolio.status && portfolio.status !== 'active'
-                ? `（${PORTFOLIO_STATUS_LABELS[portfolio.status] ?? portfolio.status}）`
+                ? ` (${PORTFOLIO_STATUS_LABELS[portfolio.status] ?? portfolio.status})`
                 : ''
             }`
-          : '未選擇模擬組合'}
+          : 'No paper portfolio selected'}
       </span>
       <span className="ctx-strip-sep">·</span>
       <span className="ctx-strip-symbol" title={name ?? undefined}>
-        {symbol ?? '未選擇'}
+        {symbol ?? 'No instrument'}
       </span>
       <span className="ctx-strip-sep">·</span>
       <span className="ctx-strip-mode">
@@ -144,7 +136,7 @@ export default function WorkspaceContextBar({
           <span
             className="ctx-strip-replay"
             data-testid="ctx-replay-clock"
-            title={replayInstrumentNote ?? '回放時鐘（非即時）'}
+            title={replayInstrumentNote ?? 'Replay clock (not live)'}
           >
             {replayTimestamp}
           </span>
@@ -154,7 +146,7 @@ export default function WorkspaceContextBar({
               data-testid="ctx-replay-mismatch"
               title={replayInstrumentNote}
             >
-              游標非本標的
+              Cursor is on another instrument
             </span>
           )}
         </>
@@ -163,24 +155,24 @@ export default function WorkspaceContextBar({
       <span className="ctx-strip-status" data-testid="status-chips">
         <span
           className="ws-chip"
-          title="市場數據模式（來源：伺服器運行狀態端點）"
+          title="Market data mode (source: server operational status endpoint)"
           data-testid="status-data-mode"
         >
-          數據：{configValue(DATA_MODE_LABELS, dataMode)}
+          Data: {configValue(DATA_MODE_LABELS, dataMode)}
         </span>
         <span
           className="ws-chip"
-          title="本頁送單只寫本地紙上帳簿：manual-decision 提交的是 pending 掛單（不計入持股、不動現金），由重放時鐘在下一根可執行 K 線以開盤價成交一次；execution intent 走受控執行器的離線模擬。兩者都不連接實盤經紀。"
+          title="Orders from this page write to the local paper ledger only: manual decisions queue a pending order (no position, no cash movement) that the replay clock fills once at the next executable bar's open; execution intents go to the controlled executor's offline simulation. Neither connects to a live broker."
           data-testid="status-execution-scope"
         >
-          執行範圍：{EXECUTION_SCOPE}
+          Execution: {EXECUTION_SCOPE}
         </span>
         <span
           className={`ws-chip ${configConflicts ? 'ws-chip-warn' : 'ws-chip-muted'}`}
-          title="經紀連接的系統配置值，非此組合的實盤執行證明"
+          title="Broker connection configuration value; not proof that this portfolio would trade live"
           data-testid="status-broker-mode"
         >
-          經紀：{configValue(BROKER_CONFIG_LABELS, brokerMode)}
+          Broker: {configValue(BROKER_CONFIG_LABELS, brokerMode)}
         </span>
       </span>
 
@@ -192,7 +184,7 @@ export default function WorkspaceContextBar({
         onClick={() => toggle('data')}
         data-testid="ctx-details-toggle"
       >
-        資料詳情
+        Data details
       </button>
       <button
         type="button"
@@ -202,31 +194,31 @@ export default function WorkspaceContextBar({
         onClick={() => toggle('system')}
         data-testid="ctx-system-toggle"
       >
-        系統狀態
+        System status
       </button>
 
       {openPanel === 'data' && (
         <div className="ctx-details-panel" id="ctx-details-panel" data-testid="ctx-details-panel">
           <span className="ctx-detail-item">
-            <span className="ctx-detail-label">數據來源</span>
-            <span className="ctx-detail-value">{provider ?? '未知'}</span>
+            <span className="ctx-detail-label">Source</span>
+            <span className="ctx-detail-value">{provider ?? 'Unknown'}</span>
           </span>
           <span className="ctx-detail-item">
-            <span className="ctx-detail-label">推送模式</span>
+            <span className="ctx-detail-label">Feed mode</span>
             <span className="ctx-detail-value">{feedMode ?? UNAVAILABLE}</span>
           </span>
           <span className="ctx-detail-item">
-            <span className="ctx-detail-label">數據截至</span>
-            <span className="ctx-detail-value">{asOf ?? '未知'}</span>
+            <span className="ctx-detail-label">As of</span>
+            <span className="ctx-detail-value">{asOf ?? 'Unknown'}</span>
           </span>
           <span className="ctx-detail-item">
-            <span className="ctx-detail-label">市場狀態</span>
+            <span className="ctx-detail-label">Market status</span>
             <span className="ctx-detail-value">{marketLabel ?? UNAVAILABLE}</span>
           </span>
           <span className="ctx-detail-item">
-            <span className="ctx-detail-label">回放截止</span>
+            <span className="ctx-detail-label">Replay cut-off</span>
             <span className="ctx-detail-value" data-testid="ctx-replay-cut">
-              {replayInstrumentNote ?? replayTimestamp ?? '非回放（無回放游標）'}
+              {replayInstrumentNote ?? replayTimestamp ?? 'Not in replay (no replay cursor)'}
             </span>
           </span>
         </div>
@@ -235,57 +227,57 @@ export default function WorkspaceContextBar({
       {openPanel === 'system' && (
         <div className="ctx-details-panel" id="ctx-system-panel" data-testid="ctx-system-panel">
           <span className="ctx-detail-item">
-            <span className="ctx-detail-label">系統模式</span>
+            <span className="ctx-detail-label">System mode</span>
             <span className="ctx-detail-value">{status?.mode ?? UNAVAILABLE}</span>
           </span>
           <span className="ctx-detail-item">
-            <span className="ctx-detail-label">數據模式</span>
+            <span className="ctx-detail-label">Data mode</span>
             <span className="ctx-detail-value">{configValue(DATA_MODE_LABELS, dataMode)}</span>
           </span>
           <span className="ctx-detail-item">
-            <span className="ctx-detail-label">執行範圍</span>
-            <span className="ctx-detail-value">{EXECUTION_SCOPE}（此頁送單端點）</span>
+            <span className="ctx-detail-label">Execution scope</span>
+            <span className="ctx-detail-value">{EXECUTION_SCOPE} (this page&apos;s order endpoint)</span>
           </span>
           <span className="ctx-detail-item">
-            <span className="ctx-detail-label">經紀配置</span>
+            <span className="ctx-detail-label">Broker config</span>
             <span className="ctx-detail-value">{configValue(BROKER_CONFIG_LABELS, brokerMode)}</span>
           </span>
           <span className="ctx-detail-item">
-            <span className="ctx-detail-label">AI 配置</span>
+            <span className="ctx-detail-label">AI config</span>
             <span className="ctx-detail-value">{configValue(AI_MODE_LABELS, aiMode)}</span>
           </span>
           <span className="ctx-detail-item">
-            <span className="ctx-detail-label">AI 用量</span>
+            <span className="ctx-detail-label">AI usage</span>
             <span className="ctx-detail-value">
-              {typeof usageCount === 'number' ? `${usageCount} 次` : UNAVAILABLE}
+              {typeof usageCount === 'number' ? `${usageCount} calls` : UNAVAILABLE}
             </span>
           </span>
           <span className="ctx-detail-item">
-            <span className="ctx-detail-label">組合選擇</span>
+            <span className="ctx-detail-label">Portfolio</span>
             <span className="ctx-detail-value">
-              {portfolioHint ?? (portfolio ? `已綁定組合 ${portfolio.id.slice(0, 8)}` : UNAVAILABLE)}
+              {portfolioHint ?? (portfolio ? `Bound to portfolio ${portfolio.id.slice(0, 8)}` : UNAVAILABLE)}
             </span>
           </span>
           <span className="ctx-detail-item">
-            <span className="ctx-detail-label">組合狀態</span>
+            <span className="ctx-detail-label">Portfolio status</span>
             <span className="ctx-detail-value" title={portfolio?.status ?? undefined}>
               {portfolio
                 ? `${PORTFOLIO_STATUS_LABELS[portfolio.status] ?? portfolio.status} · ${portfolio.status}`
-                : '未選擇模擬組合'}
+                : 'No paper portfolio selected'}
             </span>
           </span>
           <span className="ctx-detail-item">
-            <span className="ctx-detail-label">回放綁定</span>
+            <span className="ctx-detail-label">Replay binding</span>
             <span className="ctx-detail-value">
-              {portfolio?.simulation_session_id ? portfolio.simulation_session_id.slice(0, 8) : '未綁定'}
+              {portfolio?.simulation_session_id ? portfolio.simulation_session_id.slice(0, 8) : 'Not bound'}
             </span>
           </span>
           <p className="ctx-detail-note" data-testid="ctx-config-consistency">
             {status
               ? configConflicts
-                ? '配置不一致：經紀配置為 live，但此工作區送單端點仍在本地紙上帳簿成交。實盤執行與 agent 部署狀態未確認，如需實盤請另行核對，本頁面不提供實盤下單。'
-                : '配置一致：經紀配置與此頁送單端點同為紙上模擬。此判斷只適用於本工作區端點，不代表其他程序或部署的執行能力。'
-              : '運行狀態端點未能讀取：數據／經紀／AI 配置皆為未提供，不以任何預設值代替真實狀態。'}
+                ? 'Configuration mismatch: the broker configuration reads live, but this workspace’s order endpoint still settles on the local paper ledger. Live execution and agent deployment are unconfirmed — verify separately; this page does not place live orders.'
+                : 'Configuration consistent: the broker configuration and this page’s order endpoint are both paper. This applies to this workspace endpoint only, not to other processes or deployments.'
+              : 'The operational status endpoint could not be read. Data, broker and AI configuration are all reported as not provided; no default value is substituted for real status.'}
           </p>
         </div>
       )}

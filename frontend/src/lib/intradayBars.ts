@@ -198,100 +198,100 @@ export function planChartUpdate(
 
 export interface StatusView {
   tone: 'ok' | 'warn' | 'bad';
-  labelZh: string;
-  detailZh: string;
+  label: string;
+  detail: string;
 }
 
 const STATUS_VIEWS: Record<string, StatusView> = {
   disabled: {
     tone: 'warn',
-    labelZh: '未啟用',
-    detailZh: '伺服器未啟用盤中行情通道；不會發出任何上游請求。',
+    label: 'Not enabled',
+    detail: 'The intraday lane is disabled on the server; no upstream requests are sent.',
   },
   not_configured: {
     tone: 'bad',
-    labelZh: '未設定供應商',
-    detailZh: '後端沒有可用的行情供應商設定（例如缺少 API 金鑰）。',
+    label: 'Provider not configured',
+    detail: 'No usable market-data provider is configured on the backend (for example, a missing API key).',
   },
   provider_not_intraday_capable: {
     tone: 'bad',
-    labelZh: '供應商不支援盤中',
-    detailZh: '目前的 adapter 沒有盤中請求路徑。',
+    label: 'Provider has no intraday access',
+    detail: 'The current adapter has no intraday request path.',
   },
   interval_not_declared: {
     tone: 'warn',
-    labelZh: '此週期未宣告',
-    detailZh: '供應商 adapter 未宣告此週期可請求。',
+    label: 'Interval not declared',
+    detail: 'The provider adapter does not declare this interval as requestable.',
   },
   unverified_interval: {
     tone: 'warn',
-    labelZh: '此週期未經驗證',
-    detailZh: 'adapter 支援不等於你的帳戶可取得此週期；需先以實際帳戶驗證。',
+    label: 'Interval not verified',
+    detail: 'Adapter support does not mean your account can retrieve this interval; verify it with a real account first.',
   },
   backoff: {
     tone: 'warn',
-    labelZh: '暫停中（退避）',
-    detailZh: '上一次失敗後正在退避，時間到之前不會再請求上游。',
+    label: 'Backing off',
+    detail: 'Retrying after a previous failure; no upstream request is sent until the backoff ends.',
   },
   rate_limited: {
     tone: 'warn',
-    labelZh: '供應商限流',
-    detailZh: '已收到 429，正依照供應商指示退避。',
+    label: 'Provider rate limit',
+    detail: 'A 429 was returned; backing off as the provider instructs.',
   },
   budget_exhausted: {
     tone: 'warn',
-    labelZh: '已達本機預算',
-    detailZh: '此程序的本機請求預算已用完；這是本機保護，不代表供應商配額。',
+    label: 'Local budget reached',
+    detail: 'The process request budget is exhausted; this is a local guard, not the provider quota.',
   },
   provider_unavailable: {
     tone: 'bad',
-    labelZh: '供應商未連線',
-    detailZh: '供應商目前不可用，僅顯示已儲存資料。',
+    label: 'Provider unavailable',
+    detail: 'The provider is currently unavailable; only stored data is shown.',
   },
   symbol_not_mapped: {
     tone: 'bad',
-    labelZh: '標的未對應',
-    detailZh: '此標的沒有供應商代號對應，未送出任何上游請求。',
+    label: 'Symbol not mapped',
+    detail: 'This symbol has no provider mapping; no upstream request was sent.',
   },
   upstream_error: {
     tone: 'bad',
-    labelZh: '供應商錯誤',
-    detailZh: '上游請求失敗，僅顯示已儲存資料。',
+    label: 'Provider error',
+    detail: 'The upstream request failed; only stored data is shown.',
   },
   cache_fresh: {
     tone: 'ok',
-    labelZh: '快取內（未重新請求）',
-    detailZh: '距離上次成功請求未滿最短更新間隔，因此未再請求上游。',
+    label: 'Cached (no new request)',
+    detail: 'Less than the minimum refresh interval has passed since the last successful request, so no upstream request was sent.',
   },
   new_bar: {
     tone: 'ok',
-    labelZh: '已收到新 K 線',
-    detailZh: '最新已收盤 K 線比先前儲存的更新。',
+    label: 'New bar received',
+    detail: 'The latest completed bar is newer than the stored one.',
   },
   updated: {
     tone: 'ok',
-    labelZh: '已更新',
-    detailZh: '本次請求更新了既有的未完成或已收盤 K 線。',
+    label: 'Updated',
+    detail: 'This request updated an existing forming or completed bar.',
   },
   no_change: {
     tone: 'ok',
-    labelZh: '無新資料',
-    detailZh: '供應商回傳的 K 線與已儲存者相同。',
+    label: 'No new data',
+    detail: 'The provider returned the same bars that are already stored.',
   },
   no_data: {
     tone: 'warn',
-    labelZh: '供應商無資料',
-    detailZh: '供應商回傳空結果；未以合成資料替代。',
+    label: 'Provider returned no data',
+    detail: 'The provider returned an empty result; it was not replaced with synthetic data.',
   },
   read_only: {
     tone: 'ok',
-    labelZh: '只讀取（未請求上游）',
-    detailZh: '此請求只讀取已儲存資料。',
+    label: 'Read only (no upstream request)',
+    detail: 'This request read stored data only.',
   },
   idle: {
     tone: 'warn',
-    labelZh: '尚未請求',
-    detailZh: '此程序尚未對此系列發出上游請求。',
+    label: 'Not requested yet',
+    detail: 'This process has not requested this series from the provider.',
   },
 };
 
@@ -299,8 +299,8 @@ export function describeStatus(status: string): StatusView {
   return (
     STATUS_VIEWS[status] ?? {
       tone: 'warn',
-      labelZh: status,
-      detailZh: '未知狀態；不以成功視之。',
+      label: status,
+      detail: 'Unknown status; not treated as success.',
     }
   );
 }
@@ -309,17 +309,17 @@ export function describeStatus(status: string): StatusView {
 export function describeSession(status: string): string {
   switch (status) {
     case 'open':
-      return '開市中';
+      return 'Open';
     case 'closed':
-      return '已收市';
+      return 'Closed';
     case 'closed_weekend':
-      return '週末休市';
+      return 'Closed (weekend)';
     case 'closed_holiday':
-      return '假日休市';
+      return 'Closed (holiday)';
     case 'unknown_holiday_calendar':
-      return '休市狀態未知（無假日曆）';
+      return 'Session unknown (no holiday calendar)';
     default:
-      return `狀態未知（${status}）`;
+      return `Unknown status (${status})`;
   }
 }
 
@@ -387,20 +387,20 @@ export function seriesKey(instrumentId: string, interval: string): string {
 
 /** Prefer the server's data time; never present the request time as data time. */
 export function dataAsOfLabel(payload: IntradaySeriesPayload): string {
-  if (!payload.data_as_of) return '—（尚無已收盤 K 線）';
+  if (!payload.data_as_of) return '— (no completed bars yet)';
   return payload.data_as_of;
 }
 
 /** Gaps and duplicates are reported, not silently repaired. */
 export function integritySummary(integrity: IntradayIntegrity): string {
-  if (integrity.integrity_ok) return '序列完整';
+  if (integrity.integrity_ok) return 'Series complete';
   const parts: string[] = [];
-  if (integrity.missing_intervals > 0) parts.push(`缺 ${integrity.missing_intervals} 根`);
+  if (integrity.missing_intervals > 0) parts.push(`missing ${integrity.missing_intervals}`);
   if (integrity.duplicate_timestamps.length > 0)
-    parts.push(`重複 ${integrity.duplicate_timestamps.length} 個`);
+    parts.push(`duplicate ${integrity.duplicate_timestamps.length}`);
   if (integrity.off_grid_timestamps.length > 0)
-    parts.push(`非網格 ${integrity.off_grid_timestamps.length} 個`);
+    parts.push(`off-grid ${integrity.off_grid_timestamps.length}`);
   if (integrity.invalid_timestamps.length > 0)
-    parts.push(`無效 ${integrity.invalid_timestamps.length} 個`);
-  return parts.length > 0 ? parts.join('、') : '序列有異常';
+    parts.push(`invalid ${integrity.invalid_timestamps.length}`);
+  return parts.length > 0 ? parts.join(', ') : 'Series has issues';
 }

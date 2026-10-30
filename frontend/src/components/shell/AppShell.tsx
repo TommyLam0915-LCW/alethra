@@ -13,51 +13,55 @@ import {
 } from '@/lib/candidate';
 
 export type NavKey =
+  | 'market'
   | 'workspace'
   | 'strategies'
+  | 'models'
+  | 'training'
   | 'portfolios'
   | 'journal'
-  | 'training'
-  | 'market'
   | 'pilot';
 
 interface NavItem {
   key: NavKey;
   href: string;
   label: string;
-  labelEn: string;
   /** Short label for the mobile bottom bar, where the long form truncates. */
   labelMobile: string;
 }
 
+/**
+ * Primary navigation follows the product's own task order — find a market,
+ * do the work, keep the record — rather than internal backend module names.
+ * Hrefs keep the existing routes so bookmarks and deep links still resolve.
+ */
 const PRIMARY_NAV: NavItem[] = [
-  { key: 'workspace', href: '/workspace', label: '工作台', labelEn: 'Workspace', labelMobile: '工作台' },
-  { key: 'strategies', href: '/dashboard', label: '策略與實驗', labelEn: 'Strategies & Experiments', labelMobile: '策略' },
-  { key: 'portfolios', href: '/paper-portfolio', label: '投資組合', labelEn: 'Portfolios', labelMobile: '組合' },
-  { key: 'journal', href: '/paper-portfolio?view=journal', label: '紀錄與結果', labelEn: 'Journal & Results', labelMobile: '日誌' },
+  { key: 'market', href: '/market-data', label: 'Markets', labelMobile: 'Markets' },
+  { key: 'workspace', href: '/workspace', label: 'Workspace', labelMobile: 'Workspace' },
+  { key: 'strategies', href: '/dashboard', label: 'Research', labelMobile: 'Research' },
+  { key: 'models', href: '/models', label: 'Models', labelMobile: 'Models' },
+  { key: 'journal', href: '/paper-portfolio?view=journal', label: 'Journal', labelMobile: 'Journal' },
 ];
 
 const TOOL_LINKS = [
-  { key: 'training' as NavKey, href: '/training', label: '訓練與模型', labelEn: 'Training & Models' },
-  { href: '/models', label: '模型研究記錄', labelEn: 'Model research records' },
-  { href: '/inference', label: '推論紀錄', labelEn: 'Inference runs' },
-  { href: '/research-drafts', label: '研究草稿', labelEn: 'Research drafts' },
-  { key: 'market' as NavKey, href: '/market-data', label: '市場資料', labelEn: 'Market data' },
-  { href: '/execution', label: '執行意圖', labelEn: 'Execution intents' },
-  { key: 'pilot' as NavKey, href: '/pilot', label: 'Pilot 計劃', labelEn: 'Pilot program' },
+  { href: '/training', label: 'Training jobs' },
+  { href: '/inference', label: 'Inference runs' },
+  { href: '/research-drafts', label: 'Research drafts' },
+  { href: '/execution', label: 'Execution intents' },
+  { href: '/paper-portfolio', label: 'Paper portfolios' },
+  { href: '/pilot', label: 'Pilot program' },
 ];
 
 const SETTINGS_LINKS = [
-  { href: '/personal-memory', label: '個人研究記憶', labelEn: 'Personal research memory' },
-  { href: '/api-keys', label: 'API 金鑰', labelEn: 'API access' },
-  { href: '/subscription', label: '訂閱與帳單', labelEn: 'Subscription' },
+  { href: '/api-keys', label: 'API access' },
+  { href: '/personal-memory', label: 'Personal research memory' },
+  { href: '/subscription', label: 'Subscription & usage' },
+  { href: '/legal', label: 'Legal & disclosures' },
 ];
 
 interface MenuLink {
   href: string;
   label: string;
-  labelEn: string;
-  key?: NavKey;
 }
 
 /**
@@ -70,12 +74,10 @@ function AppMenu({
   label,
   testId,
   items,
-  activeKey,
 }: {
   label: string;
   testId: string;
   items: MenuLink[];
-  activeKey?: NavKey;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -122,12 +124,6 @@ function AppMenu({
               href={item.href}
               role="menuitem"
               className="app-settings-item"
-              aria-current={
-                activeKey !== undefined &&
-                (item as MenuLink & { key?: NavKey }).key === activeKey
-                  ? 'page'
-                  : undefined
-              }
               onClick={() => setOpen(false)}
             >
               {item.label}
@@ -140,11 +136,66 @@ function AppMenu({
 }
 
 /**
+ * One environment marker for the whole app. Everything test-only, sample or
+ * paper-execution related lives behind this single control instead of being
+ * repeated as a warning paragraph on every panel.
+ */
+function EnvBadge() {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('mousedown', onDocClick);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDocClick);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  return (
+    <div className="app-settings" ref={ref}>
+      <button
+        type="button"
+        className="app-env-badge"
+        data-env="demo"
+        data-testid="env-badge"
+        aria-expanded={open}
+        aria-controls="env-popover"
+        onClick={() => setOpen((v) => !v)}
+        title="Environment and execution scope"
+      >
+        Demo
+      </button>
+      {open && (
+        <div id="env-popover" className="app-env-popover" role="dialog" data-testid="env-popover">
+          <strong>Demo environment</strong>
+          Market data may be sample, historical or delayed. Orders are paper
+          orders only — nothing is sent to a broker or exchange. Review the
+          source and as-of label on each data surface.
+          <div style={{ marginTop: 8 }}>
+            <Link href="/legal" className="app-settings-item" style={{ padding: 0 }}>
+              Legal & disclosures
+            </Link>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
  * The one shared application shell for every authenticated page. Owns the
- * auth guard, the persistent top app bar (brand + primary nav + settings +
- * logout) and an optional persistent context bar slot, so pages no longer
- * render their own ad-hoc headers. Additive: pages opt in by wrapping their
- * content in <AppShell>.
+ * auth guard, the persistent top app bar (brand + primary nav + environment +
+ * tools + settings + logout) and an optional persistent context bar slot, so
+ * pages no longer render their own ad-hoc headers.
  */
 export default function AppShell({
   active,
@@ -223,7 +274,7 @@ export default function AppShell({
         clearCandidateMode();
         setCandidate(null);
       } else {
-        setCandidateError(err instanceof Error ? err.message : '切換情境失敗');
+        setCandidateError(err instanceof Error ? err.message : 'Could not switch scenario');
       }
       setCandidateSwitching(false);
     }
@@ -232,7 +283,7 @@ export default function AppShell({
   if (!authed) {
     return (
       <div className="app-shell app-shell-loading">
-        <span className="app-shell-loading-text">載入中…</span>
+        <span className="app-shell-loading-text">Loading…</span>
       </div>
     );
   }
@@ -244,7 +295,7 @@ export default function AppShell({
           {brand.name}
         </Link>
 
-        <nav className="app-nav" aria-label="主要導覽">
+        <nav className="app-nav" aria-label="Primary">
           {PRIMARY_NAV.map((item) => {
             const isActive = active === item.key;
             return (
@@ -262,15 +313,16 @@ export default function AppShell({
         </nav>
 
         <div className="app-bar-right">
-          <AppMenu label="工具" testId="tools-toggle" items={TOOL_LINKS} activeKey={active} />
-          <AppMenu label="設定" testId="settings-toggle" items={SETTINGS_LINKS} />
+          <EnvBadge />
+          <AppMenu label="Tools" testId="tools-toggle" items={TOOL_LINKS} />
+          <AppMenu label="Settings" testId="settings-toggle" items={SETTINGS_LINKS} />
           <button
             type="button"
             className="app-logout"
             onClick={handleLogout}
             data-testid="app-logout"
           >
-            登出
+            Log out
           </button>
         </div>
       </header>
@@ -283,21 +335,19 @@ export default function AppShell({
             flexWrap: 'wrap',
             alignItems: 'center',
             gap: '10px',
-            padding: '6px 16px',
-            borderBottom: '1px solid var(--border)',
-            background: 'rgba(255,255,255,0.02)',
+            padding: '5px 16px',
+            borderBottom: '1px solid var(--border-subtle)',
+            background: 'var(--surface-1)',
             fontSize: '12px',
             color: 'var(--text-secondary)',
           }}
         >
-          <span data-testid="candidate-mode-label" style={{ fontWeight: 600, color: 'var(--text-white)' }}>
-            ◈ {candidate.label_zh}
+          <span data-testid="candidate-mode-label" style={{ fontWeight: 600, color: 'var(--text-primary)' }}>
+            {candidate.label_zh}
           </span>
           {candidate.accounts.length > 1 && (
             <>
-              <label htmlFor="candidate-role-select" style={{ color: 'var(--text-muted)' }}>
-                測試情境
-              </label>
+              <label htmlFor="candidate-role-select">Test scenario</label>
               <select
                 id="candidate-role-select"
                 data-testid="candidate-role-select"
@@ -306,10 +356,10 @@ export default function AppShell({
                 onChange={(e) => handleCandidateRole(e.target.value)}
                 style={{
                   background: 'transparent',
-                  color: 'var(--text-white)',
-                  border: '1px solid var(--border)',
-                  borderRadius: '6px',
-                  padding: '3px 8px',
+                  color: 'var(--text-primary)',
+                  border: '1px solid var(--border-strong)',
+                  borderRadius: '4px',
+                  padding: '2px 8px',
                   fontSize: '12px',
                 }}
               >
@@ -321,14 +371,14 @@ export default function AppShell({
               </select>
             </>
           )}
-          {candidateSwitching && <span>切換中…</span>}
+          {candidateSwitching && <span>Switching…</span>}
           {candidateError && (
             <span role="alert" data-testid="candidate-switch-error">
               {candidateError}
             </span>
           )}
           <span style={{ marginLeft: 'auto', color: 'var(--text-muted)' }}>
-            合成資料 · 僅供本機測試
+            Sample data · paper execution · local environment
           </span>
         </div>
       )}
@@ -343,7 +393,7 @@ export default function AppShell({
         {children}
       </main>
 
-      <nav className="app-bottom-nav" aria-label="主要導覽（行動裝置）" data-testid="app-bottom-nav">
+      <nav className="app-bottom-nav" aria-label="Primary (mobile)" data-testid="app-bottom-nav">
         {PRIMARY_NAV.map((item) => {
           const isActive = active === item.key;
           return (

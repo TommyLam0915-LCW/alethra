@@ -161,13 +161,12 @@ test.describe('load failures are visible, not empty states', () => {
     await expect(notice).toContainText('無法載入模型與額度資料');
   });
 
-  test('model research records stay reachable from the tools menu', async ({ page }) => {
+  test('model research records stay reachable from the primary navigation', async ({ page }) => {
     await page.route(ROUTE.experiments, (route) => json(route, []));
 
     await open(page, '/dashboard');
 
-    await page.getByTestId('tools-toggle').click();
-    const entry = page.getByRole('menuitem', { name: '模型研究記錄' });
+    const entry = page.getByTestId('nav-models');
     await expect(entry).toBeVisible();
     await expect(entry).toHaveAttribute('href', '/models');
   });

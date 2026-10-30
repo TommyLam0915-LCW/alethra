@@ -355,7 +355,7 @@ test('ordinary login stays available after logging out of a candidate session', 
   const zone = page.locator('.login-form-zone');
   await expect(zone.locator('input[type="email"]')).toBeVisible();
   await expect(zone.locator('input[type="password"]')).toBeVisible();
-  await expect(zone.getByRole('button', { name: '登入', exact: true })).toBeVisible();
+  await expect(zone.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible();
   // The password-free panel is additive; it must not replace the form.
   await expect(page.getByTestId('candidate-entry-panel')).toBeVisible();
 });
@@ -404,7 +404,9 @@ test('mode off: homepage stays public and mints no session', async ({ page }) =>
   expect(statusResponse.ok()).toBeTruthy();
   expect((await statusResponse.json()).enabled).toBe(false);
 
-  await expect(page.getByRole('link', { name: '登入', exact: true })).toBeVisible();
+  await expect(
+    page.getByRole('navigation', { name: 'Account' }).getByRole('link', { name: 'Sign in' })
+  ).toBeVisible();
   expect(new URL(page.url()).pathname).toBe('/');
   expect(posts).toHaveLength(0);
   await expect(page.getByTestId('candidate-mode-bar')).toHaveCount(0);

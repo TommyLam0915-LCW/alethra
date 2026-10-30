@@ -92,7 +92,7 @@ async function login(page: Page, email: string, password: string) {
     expect(await emailInput.inputValue()).toBe(email);
     expect(await passwordInput.inputValue()).toBe(password);
   }).toPass({ timeout: 15000 });
-  await page.getByRole('button', { name: '登入', exact: true }).click();
+  await page.getByRole('button', { name: 'Sign in', exact: true }).click();
   await page.waitForURL((url) => !url.pathname.startsWith('/login'), { timeout: 30000 });
 }
 

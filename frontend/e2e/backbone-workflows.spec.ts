@@ -189,41 +189,43 @@ test.describe('Backbone Workflow Acceptance', () => {
       await loginViaBrowser(page);
       await page.goto(`${FRONTEND_URL}/market-data`);
       
-      // Verify page loads (title is "市場資料")
-      await expect(page.locator('h1').filter({ hasText: /市場資料|Market Data/i })).toBeVisible();
-      
-      // Verify demo mode label is present
-      await expect(page.locator('text=/DEMO|示範|演示/i').first()).toBeVisible();
+      // Verify page loads
+      await expect(page.locator('h1').filter({ hasText: /Markets/i })).toBeVisible();
+
+      // The environment marker is the single, global disclosure surface.
+      await expect(page.getByTestId('env-badge')).toHaveText('Demo');
     });
 
     test('B2. Load available symbol', async ({ page }) => {
       await loginViaBrowser(page);
       await page.goto(`${FRONTEND_URL}/market-data`);
-      
-      // Look for DEMO-ALPHA or similar demo symbol
-      const symbolInput = await page.locator('input[placeholder*="符號"], input[placeholder*="symbol"]').first();
-      if (await symbolInput.isVisible()) {
-        await symbolInput.fill('DEMO-ALPHA');
-        await page.click('button:has-text("查詢"), button:has-text("Load")');
-        
-        // Wait for data to load
-        await page.waitForTimeout(2000);
-        
-        // Verify data is displayed
-        await expect(page.locator('text=/DEMO-ALPHA/').first()).toBeVisible();
-      }
+
+      // Demo instruments live behind the Demo source tab.
+      await page.getByRole('button', { name: 'Demo', exact: true }).click();
+      const symbolSelect = page.getByLabel('Choose instrument');
+      await expect(symbolSelect.locator('option[value="DEMO-ALPHA"]')).toHaveCount(1);
+      await symbolSelect.selectOption('DEMO-ALPHA');
+
+      // The latest-close heading proves the bar request completed for that symbol.
+      await expect(page.locator('h3').filter({ hasText: /Latest close — DEMO-ALPHA/ })).toBeVisible({
+        timeout: 15000,
+      });
     });
 
     test('B3. Verify truthful mode labels', async ({ page }) => {
       await loginViaBrowser(page);
       await page.goto(`${FRONTEND_URL}/market-data`);
 
-      // Retrying expectation: the labels render after the provider-status fetch,
-      // so a one-shot isVisible() races React hydration.
-      await expect(page.locator('body')).toContainText(
-        /模擬或演示數據|僅供研究用途|模擬資料|Demo \(Synthetic\)/i,
-        { timeout: 10000 }
-      );
+      // Truthfulness is asserted from the surfaces that actually render: the
+      // global environment badge states the paper-only scope, and the demo
+      // source tab labels synthetic instruments.
+      await page.getByTestId('env-badge').click();
+      await expect(page.getByTestId('env-popover')).toContainText(/paper orders only/i);
+
+      await expect(page.getByRole('button', { name: 'Demo', exact: true })).toBeVisible();
+      await page.getByRole('button', { name: 'Demo', exact: true }).click();
+      await expect(page.locator('#market-data-heading')).toContainText(/Demo instruments/);
+      await expect(page.getByLabel('Choose instrument')).toContainText(/DEMO-ALPHA \(synthetic\)/);
     });
   });
 
@@ -466,14 +468,29 @@ test.describe('Backbone Workflow Acceptance', () => {
       await loginViaBrowser(page);
       await page.goto(`${FRONTEND_URL}/dashboard`);
 
-      // The redesign moved backbone pages into the persistent shell's
-      // "工具" and "設定" menus instead of dashboard cards.
+      // The redesign keeps five primary destinations in the shell — Markets,
+      // Workspace, Research, Models, Journal — and moves the backbone tools,
+      // API access and usage/preferences into the "Tools" and "Settings" menus.
+      const primaryLinks = [
+        { href: '/market-data', text: /Markets/i },
+        { href: '/workspace', text: /Workspace/i },
+        { href: '/dashboard', text: /Research/i },
+        { href: '/models', text: /Models/i },
+      ];
+      for (const link of primaryLinks) {
+        const linkElement = page
+          .locator('.app-nav')
+          .locator(`a[href="${link.href}"]`)
+          .filter({ hasText: link.text });
+        await expect(linkElement).toBeVisible();
+      }
+
       await page.getByTestId('tools-toggle').click();
       const toolLinks = [
-        { href: '/training', text: /訓練|Training/i },
-        { href: '/models', text: /模型研究記錄|Model research/i },
-        { href: '/inference', text: /推論|Inference/i },
-        { href: '/market-data', text: /市場資料|Market data/i },
+        { href: '/training', text: /Training/i },
+        { href: '/inference', text: /Inference/i },
+        { href: '/execution', text: /Execution/i },
+        { href: '/paper-portfolio', text: /Paper portfolios/i },
         { href: '/pilot', text: /Pilot/i },
       ];
       for (const link of toolLinks) {
@@ -485,8 +502,10 @@ test.describe('Backbone Workflow Acceptance', () => {
 
       await page.getByTestId('settings-toggle').click();
       const settingLinks = [
-        { href: '/api-keys', text: /API|金鑰|Key/i },
-        { href: '/subscription', text: /訂閱|Subscription/i },
+        { href: '/api-keys', text: /API/i },
+        { href: '/personal-memory', text: /Personal research memory/i },
+        { href: '/subscription', text: /Subscription|Usage/i },
+        { href: '/legal', text: /Legal/i },
       ];
       for (const link of settingLinks) {
         const linkElement = page.getByTestId('settings-toggle-menu')

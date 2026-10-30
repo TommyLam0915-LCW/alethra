@@ -200,13 +200,13 @@ async function openInferenceForm(page: Page): Promise<void> {
 test.describe('inference entry and admin restriction', () => {
   test.skip(!READY, SKIP_REASON);
 
-  test('tools menu links to 推論紀錄', async ({ page }) => {
+  test('tools menu links to Inference runs', async ({ page }) => {
     const state = defaultState();
     await install(page, state);
     await open(page, '/dashboard');
 
     await page.getByTestId('tools-toggle').click();
-    const link = page.getByTestId('tools-toggle-menu').getByRole('menuitem', { name: '推論紀錄' });
+    const link = page.getByTestId('tools-toggle-menu').getByRole('menuitem', { name: 'Inference runs' });
     await expect(link).toBeVisible();
     await link.click();
 
@@ -315,7 +315,7 @@ test.describe('inference entry and admin restriction', () => {
 
     await page.getByTestId('tools-toggle').click();
     const menu = page.getByTestId('tools-toggle-menu');
-    await expect(menu.getByRole('menuitem', { name: '推論紀錄' })).toBeVisible();
+    await expect(menu.getByRole('menuitem', { name: 'Inference runs' })).toBeVisible();
     await expect(menu.locator('a[href="/admin"]')).toHaveCount(0);
 
     await page.goto(`${FRONTEND_BASE}/admin`, { waitUntil: 'domcontentloaded' });
