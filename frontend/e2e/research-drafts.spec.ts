@@ -495,7 +495,7 @@ test.describe('PR #3 Browser Acceptance - Local Playwright', () => {
   });
 
   test.describe('L. Confirmation and Population', () => {
-    test('should apply only confirmed fields and preserve zero costs', async ({ page }) => {
+    test('should apply only confirmed fields and preserve zero costs', async ({ page, context }) => {
       const token = await getAuthToken(USER_A.email, USER_A.password);
 
       // Create a draft with distinct values including zero costs
@@ -515,6 +515,20 @@ test.describe('PR #3 Browser Acceptance - Local Playwright', () => {
       // Verify draft is actually accepted via API
       const acceptedDraft = await getDraft(token, draft.id);
       expect(acceptedDraft.status).toBe('accepted');
+
+      // The form now opens on the real-instrument catalog, so read its own
+      // default instead of pinning a catalog entry that can rotate.
+      const baselinePage = await context.newPage();
+      await baselinePage.goto(`${FRONTEND_BASE}/experiments/new`);
+      await baselinePage.waitForLoadState('networkidle');
+      const defaultAsset = await baselinePage
+        .locator('.form-group:has-text("資產") select')
+        .inputValue();
+      await baselinePage.close();
+
+      // The differential below only proves "not applied" while the catalog
+      // default still differs from the draft's asset; fail if that ever collapses.
+      expect(defaultAsset).not.toBe('DEMO-BETA');
 
       // Login and navigate to draft detail
       await login(page, USER_A.email, USER_A.password);
@@ -583,7 +597,7 @@ test.describe('PR #3 Browser Acceptance - Local Playwright', () => {
       expect(await templateSelect.inputValue()).toBe('buy_and_hold'); // Default, NOT sma_crossover
 
       const assetSelect = page.locator('.form-group:has-text("資產") select');
-      expect(await assetSelect.inputValue()).toBe('DEMO-ALPHA'); // Default, NOT DEMO-BETA
+      expect(await assetSelect.inputValue()).toBe(defaultAsset); // Form default, NOT the draft's DEMO-BETA
 
       const initialCashInput = page.locator('.form-group:has-text("初始資金") input');
       expect(await initialCashInput.inputValue()).toBe('10000'); // Default, NOT 50000

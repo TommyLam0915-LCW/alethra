@@ -217,12 +217,13 @@ test.describe('Backbone Workflow Acceptance', () => {
     test('B3. Verify truthful mode labels', async ({ page }) => {
       await loginViaBrowser(page);
       await page.goto(`${FRONTEND_URL}/market-data`);
-      
-      // Verify demo/disclaimer labels are present
-      const hasDemoLabel = await page.locator('text=/DEMO|示範|演示|模擬/i').first().isVisible();
-      const hasDisclaimer = await page.locator('text=/聲明|Disclaimer|僅供研究/i').first().isVisible();
-      
-      expect(hasDemoLabel || hasDisclaimer).toBeTruthy();
+
+      // Retrying expectation: the labels render after the provider-status fetch,
+      // so a one-shot isVisible() races React hydration.
+      await expect(page.locator('body')).toContainText(
+        /模擬或演示數據|僅供研究用途|模擬資料|Demo \(Synthetic\)/i,
+        { timeout: 10000 }
+      );
     });
   });
 
@@ -464,19 +465,33 @@ test.describe('Backbone Workflow Acceptance', () => {
     test('G1. Discover new pages through dashboard', async ({ page }) => {
       await loginViaBrowser(page);
       await page.goto(`${FRONTEND_URL}/dashboard`);
-      
-      // Verify all backbone page links are present
-      const links = [
+
+      // The redesign moved backbone pages into the persistent shell's
+      // "工具" and "設定" menus instead of dashboard cards.
+      await page.getByTestId('tools-toggle').click();
+      const toolLinks = [
         { href: '/training', text: /訓練|Training/i },
+        { href: '/models', text: /模型研究記錄|Model research/i },
         { href: '/inference', text: /推論|Inference/i },
-        { href: '/execution', text: /執行|Execution/i },
-        { href: '/market-data', text: /市場數據|Market Data/i },
+        { href: '/market-data', text: /市場資料|Market data/i },
+        { href: '/pilot', text: /Pilot/i },
+      ];
+      for (const link of toolLinks) {
+        const linkElement = page.getByTestId('tools-toggle-menu')
+          .locator(`a[href="${link.href}"]`)
+          .filter({ hasText: link.text });
+        await expect(linkElement).toBeVisible();
+      }
+
+      await page.getByTestId('settings-toggle').click();
+      const settingLinks = [
         { href: '/api-keys', text: /API|金鑰|Key/i },
         { href: '/subscription', text: /訂閱|Subscription/i },
       ];
-
-      for (const link of links) {
-        const linkElement = await page.locator(`a[href="${link.href}"]`).filter({ hasText: link.text }).first();
+      for (const link of settingLinks) {
+        const linkElement = page.getByTestId('settings-toggle-menu')
+          .locator(`a[href="${link.href}"]`)
+          .filter({ hasText: link.text });
         await expect(linkElement).toBeVisible();
       }
     });
@@ -511,25 +526,26 @@ test.describe('Backbone Workflow Acceptance', () => {
       await page.goto(`${FRONTEND_URL}/dashboard`);
       await expect(page).toHaveURL(/\/dashboard/);
       
-      // Verify dashboard loads (title is "我的實驗")
-      await expect(page.locator('h1').filter({ hasText: /我的實驗|My Experiments/i })).toBeVisible();
+      // Verify dashboard loads (post-redesign title is "策略與實驗")
+      await expect(page.locator('h1').filter({ hasText: /策略與實驗|My Experiments/i })).toBeVisible();
     });
   });
 
   test.describe('H. Product Alignment', () => {
-    test('H1. Dashboard shows brand tagline and research-focused layout', async ({ page }) => {
+    test('H1. Dashboard shows brand and research-focused layout', async ({ page }) => {
       await loginViaBrowser(page);
       await page.goto(`${FRONTEND_URL}/dashboard`);
 
-      // Brand tagline present
-      await expect(page.locator('text=你的投資想法，值得被認真檢驗')).toBeVisible({ timeout: 10000 });
+      // Brand mark in the persistent shell (tagline now lives on the login hero)
+      await expect(page.getByTestId('app-brand')).toBeVisible();
 
-      // Primary research actions visible
-      await expect(page.locator('a[href="/experiments/new"], button:has-text("建立實驗")').first()).toBeVisible();
+      // Research-first layout: list title + primary research action
+      await expect(page.locator('h1').filter({ hasText: '策略與實驗' })).toBeVisible();
+      await expect(page.locator('a[href="/experiments/new"]').first()).toBeVisible();
 
-      // Infrastructure buttons moved to secondary section
-      const secondarySection = page.locator('text=其他功能');
-      await expect(secondarySection).toBeVisible();
+      // Infrastructure lives in secondary shell menus, not the primary page
+      await expect(page.getByTestId('tools-toggle')).toBeVisible();
+      await expect(page.locator('a[href="/training"]')).toHaveCount(0);
     });
 
     test('H2. Dashboard shows honest disclaimers and guidance', async ({ page }) => {
