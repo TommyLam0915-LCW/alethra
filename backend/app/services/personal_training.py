@@ -12,11 +12,13 @@ it is never claimed to erase what a model learned.
 """
 
 import json
+import logging
 import uuid
 from typing import Any, Dict, Optional
 
 from sqlalchemy.orm import Session
 
+from app.lib.error_safety import safe_error_message
 from app.lib.timeutil import utcnow
 from app.ml.personal_trainer import (
     PERSONAL_TASK_TYPE,
@@ -42,6 +44,8 @@ from app.services import emit_event
 from app.services.job_control import stop_if_cancelled
 from app.services.personal_dataset import LABEL_DEFINITION, _canonical_checksum
 from app.services.personalization import get_active_consent, _scope_strategy_ids
+
+logger = logging.getLogger(__name__)
 
 PERSONAL_TRAINING_TYPE = "personal_decision_model"
 PERSONAL_PURPOSE_ZH = (
@@ -323,8 +327,9 @@ def execute_personal_training(db: Session, job_id: uuid.UUID) -> TrainingJob:
             ensure_ascii=False,
         )
     except Exception as exc:  # noqa: BLE001 - worker records any failure
+        logger.exception("Personal training job failed")
         job.status = TrainingJobStatus.failed
-        job.error_details = str(exc)
+        job.error_details = safe_error_message(exc)
 
     job.completed_at = utcnow()
     db.flush()

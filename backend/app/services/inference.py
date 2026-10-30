@@ -1,4 +1,5 @@
 """Module E: Model execution runtime — inference engine."""
+import logging
 import uuid
 from datetime import datetime
 from typing import Dict, List, Any, Optional
@@ -8,7 +9,10 @@ from sqlalchemy.orm import Session
 from app.models.inference import InferenceRun, InferenceRunStatus
 from app.models.model_research import ModelResearchRecord, ModelVersion, ModelType
 from app.providers import get_data_provider
+from app.lib.error_safety import safe_error_message
 from app.lib.timeutil import utcnow
+
+logger = logging.getLogger(__name__)
 
 
 def _compute_sma(closes: List[float], window: int) -> List[Optional[float]]:
@@ -225,8 +229,9 @@ def run_inference(
             run.error_details = f"Unsupported model type: {model_type_enum}"
 
     except Exception as e:
+        logger.exception("Inference run failed")
         run.status = InferenceRunStatus.failed
-        run.error_details = str(e)
+        run.error_details = safe_error_message(e)
 
     run.completed_at = utcnow()
     db.flush()

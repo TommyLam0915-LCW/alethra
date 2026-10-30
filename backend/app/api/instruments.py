@@ -1,9 +1,12 @@
+import logging
+
 from fastapi import APIRouter, HTTPException, Depends, Query
 from typing import Optional
 from datetime import date, datetime, timezone
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.lib.error_safety import safe_error_message, safe_provider_status
 from app.auth.jwt import require_admin
 from app.auth.safety import rate_limit
 from app.models.user import User
@@ -29,6 +32,7 @@ from app.providers.instruments import (
 )
 from app.data import real_synthetic_data
 
+logger = logging.getLogger(__name__)
 router = APIRouter(tags=["instruments"])
 
 
@@ -50,11 +54,15 @@ def _validated_refresh_range(start_date: str, end_date: str) -> None:
 
 def _provider_failure(instrument_id: str, exc: Exception) -> HTTPException:
     provider = get_data_provider()
+    logger.warning("Data provider failed for %s: %r", instrument_id, exc, exc_info=exc)
     return HTTPException(
         status_code=503,
         detail={
-            "error": f"Data provider failed to serve data for {instrument_id}: {exc}",
-            "provider_status": provider.get_status(),
+            "error": (
+                f"Data provider failed to serve data for {instrument_id}: "
+                f"{safe_error_message(exc)}"
+            ),
+            "provider_status": safe_provider_status(provider.get_status()),
         },
     )
 
@@ -568,12 +576,16 @@ def refresh_instrument_bars(
         }
 
     except Exception as exc:
+        logger.warning("Data refresh failed for %s: %r", instrument_id, exc, exc_info=exc)
         storage.mark_error(instrument_id, provider.provider_id, str(exc))
         raise HTTPException(
             status_code=503,
             detail={
-                "error": f"Failed to refresh data for {instrument_id}: {exc}",
-                "provider_status": provider.get_status(),
+                "error": (
+                    f"Failed to refresh data for {instrument_id}: "
+                    f"{safe_error_message(exc)}"
+                ),
+                "provider_status": safe_provider_status(provider.get_status()),
             },
         )
 

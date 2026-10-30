@@ -1,12 +1,14 @@
 """Module F: Training pipeline — parameter sweep engine."""
 import copy
 import itertools
+import logging
 import uuid
 from datetime import datetime
 from typing import Dict, List, Any, Optional
 
 from sqlalchemy.orm import Session
 
+from app.lib.error_safety import safe_error_message
 from app.models.training import TrainingJob, TrainingJobStatus
 from app.models.experiment import Experiment
 from app.models.experiment_version import ExperimentVersion
@@ -14,6 +16,8 @@ from app.engine.backtest import run_backtest
 from app.lib.timeutil import utcnow
 from app.services.job_control import stop_if_cancelled
 
+
+logger = logging.getLogger(__name__)
 
 # Maximum number of grid combinations allowed per training job.
 MAX_GRID_SIZE = 1000
@@ -180,8 +184,9 @@ def run_parameter_sweep(
         job.status = TrainingJobStatus.completed
 
     except Exception as e:
+        logger.exception("Parameter sweep failed")
         job.status = TrainingJobStatus.failed
-        job.error_details = str(e)
+        job.error_details = safe_error_message(e)
 
     job.completed_at = utcnow()
     db.flush()

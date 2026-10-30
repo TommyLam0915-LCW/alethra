@@ -16,6 +16,7 @@ from app.models.training import TrainingJob, TrainingJobStatus
 from app.providers import get_data_provider
 from app.services.market_data_storage import MarketDataStorage
 from app.ml.trainer import train_model, load_model, list_models
+from app.lib.error_safety import safe_error_message
 from app.lib.timeutil import utcnow
 from app.services.job_control import stop_if_cancelled
 
@@ -322,8 +323,9 @@ def execute_ml_training(
         job.status = TrainingJobStatus.completed
 
     except Exception as e:
+        logger.exception("ML training failed")
         job.status = TrainingJobStatus.failed
-        job.error_details = str(e)
+        job.error_details = safe_error_message(e)
 
     job.completed_at = utcnow()
     db.flush()

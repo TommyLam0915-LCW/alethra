@@ -42,6 +42,7 @@ from app.services.personal_training import (
     execute_personal_training,
 )
 from app.auth.entitlements import settle_reservation, release_reservation
+from app.lib.error_safety import safe_error_message
 from app.lib.timeutil import utcnow
 
 logging.basicConfig(
@@ -315,7 +316,7 @@ def execute_job(job_id: int) -> None:
         job = db.query(TrainingJob).filter(TrainingJob.id == job_id).first()
         if job:
             job.status = TrainingJobStatus.failed
-            job.error_details = str(exc)
+            job.error_details = safe_error_message(exc)
             job.completed_at = utcnow()
             db.commit()
             if _is_quota_tracked_ml_job(job):

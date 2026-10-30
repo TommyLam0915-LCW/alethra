@@ -6,6 +6,7 @@ fields. Keeping that in one function is what makes "a study attempt is a real
 research run" true instead of a parallel bookkeeping lane that can drift.
 """
 
+import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
@@ -17,12 +18,16 @@ from app.auth.entitlements import (
     settle_reservation,
 )
 from app.engine.backtest import ENGINE_VERSION, compute_config_hash, run_backtest
+from app.lib.error_safety import safe_error_message
 from app.models.experiment import Experiment
 from app.models.experiment_version import ExperimentVersion
 from app.models.research_run import ResearchRun, RunStatus
 from app.models.user import User
 from app.providers import get_data_provider
 from app.services import emit_event
+
+
+logger = logging.getLogger(__name__)
 
 
 class BacktestRefused(Exception):
@@ -157,10 +162,11 @@ def execute_backtest_run(
         return run
 
     except Exception as e:
+        logger.exception("Research run failed")
         release_reservation(db, reservation.id)
 
         run.status = RunStatus.failed
-        run.error_details = str(e)
+        run.error_details = safe_error_message(e)
         run.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
         emit_event(

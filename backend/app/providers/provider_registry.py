@@ -4,6 +4,7 @@ from functools import lru_cache
 from typing import Dict, Any, Optional
 
 from app.config import get_settings
+from app.lib.error_safety import safe_provider_status
 from app.providers.data_provider import DataProvider
 from app.providers.demo_provider import DemoDataProvider
 
@@ -84,7 +85,9 @@ def get_provider_info() -> Dict[str, Any]:
         "provider_name": provider.provider_name,
         "feed_mode": provider.feed_mode,
         "available": provider.is_available(),
-        "status": provider.get_status(),
+        # get_status() carries the last upstream error, which is raw exception
+        # text; this payload is served to the browser.
+        "status": safe_provider_status(provider.get_status()),
     }
 
 

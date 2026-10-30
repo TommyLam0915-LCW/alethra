@@ -1,5 +1,6 @@
 import hashlib
 import json
+import logging
 import uuid
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -10,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.auth.jwt import get_current_user
+from app.lib.error_safety import safe_error_message
 from app.models.user import User
 from app.models.model_research import (
     ModelResearchRecord,
@@ -35,6 +37,7 @@ from app.services import emit_event
 from app.engine.backtest import ENGINE_VERSION
 
 
+logger = logging.getLogger(__name__)
 router = APIRouter(tags=["model-research-export"])
 
 
@@ -595,6 +598,7 @@ def create_export(
         db.commit()
         db.refresh(export)
     except Exception as e:
+        logger.exception("Model research export failed")
         db.rollback()
         export = ModelResearchExport(
             owner_id=current_user.id,
@@ -602,7 +606,7 @@ def create_export(
             model_version_id=version.id,
             status=ExportStatus.failed,
             include_private_notes=body.include_private_notes,
-            error_message=str(e),
+            error_message=safe_error_message(e),
         )
         db.add(export)
         db.commit()

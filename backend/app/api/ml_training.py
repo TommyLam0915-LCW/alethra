@@ -1,5 +1,6 @@
 """API endpoints for ML model training and inference."""
 
+import logging
 import uuid
 from typing import Optional
 
@@ -8,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.database import get_db
+from app.lib.error_safety import safe_error_message
 from app.auth.jwt import get_current_user
 from app.auth.entitlements import (
     require_entitlement,
@@ -39,6 +41,7 @@ from app.ml.predictor import predict, predict_latest
 from app.providers import get_data_provider
 
 _settings = get_settings()
+logger = logging.getLogger(__name__)
 
 # The personal model API is reachable with an API key; budget each key the same
 # way the personal paper API does so one script cannot starve the others.
@@ -380,10 +383,11 @@ def run_prediction(
     try:
         result = predict(model_id, bar_dicts)
     except Exception as e:
+        logger.exception("Prediction failed")
         # Release reservation on prediction failure
         release_reservation(db, reservation.id)
         db.commit()
-        raise HTTPException(422, f"Prediction failed: {e}")
+        raise HTTPException(422, f"Prediction failed: {safe_error_message(e)}")
 
     # Settle quota on success
     settle_reservation(db, reservation.id)
@@ -468,9 +472,10 @@ def run_latest_prediction(
     try:
         result = predict_latest(model_id, bar_dicts)
     except Exception as e:
+        logger.exception("Prediction failed")
         release_reservation(db, reservation.id)
         db.commit()
-        raise HTTPException(422, f"Prediction failed: {e}")
+        raise HTTPException(422, f"Prediction failed: {safe_error_message(e)}")
 
     # Settle quota on success
     settle_reservation(db, reservation.id)
