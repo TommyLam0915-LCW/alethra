@@ -1,390 +1,194 @@
+"""C1-C4 safety cases probed over HTTP against a disposable live stack.
+
+Same four business properties as the original module, expressed against the
+current replay contract: a manual BUY/SELL is submitted as a *pending* order
+stamped with the bar the user has observed, and the next ``advance`` executes it
+at that bar's open. A submission therefore books no cash, position or fill, and
+the probes assert both halves explicitly:
+
+    C1  concurrent duplicate key   -> one decision, one order, one fill (after
+                                      the window opens)
+    C2  stale state version race   -> one winner, one 409, one order
+    C3  response lost after commit -> replay returns the original decision
+    C4  invalid payload            -> 422, no decision/order/fill, no book move
+
+Target identity, the probe account and every row these tests touch come from
+``tests.live_stack_env``; nothing here reads or writes an owner database.
 """
-C1-C4 Safety Case Tests - HTTP-based
-Tests against running application without importing app modules
-"""
+import uuid
+
 import pytest
-import requests
-import threading
-import time
-import sqlite3
-from datetime import datetime
-from uuid import uuid4
 
-from tests.live_stack_guard import live_probe_skip_reason
+from tests.live_stack_env import (  # noqa: F401  (fixtures registered by import)
+    live_probe,
+    new_session,
+    probe_version,
+    skip_reason,
+    submit_concurrently,
+)
 
-BASE_URL = "http://127.0.0.1:8000"
-DB_PATH = "backend/alethra_dev.db"
-
-_SKIP_REASON = live_probe_skip_reason(BASE_URL, (DB_PATH,))
+_SKIP_REASON = skip_reason()
 pytestmark = pytest.mark.skipif(
     _SKIP_REASON is not None,
     reason=f"live-stack probe: {_SKIP_REASON}",
 )
 
-def get_auth_token():
-    """Get auth token for owner@test.com."""
-    resp = requests.post(f"{BASE_URL}/api/auth/login", json={
-        "email": "owner@test.com",
-        "password": "testpass123"
-    })
-    assert resp.status_code == 200, f"Login failed: {resp.text}"
-    return resp.json()["access_token"]
 
-def create_isolated_session():
-    """Create an isolated test session in shared DB."""
-    session_id = uuid4().hex
-    owner_id = "22eb6237d6fa4b54b1f5389eaa90caf0"
-    version_id = "2a16a9b6fa2d430aa75a3920a5b84aca"
-    now = datetime.utcnow().isoformat()
-    
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    
-    cursor.execute("""
-        INSERT INTO simulation_sessions (
-            id, experiment_version_id, owner_id, initial_virtual_cash,
-            started_at, data_cutoff_at, current_snapshot_date, status,
-            simulation_policy_version, provider_id, provider_confirmed,
-            paper_equity, current_position_json, warnings, total_decisions,
-            observed_days, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        session_id, version_id, owner_id, 100000.0,
-        None, "2024-01-31", None, "pending",
-        "1.0.0", "twelvedata", True,
-        100000.0, None, None, 0, 0, now, now
-    ))
-    
-    conn.commit()
-    conn.close()
-    return session_id
+def _intent(action: str, *, quantity=None, rationale: str = "", key=None):
+    payload = {
+        "action": action,
+        "rationale": rationale or f"probe {action}",
+        "idempotency_key": key or f"probe-{uuid.uuid4().hex}",
+    }
+    if quantity is not None:
+        payload["quantity"] = quantity
+    return payload
 
-def cleanup_session(session_id):
-    """Clean up test session and decisions."""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM simulation_decisions WHERE session_id = ?", (session_id,))
-    cursor.execute("DELETE FROM simulation_sessions WHERE id = ?", (session_id,))
-    conn.commit()
-    conn.close()
 
-def get_session_state(session_id):
-    """Get session state from DB."""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT paper_equity, total_decisions, current_snapshot_date, status
-        FROM simulation_sessions WHERE id = ?
-    """, (session_id,))
-    row = cursor.fetchone()
-    conn.close()
-    if row:
-        return {
-            "paper_equity": row[0],
-            "total_decisions": row[1],
-            "current_snapshot_date": row[2],
-            "status": row[3]
-        }
-    return None
-
-def get_decisions(session_id):
-    """Get all decisions for a session."""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT id, step_number, idempotency_key, decision_type, snapshot_date
-        FROM simulation_decisions WHERE session_id = ?
-        ORDER BY step_number
-    """, (session_id,))
-    rows = cursor.fetchall()
-    conn.close()
+def _manual_decisions(session):
+    """Decisions this session recorded from a human submission."""
     return [
-        {
-            "id": row[0],
-            "step_number": row[1],
-            "idempotency_key": row[2],
-            "decision_type": row[3],
-            "snapshot_date": row[4]
-        }
-        for row in rows
+        decision
+        for decision in session.decisions()
+        if (decision["decision_detail"] or {}).get("action")
     ]
 
 
 class TestC1ConcurrentDuplicate:
     """C1: Concurrent duplicate - same key, same payload, simultaneous requests."""
-    
-    def test_concurrent_duplicate_same_key(self):
-        """Two simultaneous requests with same idempotency key should produce only one decision."""
-        print("\n=== C1: Concurrent Duplicate Test ===")
-        token = get_auth_token()
-        headers = {"Authorization": f"Bearer {token}"}
-        session_id = create_isolated_session()
-        
-        try:
-            payload = {
-                "action": "buy",
-                "quantity": 100,
-                "rationale": "C1 concurrent test",
-                "idempotency_key": f"c1_test_{int(time.time()*1000)}"
-            }
-            
-            results = []
-            errors = []
-            
-            def make_request():
-                try:
-                    resp = requests.post(
-                        f"{BASE_URL}/api/v1/simulations/{session_id}/manual-decision",
-                        json=payload,
-                        headers=headers,
-                        timeout=10
-                    )
-                    results.append((resp.status_code, resp.json() if resp.status_code in (200, 201, 409) else resp.text))
-                except Exception as e:
-                    errors.append(str(e))
-            
-            # Launch two concurrent requests
-            threads = [threading.Thread(target=make_request) for _ in range(2)]
-            for t in threads:
-                t.start()
-            for t in threads:
-                t.join()
-            
-            print(f"Results: {len(results)} responses, {len(errors)} errors")
-            for i, (status, body) in enumerate(results):
-                print(f"  Request {i+1}: HTTP {status}")
-            
-            # Verify results
-            assert len(errors) == 0, f"Errors occurred: {errors}"
-            assert len(results) == 2, f"Expected 2 results, got {len(results)}"
-            
-            # Check decisions in DB
-            decisions = get_decisions(session_id)
-            print(f"Decisions in DB: {len(decisions)}")
-            for d in decisions:
-                print(f"  Step {d['step_number']}: {d['decision_type']} (key: {d['idempotency_key']})")
-            
-            # Should have exactly 1 decision
-            assert len(decisions) == 1, f"Expected 1 decision, got {len(decisions)}"
-            
-            # Verify session state
-            state = get_session_state(session_id)
-            print(f"Session state: total_decisions={state['total_decisions']}, equity={state['paper_equity']}")
-            assert state['total_decisions'] == 1, f"Expected total_decisions=1, got {state['total_decisions']}"
-            assert state['paper_equity'] != 100000.0, "Equity should have changed"
-            
-            print("✓ C1 PASS: Concurrent duplicate correctly handled")
-            return True
-            
-        finally:
-            cleanup_session(session_id)
+
+    def test_concurrent_duplicate_same_key(self, live_probe, new_session):
+        session = new_session()
+        first_bar = session.advance()["decision"]
+        assert first_bar["snapshot_date"] == "2024-01-02"
+
+        payload = _intent("buy", quantity=100, rationale="C1 concurrent test")
+        responses = submit_concurrently(session, [payload, payload])
+
+        assert len(responses) == 2
+        statuses = sorted(response.status_code for response in responses)
+        assert all(status in (200, 201, 409) for status in statuses), statuses
+        assert statuses[0] in (200, 201), f"no request succeeded: {statuses}"
+
+        # Pending is not booked: one decision and one order, no fill yet.
+        assert session.counts() == {
+            "decisions": 2, "decision_records": 1, "orders": 1, "fills": 0,
+        }
+        manual = _manual_decisions(session)
+        assert len(manual) == 1
+        assert manual[0]["snapshot_date"] == "2024-01-02"
+
+        orders = session.orders()
+        assert len(orders) == 1
+        order = orders[0]["order"]
+        assert order["status"] == "pending"
+        assert order["quantity"] == 100
+        assert orders[0]["execution"]["next_window"]["date"] == "2024-01-03"
+
+        state = session.state()
+        assert state["paper_equity"] == 100000.0
+        assert state["current_position_json"] is None
+
+        # The next bar is the only execution window: exactly one fill.
+        session.advance()
+        assert session.counts() == {
+            "decisions": 3, "decision_records": 1, "orders": 1, "fills": 1,
+        }
+        fills = session.fills(order["id"])
+        assert len(fills) == 1
+        assert fills[0]["execution_date"] == "2024-01-03"
+        assert fills[0]["quantity"] == 100
+        assert session.state()["paper_equity"] != 100000.0
 
 
 class TestC2DifferentKeysStaleStep:
-    """C2: Different keys against same stale step."""
-    
-    def test_different_keys_same_step(self):
-        """Two different idempotency keys should not both execute against same step."""
-        print("\n=== C2: Different Keys / Same Step Test ===")
-        token = get_auth_token()
-        headers = {"Authorization": f"Bearer {token}"}
-        session_id = create_isolated_session()
-        
-        try:
-            # First request
-            payload1 = {
-                "action": "buy",
-                "quantity": 50,
-                "rationale": "C2 first request",
-                "idempotency_key": f"c2_key1_{int(time.time()*1000)}"
-            }
-            
-            resp1 = requests.post(
-                f"{BASE_URL}/api/v1/simulations/{session_id}/manual-decision",
-                json=payload1,
-                headers=headers
-            )
-            print(f"Request 1: HTTP {resp1.status_code}")
-            assert resp1.status_code in (200, 201), f"First request failed: {resp1.text}"
-            
-            # Second request with different key
-            payload2 = {
-                "action": "hold",
-                "idempotency_key": f"c2_key2_{int(time.time()*1000)}"
-            }
-            
-            resp2 = requests.post(
-                f"{BASE_URL}/api/v1/simulations/{session_id}/manual-decision",
-                json=payload2,
-                headers=headers
-            )
-            print(f"Request 2: HTTP {resp2.status_code}")
-            
-            # Check decisions
-            decisions = get_decisions(session_id)
-            print(f"Decisions in DB: {len(decisions)}")
-            for d in decisions:
-                print(f"  Step {d['step_number']}: {d['decision_type']} (key: {d['idempotency_key'][:20]}...)")
-            
-            # Verify step numbers are sequential
-            for i, dec in enumerate(decisions):
-                assert dec['step_number'] == i + 1, f"Step numbers not sequential: {dec['step_number']} != {i+1}"
-            
-            # Verify session state
-            state = get_session_state(session_id)
-            print(f"Session state: total_decisions={state['total_decisions']}")
-            assert state['total_decisions'] == len(decisions), "total_decisions mismatch"
-            
-            print("✓ C2 PASS: Different keys handled correctly")
-            return True
-            
-        finally:
-            cleanup_session(session_id)
+    """C2: Different keys competing for the same observed state version."""
+
+    def test_different_keys_same_step(self, live_probe, new_session):
+        session = new_session()
+        session.advance()
+        observed_version = session.state()["state_version"]
+
+        payload_a = _intent("buy", quantity=50, rationale="C2 contender A", key=f"c2a-{uuid.uuid4().hex}")
+        payload_b = _intent("buy", quantity=50, rationale="C2 contender B", key=f"c2b-{uuid.uuid4().hex}")
+        for payload in (payload_a, payload_b):
+            payload["expected_version"] = observed_version
+
+        responses = submit_concurrently(session, [payload_a, payload_b])
+        statuses = sorted(response.status_code for response in responses)
+        assert statuses.count(200) == 1, f"expected exactly one winner, got {statuses}"
+        assert statuses.count(409) == 1, f"expected exactly one stale-version loss, got {statuses}"
+        loser = next(response for response in responses if response.status_code == 409)
+        assert "State version conflict" in loser.json()["detail"]
+
+        # The rejected contender wrote nothing: one manual decision, one order.
+        assert session.counts() == {
+            "decisions": 2, "decision_records": 1, "orders": 1, "fills": 0,
+        }
+        manual = _manual_decisions(session)
+        assert [decision["step_number"] for decision in manual] == [2]
+        steps = [decision["step_number"] for decision in session.decisions()]
+        assert steps == [1, 2]
+        assert session.state()["total_decisions"] == 2
 
 
 class TestC3ResponseLostAfterCommit:
-    """C3: Response lost after commit - retry with same key."""
-    
-    def test_retry_after_commit(self):
-        """Retry with same key/payload should return original result, not create duplicate."""
-        print("\n=== C3: Response Lost After Commit Test ===")
-        token = get_auth_token()
-        headers = {"Authorization": f"Bearer {token}"}
-        session_id = create_isolated_session()
-        
-        try:
-            idem_key = f"c3_retry_{int(time.time()*1000)}"
-            payload = {
-                "action": "buy",
-                "quantity": 75,
-                "rationale": "C3 retry test",
-                "idempotency_key": idem_key
-            }
-            
-            # First request
-            resp1 = requests.post(
-                f"{BASE_URL}/api/v1/simulations/{session_id}/manual-decision",
-                json=payload,
-                headers=headers
-            )
-            print(f"Request 1: HTTP {resp1.status_code}")
-            assert resp1.status_code in (200, 201), f"First request failed: {resp1.text}"
-            result1 = resp1.json()
-            decision_id1 = result1.get("decision", {}).get("id")
-            print(f"  Decision ID: {decision_id1}")
-            
-            # Second request (retry)
-            resp2 = requests.post(
-                f"{BASE_URL}/api/v1/simulations/{session_id}/manual-decision",
-                json=payload,
-                headers=headers
-            )
-            print(f"Request 2 (retry): HTTP {resp2.status_code}")
-            assert resp2.status_code in (200, 201), f"Retry failed: {resp2.text}"
-            result2 = resp2.json()
-            decision_id2 = result2.get("decision", {}).get("id")
-            print(f"  Decision ID: {decision_id2}")
-            
-            # Should return same decision
-            assert decision_id1 == decision_id2, "Retry should return same decision ID"
-            
-            # Verify only one decision exists
-            decisions = get_decisions(session_id)
-            print(f"Decisions in DB: {len(decisions)}")
-            assert len(decisions) == 1, f"Expected 1 decision, got {len(decisions)}"
-            
-            print("✓ C3 PASS: Retry returns original result")
-            return True
-            
-        finally:
-            cleanup_session(session_id)
+    """C3: Response lost after commit - retry with the same key."""
+
+    def test_retry_after_commit(self, live_probe, new_session):
+        session = new_session()
+        session.advance()
+        key = f"c3-retry-{uuid.uuid4().hex}"
+        payload = _intent("buy", quantity=75, rationale="C3 retry test", key=key)
+
+        first = session.submit_raw(payload)
+        assert first.status_code == 200, first.text
+        decision_id = first.json()["decision"]["id"]
+
+        replay = session.submit_raw(payload)
+        assert replay.status_code == 200, replay.text
+        assert replay.json()["decision"]["id"] == decision_id
+
+        assert session.counts() == {
+            "decisions": 2, "decision_records": 1, "orders": 1, "fills": 0,
+        }
+
+        # Replaying after the window opened still returns the original decision.
+        session.advance()
+        after_fill = session.counts()
+        assert after_fill == {
+            "decisions": 3, "decision_records": 1, "orders": 1, "fills": 1,
+        }
+        late_replay = session.submit_raw(payload)
+        assert late_replay.status_code == 200, late_replay.text
+        assert late_replay.json()["decision"]["id"] == decision_id
+        assert session.counts() == after_fill
 
 
 class TestC4TransactionFailure:
-    """C4: Transaction failure / rollback."""
-    
-    def test_invalid_payload_no_partial_state(self):
-        """Invalid payload should not leave partial state."""
-        print("\n=== C4: Transaction Failure Test ===")
-        token = get_auth_token()
-        headers = {"Authorization": f"Bearer {token}"}
-        session_id = create_isolated_session()
-        
-        try:
-            # Get initial state
-            state_before = get_session_state(session_id)
-            print(f"Initial state: equity={state_before['paper_equity']}, decisions={state_before['total_decisions']}")
-            
-            # Send invalid request (negative quantity)
-            payload = {
-                "action": "buy",
-                "quantity": -10,
-                "idempotency_key": f"c4_invalid_{int(time.time()*1000)}"
-            }
-            
-            resp = requests.post(
-                f"{BASE_URL}/api/v1/simulations/{session_id}/manual-decision",
-                json=payload,
-                headers=headers
-            )
-            print(f"Invalid request: HTTP {resp.status_code}")
-            assert resp.status_code == 422, f"Expected 422, got {resp.status_code}"
-            
-            # Verify no partial state
-            state_after = get_session_state(session_id)
-            print(f"Final state: equity={state_after['paper_equity']}, decisions={state_after['total_decisions']}")
-            
-            assert state_after['paper_equity'] == state_before['paper_equity'], "Equity should not change"
-            assert state_after['total_decisions'] == state_before['total_decisions'], "total_decisions should not change"
-            
-            decisions = get_decisions(session_id)
-            assert len(decisions) == 0, f"Expected 0 decisions, got {len(decisions)}"
-            
-            print("✓ C4 PASS: Invalid request leaves no partial state")
-            return True
-            
-        finally:
-            cleanup_session(session_id)
+    """C4: Invalid payload must not leave partial state."""
 
+    def test_invalid_payload_no_partial_state(self, live_probe, new_session):
+        session = new_session()
+        session.advance()
+        before_state = session.state()
+        before_counts = session.counts()
 
-if __name__ == "__main__":
-    print("=" * 60)
-    print("C1-C4 Safety Case Tests")
-    print("=" * 60)
-    
-    results = []
-    
-    try:
-        results.append(("C1", TestC1ConcurrentDuplicate().test_concurrent_duplicate_same_key()))
-    except Exception as e:
-        print(f"✗ C1 FAIL: {e}")
-        results.append(("C1", False))
-    
-    try:
-        results.append(("C2", TestC2DifferentKeysStaleStep().test_different_keys_same_step()))
-    except Exception as e:
-        print(f"✗ C2 FAIL: {e}")
-        results.append(("C2", False))
-    
-    try:
-        results.append(("C3", TestC3ResponseLostAfterCommit().test_retry_after_commit()))
-    except Exception as e:
-        print(f"✗ C3 FAIL: {e}")
-        results.append(("C3", False))
-    
-    try:
-        results.append(("C4", TestC4TransactionFailure().test_invalid_payload_no_partial_state()))
-    except Exception as e:
-        print(f"✗ C4 FAIL: {e}")
-        results.append(("C4", False))
-    
-    print("\n" + "=" * 60)
-    print("Summary:")
-    print("=" * 60)
-    for name, passed in results:
-        status = "PASS" if passed else "FAIL"
-        print(f"{name}: {status}")
-    
-    total = len(results)
-    passed = sum(1 for _, p in results if p)
-    print(f"\nTotal: {passed}/{total} passed")
+        response = session.probe.raw(
+            "POST",
+            f"/api/v1/simulations/{session.id}/manual-decision",
+            json=_intent("buy", quantity=-10, rationale="C4 invalid quantity"),
+        )
+        assert response.status_code == 422, response.text
+
+        assert session.counts() == before_counts
+        after_state = session.state()
+        assert after_state["paper_equity"] == before_state["paper_equity"]
+        assert after_state["current_snapshot_date"] == before_state["current_snapshot_date"]
+        assert after_state["state_version"] == before_state["state_version"]
+        assert session.orders() == []
+
+        # The refused intent cannot resurface as a fill when the bar opens.
+        session.advance()
+        assert session.counts()["fills"] == 0
+        assert session.state()["current_position_json"] is None
