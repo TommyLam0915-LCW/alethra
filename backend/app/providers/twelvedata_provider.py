@@ -11,12 +11,18 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone as dt_timezone
 from typing import Any, Dict, List, Optional
 
 import httpx
 
-from app.providers.data_provider import DataProvider, OHLCVBar, AssetInfo
+from app.providers.data_provider import (
+    AssetInfo,
+    DataProvider,
+    IntradayBar,
+    OHLCVBar,
+    ProviderRateLimitError,
+)
 from app.providers.instruments import Instrument, Market, parse_instrument_id
 from app.data.real_instruments import (
     ALL_REAL_INSTRUMENTS,
@@ -31,6 +37,11 @@ TWELVEDATA_API_BASE = "https://api.twelvedata.com"
 _MAX_RETRIES = 2
 _RETRY_BACKOFF_SECONDS = 1.0
 
+# What this adapter can request. Twelve Data also documents intervals outside
+# this set, but only these four are both representable on the epoch grid this
+# stack validates against and useful for a sub-daily equity view.
+_TWELVEDATA_INTRADAY_INTERVALS = ("1min", "5min", "15min", "30min")
+
 _TWELVEDATA_EXCHANGE_MAP = {
     "NASDAQ": "NASDAQ",
     "NYSE": "NYSE",
@@ -38,6 +49,27 @@ _TWELVEDATA_EXCHANGE_MAP = {
     "BATS": "BATS",
     "HKEX": "HKG",
 }
+
+_TD_UTC_FORMATS = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S")
+
+
+def _parse_td_utc(value: str) -> datetime:
+    """Parse a Twelve Data timestamp requested with ``timezone=UTC``.
+
+    Returns a naive UTC datetime to match storage. A value that carries its
+    own offset (unexpected when UTC was requested) is converted rather than
+    trusted as already-UTC.
+    """
+    text = str(value).strip()
+    for fmt in _TD_UTC_FORMATS:
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(dt_timezone.utc).replace(tzinfo=None)
+    return parsed
 
 
 class TwelveDataConfigurationError(Exception):
@@ -48,15 +80,23 @@ class TwelveDataError(Exception):
     """Raised when Twelve Data API returns an error."""
 
 
-class TwelveDataRateLimitError(TwelveDataError):
+class TwelveDataRateLimitError(TwelveDataError, ProviderRateLimitError):
     """Raised on HTTP 429 or while a rate-limit window is active."""
+
+    def __init__(
+        self,
+        message: str,
+        retry_after_seconds: Optional[int] = None,
+    ) -> None:
+        ProviderRateLimitError.__init__(self, message, retry_after_seconds)
 
 
 class TwelveDataProvider(DataProvider):
     """Twelve Data market data provider.
 
-    Requires TWELVEDATA_API_KEY in environment.
-    Free tier: 8 requests/minute, 800/day.
+    Requires TWELVEDATA_API_KEY in environment. Request quotas depend on the
+    account's plan, endpoint and symbols; this adapter makes no assumption
+    about a fixed rate and always obeys an upstream 429 with its Retry-After.
     """
 
     def __init__(self, api_key: Optional[str] = None):
@@ -69,6 +109,9 @@ class TwelveDataProvider(DataProvider):
         self._last_success_at: Optional[str] = None
         self._last_error_at: Optional[str] = None
         self._request_count: int = 0
+        # Only intervals the provider itself echoed back in a real response;
+        # empty until an authenticated request actually succeeds.
+        self._observed_intraday_intervals: set[str] = set()
 
     @property
     def provider_id(self) -> str:
@@ -129,7 +172,8 @@ class TwelveDataProvider(DataProvider):
         remaining = self._rate_limited_until - time.monotonic()
         if remaining > 0:
             raise TwelveDataRateLimitError(
-                f"Twelve Data rate limit active; retry after {int(remaining)}s"
+                f"Twelve Data rate limit active; retry after {int(remaining)}s",
+                retry_after_seconds=max(1, int(remaining)),
             )
 
     def _record_success(self) -> None:
@@ -181,7 +225,8 @@ class TwelveDataProvider(DataProvider):
                     retry_after = int(resp.headers.get("Retry-After", "60"))
                     self._rate_limited_until = time.monotonic() + min(retry_after, 300)
                     raise TwelveDataRateLimitError(
-                        f"Twelve Data rate limited (HTTP 429); retry after {retry_after}s"
+                        f"Twelve Data rate limited (HTTP 429); retry after {retry_after}s",
+                        retry_after_seconds=max(1, retry_after),
                     )
 
                 if resp.status_code >= 500:
@@ -200,7 +245,10 @@ class TwelveDataProvider(DataProvider):
                     msg = data.get("message", "Unknown API error")
                     if code == 429:
                         self._rate_limited_until = time.monotonic() + 60
-                        raise TwelveDataRateLimitError(f"Twelve Data rate limited: {msg}")
+                        raise TwelveDataRateLimitError(
+                            f"Twelve Data rate limited: {msg}",
+                            retry_after_seconds=60,
+                        )
                     raise TwelveDataError(f"Twelve Data API error ({code}): {msg}")
 
                 return data
@@ -320,6 +368,77 @@ class TwelveDataProvider(DataProvider):
             logger.warning("Twelve Data get_latest_bar failed for %s: %s", symbol, e)
             return None
 
+    def supports_intraday(self) -> bool:
+        return True
+
+    def declared_intraday_intervals(self) -> tuple:
+        return _TWELVEDATA_INTRADAY_INTERVALS
+
+    def get_intraday_bars(
+        self,
+        symbol: str,
+        interval: str,
+        *,
+        outputsize: int = 390,
+    ) -> List[IntradayBar]:
+        if not self.is_available():
+            raise TwelveDataError("Twelve Data provider not connected. Call connect() first.")
+        if interval not in _TWELVEDATA_INTRADAY_INTERVALS:
+            raise ValueError(
+                f"Unsupported intraday interval '{interval}'. Supported: "
+                f"{', '.join(_TWELVEDATA_INTRADAY_INTERVALS)}"
+            )
+
+        self._check_rate_limit()
+
+        td_symbol = self._to_twelvedata_symbol(symbol) if ":" in symbol else symbol
+        requested_size = max(1, min(int(outputsize), 5000))
+
+        data = self._request_with_retry(
+            "/time_series",
+            params={
+                "symbol": td_symbol,
+                "interval": interval,
+                "outputsize": requested_size,
+                "timezone": "UTC",
+                "order": "ASC",
+                "format": "JSON",
+            },
+        )
+
+        meta = data.get("meta") or {}
+        returned_interval = meta.get("interval")
+        if returned_interval and str(returned_interval) != interval:
+            # Answering a different interval than requested would silently
+            # relabel 5-minute bars as 1-minute; refuse instead.
+            raise TwelveDataError(
+                f"Twelve Data returned interval {returned_interval!r} for a "
+                f"{interval!r} request"
+            )
+
+        bars: List[IntradayBar] = []
+        for row in data.get("values") or []:
+            try:
+                bars.append(
+                    IntradayBar(
+                        timestamp=_parse_td_utc(row["datetime"]),
+                        open=float(row["open"]),
+                        high=float(row["high"]),
+                        low=float(row["low"]),
+                        close=float(row["close"]),
+                        volume=int(row.get("volume", 0)) or None,
+                    )
+                )
+            except (KeyError, ValueError, TypeError) as e:
+                logger.warning("Skipping malformed Twelve Data intraday row: %s — %s", row, e)
+                continue
+
+        bars.sort(key=lambda b: b.timestamp)
+        if returned_interval:
+            self._observed_intraday_intervals.add(str(returned_interval))
+        self._record_success()
+        return bars
+
     def get_date_range(self) -> Dict[str, Any]:
         return {
             "min": "2020-01-02",
@@ -383,9 +502,16 @@ class TwelveDataProvider(DataProvider):
         status.update({
             "health": health,
             "rate_limited": rate_limited,
+            "rate_limited_retry_after_seconds": (
+                max(1, int(self._rate_limited_until - time.monotonic()))
+                if rate_limited else 0
+            ),
             "consecutive_errors": self._consecutive_errors,
             "last_success_at": self._last_success_at,
             "last_error_at": self._last_error_at,
+            "intraday_adapter_supported": self.supports_intraday(),
+            "intraday_declared_intervals": list(self.declared_intraday_intervals()),
+            "intraday_observed_intervals": sorted(self._observed_intraday_intervals),
         })
         if self._last_error:
             status["last_error"] = self._last_error

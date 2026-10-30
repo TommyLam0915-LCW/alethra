@@ -18,6 +18,7 @@ _MIN_JWT_SECRET_LENGTH = 32
 
 _KNOWN_DATA_PROVIDERS = {"demo", "lseg", "twelvedata"}
 _KNOWN_AI_PROVIDERS = {"mock", "openai_compatible"}
+_INTRADAY_INTERVAL_LABELS = {"1min", "5min", "15min", "30min"}
 
 
 class Settings(BaseSettings):
@@ -46,6 +47,36 @@ class Settings(BaseSettings):
     candidate_passwordless_mode: bool = False
     candidate_passwordless_accounts: str = ""
     candidate_passwordless_session_minutes: int = 30
+    # Bounded intraday REST updates. Off by default: enabling it spends real
+    # provider quota, and a real request also requires the interval to be
+    # listed in intraday_verified_intervals after it was confirmed against the
+    # actual account. Adapter support alone is never treated as permission.
+    intraday_enabled: bool = False
+    intraday_default_interval: str = "1min"
+    intraday_refresh_seconds: int = 60
+    intraday_outputsize: int = 390
+    intraday_instruments: str = "US:AAPL"
+    intraday_verified_intervals: str = ""
+    intraday_max_requests_per_hour: int = 60
+    intraday_max_requests_per_day: int = 400
+    intraday_backoff_base_seconds: int = 30
+    intraday_backoff_max_seconds: int = 300
+
+    @property
+    def intraday_instrument_list(self) -> list[str]:
+        return [
+            item.strip().upper()
+            for item in self.intraday_instruments.split(",")
+            if item.strip()
+        ]
+
+    @property
+    def intraday_verified_interval_list(self) -> list[str]:
+        return [
+            item.strip().lower()
+            for item in self.intraday_verified_intervals.split(",")
+            if item.strip()
+        ]
 
     @property
     def cors_origins_list(self) -> list[str]:
@@ -58,6 +89,7 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _validate_production_safety(self) -> "Settings":
         self._validate_candidate_passwordless()
+        self._validate_intraday_bounds()
 
         if not self.is_production_like:
             return self
@@ -110,6 +142,29 @@ class Settings(BaseSettings):
             )
 
         return self
+
+    def _validate_intraday_bounds(self) -> None:
+        if not 1 <= self.intraday_outputsize <= 5000:
+            raise ValueError("INTRADAY_OUTPUTSIZE must be between 1 and 5000.")
+        if self.intraday_refresh_seconds < 1:
+            raise ValueError("INTRADAY_REFRESH_SECONDS must be positive.")
+        if self.intraday_max_requests_per_hour < 1:
+            raise ValueError("INTRADAY_MAX_REQUESTS_PER_HOUR must be positive.")
+        if self.intraday_max_requests_per_day < 1:
+            raise ValueError("INTRADAY_MAX_REQUESTS_PER_DAY must be positive.")
+        if self.intraday_max_requests_per_day < self.intraday_max_requests_per_hour:
+            raise ValueError(
+                "INTRADAY_MAX_REQUESTS_PER_DAY must be >= INTRADAY_MAX_REQUESTS_PER_HOUR."
+            )
+        if self.intraday_backoff_max_seconds < self.intraday_backoff_base_seconds:
+            raise ValueError(
+                "INTRADAY_BACKOFF_MAX_SECONDS must be >= INTRADAY_BACKOFF_BASE_SECONDS."
+            )
+        if self.intraday_default_interval not in _INTRADAY_INTERVAL_LABELS:
+            raise ValueError(
+                f"INTRADAY_DEFAULT_INTERVAL must be one of "
+                f"{sorted(_INTRADAY_INTERVAL_LABELS)}."
+            )
 
     def _validate_candidate_passwordless(self) -> None:
         if not self.candidate_passwordless_mode:

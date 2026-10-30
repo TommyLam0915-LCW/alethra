@@ -5,6 +5,7 @@ import {
   type CandidateSession,
   type CandidateStatus,
 } from './candidate';
+import type { IntradayCapability, IntradaySeriesPayload } from './intradayBars';
 
 export const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 const API_URL = API_BASE_URL;
@@ -537,6 +538,21 @@ export const api = {
       return apiFetch(`/api/v1/market-data/bars/${symbol}${q ? `?${q}` : ''}`);
     },
     latest: (symbol: string) => apiFetch(`/api/v1/market-data/latest/${symbol}`),
+  },
+  intraday: {
+    capability: () =>
+      apiFetch('/api/v1/market/intraday/capability') as Promise<IntradayCapability>,
+    series: (instrumentId: string, interval: string, limit?: number) => {
+      const qs = new URLSearchParams({ instrument_id: instrumentId, interval });
+      if (limit) qs.set('limit', String(limit));
+      return apiFetch(`/api/v1/market/intraday/series?${qs}`) as Promise<IntradaySeriesPayload>;
+    },
+    refresh: (instrumentId: string, interval: string) => {
+      const qs = new URLSearchParams({ instrument_id: instrumentId, interval });
+      return apiFetch(`/api/v1/market/intraday/refresh?${qs}`, {
+        method: 'POST',
+      }) as Promise<IntradaySeriesPayload & { requested_by: string }>;
+    },
   },
   instruments: {
     list: (market?: string, assetType?: string, q?: string, limit?: number) => {

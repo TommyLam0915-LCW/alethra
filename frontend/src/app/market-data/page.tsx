@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import AppShell from '@/components/shell/AppShell';
@@ -204,8 +205,11 @@ export default function MarketDataPage() {
   return (
     <AppShell active="market">
       <div className="container" style={{ paddingTop: '40px', paddingBottom: '40px' }}>
-        <div style={{ marginBottom: '30px' }}>
+        <div style={{ marginBottom: '30px', display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 16, flexWrap: 'wrap' }}>
           <h1 style={{ margin: 0 }}>市場資料</h1>
+          <Link href="/market-data/intraday" className="ws-muted" style={{ fontSize: 13 }}>
+            盤中 K 線（內部測試，後端控制更新）
+          </Link>
         </div>
 
         <div className="disclaimer" style={{ marginBottom: '24px' }}>

@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from typing import List, Optional, Dict, Any, Union
+from typing import List, Optional, Dict, Any, Tuple, Union
 from app.providers.instruments import Instrument
 from app.lib.timeutil import utcnow
 
@@ -16,6 +16,58 @@ class OHLCVBar:
     low: float
     close: float
     volume: Optional[float] = None
+
+
+# Interval labels this stack can represent as sub-daily bars, and their
+# length in minutes. ``1h`` is deliberately absent: an hourly equity bar does
+# not open on the epoch hour grid the series integrity check assumes, so it
+# would be reported as off-grid rather than served.
+INTRADAY_INTERVALS: Dict[str, int] = {
+    "1min": 1,
+    "5min": 5,
+    "15min": 15,
+    "30min": 30,
+}
+
+
+def intraday_interval_minutes(interval: str) -> int:
+    try:
+        return INTRADAY_INTERVALS[interval]
+    except KeyError:
+        raise ValueError(
+            f"Unsupported intraday interval '{interval}'. Supported: "
+            f"{', '.join(INTRADAY_INTERVALS)}"
+        ) from None
+
+
+@dataclass(frozen=True)
+class IntradayBar:
+    """One sub-daily row exactly as the provider timed it.
+
+    ``timestamp`` is the bar's open time in UTC (naive, to match storage).
+    Providers must request UTC from upstream so the open time is unambiguous;
+    whether the bucket is still forming is decided downstream from the wall
+    clock, not trusted from the provider.
+    """
+    timestamp: datetime
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: Optional[float] = None
+
+
+class ProviderRateLimitError(Exception):
+    """Upstream refused because a quota window is exhausted.
+
+    ``retry_after_seconds`` is what the provider asked for, or None when it
+    supplied no hint. Callers must honour it; a rate limit is not a transient
+    error to hammer through.
+    """
+
+    def __init__(self, message: str, retry_after_seconds: Optional[int] = None):
+        super().__init__(message)
+        self.retry_after_seconds = retry_after_seconds
 
 
 def compute_staleness(
@@ -206,3 +258,35 @@ class DataProvider(ABC):
         from what happens to be cached.
         """
         return None
+
+    def supports_intraday(self) -> bool:
+        """Whether this adapter has a sub-daily request path at all.
+
+        Adapter capability only. It says nothing about whether the configured
+        account may call it, which market/interval is entitled, or whether a
+        response actually arrived. Those are verified separately and never
+        inferred from this flag.
+        """
+        return False
+
+    def declared_intraday_intervals(self) -> Tuple[str, ...]:
+        """Interval labels the adapter knows how to request, not verified ones."""
+        return ()
+
+    def get_intraday_bars(
+        self,
+        symbol: str,
+        interval: str,
+        *,
+        outputsize: int = 390,
+    ) -> List[IntradayBar]:
+        """Fetch sub-daily bars, ascending by open time, timestamps in UTC.
+
+        Implementations must raise ``ProviderRateLimitError`` (with the
+        provider's retry hint when it gives one) instead of retrying through a
+        quota window, and must raise rather than return an empty list when the
+        provider itself failed.
+        """
+        raise NotImplementedError(
+            f"{self.provider_id} does not implement intraday bars"
+        )

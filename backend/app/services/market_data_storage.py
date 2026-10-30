@@ -7,16 +7,27 @@ Persists OHLCV bars and metadata to the database, enabling:
 """
 import logging
 from datetime import datetime, date, timedelta, timezone as dt_timezone
-from typing import List, Optional, Dict, Any, Sequence
+from typing import List, Optional, Dict, Any, Mapping, Sequence
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_
 
-from app.models.market_data import MarketDataBar, MarketDataMetadata
+from app.models.market_data import (
+    IntradayMarketDataBar,
+    MarketDataBar,
+    MarketDataMetadata,
+)
 from app.providers.data_provider import OHLCVBar
 from app.services.crypto_series import Candle
 from app.lib.timeutil import utcnow
 
 logger = logging.getLogger(__name__)
+
+
+def _naive_utc(value: datetime) -> datetime:
+    """Storage keeps naive UTC; a tz-aware bound must be converted, not dropped."""
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(dt_timezone.utc).replace(tzinfo=None)
 
 
 class MarketDataStorage:
@@ -265,6 +276,186 @@ class MarketDataStorage:
             "updated": updated,
             "skipped_forming": skipped_forming,
         }
+
+    def store_intraday_candles(
+        self,
+        *,
+        instrument_id: str,
+        provider_id: str,
+        timeframe: str,
+        candles: Sequence[Candle],
+        volume_overrides: Optional[Mapping[datetime, Optional[float]]] = None,
+    ) -> Dict[str, int]:
+        """Upsert live intraday candles under the full identity tuple.
+
+        The row key is (instrument, provider, timeframe, open time), so a
+        1-minute series and a 5-minute series for one symbol are separate rows,
+        and two providers can never overwrite each other.
+
+        Closed bars are never rewritten. Re-fetching a final bar is a no-op
+        (provider corrections are deliberately not applied here) and a response
+        that calls an already-closed bucket "forming" is refused, so a clock
+        skew or an out-of-order response cannot walk a settled bar backwards.
+
+        Returns counts; nothing is inferred from a response with no rows.
+
+        ``volume_overrides`` carries the provider's own volume for each open
+        time. Series arithmetic needs a numeric volume, so a provider that did
+        not report one arrives here as zero; the override lets storage keep
+        "unknown" as NULL instead of inventing a trade of zero shares.
+        """
+        accepted: Dict[datetime, Candle] = {}
+        for candle in candles:
+            open_time = candle.open_time
+            if open_time.tzinfo is not None:
+                open_time = open_time.astimezone(dt_timezone.utc).replace(tzinfo=None)
+            previous = accepted.get(open_time)
+            # A single response can repeat a timestamp; keep the closed form so
+            # a trailing open duplicate cannot replace a finished bar.
+            if previous is None or (candle.is_final and not previous.is_final):
+                accepted[open_time] = candle
+
+        stored = 0
+        updated = 0
+        unchanged_final = 0
+        skipped_forming_regression = 0
+        forming_rows = 0
+
+        for open_time in sorted(accepted):
+            candle = accepted[open_time]
+            existing = self.db.query(IntradayMarketDataBar).filter(
+                and_(
+                    IntradayMarketDataBar.instrument_id == instrument_id,
+                    IntradayMarketDataBar.provider_id == provider_id,
+                    IntradayMarketDataBar.timeframe == timeframe,
+                    IntradayMarketDataBar.bar_timestamp == open_time,
+                )
+            ).first()
+
+            if existing is not None and existing.is_final:
+                if not candle.is_final:
+                    skipped_forming_regression += 1
+                else:
+                    unchanged_final += 1
+                continue
+
+            volume = None if candle.volume is None else int(candle.volume)
+            if volume_overrides is not None and open_time in volume_overrides:
+                reported = volume_overrides[open_time]
+                volume = None if reported is None else int(reported)
+            values = dict(
+                bar_date=open_time.date(),
+                open=float(candle.open),
+                high=float(candle.high),
+                low=float(candle.low),
+                close=float(candle.close),
+                volume=volume,
+                is_final=bool(candle.is_final),
+                fetched_at=utcnow(),
+            )
+
+            if existing is not None:
+                for key, value in values.items():
+                    setattr(existing, key, value)
+                updated += 1
+            else:
+                self.db.add(
+                    IntradayMarketDataBar(
+                        instrument_id=instrument_id,
+                        provider_id=provider_id,
+                        timeframe=timeframe,
+                        bar_timestamp=open_time,
+                        **values,
+                    )
+                )
+                stored += 1
+
+            if not candle.is_final:
+                forming_rows += 1
+
+        self.db.commit()
+        logger.info(
+            "Stored intraday %s/%s/%s: new=%s updated=%s unchanged_final=%s "
+            "forming=%s skipped_forming_regression=%s",
+            instrument_id,
+            provider_id,
+            timeframe,
+            stored,
+            updated,
+            unchanged_final,
+            forming_rows,
+            skipped_forming_regression,
+        )
+        return {
+            "stored": stored,
+            "updated": updated,
+            "unchanged_final": unchanged_final,
+            "forming": forming_rows,
+            "skipped_forming_regression": skipped_forming_regression,
+        }
+
+    def get_intraday_candles(
+        self,
+        instrument_id: str,
+        provider_id: str,
+        timeframe: str,
+        *,
+        start: Optional[datetime] = None,
+        end: Optional[datetime] = None,
+        limit: Optional[int] = None,
+    ) -> List[IntradayMarketDataBar]:
+        """Return stored intraday bars in ascending timestamp order.
+
+        With only ``limit`` given, the newest ``limit`` rows are selected and
+        then re-sorted ascending, so a chart never receives a reversed series.
+        """
+        query = self.db.query(IntradayMarketDataBar).filter(
+            and_(
+                IntradayMarketDataBar.instrument_id == instrument_id,
+                IntradayMarketDataBar.provider_id == provider_id,
+                IntradayMarketDataBar.timeframe == timeframe,
+            )
+        )
+
+        if start is not None:
+            query = query.filter(
+                IntradayMarketDataBar.bar_timestamp >= _naive_utc(start)
+            )
+        if end is not None:
+            query = query.filter(
+                IntradayMarketDataBar.bar_timestamp <= _naive_utc(end)
+            )
+
+        if limit is not None and start is None and end is None:
+            rows = query.order_by(
+                IntradayMarketDataBar.bar_timestamp.desc()
+            ).limit(limit).all()
+            return list(reversed(rows))
+
+        query = query.order_by(IntradayMarketDataBar.bar_timestamp)
+        if limit is not None:
+            query = query.limit(limit)
+        return query.all()
+
+    def get_intraday_latest(
+        self,
+        instrument_id: str,
+        provider_id: str,
+        timeframe: str,
+    ) -> Optional[IntradayMarketDataBar]:
+        """Newest stored intraday bar for one series, or None."""
+        return (
+            self.db.query(IntradayMarketDataBar)
+            .filter(
+                and_(
+                    IntradayMarketDataBar.instrument_id == instrument_id,
+                    IntradayMarketDataBar.provider_id == provider_id,
+                    IntradayMarketDataBar.timeframe == timeframe,
+                )
+            )
+            .order_by(IntradayMarketDataBar.bar_timestamp.desc())
+            .first()
+        )
 
     def get_bars(
         self,
