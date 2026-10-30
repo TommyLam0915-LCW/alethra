@@ -4,6 +4,8 @@ from pydantic_settings import BaseSettings
 from pydantic import model_validator, ConfigDict
 from functools import lru_cache
 
+from app.auth.candidate_access import is_local_database_url, parse_account_allowlist
+
 _INSECURE_JWT_DEFAULTS = {
     "change-me-in-production-use-a-long-random-string",
     "secret",
@@ -39,6 +41,11 @@ class Settings(BaseSettings):
     redis_url: str = ""
     api_key_rate_limit_requests: int = 60
     api_key_rate_limit_window_seconds: int = 60
+    # Local candidate trial entry: issues a short-lived JWT for one synthetic
+    # allowlisted account. Off by default; refused outside local development.
+    candidate_passwordless_mode: bool = False
+    candidate_passwordless_accounts: str = ""
+    candidate_passwordless_session_minutes: int = 30
 
     @property
     def cors_origins_list(self) -> list[str]:
@@ -50,6 +57,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_production_safety(self) -> "Settings":
+        self._validate_candidate_passwordless()
+
         if not self.is_production_like:
             return self
 
@@ -101,6 +110,36 @@ class Settings(BaseSettings):
             )
 
         return self
+
+    def _validate_candidate_passwordless(self) -> None:
+        if not self.candidate_passwordless_mode:
+            return
+        if self.is_production_like or self.app_env != "development":
+            raise ValueError(
+                "CANDIDATE_PASSWORDLESS_MODE is a local candidate trial entry and must be "
+                f"off when APP_ENV={self.app_env}. It cannot serve a public deployment."
+            )
+        if (
+            self.jwt_secret_key in _INSECURE_JWT_DEFAULTS
+            or len(self.jwt_secret_key) < _MIN_JWT_SECRET_LENGTH
+        ):
+            raise ValueError(
+                "CANDIDATE_PASSWORDLESS_MODE requires a non-default JWT_SECRET_KEY of at "
+                f"least {_MIN_JWT_SECRET_LENGTH} characters; it issues real sessions."
+            )
+        if not is_local_database_url(self.database_url):
+            raise ValueError(
+                "CANDIDATE_PASSWORDLESS_MODE requires a sqlite or loopback DATABASE_URL; "
+                "refusing to issue sessions against a remote database."
+            )
+        try:
+            parse_account_allowlist(self.candidate_passwordless_accounts)
+        except ValueError as exc:
+            raise ValueError(f"CANDIDATE_PASSWORDLESS_ACCOUNTS is invalid: {exc}") from exc
+        if not 1 <= self.candidate_passwordless_session_minutes <= 120:
+            raise ValueError(
+                "CANDIDATE_PASSWORDLESS_SESSION_MINUTES must be between 1 and 120."
+            )
 
     model_config = ConfigDict(env_file=".env", env_file_encoding="utf-8")
 

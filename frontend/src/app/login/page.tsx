@@ -1,9 +1,15 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { brand } from '@/lib/brand';
+import {
+  CANDIDATE_MODE_FALLBACK_LABEL,
+  preferredCandidateRole,
+  writeCandidateMode,
+  type CandidateStatus,
+} from '@/lib/candidate';
 
 export default function LoginPage() {
   const router = useRouter();
@@ -13,6 +19,46 @@ export default function LoginPage() {
   const [displayName, setDisplayName] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [candidate, setCandidate] = useState<CandidateStatus | null>(null);
+  const [candidatePending, setCandidatePending] = useState<string | null>(null);
+  const [candidateError, setCandidateError] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+    api.candidateSession
+      .status()
+      .then((status) => {
+        if (!cancelled) setCandidate(status.enabled ? status : null);
+      })
+      .catch(() => {
+        // A missing candidate endpoint is the normal production shape; the
+        // ordinary email/password form below stays fully usable.
+        if (!cancelled) setCandidate(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const enterCandidate = async (role: string) => {
+    if (!candidate) return;
+    setCandidateError('');
+    setCandidatePending(role);
+    try {
+      const session = await api.candidateSession.start(role);
+      localStorage.setItem('token', session.access_token);
+      writeCandidateMode({
+        label_zh: session.mode_label_zh || candidate.label_zh || CANDIDATE_MODE_FALLBACK_LABEL,
+        session_minutes: candidate.session_minutes ?? Math.round(session.expires_in / 60),
+        role: session.role,
+        accounts: candidate.accounts,
+      });
+      router.push('/dashboard');
+    } catch (err) {
+      setCandidateError(err instanceof Error ? err.message : '本機測試模式暫時不可用');
+      setCandidatePending(null);
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -64,6 +110,74 @@ export default function LoginPage() {
           <h2 className="login-form-title">
             {isLogin ? brand.ui.auth.loginZh : brand.ui.auth.registerZh}
           </h2>
+
+          {candidate && (
+            <div
+              data-testid="candidate-entry-panel"
+              style={{
+                marginBottom: '24px',
+                padding: '16px 18px',
+                border: '1px solid var(--border)',
+                borderRadius: '10px',
+                background: 'rgba(255,255,255,0.02)',
+              }}
+            >
+              <div
+                data-testid="candidate-entry-label"
+                style={{
+                  fontSize: '13px',
+                  fontWeight: 600,
+                  letterSpacing: '0.04em',
+                  color: 'var(--text-white)',
+                  marginBottom: '6px',
+                }}
+              >
+                ◈ {candidate.label_zh || CANDIDATE_MODE_FALLBACK_LABEL}
+              </div>
+              <p style={{ margin: '0 0 12px', fontSize: '13px', lineHeight: 1.6, color: 'var(--text-secondary)' }}>
+                毋須輸入密碼。只可使用此候選環境已設定的合成帳戶；身份、同意、用量與資料權限仍照常套用。
+              </p>
+              {candidateError && (
+                <p
+                  role="alert"
+                  data-testid="candidate-entry-error"
+                  style={{ margin: '0 0 12px', fontSize: '13px', color: 'var(--text-secondary)' }}
+                >
+                  進入失敗：{candidateError}
+                </p>
+              )}
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                {candidate.accounts.map((account) => (
+                  <button
+                    key={account.role}
+                    type="button"
+                    data-testid={`candidate-enter-${account.role}`}
+                    disabled={candidatePending !== null}
+                    onClick={() => enterCandidate(account.role)}
+                    style={{
+                      padding: '9px 14px',
+                      borderRadius: '8px',
+                      border: '1px solid var(--border)',
+                      background: 'transparent',
+                      color: 'var(--text-white)',
+                      fontSize: '13px',
+                      cursor: candidatePending !== null ? 'default' : 'pointer',
+                      opacity: candidatePending !== null && candidatePending !== account.role ? 0.5 : 1,
+                    }}
+                  >
+                    {candidatePending === account.role
+                      ? '正在進入…'
+                      : `以${account.label_zh}${
+                          account.role === preferredCandidateRole(candidate.accounts) ? '（預設）' : ''
+                        }進入`}
+                  </button>
+                ))}
+              </div>
+              <p style={{ margin: '10px 0 0', fontSize: '12px', color: 'var(--text-muted)' }}>
+                下方「登入」表單仍可使用；此入口只在本機候選環境開啟。
+              </p>
+            </div>
+          )}
 
           {error && (
             <div className="login-error">

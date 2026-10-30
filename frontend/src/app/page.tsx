@@ -2,15 +2,62 @@
 
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
+import { api } from '@/lib/api';
 import { brand } from '@/lib/brand';
+import {
+  CANDIDATE_MODE_FALLBACK_LABEL,
+  preferredCandidateRole,
+  writeCandidateMode,
+} from '@/lib/candidate';
 
 export default function HomePage() {
+  const router = useRouter();
   const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [entering, setEntering] = useState(false);
+  const [entryError, setEntryError] = useState('');
 
   useEffect(() => {
     const token = localStorage.getItem('token');
-    setIsLoggedIn(!!token);
-  }, []);
+    if (token) {
+      setIsLoggedIn(true);
+      return;
+    }
+
+    // Password-free entry exists only for an explicitly enabled local
+    // candidate profile. The backend stays the authority: when the mode is off
+    // the status call reports enabled=false and this page stays a normal
+    // landing page with its login form.
+    let cancelled = false;
+    (async () => {
+      try {
+        const status = await api.candidateSession.status();
+        if (cancelled || !status.enabled) return;
+        const role = preferredCandidateRole(status.accounts);
+        if (!role) return;
+        setEntering(true);
+        const session = await api.candidateSession.start(role);
+        if (cancelled) return;
+        localStorage.setItem('token', session.access_token);
+        writeCandidateMode({
+          label_zh: session.mode_label_zh || status.label_zh || CANDIDATE_MODE_FALLBACK_LABEL,
+          session_minutes: status.session_minutes ?? Math.round(session.expires_in / 60),
+          role: session.role,
+          accounts: status.accounts,
+        });
+        router.replace('/dashboard');
+      } catch (err) {
+        if (!cancelled) {
+          setEntering(false);
+          setEntryError(err instanceof Error ? err.message : '本機測試模式暫時不可用');
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [router]);
 
   return (
     <div className="dash-root">
@@ -45,6 +92,38 @@ export default function HomePage() {
           }}>
             {brand.ui.landing.heroSubtitle}
           </p>
+
+          {entering && (
+            <p
+              data-testid="candidate-entry-pending"
+              style={{
+                display: 'inline-block',
+                marginBottom: '32px',
+                padding: '10px 18px',
+                borderRadius: '999px',
+                border: '1px solid var(--border)',
+                color: 'var(--text-secondary)',
+                fontSize: '14px',
+              }}
+            >
+              {CANDIDATE_MODE_FALLBACK_LABEL} · 正在進入測試工作區…
+            </p>
+          )}
+
+          {entryError && (
+            <p
+              role="alert"
+              data-testid="candidate-entry-error"
+              style={{
+                maxWidth: '640px',
+                margin: '0 auto 32px',
+                color: 'var(--text-secondary)',
+                fontSize: '14px',
+              }}
+            >
+              未能自動進入本機測試模式（{entryError}）。請使用下方登入，或重新載入此頁。
+            </p>
+          )}
 
           <div style={{ display: 'flex', gap: '16px', justifyContent: 'center' }}>
             {isLoggedIn ? (

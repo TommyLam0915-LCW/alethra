@@ -161,6 +161,27 @@ export_process_env() {
   export CANDIDATE_DB_HOST="$DB_HOST" CANDIDATE_DB_PORT="$DB_PORT"
   export CANDIDATE_DB_USER="$DB_USER" CANDIDATE_DB_PASSWORD="$DB_PASSWORD"
   export DATABASE_URL="$DB_URL"
+
+  # Password-free local entry: opt-in through the persistent profile only, and
+  # only for a development APP_ENV. The backend re-checks this as well, but a
+  # clear refusal here beats a backend that fails halfway through startup.
+  CANDIDATE_PASSWORDLESS_MODE="$(profile_get CANDIDATE_PASSWORDLESS_MODE)"
+  [ "$CANDIDATE_PASSWORDLESS_MODE" = "on" ] || CANDIDATE_PASSWORDLESS_MODE="off"
+  if [ "$CANDIDATE_PASSWORDLESS_MODE" = "on" ] && [ "$APP_ENV" != "development" ]; then
+    fail "CANDIDATE_PASSWORDLESS_MODE=on requires APP_ENV=development (got $APP_ENV); this entry is local-only"
+  fi
+  export CANDIDATE_PASSWORDLESS_MODE
+  export CANDIDATE_PASSWORDLESS_ACCOUNTS="$(profile_get CANDIDATE_PASSWORDLESS_ACCOUNTS)"
+  if [ -z "$CANDIDATE_PASSWORDLESS_ACCOUNTS" ]; then
+    CANDIDATE_PASSWORDLESS_ACCOUNTS="owner=$CANDIDATE_EMAIL,thin=$CANDIDATE_THIN_EMAIL,empty=$CANDIDATE_EMPTY_EMAIL"
+    export CANDIDATE_PASSWORDLESS_ACCOUNTS
+  fi
+  export CANDIDATE_PASSWORDLESS_SESSION_MINUTES="$(profile_get CANDIDATE_PASSWORDLESS_SESSION_MINUTES)"
+  # An empty string would fail int parsing in Settings; leaving it unset lets
+  # the backend default (30 minutes) apply.
+  if [ -z "$CANDIDATE_PASSWORDLESS_SESSION_MINUTES" ]; then
+    unset CANDIDATE_PASSWORDLESS_SESSION_MINUTES
+  fi
 }
 
 import_check() {
@@ -422,6 +443,11 @@ print_ready() {
   echo
   echo "Candidate stack ready (candidate $CANDIDATE_ID, database $DB_NAME, mode: $MODE):"
   echo "  open     : $FRONTEND_ORIGIN/login"
+  if [ "${CANDIDATE_PASSWORDLESS_MODE:-off}" = "on" ]; then
+    echo "  enter    : $FRONTEND_ORIGIN/   (password-free local test mode - synthetic data; the login form still works)"
+  else
+    echo "  enter    : password-free entry OFF (set CANDIDATE_PASSWORDLESS_MODE=on in $PROFILE to enable it)"
+  fi
   echo "  login    : $CANDIDATE_EMAIL   password: $CREDENTIALS_FILE (key CANDIDATE_PASSWORD, never printed)"
   echo "  accounts : empty $CANDIDATE_EMPTY_EMAIL · thin $CANDIDATE_THIN_EMAIL (passwords in the same 0600 file)"
   echo "  backend  : $BACKEND_ORIGIN"

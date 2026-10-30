@@ -4,6 +4,13 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { brand } from '@/lib/brand';
+import { api, ApiError } from '@/lib/api';
+import {
+  clearCandidateMode,
+  readCandidateMode,
+  writeCandidateMode,
+  type CandidateModeState,
+} from '@/lib/candidate';
 
 export type NavKey =
   | 'workspace'
@@ -151,6 +158,9 @@ export default function AppShell({
 }) {
   const pathname = usePathname();
   const [authed, setAuthed] = useState(false);
+  const [candidate, setCandidate] = useState<CandidateModeState | null>(null);
+  const [candidateSwitching, setCandidateSwitching] = useState(false);
+  const [candidateError, setCandidateError] = useState('');
 
   useEffect(() => {
     const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
@@ -159,11 +169,41 @@ export default function AppShell({
       return;
     }
     setAuthed(true);
+    setCandidate(readCandidateMode());
   }, []);
 
   const handleLogout = () => {
     localStorage.removeItem('token');
+    clearCandidateMode();
     window.location.href = '/login';
+  };
+
+  const handleCandidateRole = async (role: string) => {
+    if (!candidate || role === candidate.role) return;
+    setCandidateError('');
+    setCandidateSwitching(true);
+    try {
+      const session = await api.candidateSession.start(role);
+      localStorage.setItem('token', session.access_token);
+      writeCandidateMode({
+        ...candidate,
+        role: session.role,
+        label_zh: session.mode_label_zh || candidate.label_zh,
+      });
+      window.location.reload();
+    } catch (err) {
+      // The operator may have switched the local mode off since this session
+      // started. Drop the test-mode marker so the shell stops advertising a
+      // scenario switch, but keep the still-valid session rather than ejecting
+      // the user mid-research.
+      if (err instanceof ApiError && (err.status === 404 || err.status === 403)) {
+        clearCandidateMode();
+        setCandidate(null);
+      } else {
+        setCandidateError(err instanceof Error ? err.message : '切換情境失敗');
+      }
+      setCandidateSwitching(false);
+    }
   };
 
   if (!authed) {
@@ -211,6 +251,64 @@ export default function AppShell({
           </button>
         </div>
       </header>
+
+      {candidate && (
+        <div
+          data-testid="candidate-mode-bar"
+          style={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            alignItems: 'center',
+            gap: '10px',
+            padding: '6px 16px',
+            borderBottom: '1px solid var(--border)',
+            background: 'rgba(255,255,255,0.02)',
+            fontSize: '12px',
+            color: 'var(--text-secondary)',
+          }}
+        >
+          <span data-testid="candidate-mode-label" style={{ fontWeight: 600, color: 'var(--text-white)' }}>
+            ◈ {candidate.label_zh}
+          </span>
+          {candidate.accounts.length > 1 && (
+            <>
+              <label htmlFor="candidate-role-select" style={{ color: 'var(--text-muted)' }}>
+                測試情境
+              </label>
+              <select
+                id="candidate-role-select"
+                data-testid="candidate-role-select"
+                value={candidate.role}
+                disabled={candidateSwitching}
+                onChange={(e) => handleCandidateRole(e.target.value)}
+                style={{
+                  background: 'transparent',
+                  color: 'var(--text-white)',
+                  border: '1px solid var(--border)',
+                  borderRadius: '6px',
+                  padding: '3px 8px',
+                  fontSize: '12px',
+                }}
+              >
+                {candidate.accounts.map((account) => (
+                  <option key={account.role} value={account.role}>
+                    {account.label_zh}
+                  </option>
+                ))}
+              </select>
+            </>
+          )}
+          {candidateSwitching && <span>切換中…</span>}
+          {candidateError && (
+            <span role="alert" data-testid="candidate-switch-error">
+              {candidateError}
+            </span>
+          )}
+          <span style={{ marginLeft: 'auto', color: 'var(--text-muted)' }}>
+            合成資料 · 僅供本機測試
+          </span>
+        </div>
+      )}
 
       {contextBar && (
         <div className="app-contextbar" data-testid="app-contextbar">

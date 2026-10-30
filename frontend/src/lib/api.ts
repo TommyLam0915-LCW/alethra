@@ -1,3 +1,5 @@
+import type { CandidateSession, CandidateStatus } from './candidate';
+
 export const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 const API_URL = API_BASE_URL;
 
@@ -119,6 +121,16 @@ export const api = {
     login: (data: { email: string; password: string }) =>
       apiFetch('/api/auth/login', { method: 'POST', body: JSON.stringify(data) }),
     me: () => apiFetch('/api/auth/me'),
+  },
+  // Password-free local candidate entry. The server decides whether it exists
+  // and which roles are allowed; this client only asks for a named role.
+  candidateSession: {
+    status: () => apiFetch('/api/auth/candidate-session') as Promise<CandidateStatus>,
+    start: (role: string) =>
+      apiFetch('/api/auth/candidate-session', {
+        method: 'POST',
+        body: JSON.stringify({ role }),
+      }) as Promise<CandidateSession>,
   },
   brand: {
     get: () => apiFetch('/api/v1/brand'),

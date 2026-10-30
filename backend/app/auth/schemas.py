@@ -31,3 +31,35 @@ class Token(BaseModel):
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str
+
+
+class CandidateSessionAccount(BaseModel):
+    """One allowlisted synthetic role; the account email is never exposed."""
+
+    role: str
+    label_zh: str
+
+
+class CandidateSessionStatus(BaseModel):
+    enabled: bool
+    synthetic: bool = True
+    label_zh: Optional[str] = None
+    session_minutes: Optional[int] = None
+    accounts: list[CandidateSessionAccount] = []
+
+
+class CandidateSessionRequest(BaseModel):
+    """The client may only choose a role. It can never name a user or email."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    role: str = "owner"
+
+
+class CandidateSessionResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int
+    role: str
+    mode_label_zh: str
+    user: UserResponse

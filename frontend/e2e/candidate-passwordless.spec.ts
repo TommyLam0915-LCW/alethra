@@ -1,0 +1,227 @@
+import { test, expect, type Page } from '@playwright/test';
+
+/**
+ * Tracked regression for the local password-free candidate entry.
+ *
+ * WHAT THIS PROVES
+ *   - with the candidate profile's PASSWORDLESS mode ON, opening the candidate
+ *     homepage mints one short-lived session for the configured account and
+ *     lands in the authed workspace, with a persistent "local test mode /
+ *     synthetic data" label;
+ *   - the identity is stable across reload (same server-issued subject);
+ *   - the scenario switcher can only move between the roles the backend
+ *     allowlists, and refuses an unlisted role;
+ *   - the ordinary email/password login remains available;
+ *   - with the mode OFF the homepage stays public, no session is minted, and
+ *     the login page shows no candidate panel.
+ *
+ * WHAT THIS DOES NOT PROVE
+ *   - remote peers are refused: a Playwright client is always loopback, so the
+ *     TCP-peer guard is proven by backend tests, not here;
+ *   - production config refusal: also a backend settings test;
+ *   - model/signal efficacy: out of scope.
+ *
+ * GATING
+ *   Runs only when explicitly pointed at a loopback candidate stack:
+ *     E2E_CANDIDATE_PASSWORDLESS=on   stacked with the profile mode enabled
+ *     E2E_CANDIDATE_PASSWORDLESS=off  the same stack after disabling the mode
+ *   API_BASE is optional and only used for the direct allowlist checks.
+ */
+
+const BASE = process.env.E2E_FRONTEND_BASE ?? 'http://localhost:3001';
+const MODE = process.env.E2E_CANDIDATE_PASSWORDLESS ?? '';
+const API_BASE = process.env.E2E_API_BASE ?? '';
+const host = (() => {
+  try {
+    return new URL(BASE).hostname;
+  } catch {
+    return '';
+  }
+})();
+const LOOPBACK = host === '127.0.0.1' || host === 'localhost' || host === '[::1]' || host === '::1';
+const READY = LOOPBACK && (MODE === 'on' || MODE === 'off');
+const SKIP =
+  'set E2E_CANDIDATE_PASSWORDLESS=on|off and point E2E_FRONTEND_BASE at a loopback candidate frontend';
+
+interface Claims {
+  sub?: string;
+  exp?: number;
+  role?: string;
+  cand?: string;
+}
+
+async function readClaims(page: Page): Promise<Claims | null> {
+  return page.evaluate(() => {
+    const token = localStorage.getItem('token');
+    if (!token) return null;
+    const raw = token.split('.')[1];
+    if (!raw) return null;
+    let part = raw.replace(/-/g, '+').replace(/_/g, '/');
+    while (part.length % 4) part += '=';
+    try {
+      return JSON.parse(atob(part));
+    } catch {
+      return null;
+    }
+  });
+}
+
+async function enterFromHomepage(page: Page) {
+  await page.goto('/', { waitUntil: 'domcontentloaded' });
+  await page.waitForURL((url) => url.pathname === '/dashboard', { timeout: 30000 });
+  await expect(page.getByTestId('candidate-mode-bar')).toBeVisible();
+}
+
+test('homepage enters the test workspace without credentials', async ({ page }) => {
+  test.skip(!READY || MODE !== 'on', SKIP);
+
+  const sessionPosts: string[] = [];
+  page.on('request', (request) => {
+    if (request.method() === 'POST' && request.url().includes('/api/auth/candidate-session')) {
+      sessionPosts.push(request.url());
+    }
+  });
+
+  await enterFromHomepage(page);
+
+  expect(sessionPosts).toHaveLength(1);
+  await expect(page.getByTestId('candidate-mode-label')).toContainText('本機測試模式');
+  await expect(page.getByTestId('candidate-mode-bar')).toContainText('合成資料');
+
+  const claims = await readClaims(page);
+  expect(claims).not.toBeNull();
+  expect(claims!.cand).toBe('local_passwordless');
+  expect(typeof claims!.sub).toBe('string');
+  expect(claims!.sub!.length).toBeGreaterThan(0);
+  expect(typeof claims!.role).toBe('string');
+  expect(claims!.role!.length).toBeGreaterThan(0);
+
+  const modeRaw = await page.evaluate(() => localStorage.getItem('candidate_mode'));
+  expect(modeRaw).toContain('本機測試模式');
+});
+
+test('reload keeps the same candidate identity', async ({ page }) => {
+  test.skip(!READY || MODE !== 'on', SKIP);
+
+  await enterFromHomepage(page);
+  const before = await readClaims(page);
+  expect(before?.sub).toBeTruthy();
+
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await expect(page.getByTestId('candidate-mode-bar')).toBeVisible();
+  expect(new URL(page.url()).pathname).toBe('/dashboard');
+
+  const after = await readClaims(page);
+  expect(after?.sub).toBe(before!.sub);
+  expect(after?.exp).toBe(before!.exp);
+  // A reload must not silently mint a second session.
+  await expect(page.getByTestId('candidate-mode-label')).toContainText('本機測試模式');
+});
+
+test('scenario switch moves only between configured accounts', async ({ page }) => {
+  test.skip(!READY || MODE !== 'on', SKIP);
+
+  await enterFromHomepage(page);
+  const select = page.getByTestId('candidate-role-select');
+  if ((await select.count()) === 0) {
+    test.skip(true, 'this candidate profile lists a single allowlisted account');
+  }
+
+  const options = await select
+    .locator('option')
+    .evaluateAll((els) => els.map((el) => (el as HTMLOptionElement).value));
+  const current = await select.inputValue();
+  const target = options.find((role) => role !== current);
+  expect(target).toBeTruthy();
+
+  const before = await readClaims(page);
+  // The switcher writes the new role and then reloads the document, so wait for
+  // the reload's load event rather than polling localStorage: the storage value
+  // is written slightly before the old execution context is destroyed.
+  await page.waitForLoadState('load');
+  const reloaded = page.waitForEvent('load', { timeout: 30000 });
+  await select.selectOption(target!);
+  await reloaded;
+
+  await expect(page.getByTestId('candidate-mode-bar')).toBeVisible();
+  const after = await readClaims(page);
+  expect(after?.role).toBe(target);
+  expect(after?.sub).not.toBe(before?.sub);
+  await expect(page.getByTestId('candidate-mode-label')).toContainText('本機測試模式');
+});
+
+test('ordinary login stays available after logging out of a candidate session', async ({ page }) => {
+  test.skip(!READY || MODE !== 'on', SKIP);
+
+  await enterFromHomepage(page);
+  await page.getByTestId('app-logout').click();
+  await page.waitForURL((url) => url.pathname === '/login', { timeout: 30000 });
+
+  const zone = page.locator('.login-form-zone');
+  await expect(zone.locator('input[type="email"]')).toBeVisible();
+  await expect(zone.locator('input[type="password"]')).toBeVisible();
+  await expect(zone.getByRole('button', { name: '登入', exact: true })).toBeVisible();
+  // The password-free panel is additive; it must not replace the form.
+  await expect(page.getByTestId('candidate-entry-panel')).toBeVisible();
+});
+
+test('running backend refuses roles outside the allowlist', async ({ request }) => {
+  test.skip(!READY || MODE !== 'on' || !API_BASE, `${SKIP}; also needs E2E_API_BASE for direct checks`);
+
+  const unknown = await request.post(`${API_BASE}/api/auth/candidate-session`, {
+    data: { role: 'admin' },
+  });
+  expect(unknown.status()).toBe(400);
+
+  const extra = await request.post(`${API_BASE}/api/auth/candidate-session`, {
+    data: { role: 'owner', user_id: '00000000-0000-0000-0000-000000000000' },
+  });
+  expect(extra.status()).toBe(422);
+
+  const status = await request.get(`${API_BASE}/api/auth/candidate-session`);
+  expect(status.ok()).toBeTruthy();
+  const body = await status.json();
+  expect(body.enabled).toBe(true);
+  expect(Array.isArray(body.accounts)).toBeTruthy();
+  for (const account of body.accounts) {
+    expect(Object.keys(account).sort()).toEqual(['label_zh', 'role']);
+  }
+});
+
+test('mode off: homepage stays public and mints no session', async ({ page }) => {
+  test.skip(!READY || MODE !== 'off', SKIP);
+
+  const posts: string[] = [];
+  const statusSeen = page.waitForResponse(
+    (response) =>
+      response.url().includes('/api/auth/candidate-session') &&
+      response.request().method() === 'GET',
+    { timeout: 30000 },
+  );
+  page.on('request', (request) => {
+    if (request.method() === 'POST' && request.url().includes('/api/auth/candidate-session')) {
+      posts.push(request.url());
+    }
+  });
+
+  await page.goto('/', { waitUntil: 'domcontentloaded' });
+  const statusResponse = await statusSeen;
+  expect(statusResponse.ok()).toBeTruthy();
+  expect((await statusResponse.json()).enabled).toBe(false);
+
+  await expect(page.getByRole('link', { name: '登入', exact: true })).toBeVisible();
+  expect(new URL(page.url()).pathname).toBe('/');
+  expect(posts).toHaveLength(0);
+  await expect(page.getByTestId('candidate-mode-bar')).toHaveCount(0);
+
+  await page.goto('/login', { waitUntil: 'domcontentloaded' });
+  await expect(page.locator('.login-form-zone input[type="email"]')).toBeVisible();
+  await expect(page.getByTestId('candidate-entry-panel')).toHaveCount(0);
+
+  if (API_BASE) {
+    const refused = await page.request.post(`${API_BASE}/api/auth/candidate-session`, {
+      data: { role: 'owner' },
+    });
+    expect(refused.status()).toBe(404);
+  }
+});
