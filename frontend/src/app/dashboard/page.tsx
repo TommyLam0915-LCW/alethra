@@ -245,6 +245,12 @@ export default function DashboardPage() {
             </table>
           ))}
         </div>
+
+        {/* The redesign dropped the always-visible disclaimer this page had;
+            every other result surface still carries one, so keep it here too. */}
+        <div className="dash-disclaimer" style={{ marginTop: '24px', marginBottom: 0 }}>
+          <strong>提醒：</strong>本系統是研究工具，所有結果僅供研究參考，不代表未來績效，不構成投資建議。
+        </div>
       </div>
     </AppShell>
   );
