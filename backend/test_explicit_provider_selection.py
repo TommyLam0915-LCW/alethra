@@ -1,16 +1,23 @@
 """Test explicit provider selection for stored-data sessions."""
 import sys
 import os
+
+import pytest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 from datetime import date, datetime
 from uuid import UUID
 
 from app.database import Base, get_db
 from app.main import app
+# Import the model package so every table (including api_keys, touched by the
+# request path) is registered on Base.metadata before create_all runs. Bind it
+# under another name so it does not shadow the FastAPI `app` imported above.
+from app import models as _models  # noqa: F401
 from app.models.user import User
 from app.models.experiment import Experiment
 from app.models.experiment_version import ExperimentVersion
@@ -18,8 +25,14 @@ from app.models.market_data import MarketDataBar
 from app.models.simulation import SimulationSession
 from app.auth.jwt import create_access_token
 
-# Create test database
-engine = create_engine('sqlite:///:memory:')
+# Create test database. A plain in-memory SQLite URL gives every connection its
+# own empty database, so requests served on TestClient's thread would not see
+# the tables; StaticPool keeps one shared connection for the whole process.
+engine = create_engine(
+    'sqlite:///:memory:',
+    connect_args={'check_same_thread': False},
+    poolclass=StaticPool,
+)
 Base.metadata.create_all(engine)
 TestSession = sessionmaker(bind=engine)
 
@@ -29,6 +42,11 @@ def override_get_db():
         yield db
     finally:
         db.close()
+
+# The seeded fixture rows above are addressed by these ids; auth now
+# resolves the token subject as a real user.
+TEST_USER_ID = UUID('00000000-0000-0000-0000-000000000001')
+TEST_VERSION_ID = UUID('00000000-0000-0000-0000-000000000003')
 
 app.dependency_overrides[get_db] = override_get_db
 client = TestClient(app)
@@ -119,15 +137,22 @@ def setup_test_data():
     db.commit()
     db.close()
 
+@pytest.fixture(scope='module', autouse=True)
+def _seeded_fixture_rows():
+    # The rows were only seeded under __main__ before, so pytest ran against
+    # an empty in-memory database and every request failed authentication.
+    setup_test_data()
+    yield
+
 def test_available_providers():
     """Test GET /available-providers endpoint."""
     print("\n=== Test 1: Get available providers ===")
     
-    token = create_access_token({'sub': 'test-user-id'})
+    token = create_access_token({'sub': str(TEST_USER_ID)})
     headers = {'Authorization': f'Bearer {token}'}
     
     response = client.get(
-        '/api/v1/simulations/versions/test-version-id/available-providers',
+        f'/api/v1/simulations/versions/{TEST_VERSION_ID}/available-providers',
         headers=headers,
     )
     
@@ -141,7 +166,9 @@ def test_available_providers():
     assert 'twelvedata' in providers
     assert 'demo' in providers
     assert providers['twelvedata']['bar_count'] == 20
-    assert providers['demo']['bar_count'] == 4
+    # Only the 2024-01-30 demo bar falls inside the version window
+    # (2024-01-02..2024-01-30); the other three are outside it.
+    assert providers['demo']['bar_count'] == 1
     
     print(f"✓ Found {len(data['available_providers'])} providers")
     print(f"  - twelvedata: {providers['twelvedata']['bar_count']} bars")
@@ -151,11 +178,11 @@ def test_create_session_with_explicit_provider():
     """Test POST /versions/{version_id} with explicit provider_id."""
     print("\n=== Test 2: Create session with explicit provider ===")
     
-    token = create_access_token({'sub': 'test-user-id'})
+    token = create_access_token({'sub': str(TEST_USER_ID)})
     headers = {'Authorization': f'Bearer {token}'}
     
     response = client.post(
-        '/api/v1/simulations/versions/test-version-id',
+        f'/api/v1/simulations/versions/{TEST_VERSION_ID}',
         headers=headers,
         json={
             'initial_virtual_cash': 10000.0,
@@ -175,11 +202,11 @@ def test_create_session_without_provider_multiple_available():
     """Test that creating session without provider_id fails when multiple providers available."""
     print("\n=== Test 3: Create session without provider (should fail) ===")
     
-    token = create_access_token({'sub': 'test-user-id'})
+    token = create_access_token({'sub': str(TEST_USER_ID)})
     headers = {'Authorization': f'Bearer {token}'}
     
     response = client.post(
-        '/api/v1/simulations/versions/test-version-id',
+        f'/api/v1/simulations/versions/{TEST_VERSION_ID}',
         headers=headers,
         json={
             'initial_virtual_cash': 10000.0,
@@ -197,11 +224,11 @@ def test_create_session_with_invalid_provider():
     """Test that creating session with invalid provider_id fails."""
     print("\n=== Test 4: Create session with invalid provider (should fail) ===")
     
-    token = create_access_token({'sub': 'test-user-id'})
+    token = create_access_token({'sub': str(TEST_USER_ID)})
     headers = {'Authorization': f'Bearer {token}'}
     
     response = client.post(
-        '/api/v1/simulations/versions/test-version-id',
+        f'/api/v1/simulations/versions/{TEST_VERSION_ID}',
         headers=headers,
         json={
             'initial_virtual_cash': 10000.0,
@@ -220,11 +247,11 @@ def test_create_session_with_demo_provider():
     """Test creating session with demo provider."""
     print("\n=== Test 5: Create session with demo provider ===")
     
-    token = create_access_token({'sub': 'test-user-id'})
+    token = create_access_token({'sub': str(TEST_USER_ID)})
     headers = {'Authorization': f'Bearer {token}'}
     
     response = client.post(
-        '/api/v1/simulations/versions/test-version-id',
+        f'/api/v1/simulations/versions/{TEST_VERSION_ID}',
         headers=headers,
         json={
             'initial_virtual_cash': 10000.0,

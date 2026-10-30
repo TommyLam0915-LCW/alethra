@@ -42,7 +42,6 @@ def test_provider_isolation():
         close=188.5,
         volume=50000000,
         provider_id='twelvedata',
-        source='twelvedata'
     )
     
     # Demo bar (same date)
@@ -56,7 +55,6 @@ def test_provider_isolation():
         close=190.5,
         volume=1000000,
         provider_id='demo',
-        source='demo'
     )
     
     db.add(td_bar)
@@ -97,7 +95,6 @@ def test_provider_isolation():
         close=191.5,
         volume=1000000,
         provider_id='demo',
-        source='demo'
     )
     db.add(demo_only_bar)
     db.commit()
