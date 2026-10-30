@@ -61,17 +61,22 @@ def rate_limit_dependency(
     max_requests: int = 60,
     window_seconds: float = 60,
     limiter: Optional[RateLimiter] = None,
+    bucket: str = "default",
 ):
     """
     FastAPI dependency factory that enforces rate limiting per client IP.
     Returns 429 when the limit is exceeded.
+
+    ``bucket`` isolates the counter per route group: the store is a plain counter
+    map, so two endpoints sharing a key would consume each other's budget while
+    each compared against its own threshold.
     """
     if limiter is None:
         limiter = _default_limiter
 
     async def _dependency(request: Request, response: Response) -> None:
         client_ip = request.client.host if request.client else "unknown"
-        key = f"rl:{client_ip}"
+        key = f"rl:{bucket}:{client_ip}"
 
         allowed = limiter.check_rate_limit(key, max_requests, window_seconds)
         remaining = limiter.remaining(key, max_requests, window_seconds)

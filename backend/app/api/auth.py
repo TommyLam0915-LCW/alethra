@@ -3,13 +3,34 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.user import User
 from app.auth.jwt import get_password_hash, create_access_token, get_current_user
+from app.auth.rate_limit import rate_limit_dependency
 from app.auth.schemas import UserCreate, UserResponse, Token, LoginRequest
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
+# Credential endpoints are the only unauthenticated write surface, so they need
+# their own budget: without it, login is an unlimited password oracle. The bucket
+# is keyed on the TCP peer (``request.client.host``); a deployment behind a
+# reverse proxy would put every user in one bucket until real client addresses
+# are plumbed through, which is a known limitation rather than a silent default.
+LOGIN_ATTEMPTS_PER_WINDOW = 20
+LOGIN_WINDOW_SECONDS = 60
+REGISTRATIONS_PER_WINDOW = 5
+REGISTRATION_WINDOW_SECONDS = 300
+
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
-def register(user_data: UserCreate, db: Session = Depends(get_db)):
+def register(
+    user_data: UserCreate,
+    db: Session = Depends(get_db),
+    _rate_limit=Depends(
+        rate_limit_dependency(
+            REGISTRATIONS_PER_WINDOW,
+            REGISTRATION_WINDOW_SECONDS,
+            bucket="auth_register",
+        )
+    ),
+):
     existing_user = db.query(User).filter(User.email == user_data.email).first()
     if existing_user:
         raise HTTPException(
@@ -30,7 +51,17 @@ def register(user_data: UserCreate, db: Session = Depends(get_db)):
 
 
 @router.post("/login", response_model=Token)
-def login(credentials: LoginRequest, db: Session = Depends(get_db)):
+def login(
+    credentials: LoginRequest,
+    db: Session = Depends(get_db),
+    _rate_limit=Depends(
+        rate_limit_dependency(
+            LOGIN_ATTEMPTS_PER_WINDOW,
+            LOGIN_WINDOW_SECONDS,
+            bucket="auth_login",
+        )
+    ),
+):
     user = db.query(User).filter(User.email == credentials.email).first()
     if not user or not user.password_hash:
         raise HTTPException(
