@@ -3,10 +3,19 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { api, ApiError } from '@/lib/api';
+import {
+  ACTION_LABELS,
+  label,
+  NOT_PROVIDED,
+  ORDER_STATUS_LABELS,
+  PORTFOLIO_STATUS_LABELS,
+  REJECTION_LABELS,
+  SESSION_STATUS_LABELS,
+} from '@/lib/copy';
 import type { ContextPortfolio } from '@/components/shell/WorkspaceContextBar';
 import type { BarsResponse, ExecutionIntent, InstrumentDetail } from './types';
 import type { ReplaySession } from './ReplayController';
-import { NOT_PROVIDED, type RulesState } from './strategyRules';
+import type { RulesState } from './strategyRules';
 
 interface PaperPortfolio {
   id: string;
@@ -56,58 +65,13 @@ interface ManualResult {
   idempotency_key: string;
 }
 
-const ACTION_LABELS: Record<ManualAction, string> = {
-  buy: '買入',
-  sell: '賣出',
-  hold: '觀望',
-};
-
-const REJECTION_LABELS: Record<string, string> = {
-  already_in_position: '工作階段已有持倉',
-  insufficient_cash: '虛擬現金不足',
-  no_position_to_sell: '沒有可賣出的持倉',
-  quantity_exceeds_position: '賣出數量超過現有持股',
-  awaiting_execution_window: '等待可執行窗口',
-  no_market_clock: '沒有綁定的模擬帳戶',
-  no_quote_on_window: '視窗內沒有可執行報價',
-  portfolio_paused: '帳戶已暫停',
-  instrument_not_allowed: '標的不在風控允許清單',
-  daily_entry_limit: '已達當日進場次數上限',
-  position_limit: '超過單一持倉上限',
-  risk_price_unavailable: '缺少決策價格，未能計算風控',
-};
-
-/** Mirrors backend OrderStatus. `pending` must never read as executed. */
-const ORDER_STATUS_LABELS: Record<string, string> = {
-  pending: '掛單待執行',
-  filled: '已成交',
-  cancelled: '已取消',
-  rejected: '已拒絕',
-};
-
-const SESSION_STATUS_LABELS: Record<string, string> = {
-  pending: '待開始',
-  active: '進行中',
-  paused: '已暫停',
-  completed: '已完成',
-  retired: '已停用',
-};
-
-/** Mirrors backend PortfolioStatus; non-active portfolios stay viewable but are not orderable here. */
-const PORTFOLIO_STATUS_LABELS: Record<string, string> = {
-  active: '進行中',
-  paused: '已暫停',
-  retired: '已停用',
-  completed: '已完成',
-};
-
 /** Session responses carry the cursor in one of two shapes depending on rhythm. */
 function sessionClock(session: ReplaySession): string {
   const intraday = !!session.timeframe && session.timeframe !== '1d';
   if (intraday && session.current_bar_timestamp) {
-    return `${session.current_bar_timestamp.slice(0, 16).replace('T', ' ')}（交易所當地時間）`;
+    return `${session.current_bar_timestamp.slice(0, 16).replace('T', ' ')} (exchange local time)`;
   }
-  return session.current_snapshot_date ?? '尚未推進';
+  return session.current_snapshot_date ?? 'Not advanced yet';
 }
 
 function text(value: unknown): string {
@@ -125,43 +89,53 @@ function manualNotice(
 ): string {
   if (order) {
     return (
-      `掛單已提交，尚未成交（步驟 ${text(decision?.step_number)}，決策基準 ` +
-      `${text(order.decided_on_cutoff)}）。它會在綁定的數據集裡第一個晚於該基準的 K 線以開盤價執行；` +
-      '在此之前不計入持股，也不變動現金。'
+      `Pending order submitted, not yet filled (step ${text(decision?.step_number)}, decision basis ` +
+      `${text(order.decided_on_cutoff)}). It executes at the open of the first bar in the bound dataset ` +
+      'after that basis; until then it is not counted as a holding and does not move cash.'
     );
   }
   if (rejection) {
     return (
-      `決策已記錄，但這張掛單被拒絕（${REJECTION_LABELS[String(rejection.reason)] ?? text(rejection.reason)}），` +
-      '未變動現金或部位。'
+      `The decision was recorded, but this order was rejected (${label(REJECTION_LABELS, String(rejection.reason))}); ` +
+      'cash and positions were not changed.'
     );
   }
   if (fill) {
-    return `模擬單已成交並記錄於工作階段決策（步驟 ${text(decision?.step_number)}）。`;
+    return `Paper order filled and recorded in the session decisions (step ${text(decision?.step_number)}).`;
   }
-  return '觀望已記錄：未提交掛單，未變動現金或部位。';
+  return 'Hold recorded: no order submitted, no cash or position change.';
 }
 
-/** Where one order stands between 提交 and 結算, from the backend's own view. */
+/** Where one order stands between submission and settlement, from the backend's own view. */
 function executionSummary(execution: Record<string, any> | null): string {
   if (!execution) return NOT_PROVIDED;
   const blockers: string[] = Array.isArray(execution.blockers)
-    ? execution.blockers.map((b) => REJECTION_LABELS[String(b)] ?? String(b))
+    ? execution.blockers.map((b) => label(REJECTION_LABELS, String(b)))
     : [];
   if (execution.next_window) {
     const window = execution.next_window;
-    const paused = blockers.length ? `（目前受阻：${blockers.join('、')}）` : '';
-    return `等待 ${text(window.date)} 開盤 ${text(window.open)} 執行${paused}`;
+    const paused = blockers.length ? ` (currently blocked: ${blockers.join(', ')})` : '';
+    return `Waiting for the ${text(window.date)} open at ${text(window.open)} to execute${paused}`;
   }
-  if (execution.waiting?.reason) return String(execution.waiting.reason);
+  if (execution.waiting?.reason) {
+    // The server's prose for this state is not translated, but it also sends the stable
+    // blocker code that produced it. Rendering the code keeps the lifecycle line English
+    // without rewriting server messages, and leaves the reason traceable.
+    const blocked = blockers.length ? ` (${blockers.join(', ')})` : '';
+    return (
+      `Waiting for an executable bar${blocked}: the bound dataset has no bar after the decision ` +
+      'basis, so this order cannot fill and is settled as expired when the session is reviewed, ' +
+      'not silently dropped.'
+    );
+  }
   if (execution.executed) {
     const done = execution.executed;
     return (
-      `已於 ${text(done.execution_date)} 成交；結算日 ` +
-      `${done.settlement_date ? String(done.settlement_date) : 'UNKNOWN（綁定的數據集在成交日後沒有 bar）'}`
+      `Filled on ${text(done.execution_date)}; settlement date ` +
+      `${done.settlement_date ? String(done.settlement_date) : 'UNKNOWN (the bound dataset has no bar after the fill date)'}`
     );
   }
-  if (execution.not_executed_reason) return `未成交（${text(execution.not_executed_reason)}）`;
+  if (execution.not_executed_reason) return `Not filled (${text(execution.not_executed_reason)})`;
   return text(execution.state);
 }
 
@@ -249,8 +223,8 @@ export default function OrderPreviewPanel({
   const activeSessionId = session?.id ?? null;
 
   // Advancing the clock is what executes a pending intent, so the balances are re-read
-  // with the cursor too: a fill that moved cash must not leave 「虛擬現金」 showing the
-  // pre-trade figure while the book below already reads 已成交.
+  // with the cursor too: a fill that moved cash must not leave the virtual cash showing
+  // the pre-trade figure while the book below already reads filled.
   useEffect(() => {
     loadPortfolios(activeSessionId);
   }, [loadPortfolios, activeSessionId, session?.current_snapshot_date, session?.current_bar_timestamp]);
@@ -285,70 +259,70 @@ export default function OrderPreviewPanel({
   // Which endpoint a simulated order can honestly go to, given what the API supports.
   const target = useMemo<{ kind: 'intent' | 'manual' | 'blocked'; reason: string }>(() => {
     if (!portfoliosLoaded) {
-      return { kind: 'blocked', reason: '尚未讀取模擬投資組合，無法決定提交目標。' };
+      return { kind: 'blocked', reason: 'Paper portfolios have not loaded, so the submission target cannot be decided.' };
     }
     if (!selected) {
       if (portfolios.length === 0) {
-        return { kind: 'blocked', reason: '尚未建立模擬投資組合，請先建立。' };
+        return { kind: 'blocked', reason: 'No paper portfolio exists yet; create one first.' };
       }
       return portfolios.some((p) => p.status === 'active')
-        ? { kind: 'blocked', reason: '有多個進行中的模擬組合且回放綁定不明確，不自動代選 — 請於上方選擇。' }
+        ? { kind: 'blocked', reason: 'More than one active paper portfolio exists and the replay binding is unclear, so none was chosen automatically — select one above.' }
         : {
             kind: 'blocked',
-            reason: `現有 ${portfolios.length} 個組合均非進行中（${portfolios
-              .map((p) => PORTFOLIO_STATUS_LABELS[p.status] ?? p.status)
-              .reduce<string[]>((acc, label) => (acc.includes(label) ? acc : [...acc, label]), [])
-              .join('、')}），可查看歷史但需選擇或建立進行中的組合才能提交。`,
+            reason: `None of the ${portfolios.length} portfolios is active (${portfolios
+              .map((p) => label(PORTFOLIO_STATUS_LABELS, p.status))
+              .reduce<string[]>((acc, value) => (acc.includes(value) ? acc : [...acc, value]), [])
+              .join(', ')}), so history is viewable but you must select or create an active portfolio to submit.`,
           };
     }
     if (selected.status !== 'active') {
       return {
         kind: 'blocked',
-        reason: `此組合狀態為「${PORTFOLIO_STATUS_LABELS[selected.status] ?? selected.status}」：後端模擬單端點對 retired/completed 回傳 400，paused 由風險檢查拒絕，因此本面板只對進行中的組合提交。組合歷史仍可檢視。`,
+        reason: `This portfolio is ${label(PORTFOLIO_STATUS_LABELS, selected.status)}: the backend paper-order endpoint returns 400 for retired/completed and risk checks reject paused, so this panel only submits for active portfolios. Portfolio history remains viewable.`,
       };
     }
     if (!selected.simulation_session_id) {
-      return { kind: 'intent', reason: '此組合未綁定歷史回放工作階段，走受控執行器意向流程。' };
+      return { kind: 'intent', reason: 'This portfolio is not bound to a historical replay session, so it uses the controlled executor intent flow.' };
     }
     if (!session || session.id !== selected.simulation_session_id) {
       return {
         kind: 'blocked',
-        reason: `此組合綁定工作階段 ${selected.simulation_session_id.slice(0, 8)}，但其回放游標與策略版本未在右欄載入，無法確認成交基準，因此停用提交。`,
+        reason: `This portfolio is bound to session ${selected.simulation_session_id.slice(0, 8)}, but that replay cursor and strategy version are not loaded in the right column, so the fill basis cannot be confirmed and submission is disabled.`,
       };
     }
     if (rules.status !== 'resolved' || rules.versionId !== session.experiment_version_id) {
       return {
         kind: 'blocked',
-        reason: `工作階段綁定的策略規則${NOT_PROVIDED}（版本 ${session.experiment_version_id.slice(0, 8)}${
-          rules.status === 'unresolved' ? `：${rules.reason}` : rules.status === 'error' ? `：${rules.message}` : ''
-        }），無法確認此表單提交的標的是否等於目前標的，因此停用提交。`,
+        reason: `The strategy rules bound to this session are ${NOT_PROVIDED} (version ${session.experiment_version_id.slice(0, 8)}${
+          rules.status === 'unresolved' ? `: ${rules.reason}` : rules.status === 'error' ? `: ${rules.message}` : ''
+        }), so it cannot be confirmed that this form's instrument matches the active one, and submission is disabled.`,
       };
     }
     const assetId = rules.assetIds[0] ?? null;
     if (!assetId) {
       return {
         kind: 'blocked',
-        reason: `規則的 strategy_spec.asset_ids ${NOT_PROVIDED}，無法確認成交標的，因此停用提交。`,
+        reason: `The rules' strategy_spec.asset_ids is ${NOT_PROVIDED}, so the fill instrument cannot be confirmed and submission is disabled.`,
       };
     }
     if (assetId !== instrumentId) {
       return {
         kind: 'blocked',
-        reason: `目前標的為 ${instrumentId}，但此工作階段的規則綁定 ${assetId}。manual-decision 只對 asset_ids[0] 成交，跨標的提交會誤導研究紀錄，因此停用。`,
+        reason: `The current instrument is ${instrumentId}, but this session's rules bind ${assetId}. manual-decision only fills asset_ids[0], and a cross-instrument submission would misstate the research record, so it is disabled.`,
       };
     }
     if (session.status !== 'pending' && session.status !== 'active') {
       return {
         kind: 'blocked',
-        reason: `此工作階段已${SESSION_STATUS_LABELS[session.status] ?? session.status}，後端不再接受決策。`,
+        reason: `This session is already ${label(SESSION_STATUS_LABELS, session.status)}; the backend no longer accepts decisions.`,
       };
     }
-    return { kind: 'manual', reason: '以回放游標為成交基準，提交給綁定的工作階段。' };
+    return { kind: 'manual', reason: 'Submits to the bound session, using the replay cursor as the fill basis.' };
   }, [portfoliosLoaded, portfolios, selected, session, rules, instrumentId]);
 
   const isManual = target.kind === 'manual';
   // Reading the lifecycle record is not the same decision as being allowed to write to it:
-  // the book stays available for the account's bound session even once 提交 is 停用.
+  // the book stays available for the account's bound session even once submission is disabled.
   const bookSession =
     selected && session && session.id === selected.simulation_session_id ? session : null;
   const manualQuantity = Math.floor(parseFloat(quantityText) || 0);
@@ -398,7 +372,7 @@ export default function OrderPreviewPanel({
     try {
       return await fn();
     } catch (err) {
-      setError(err instanceof Error ? err.message : '操作失敗');
+      setError(err instanceof Error ? err.message : 'Operation failed');
       return null;
     } finally {
       setBusy(false);
@@ -411,12 +385,12 @@ export default function OrderPreviewPanel({
     setReconcileNote('');
     if (action === 'buy') {
       if (!Number.isFinite(manualQuantity) || manualQuantity < 1) {
-        setError('買入數量必須為不小於 1 的整數股。');
+        setError('Buy quantity must be a whole number of shares of at least 1.');
         return;
       }
     }
     if (rationale.length > 1000) {
-      setError(`決策理由長度 ${rationale.length} 超過後端上限 1000 字元。`);
+      setError(`Decision rationale is ${rationale.length} characters, over the backend limit of 1000.`);
       return;
     }
     setManualUnknown('');
@@ -471,26 +445,26 @@ export default function OrderPreviewPanel({
       setReview(null);
       setRationale('');
     } catch (err) {
-      const message = err instanceof Error ? err.message : '提交失敗';
+      const message = err instanceof Error ? err.message : 'Submission failed';
       if (err instanceof ApiError && err.status === 409) {
         setReview(null);
         if (message.includes('State version conflict')) {
-          setError('狀態版本衝突：工作階段已被其他操作變更，請依最新游標重新檢視後再提交。');
+          setError('State version conflict: the session was changed by another action; re-check the latest cursor and submit again.');
         } else if (message.includes('Idempotency key conflict') || message.includes('idempotency_key')) {
           setError(
-            '冪等鍵衝突：同一把 key 已在這個帳戶留下一張掛單，系統不會提交第二張。' +
-            '已重新讀取掛單列表，請以它為準。'
+            'Idempotency key conflict: this key already left an order on this account and the system will not submit a second one. ' +
+            'The order list was re-read; treat it as authoritative.'
           );
           loadSessionOrders(review.sessionId);
         } else {
-          setError(`衝突（409）：${message}`);
+          setError(`Conflict (409): ${message}`);
         }
       } else if (err instanceof ApiError && err.status >= 400 && err.status < 500) {
-        setError(`後端拒絕提交（${err.status}）：${message}`);
+        setError(`The backend rejected the submission (${err.status}): ${message}`);
       } else {
         setManualUnknown(
-          `提交結果未知（${message}）。決策可能已在伺服器成立，請先核對；` +
-          '必要時以同一冪等鍵重試 — 同一把 key 不會產生第二張掛單，成交仍由市場時間決定一次。'
+          `Submission outcome unknown (${message}). The decision may already exist on the server; check first, ` +
+          'and retry with the same idempotency key if needed — the same key cannot create a second order, and the fill is still decided once by market time.'
         );
       }
     } finally {
@@ -513,8 +487,8 @@ export default function OrderPreviewPanel({
         : null;
       setReconcileNote(
         hit
-          ? `核對結果：決策已成立（id ${String(hit.id).slice(0, 8)}、步驟 ${text(hit.step_number)}、類型 ${text(hit.decision_type)}）。請不要重試。`
-          : `核對結果：查無此冪等鍵的決策（已比對 ${Array.isArray(rows) ? rows.length : 0} 筆），尚未成立，可以安全重試。`
+          ? `Reconciliation: the decision exists (id ${String(hit.id).slice(0, 8)}, step ${text(hit.step_number)}, type ${text(hit.decision_type)}). Do not retry.`
+          : `Reconciliation: no decision with this idempotency key (checked ${Array.isArray(rows) ? rows.length : 0} rows); it does not exist yet and it is safe to retry.`
       );
       if (hit) {
         const detail = hit.decision_detail ?? {};
@@ -532,7 +506,7 @@ export default function OrderPreviewPanel({
         loadSessionOrders(review.sessionId);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : '核對失敗');
+      setError(err instanceof Error ? err.message : 'Reconciliation failed');
     } finally {
       setBusy(false);
     }
@@ -540,23 +514,23 @@ export default function OrderPreviewPanel({
 
   const createIntent = async () => {
     if (!portfolioId) {
-      setError('沒有可用的模擬投資組合，請先建立。');
+      setError('No paper portfolio is available; create one first.');
       return;
     }
     if (lotSize === null || lotSize === undefined) {
-      setError('此商品每手數量未知，無法下單。請先確認商品規格。');
+      setError("This instrument's lot size is unknown, so it cannot be ordered. Confirm the instrument specification first.");
       return;
     }
     if (instrument?.currency && selected && portfolioId === selected.id && selected.currency !== instrument.currency) {
-      setError(`商品幣別（${instrument.currency}）與投資組合幣別（${selected.currency}）不符，不支援自動換匯。`);
+      setError(`The instrument currency (${instrument.currency}) does not match the portfolio currency (${selected.currency}); automatic FX conversion is not supported.`);
       return;
     }
     if (quantity <= 0) {
-      setError('數量必須大於 0。');
+      setError('Quantity must be greater than 0.');
       return;
     }
     if (orderType === 'LIMIT' && !(parseFloat(limitPrice) > 0)) {
-      setError('限價單需要有效限價。');
+      setError('A limit order needs a valid limit price.');
       return;
     }
     const result = await call(() =>
@@ -572,7 +546,7 @@ export default function OrderPreviewPanel({
     );
     if (result) {
       setIntent(result as ExecutionIntent);
-      setNotice('意向已建立，需明確授權後才會提交。');
+      setNotice('Intent created; it is submitted only after explicit authorization.');
     }
   };
 
@@ -581,7 +555,7 @@ export default function OrderPreviewPanel({
     const result = await call(() => api.execution.authorize(intent.intent_id, intent.authorization_token!));
     if (result) {
       setIntent(result as ExecutionIntent);
-      setNotice('已授權。提交前請再次確認（受安全開關限制）。');
+      setNotice('Authorized. Confirm again before submitting (subject to the safety switch).');
     }
   };
 
@@ -593,12 +567,12 @@ export default function OrderPreviewPanel({
       setIntentUnknown(false);
       const result = (await api.execution.submit(intent.intent_id)) as ExecutionIntent;
       setIntent(result);
-      setNotice('已提交受控執行器。成交會顯示在「成交」分頁。');
+      setNotice('Submitted to the controlled executor. Fills appear in the Fills tab.');
     } catch (err) {
       if (err instanceof ApiError) {
-        setError(err.message || '提交失敗');
+        setError(err.message || 'Submission failed');
       } else {
-        setError(err instanceof Error ? err.message : '提交失敗');
+        setError(err instanceof Error ? err.message : 'Submission failed');
         setIntentUnknown(true);
       }
     } finally {
@@ -613,9 +587,9 @@ export default function OrderPreviewPanel({
     setIntent(result);
     setIntentUnknown(false);
     if (result.status === 'authorized') {
-      setNotice(`核對結果：意向仍是「已授權、未提交」（${result.status}），先前那次提交沒有送出去。`);
+      setNotice(`Reconciliation: the intent is still "authorized, not submitted" (${result.status}); the earlier submission was not sent.`);
     } else {
-      setNotice(`核對結果：伺服器意向狀態為 ${result.status}。`);
+      setNotice(`Reconciliation: the server intent status is ${result.status}.`);
     }
   };
 
@@ -624,7 +598,7 @@ export default function OrderPreviewPanel({
     const result = await call(() => api.execution.cancel(intent.intent_id));
     if (result) {
       setIntent(result as ExecutionIntent);
-      setNotice('意向已取消。');
+      setNotice('Intent cancelled.');
     }
   };
 
@@ -636,7 +610,7 @@ export default function OrderPreviewPanel({
   const cancelSessionOrder = async (row: Record<string, any>) => {
     const order = row?.order ?? {};
     if (!order.id || !order.portfolio_id) {
-      setError('此掛單缺少所屬組合識別，無法在本面板取消；請至該模擬組合的掛單列表操作。');
+      setError("This order has no portfolio identifier, so it cannot be cancelled here; cancel it from that paper portfolio's order list.");
       return;
     }
     setCancellingOrderId(String(order.id));
@@ -648,20 +622,18 @@ export default function OrderPreviewPanel({
       };
       const status = res?.order?.status ?? order.status;
       setNotice(
-        `掛單 ${String(order.id).slice(0, 8)}… 現為「${
-          ORDER_STATUS_LABELS[String(status)] ?? text(status)
-        }」：取消發生在市場執行之前，因此沒有成交，也不影響現金或持股。`
+        `Order ${String(order.id).slice(0, 8)}… is now "${label(ORDER_STATUS_LABELS, String(status))}": the cancellation happened before market execution, so nothing was filled and cash and positions are unchanged.`
       );
       // Only a resolved request gets here: a rejected or failed cancel signals
       // nothing, so ⑧ can never be told to show a cancelled state that did not happen.
       onBookChanged?.();
       await Promise.all([loadSessionOrders(activeSessionId), loadPortfolios(activeSessionId)]);
     } catch (err) {
-      const message = err instanceof Error ? err.message : '取消失敗';
+      const message = err instanceof Error ? err.message : 'Cancellation failed';
       setError(
         err instanceof ApiError && err.status === 400
-          ? `後端拒絕取消（400）：${message}。只有 pending（尚未被市場執行）的掛單可以取消；已成交的單要對沖，不是抹除。`
-          : `取消失敗：${message}`
+          ? `The backend rejected the cancellation (400): ${message}. Only pending orders (not yet executed by the market) can be cancelled; a filled order must be offset, not erased.`
+          : `Cancellation failed: ${message}`
       );
     } finally {
       setCancellingOrderId('');
@@ -672,7 +644,7 @@ export default function OrderPreviewPanel({
     const result = await call(() => api.paperPortfolio.create({ initial_virtual_cash: 100000 }));
     if (result) {
       await loadPortfolios(activeSessionId);
-      setNotice('已建立模擬投資組合（100,000 USD 虛擬資金）。');
+      setNotice('Paper portfolio created (100,000 USD virtual cash).');
     }
   };
 
@@ -682,18 +654,22 @@ export default function OrderPreviewPanel({
 
   return (
     <div className="ws-panel ws-panel-fill" data-testid="order-preview-panel">
-      {!hideHeader && <div className="ws-panel-header">手動模擬單</div>}
+      {!hideHeader && <div className="ws-panel-header">Manual paper order</div>}
       <div className="ws-panel-body" style={{ padding: 10 }}>
         {error && (
           <div className="ws-message-error" role="alert" data-testid="order-error">
             {error}
           </div>
         )}
-        {notice && <div className="ws-message-ok">{notice}</div>}
+        {notice && (
+          <div className="ws-message-ok" role="status">
+            {notice}
+          </div>
+        )}
 
         <div className="ws-form-row">
           <div className="ws-form-field">
-            <label htmlFor="order-portfolio-select">組合</label>
+            <label htmlFor="order-portfolio-select">Portfolio</label>
             {portfolios.length > 0 ? (
               <>
                 <select
@@ -709,7 +685,7 @@ export default function OrderPreviewPanel({
                   }}
                 >
                   <option value="" disabled>
-                    — 請選擇模擬組合 —
+                    — Select a paper portfolio —
                   </option>
                   {portfolios.map((p) => (
                     <option key={p.id} value={p.id}>
@@ -718,9 +694,9 @@ export default function OrderPreviewPanel({
                         ? p.current_virtual_cash.toLocaleString()
                         : NOT_PROVIDED}
                       {p.status !== 'active'
-                        ? ` · ${PORTFOLIO_STATUS_LABELS[p.status] ?? p.status}`
+                        ? ` · ${label(PORTFOLIO_STATUS_LABELS, p.status)}`
                         : ''}
-                      {p.simulation_session_id ? ' · 回放' : ''}
+                      {p.simulation_session_id ? ' · Replay' : ''}
                     </option>
                   ))}
                 </select>
@@ -731,13 +707,13 @@ export default function OrderPreviewPanel({
                     disabled={busy}
                     data-testid="order-create-portfolio"
                   >
-                    建立模擬組合
+                    Create paper portfolio
                   </button>
                 )}
               </>
             ) : (
               <button className="ws-btn ws-btn-neutral" onClick={createPortfolio} disabled={busy}>
-                建立模擬組合
+                Create paper portfolio
               </button>
             )}
           </div>
@@ -746,23 +722,23 @@ export default function OrderPreviewPanel({
         {selected ? (
           <div className="order-account-context" data-testid="order-account-context">
             <span className="order-account-item">
-              <span className="order-account-label">組合</span>
+              <span className="order-account-label">Portfolio</span>
               <span className="order-account-value" title={selected.id}>
                 {selected.id.slice(0, 8)}
               </span>
             </span>
             <span className="order-account-item">
-              <span className="order-account-label">貨幣</span>
+              <span className="order-account-label">Currency</span>
               <span className="order-account-value">{text(selected.currency)}</span>
             </span>
             <span className="order-account-item">
-              <span className="order-account-label">狀態</span>
+              <span className="order-account-label">Status</span>
               <span className="order-account-value" title={selected.status}>
-                {PORTFOLIO_STATUS_LABELS[selected.status] ?? selected.status}
+                {label(PORTFOLIO_STATUS_LABELS, selected.status)}
               </span>
             </span>
             <span className="order-account-item">
-              <span className="order-account-label">虛擬現金</span>
+              <span className="order-account-label">Virtual cash</span>
               <span className="order-account-value">
                 {typeof selected.current_virtual_cash === 'number'
                   ? `${selected.currency} ${selected.current_virtual_cash.toLocaleString(
@@ -773,34 +749,36 @@ export default function OrderPreviewPanel({
               </span>
             </span>
             <span className="order-account-item">
-              <span className="order-account-label">購買力</span>
+              <span className="order-account-label">Buying power</span>
               <span className="order-account-value" data-testid="order-buying-power">
                 {NOT_PROVIDED}
               </span>
             </span>
             <p className="order-account-note">
-              購買力不由虛擬現金推算：伺服器未回傳購買力欄位，因此如實顯示未提供。本系統只進行紙上模擬，不連接實盤經紀。
+              Buying power is not derived from virtual cash: the server returns no buying-power
+              field, so it is shown as not provided. This system is paper-only and connects to no
+              live broker.
             </p>
           </div>
         ) : (
           <p className="order-account-note" data-testid="order-account-context">
-            未選擇模擬組合 — 送出模擬單前需先建立或選擇組合。
+            No paper portfolio selected — create or select one before submitting a paper order.
           </p>
         )}
 
         <p className="ws-muted ws-small" data-testid="order-target">
-          提交目標：
+          Submission target:{' '}
           {target.kind === 'manual'
-            ? `歷史回放工作階段 ${session?.id.slice(0, 8)}（游標 ${session ? sessionClock(session) : NOT_PROVIDED}）`
+            ? `historical replay session ${session?.id.slice(0, 8)} (cursor ${session ? sessionClock(session) : NOT_PROVIDED})`
             : target.kind === 'intent'
-              ? '受控執行器意向（模擬組合，未綁定回放游標）'
-              : '停用'}
+              ? 'controlled executor intent (paper portfolio, not bound to a replay cursor)'
+              : 'disabled'}
           {target.kind !== 'intent' ? ` — ${target.reason}` : ''}
         </p>
 
         {target.kind === 'blocked' && (
           <div className="ws-message-error" role="alert" data-testid="order-blocked">
-            無法提交模擬單：{target.reason}
+            Paper order cannot be submitted: {target.reason}
           </div>
         )}
 
@@ -808,7 +786,7 @@ export default function OrderPreviewPanel({
           <>
             <div className="ws-form-row">
               <div className="ws-form-field">
-                <label htmlFor="order-action">動作</label>
+                <label htmlFor="order-action">Action</label>
                 <select
                   id="order-action"
                   value={action}
@@ -817,14 +795,14 @@ export default function OrderPreviewPanel({
                   }}
                   data-testid="order-action"
                 >
-                  <option value="buy">買入</option>
-                  <option value="sell">賣出</option>
-                  <option value="hold">觀望（不成交）</option>
+                  <option value="buy">Buy</option>
+                  <option value="sell">Sell</option>
+                  <option value="hold">Hold (no fill)</option>
                 </select>
               </div>
               {action === 'buy' && (
                 <div className="ws-form-field">
-                  <label htmlFor="order-quantity-input">數量（股）</label>
+                  <label htmlFor="order-quantity-input">Quantity (shares)</label>
                   <input
                     id="order-quantity-input"
                     type="number"
@@ -839,7 +817,7 @@ export default function OrderPreviewPanel({
             </div>
 
             <div className="ws-form-field" style={{ marginBottom: 8 }}>
-              <label htmlFor="order-rationale">決策理由（上限 1000 字元）</label>
+              <label htmlFor="order-rationale">Decision rationale (limit 1000 characters)</label>
               <textarea
                 id="order-rationale"
                 value={rationale}
@@ -850,8 +828,11 @@ export default function OrderPreviewPanel({
             </div>
 
             <p className="ws-muted ws-small" data-testid="order-manual-semantics">
-              類型：市價（後端 manual-decision 只接受 buy/sell/hold，沒有限價、沒有部分成交）。賣出以工作階段全部持股成交；觀望不成交。
-              成交基準：游標後的下一根可執行 K 線開盤價（next_open_no_lookahead），實際價格由伺服器回覆，不在提交前顯示。
+              Type: market (the backend manual-decision endpoint accepts only buy/sell/hold — no
+              limit orders and no partial fills). A sell fills the whole position held by the
+              session; a hold does not fill. Fill basis: the open of the next executable bar after
+              the cursor (next_open_no_lookahead); the actual price comes from the server response
+              and is not shown before submission.
             </p>
           </>
         ) : (
@@ -859,14 +840,14 @@ export default function OrderPreviewPanel({
             <>
               <div className="ws-form-row">
                 <div className="ws-form-field">
-                  <label htmlFor="order-side">方向</label>
+                  <label htmlFor="order-side">Side</label>
                   <select id="order-side" value={side} onChange={(e) => setSide(e.target.value as 'BUY' | 'SELL')}>
-                    <option value="BUY">買入</option>
-                    <option value="SELL">賣出</option>
+                    <option value="BUY">Buy</option>
+                    <option value="SELL">Sell</option>
                   </select>
                 </div>
                 <div className="ws-form-field">
-                  <label htmlFor="order-lots">手數（每手 {lotSize === null || lotSize === undefined ? NOT_PROVIDED : lotSize} 股）</label>
+                  <label htmlFor="order-lots">Lots ({lotSize === null || lotSize === undefined ? NOT_PROVIDED : lotSize} shares per lot)</label>
                   <input
                     id="order-lots"
                     type="number"
@@ -881,15 +862,15 @@ export default function OrderPreviewPanel({
 
               <div className="ws-form-row">
                 <div className="ws-form-field">
-                  <label htmlFor="order-type">類型</label>
+                  <label htmlFor="order-type">Type</label>
                   <select id="order-type" value={orderType} onChange={(e) => setOrderType(e.target.value as 'MARKET' | 'LIMIT')}>
-                    <option value="MARKET">市價</option>
-                    <option value="LIMIT">限價</option>
+                    <option value="MARKET">Market</option>
+                    <option value="LIMIT">Limit</option>
                   </select>
                 </div>
                 {orderType === 'LIMIT' && (
                   <div className="ws-form-field">
-                    <label htmlFor="order-limit-price">限價（{instrument?.currency || ''}）</label>
+                    <label htmlFor="order-limit-price">Limit price ({instrument?.currency || ''})</label>
                     <input
                       id="order-limit-price"
                       type="number"
@@ -908,29 +889,29 @@ export default function OrderPreviewPanel({
         <table className="ws-table" style={{ marginBottom: 10 }}>
           <tbody>
             <tr>
-              <td className="ws-muted">數量</td>
+              <td className="ws-muted">Quantity</td>
               <td data-testid="order-quantity">
                 {isManual
                   ? action === 'buy'
-                    ? `${manualQuantity} 股`
+                    ? `${manualQuantity} shares`
                     : action === 'sell'
-                      ? '全部持股'
-                      : '不成交'
-                  : `${quantity} 股`}
+                      ? 'Whole position'
+                      : 'No fill'
+                  : `${quantity} shares`}
               </td>
             </tr>
             <tr>
-              <td className="ws-muted">目前標的</td>
+              <td className="ws-muted">Current instrument</td>
               <td data-testid="order-symbol">{instrumentId}</td>
             </tr>
             <tr>
-              <td className="ws-muted">參考價（游標前最後收盤）</td>
+              <td className="ws-muted">Reference price (last close before cursor)</td>
               <td data-testid="order-reference">
                 {lastClose !== null ? `${lastClose.toFixed(2)} ${instrument?.currency || ''}` : NOT_PROVIDED}
               </td>
             </tr>
             <tr>
-              <td className="ws-muted">預估金額</td>
+              <td className="ws-muted">Estimated amount</td>
               <td data-testid="order-estimate">
                 {referenceValue !== null
                   ? `${referenceValue.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${instrument?.currency || ''}`
@@ -947,39 +928,39 @@ export default function OrderPreviewPanel({
             disabled={busy || target.kind !== 'manual'}
             data-testid="order-build-review"
           >
-            {reviewStale ? '重新檢視模擬單' : '檢視模擬單'}
+            {reviewStale ? 'Re-check paper order' : 'Review paper order'}
           </button>
         )}
 
         {isManual && review && (
           <div data-testid="order-review">
             <div className="ws-panel-header" style={{ marginTop: 6 }}>
-              檢視模擬單{reviewStale ? '（已作廢）' : ''}
+              Review paper order{reviewStale ? ' (void)' : ''}
             </div>
             <table className="ws-table" style={{ marginBottom: 8 }}>
               <tbody>
                 <tr>
-                  <td className="ws-muted">標的</td>
+                  <td className="ws-muted">Instrument</td>
                   <td>{instrumentId}</td>
                 </tr>
                 <tr>
-                  <td className="ws-muted">動作</td>
-                  <td>{ACTION_LABELS[review.action]}</td>
+                  <td className="ws-muted">Action</td>
+                  <td>{label(ACTION_LABELS, review.action)}</td>
                 </tr>
                 <tr>
-                  <td className="ws-muted">數量</td>
-                  <td>{review.quantity !== null ? `${review.quantity} 股` : review.action === 'sell' ? '全部持股' : '不成交'}</td>
+                  <td className="ws-muted">Quantity</td>
+                  <td>{review.quantity !== null ? `${review.quantity} shares` : review.action === 'sell' ? 'Whole position' : 'No fill'}</td>
                 </tr>
                 <tr>
-                  <td className="ws-muted">理由</td>
+                  <td className="ws-muted">Rationale</td>
                   <td>{review.rationale || NOT_PROVIDED}</td>
                 </tr>
                 <tr>
-                  <td className="ws-muted">回放游標</td>
+                  <td className="ws-muted">Replay cursor</td>
                   <td data-testid="order-review-cursor">{review.cursorLabel}</td>
                 </tr>
                 <tr>
-                  <td className="ws-muted">冪等鍵</td>
+                  <td className="ws-muted">Idempotency key</td>
                   <td data-testid="order-review-key">{review.idempotency_key.slice(0, 18)}…</td>
                 </tr>
               </tbody>
@@ -987,7 +968,8 @@ export default function OrderPreviewPanel({
 
             {reviewStale && (
               <div className="ws-message-error" role="alert" data-testid="order-review-stale">
-                欄位、標的、組合或回放游標已變更：先前的檢視已作廢，請重新「檢視模擬單」。
+                A field, instrument, portfolio or replay cursor changed: the earlier review is void.
+                Choose “Review paper order” again.
               </div>
             )}
             {manualUnknown && (
@@ -1003,7 +985,7 @@ export default function OrderPreviewPanel({
                 disabled={busy || manualPending || reviewStale}
                 data-testid="order-submit-manual"
               >
-                {manualPending ? '提交中…' : '提交模擬單'}
+                {manualPending ? 'Submitting…' : 'Submit paper order'}
               </button>
               {manualUnknown && (
                 <button
@@ -1012,7 +994,7 @@ export default function OrderPreviewPanel({
                   disabled={busy}
                   data-testid="order-reconcile-manual"
                 >
-                  核對結果
+                  Reconcile outcome
                 </button>
               )}
               <button
@@ -1025,7 +1007,7 @@ export default function OrderPreviewPanel({
                 disabled={busy}
                 data-testid="order-cancel-review"
               >
-                取消檢視
+                Cancel review
               </button>
             </div>
           </div>
@@ -1044,18 +1026,18 @@ export default function OrderPreviewPanel({
           <table className="ws-table" style={{ marginTop: 8 }} data-testid="order-manual-result">
             <tbody>
               <tr>
-                <td className="ws-muted">決策</td>
+                <td className="ws-muted">Decision</td>
                 <td>
-                  {text(manualResult.decision?.id).slice(0, 13)}… · 步驟 {text(manualResult.decision?.step_number)} ·{' '}
+                  {text(manualResult.decision?.id).slice(0, 13)}… · step {text(manualResult.decision?.step_number)} ·{' '}
                   {text(manualResult.decision?.decision_type)}
                 </td>
               </tr>
               <tr>
-                <td className="ws-muted">快照日</td>
+                <td className="ws-muted">Snapshot date</td>
                 <td>{text(manualResult.decision?.snapshot_date)}</td>
               </tr>
               <tr>
-                <td className="ws-muted">決策後現金／權益</td>
+                <td className="ws-muted">Cash / equity after decision</td>
                 <td>
                   {text(manualResult.decision?.paper_cash)} / {text(manualResult.decision?.paper_equity)}
                 </td>
@@ -1073,32 +1055,32 @@ export default function OrderPreviewPanel({
                   return (
                     <>
                       <tr>
-                        <td className="ws-muted">掛單</td>
+                        <td className="ws-muted">Order</td>
                         <td data-testid="order-manual-order">
                           {text(submitted.order_id).slice(0, 13)}… ·{' '}
                           <span className="ws-status-badge">
-                            {ORDER_STATUS_LABELS[String(state)] ?? text(state)}
+                            {label(ORDER_STATUS_LABELS, String(state))}
                           </span>{' '}
-                          · {text(submitted.side)} {text(submitted.quantity)} 股 ·{' '}
+                          · {text(submitted.side)} {text(submitted.quantity)} shares ·{' '}
                           {text(submitted.asset_id)} ·{' '}
-                          {submitted.actor_type === 'human' ? '人工決策' : text(submitted.actor_type)}
+                          {submitted.actor_type === 'human' ? 'Human decision' : text(submitted.actor_type)}
                         </td>
                       </tr>
                       <tr>
-                        <td className="ws-muted">決策基準／下單時間（UTC）</td>
+                        <td className="ws-muted">Decision basis / submitted at (UTC)</td>
                         <td data-testid="order-manual-decided">
                           {text(submitted.decided_on_cutoff)} / {text(submitted.order_created_at_utc)}
                         </td>
                       </tr>
                       <tr>
-                        <td className="ws-muted">已成交／請求數量</td>
+                        <td className="ws-muted">Filled / requested quantity</td>
                         <td data-testid="order-manual-quantities">
                           {text(view?.filled_quantity ?? 0)} / {text(view?.requested_quantity ?? submitted.quantity)}
-                          {view?.fill_count !== undefined ? ` · 成交筆數 ${text(view.fill_count)}` : ''}
+                          {view?.fill_count !== undefined ? ` · ${text(view.fill_count)} fills` : ''}
                         </td>
                       </tr>
                       <tr>
-                        <td className="ws-muted">生命週期位置</td>
+                        <td className="ws-muted">Lifecycle position</td>
                         <td data-testid="order-manual-execution">{executionSummary(view)}</td>
                       </tr>
                     </>
@@ -1107,29 +1089,29 @@ export default function OrderPreviewPanel({
               {fill && (
                 <>
                   <tr>
-                    <td className="ws-muted">成交</td>
+                    <td className="ws-muted">Fill</td>
                     <td>
-                      {text(fill.action)} {text(fill.quantity)} @ {text(fill.price)}（{text(fill.execution_rule)}）
+                      {text(fill.action)} {text(fill.quantity)} @ {text(fill.price)} ({text(fill.execution_rule)})
                     </td>
                   </tr>
                   <tr>
-                    <td className="ws-muted">成交日</td>
+                    <td className="ws-muted">Fill date</td>
                     <td>{text(fill.execution_date)}</td>
                   </tr>
                   <tr>
-                    <td className="ws-muted">觀察日／觀察收盤</td>
+                    <td className="ws-muted">Observed date / observed close</td>
                     <td>
                       {text(fill.observed_date)} / {text(fill.observed_close)}
                     </td>
                   </tr>
                   <tr>
-                    <td className="ws-muted">手續費／滑點</td>
+                    <td className="ws-muted">Commission / slippage</td>
                     <td>
                       {text(fill.commission)} / {text(fill.slippage)}
                     </td>
                   </tr>
                   <tr>
-                    <td className="ws-muted">成本／淨額／毛損益</td>
+                    <td className="ws-muted">Cost / net proceeds / gross P&amp;L</td>
                     <td>
                       {text(fill.total_cost)} / {text(fill.net_proceeds)} / {text(fill.gross_pnl)}
                     </td>
@@ -1138,13 +1120,13 @@ export default function OrderPreviewPanel({
               )}
               {rejection && (
                 <tr>
-                  <td className="ws-muted">拒絕</td>
+                  <td className="ws-muted">Rejection</td>
                   <td data-testid="order-manual-rejection">
-                    {REJECTION_LABELS[String(rejection.reason)] ?? text(rejection.reason)}
-                    {rejection.required !== undefined ? `（需要 ${text(rejection.required)}）` : ''}
-                    {rejection.available !== undefined ? `（可用 ${text(rejection.available)}）` : ''}
-                    {rejection.current_shares !== undefined ? `（現有 ${text(rejection.current_shares)} 股）` : ''}
-                    {rejection.intent_preserved ? '；意圖已保留' : ''}
+                    {label(REJECTION_LABELS, String(rejection.reason))}
+                    {rejection.required !== undefined ? ` (required ${text(rejection.required)})` : ''}
+                    {rejection.available !== undefined ? ` (available ${text(rejection.available)})` : ''}
+                    {rejection.current_shares !== undefined ? ` (holding ${text(rejection.current_shares)} shares)` : ''}
+                    {rejection.intent_preserved ? '; intent preserved' : ''}
                   </td>
                 </tr>
               )}
@@ -1154,36 +1136,40 @@ export default function OrderPreviewPanel({
 
         {bookSession && (
           <section style={{ marginTop: 10 }} data-testid="order-session-book">
-            <div className="ws-panel-header">本節掛單簿（提交 → 待執行 → 成交／取消）</div>
+            <div className="ws-panel-header">Orders in this session (submitted → pending → filled / cancelled)</div>
             <p className="ws-muted ws-small">
-              清單由工作階段綁定的模擬帳戶讀取，重新整理後仍在。pending 是尚未成交的意圖：不計入持股、不動現金；
-              成交由市場時間決定 — 推進重放走到下一根可執行 K 線時，才以該 bar 的開盤價執行一次。
+              The list is read from the paper account bound to this session and survives a reload.
+              A pending order is an intent that has not filled: it is not counted as a holding and
+              does not move cash. The fill is decided by market time — when the replay advances to
+              the next executable bar, it executes once at that bar&apos;s open.
             </p>
             {!isManual && (
               <p className="ws-muted ws-small" data-testid="order-session-book-readonly">
-                此工作階段已不再接受新決策（{target.reason}）；掛單簿改用只讀模式 —
-                已經留下的提交、待執行、成交、取消或過期紀錄仍然逐筆列在外面，不會因為結束而消失。
+                This session no longer accepts new decisions ({target.reason}); the order book is
+                now read-only — submissions, pending orders, fills, cancellations and expired
+                records already left here are still listed one by one and do not disappear when the
+                session ends.
               </p>
             )}
             {!sessionOrdersLoaded ? (
-              <p className="ws-muted ws-small" data-testid="order-session-book-loading">
-                掛單簿讀取中…
+              <p className="ws-muted ws-small" data-testid="order-session-book-loading" role="status">
+                Loading the order book…
               </p>
             ) : sessionOrders.length === 0 ? (
               <p className="ws-muted ws-small" data-testid="order-session-book-empty">
-                本節尚無掛單。
+                No orders in this session yet.
               </p>
             ) : (
               <>
                 <table className="ws-table" data-testid="order-session-book-rows">
                   <thead>
                     <tr>
-                      <th className="ws-muted">掛單</th>
-                      <th className="ws-muted">狀態</th>
-                      <th className="ws-muted">決策基準／下單時間（UTC）</th>
-                      <th className="ws-muted">已成交／請求</th>
-                      <th className="ws-muted">生命週期位置</th>
-                      <th className="ws-muted">操作</th>
+                      <th className="ws-muted">Order</th>
+                      <th className="ws-muted">Status</th>
+                      <th className="ws-muted">Decision basis / submitted at (UTC)</th>
+                      <th className="ws-muted">Filled / requested</th>
+                      <th className="ws-muted">Lifecycle position</th>
+                      <th className="ws-muted">Actions</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1194,16 +1180,16 @@ export default function OrderPreviewPanel({
                       return (
                         <tr key={String(order.id)} data-testid={`order-book-row-${shortId}`}>
                           <td title={text(order.id)}>
-                            {text(order.side)} {text(order.quantity)} 股 · {text(order.asset_id)} ·{' '}
+                            {text(order.side)} {text(order.quantity)} shares · {text(order.asset_id)} ·{' '}
                             {order.actor_type === 'system'
-                              ? '規則'
+                              ? 'Rule'
                               : order.actor_type === 'human'
-                                ? '人工'
+                                ? 'Human'
                                 : text(order.actor_type)}
                           </td>
                           <td>
                             <span className="ws-status-badge">
-                              {ORDER_STATUS_LABELS[String(order.status)] ?? text(order.status)}
+                              {label(ORDER_STATUS_LABELS, String(order.status))}
                             </span>
                           </td>
                           <td>
@@ -1223,7 +1209,7 @@ export default function OrderPreviewPanel({
                                 disabled={cancellingOrderId !== ''}
                                 data-testid={`order-book-cancel-${shortId}`}
                               >
-                                {cancellingOrderId === String(order.id) ? '取消中…' : '取消掛單'}
+                                {cancellingOrderId === String(order.id) ? 'Cancelling…' : 'Cancel order'}
                               </button>
                             )}
                           </td>
@@ -1234,8 +1220,9 @@ export default function OrderPreviewPanel({
                 </table>
                 {selected && String(sessionOrders[0]?.order?.portfolio_id ?? '') !== selected.id && (
                   <div className="ws-message-error" role="alert" data-testid="order-book-account-mismatch">
-                    掛單簿所屬帳戶（{text(sessionOrders[0]?.order?.portfolio_id).slice(0, 8)}…）與本表單目前選擇的帳戶（
-                    {selected.id.slice(0, 8)}…）不同：取消與成交一律以掛單簿帳戶為準。
+                    The order book belongs to account ({text(sessionOrders[0]?.order?.portfolio_id).slice(0, 8)}…)
+                    which differs from the account selected in this form ({selected.id.slice(0, 8)}…):
+                    cancellation and fills always follow the order book&apos;s account.
                   </div>
                 )}
               </>
@@ -1252,7 +1239,7 @@ export default function OrderPreviewPanel({
                 disabled={busy || !portfolioId}
                 data-testid="order-create-intent"
               >
-                建立執行意向
+                Create execution intent
               </button>
             )}
 
@@ -1261,11 +1248,11 @@ export default function OrderPreviewPanel({
                 <table className="ws-table" style={{ marginBottom: 8 }}>
                   <tbody>
                     <tr>
-                      <td className="ws-muted">意向 ID</td>
+                      <td className="ws-muted">Intent ID</td>
                       <td data-testid="order-intent-id">{intent.intent_id.slice(0, 13)}…</td>
                     </tr>
                     <tr>
-                      <td className="ws-muted">狀態</td>
+                      <td className="ws-muted">Status</td>
                       <td data-testid="order-intent-status">
                         <span className="ws-status-badge">{intentStatus}</span>
                       </td>
@@ -1274,28 +1261,29 @@ export default function OrderPreviewPanel({
                 </table>
                 {intentUnknown && (
                   <div className="ws-message-error" role="alert" data-testid="order-intent-unknown">
-                    提交結果未知：意向可能已送達執行器。請先「核對意向狀態」，不要直接重複提交。
+                    Submission outcome unknown: the intent may have reached the executor. Reconcile
+                    the intent status first rather than resubmitting.
                   </div>
                 )}
                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                   {intentStatus === 'pending' && (
                     <button className="ws-btn ws-btn-neutral" onClick={authorizeIntent} disabled={busy}>
-                      確認授權
+                      Authorize
                     </button>
                   )}
                   {intentStatus === 'authorized' && (
                     <button className="ws-btn ws-btn-buy" onClick={submitIntent} disabled={busy} data-testid="order-submit">
-                      提交模擬單（執行器）
+                      Submit paper order (executor)
                     </button>
                   )}
                   {intentUnknown && (
                     <button className="ws-btn ws-btn-neutral" onClick={reconcileIntent} disabled={busy} data-testid="order-reconcile-intent">
-                      核對意向狀態
+                      Reconcile intent status
                     </button>
                   )}
                   {['pending', 'authorized', 'submitted'].includes(intentStatus || '') && (
                     <button className="ws-btn ws-btn-neutral" onClick={cancelIntent} disabled={busy}>
-                      取消
+                      Cancel
                     </button>
                   )}
                   <Link
@@ -1303,7 +1291,7 @@ export default function OrderPreviewPanel({
                     className="ws-btn ws-btn-neutral"
                     style={{ textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }}
                   >
-                    執行總覽
+                    Execution overview
                   </Link>
                 </div>
               </div>

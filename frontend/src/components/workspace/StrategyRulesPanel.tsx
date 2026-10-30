@@ -2,18 +2,11 @@
 
 import type { ReplaySession } from './ReplayController';
 import { NOT_PROVIDED, type RulesState } from './strategyRules';
-
-const STATUS_LABELS: Record<string, string> = {
-  pending: '待開始',
-  active: '進行中',
-  paused: '已暫停',
-  completed: '已完成',
-  retired: '已停用',
-};
+import { label, SESSION_STATUS_LABELS } from '@/lib/copy';
 
 function formatScalar(value: unknown): string {
   if (value === null || value === undefined || value === '') return NOT_PROVIDED;
-  if (typeof value === 'boolean') return value ? '是' : '否';
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
   if (typeof value === 'number') return String(value);
   if (typeof value === 'string') return value;
   return formatValue(value);
@@ -23,12 +16,12 @@ function formatScalar(value: unknown): string {
 function formatValue(value: unknown): string {
   if (value === null || value === undefined || value === '') return NOT_PROVIDED;
   if (Array.isArray(value)) {
-    return value.length === 0 ? '（空）' : value.map((v) => formatScalar(v)).join('、');
+    return value.length === 0 ? '(empty)' : value.map((v) => formatScalar(v)).join(', ');
   }
   if (typeof value === 'object') {
     const entries = Object.entries(value as Record<string, unknown>);
-    if (entries.length === 0) return '（空）';
-    return entries.map(([k, v]) => `${k}=${formatScalar(v)}`).join('、');
+    if (entries.length === 0) return '(empty)';
+    return entries.map(([k, v]) => `${k}=${formatScalar(v)}`).join(', ');
   }
   return formatScalar(value);
 }
@@ -60,7 +53,7 @@ function Row({ label, value, testId }: { label: string; value: string; testId?: 
 /**
  * Read-only view of the rules a replay session actually runs on. Every line comes
  * from the session response or the matched experiment version; fields the API does
- * not carry are shown as 未提供 rather than filled with engine defaults.
+ * not carry are shown as not provided rather than filled with engine defaults.
  */
 export default function StrategyRulesPanel({
   session,
@@ -77,46 +70,47 @@ export default function StrategyRulesPanel({
     : [];
 
   return (
-    <section className="ws-panel ws-panel-fill" data-testid="strategy-rules-panel" aria-label="策略規則">
-      {!hideHeader && <div className="ws-panel-header">策略規則（唯讀）</div>}
+    <section className="ws-panel ws-panel-fill" data-testid="strategy-rules-panel" aria-label="Strategy rules">
+      {!hideHeader && <div className="ws-panel-header">Strategy rules (read-only)</div>}
       <div className="ws-panel-body" style={{ padding: 10 }}>
         {!session ? (
           <p className="ws-muted" data-testid="rules-no-session">
-            目前沒有綁定歷史回放工作階段，因此沒有生效中的策略版本可顯示。策略規則需先由「策略與實驗」建立工作階段。
+            No historical replay session is bound, so there is no active strategy version to show.
+            Strategy rules are created with a session in Research.
           </p>
         ) : rules.status === 'loading' ? (
-          <p className="ws-muted" data-testid="rules-loading">
-            正在比對版本 {rules.versionId.slice(0, 8)}…
+          <p className="ws-muted" data-testid="rules-loading" role="status">
+            Matching version {rules.versionId.slice(0, 8)}…
           </p>
         ) : rules.status === 'error' ? (
           <div className="ws-message-error" role="alert" data-testid="rules-error">
-            策略規則無法載入：{rules.message}
+            Strategy rules could not be loaded: {rules.message}
           </div>
         ) : rules.status === 'unresolved' ? (
           <div data-testid="rules-unresolved">
             <p className="ws-message-error" role="alert">
-              策略規則：{NOT_PROVIDED}
+              Strategy rules: {NOT_PROVIDED}
             </p>
             <p className="ws-muted">
-              生效版本 {rules.versionId.slice(0, 8)}。{rules.reason}
-              不以此版本推斷規則內容。
+              Active version {rules.versionId.slice(0, 8)}. {rules.reason} The rule contents are
+              not inferred from this version.
             </p>
           </div>
         ) : rules.status === 'resolved' ? (
-          <table className="ws-table" data-testid="rules-table">
+          <table className="ws-table ws-table-wrap" data-testid="rules-table">
             <tbody>
               <Row
-                label="實驗"
-                value={`${rules.experiment.title}（${rules.experiment.status}）`}
+                label="Experiment"
+                value={`${rules.experiment.title} (${rules.experiment.status})`}
                 testId="rules-experiment"
               />
               <Row
-                label="生效版本（工作階段）"
+                label="Active version (session)"
                 value={`${rules.versionId.slice(0, 8)} · v${rules.version.version_number}`}
                 testId="rules-effective-version"
               />
               <Row
-                label="已儲存版本（實驗）"
+                label="Saved version (experiment)"
                 value={
                   rules.experiment.current_version_id
                     ? `${rules.experiment.current_version_id.slice(0, 8)}`
@@ -124,48 +118,48 @@ export default function StrategyRulesPanel({
                 }
                 testId="rules-saved-version"
               />
-              <Row label="策略模板" value={formatScalar(spec?.template_type)} testId="rules-template" />
-              <Row label="綁定標的" value={formatValue(spec?.asset_ids)} testId="rules-assets" />
+              <Row label="Strategy template" value={formatScalar(spec?.template_type)} testId="rules-template" />
+              <Row label="Bound instruments" value={formatValue(spec?.asset_ids)} testId="rules-assets" />
               <Row
-                label="研究期間"
+                label="Study period"
                 value={
                   spec?.start_date || spec?.end_date
-                    ? `${formatScalar(spec?.start_date)} ~ ${formatScalar(spec?.end_date)}`
+                    ? `${formatScalar(spec?.start_date)} – ${formatScalar(spec?.end_date)}`
                     : NOT_PROVIDED
                 }
                 testId="rules-period"
               />
-              <Row label="資料集" value={formatScalar(spec?.dataset)} testId="rules-dataset" />
+              <Row label="Dataset" value={formatScalar(spec?.dataset)} testId="rules-dataset" />
               <Row
-                label="資料性質"
+                label="Data nature"
                 value={
                   spec?.synthetic === true
-                    ? '合成（synthetic=true）'
+                    ? 'Synthetic (synthetic=true)'
                     : spec?.synthetic === false
-                      ? '非合成（synthetic=false）'
+                      ? 'Not synthetic (synthetic=false)'
                       : NOT_PROVIDED
                 }
                 testId="rules-data-nature"
               />
-              <Row label="週期（規則）" value={formatScalar(spec?.timeframe)} testId="rules-spec-timeframe" />
-              <Row label="起始虛擬資金" value={formatScalar(spec?.initial_cash)} testId="rules-initial-cash" />
-              <Row label="手續費率" value={formatScalar(spec?.commission_rate)} testId="rules-commission-rate" />
-              <Row label="滑點率" value={formatScalar(spec?.slippage_rate)} testId="rules-slippage-rate" />
-              <Row label="風控參數" value={formatValue(spec?.risk_parameters)} testId="rules-risk-parameters" />
-              <Row label="訊號參數" value={formatValue(spec?.signal_parameters)} testId="rules-signal-parameters" />
+              <Row label="Timeframe (rules)" value={formatScalar(spec?.timeframe)} testId="rules-spec-timeframe" />
+              <Row label="Starting virtual cash" value={formatScalar(spec?.initial_cash)} testId="rules-initial-cash" />
+              <Row label="Commission rate" value={formatScalar(spec?.commission_rate)} testId="rules-commission-rate" />
+              <Row label="Slippage rate" value={formatScalar(spec?.slippage_rate)} testId="rules-slippage-rate" />
+              <Row label="Risk parameters" value={formatValue(spec?.risk_parameters)} testId="rules-risk-parameters" />
+              <Row label="Signal parameters" value={formatValue(spec?.signal_parameters)} testId="rules-signal-parameters" />
               {remaining.map(([key, value]) => (
-                <Row key={key} label={`其他：${key}`} value={formatValue(value)} />
+                <Row key={key} label={`Other: ${key}`} value={formatValue(value)} />
               ))}
-              <Row label="設定雜湊" value={formatScalar(rules.version.config_hash)} testId="rules-config-hash" />
-              <Row label="鎖定時間" value={formatScalar(rules.version.locked_at)} testId="rules-locked-at" />
+              <Row label="Config hash" value={formatScalar(rules.version.config_hash)} testId="rules-config-hash" />
+              <Row label="Locked at" value={formatScalar(rules.version.locked_at)} testId="rules-locked-at" />
               <Row
-                label="人工核准時間"
+                label="Human approval time"
                 value={formatScalar(rules.version.user_approved_at)}
                 testId="rules-approved-at"
               />
-              <Row label="變更原因" value={formatScalar(rules.version.change_reason)} testId="rules-change-reason" />
+              <Row label="Change reason" value={formatScalar(rules.version.change_reason)} testId="rules-change-reason" />
               <Row
-                label="研究假設"
+                label="Research assumptions"
                 value={formatValue(rules.version.assumptions)}
                 testId="rules-assumptions"
               />
@@ -173,16 +167,17 @@ export default function StrategyRulesPanel({
           </table>
         ) : (
           <p className="ws-muted" data-testid="rules-idle">
-            規則查詢尚未開始（狀態：{rules.status}）。
+            Rule lookup has not started (status: {rules.status}).
           </p>
         )}
 
         {session && rules.status === 'resolved' && (
           <p className="ws-muted ws-small" data-testid="rules-mapping-note">
-            對應方式：工作階段回應只給出 experiment_version_id，沒有實驗 id；此表以實驗的
-            current_version_id 比對得出（生效版本 {rules.versionId.slice(0, 8)} ＝已儲存版本{' '}
-            {rules.experiment.current_version_id?.slice(0, 8) ?? NOT_PROVIDED}）。
-            工作階段狀態：{STATUS_LABELS[session.status] ?? session.status}。
+            How this was matched: the session response only carries experiment_version_id, not an
+            experiment id; this table matches it against each experiment&apos;s current_version_id
+            (active version {rules.versionId.slice(0, 8)} = saved version{' '}
+            {rules.experiment.current_version_id?.slice(0, 8) ?? NOT_PROVIDED}).
+            Session status: {label(SESSION_STATUS_LABELS, session.status)}.
           </p>
         )}
       </div>

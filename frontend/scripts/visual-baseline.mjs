@@ -215,7 +215,7 @@ function respond(url, method) {
     return [];
   }
   if (p === '/api/v1/ai/status') return { configured: false, provider: 'mock', model: 'mock-model' };
-  if (p === '/api/v1/ai/test-connection') return { ok: true, detail: '模擬供應商連線正常', latency_ms: 1, kind: null, provider: 'mock' };
+  if (p === '/api/v1/ai/test-connection') return { ok: true, detail: 'Mock provider is ready (offline, deterministic, no external calls)', latency_ms: 1, kind: null, provider: 'mock' };
   if (p === '/api/v1/ai/conversations') return method === 'POST' ? { id: 'c-1', title: '工作台對話', created_at: '2026-10-17T00:00:00Z' } : [];
   if (p.startsWith('/api/v1/ai/conversations/')) return { messages: [] };
   return null;

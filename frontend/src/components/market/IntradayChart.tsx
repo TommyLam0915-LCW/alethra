@@ -226,8 +226,8 @@ export default function IntradayChart({ payload, identityKey }: Props) {
       <div className="ws-chart-toolbar">
         <span className="ws-muted">
           {payload?.market.timezone
-            ? `時間軸：UTC（交易所時區 ${payload.market.timezone}，未換算）`
-            : '時間軸：UTC'}
+            ? `Time axis: UTC (exchange timezone ${payload.market.timezone}, not converted)`
+            : 'Time axis: UTC'}
         </span>
         <button
           type="button"
@@ -235,15 +235,16 @@ export default function IntradayChart({ payload, identityKey }: Props) {
           onClick={scrollToLatest}
           data-testid="intraday-back-to-latest"
         >
-          回到最新
+          Back to latest
         </button>
       </div>
       <div ref={containerRef} className="ws-chart-canvas" data-testid="intraday-chart-canvas" />
       {empty && (
         <div className="ws-chart-empty" data-testid="intraday-chart-empty">
-          <div className="ws-chart-empty-title">尚無可顯示的盤中 K 線</div>
+          <div className="ws-chart-empty-title">No intraday bars to show yet</div>
           <div className="ws-chart-empty-detail">
-            未收到任何已收盤或未完成的 K 線；系統不會以模擬價格填充。
+            No closed or forming bars have been received; the chart is never filled with simulated
+            prices.
           </div>
         </div>
       )}

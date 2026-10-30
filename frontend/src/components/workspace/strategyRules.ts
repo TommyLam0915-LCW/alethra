@@ -5,7 +5,7 @@ import { api } from '@/lib/api';
 import type { ReplaySession } from './ReplayController';
 
 /** Anything the API does not return is rendered as this, never as 0 or '—'. */
-export const NOT_PROVIDED = '未提供';
+export { NOT_PROVIDED } from '@/lib/copy';
 
 export interface ExperimentSummary {
   id: string;
@@ -65,7 +65,7 @@ export function useStrategyRules(session: ReplaySession | null): RulesState {
             setState({
               status: 'unresolved',
               versionId,
-              reason: `${list.length} 個實驗沒有任何一個的 current_version_id 等於此版本，後端未提供 version→experiment 端點。`,
+              reason: `None of the ${list.length} experiments has a current_version_id matching this version, and the backend exposes no version→experiment endpoint.`,
             });
           }
           return;
@@ -77,7 +77,7 @@ export function useStrategyRules(session: ReplaySession | null): RulesState {
             setState({
               status: 'unresolved',
               versionId,
-              reason: `實驗「${owner.title}」的版本清單查無此版本（可能已被新版本取代）。`,
+              reason: `Experiment “${owner.title}” does not list this version (it may have been superseded).`,
             });
           }
           return;
@@ -95,7 +95,7 @@ export function useStrategyRules(session: ReplaySession | null): RulesState {
           setState({
             status: 'error',
             versionId,
-            message: err instanceof Error ? err.message : '策略規則無法載入',
+            message: err instanceof Error ? err.message : 'Strategy rules could not be loaded',
           });
         }
       }

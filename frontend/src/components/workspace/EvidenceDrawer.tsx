@@ -82,7 +82,7 @@ export default function EvidenceDrawer({
           onClick={onClose}
           data-testid={`${testId}-close`}
         >
-          關閉明細
+          Close details
         </button>
       </div>
       {children}

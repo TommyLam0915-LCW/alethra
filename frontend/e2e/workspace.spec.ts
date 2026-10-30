@@ -162,7 +162,7 @@ const AI_STATUS_RESPONSE = {
   base_url: null,
   timeout_seconds: 30,
   max_output_tokens: 1024,
-  advisory_notice: 'AI 回覆僅供研究參考，不構成交易授權',
+  advisory_notice: 'AI replies are for research reference only and do not constitute a trading authorisation',
 };
 
 const AI_CONVERSATION = {
@@ -176,7 +176,8 @@ const AI_CONVERSATION = {
 const AI_ASSISTANT_REPLY = {
   id: '22222222-2222-2222-2222-222222222222',
   role: 'assistant',
-  content: '（模擬 AI 助手 — 確定性回覆）就 [symbol:US:AAPL] 的動能假說而言，建議先回顧近期回撤幅度。',
+  content:
+    '(Mock AI assistant — deterministic reply) For the momentum hypothesis on [symbol:US:AAPL], review the recent drawdown first.',
   status: 'completed',
   error_detail: null,
   provider: 'mock',
@@ -190,9 +191,9 @@ const AI_ASSISTANT_REPLY = {
 /* ── ⑧ Evidence dock fixtures ──────────────────────────────────────────────
  * Response bodies mirror the real routes in backend/app/api/paper_portfolio.py:
  * PaperPortfolioResponse / PaperPositionResponse / PaperOrderResponse /
- * DecisionRecordResponse, and the `journal?format=json` envelope with its 27
- * JOURNAL_COLUMNS. Timestamps are naive ISO exactly as FastAPI serialises them,
- * and the unfilled order row omits the fill columns the way `_journal_rows`
+ * DecisionRecordResponse, and the `journal?format=json` envelope with the whole
+ * JOURNAL_COLUMNS contract. Timestamps are naive ISO exactly as FastAPI serialises
+ * them, and the unfilled order row omits the fill columns the way `_journal_rows`
  * does — an absent key, not a zero.
  */
 const JOURNAL_COLUMNS_FIXTURE = [
@@ -213,6 +214,8 @@ const JOURNAL_COLUMNS_FIXTURE = [
   'data_cutoff_at',
   'execution_date',
   'bar_timestamp',
+  'settlement_date',
+  'settlement_policy',
   'order_created_at_utc',
   'observed_price',
   'execution_price_before_costs',
@@ -362,6 +365,8 @@ const EVIDENCE_JOURNAL = [
     data_cutoff_at: '2026-01-05',
     execution_date: '2026-01-06',
     bar_timestamp: null,
+    settlement_date: '2026-01-07',
+    settlement_policy: 'T+1 (next stored trading session of the bound dataset)',
     order_created_at_utc: '2026-01-05T15:30:00',
     observed_price: 182,
     execution_price_before_costs: 181.5,
@@ -391,6 +396,8 @@ const EVIDENCE_JOURNAL = [
     data_cutoff_at: '2026-01-06',
     execution_date: '2026-01-07',
     bar_timestamp: '2026-01-07T14:35:00',
+    settlement_date: '2026-01-08',
+    settlement_policy: 'T+1 (next stored trading session of the bound dataset)',
     order_created_at_utc: '2026-01-06T01:55:00',
     observed_price: 388,
     execution_price_before_costs: 390.5,
@@ -418,6 +425,7 @@ const EVIDENCE_JOURNAL = [
     decision_type: null,
     outcome_status: null,
     data_cutoff_at: '2026-01-08',
+    settlement_policy: 'T+1 (next stored trading session of the bound dataset)',
     order_created_at_utc: '2026-01-08T15:25:00',
     rationale: null,
   },
@@ -636,7 +644,13 @@ function mockWorkspaceApis(page: Page, state: WorkspaceMocks) {
 
   page.route('**/api/v1/ai/status', (route) => json(route, AI_STATUS_RESPONSE));
   page.route('**/api/v1/ai/test-connection', (route) =>
-    json(route, { ok: true, detail: '模擬供應商連線正常', latency_ms: 1, kind: null, provider: 'mock' })
+    json(route, {
+      ok: true,
+      detail: 'Mock provider is ready (offline, deterministic, no external calls)',
+      latency_ms: 1,
+      kind: null,
+      provider: 'mock',
+    })
   );
   page.route('**/api/v1/ai/conversations', (route) => {
     if (route.request().method() === 'POST') {
@@ -681,7 +695,7 @@ test.describe('Workspace shell', () => {
 
     await expect(page.getByTestId('price-chart')).toBeVisible();
     await expect(page.getByTestId('chart-legend')).toContainText('AAPL');
-    await expect(page.getByTestId('chart-nature-badge')).toHaveText('模擬數據');
+    await expect(page.getByTestId('chart-nature-badge')).toHaveText('Synthetic');
     await expect(page.getByTestId('status-chips')).toContainText('Data: Demo data');
     await expect(page.getByTestId('status-chips')).toContainText('Broker: Paper only');
     await expect(page.getByTestId('watchlist-panel')).toContainText('AAPL');
@@ -690,8 +704,8 @@ test.describe('Workspace shell', () => {
 
     // AI assistant panel lives in the right column above details/order
     await expect(page.getByTestId('ai-panel')).toBeVisible();
-    await expect(page.getByTestId('ai-mode-badge')).toHaveText('AI 模擬');
-    await expect(page.locator('.ws-ai-advisory')).toContainText('不構成交易授權');
+    await expect(page.getByTestId('ai-mode-badge')).toHaveText('AI simulated');
+    await expect(page.locator('.ws-ai-advisory')).toContainText('do not authorize trading');
 
     // candlestick canvas actually rendered by lightweight-charts
     const canvasCount = await page.locator('[data-testid="price-chart"] canvas').count();
@@ -707,7 +721,7 @@ test.describe('Workspace shell', () => {
     await page.waitForLoadState('networkidle');
     await expect(page.getByTestId('chart-legend')).toContainText('AAPL');
 
-    await page.getByLabel('搜尋代號').fill('0700');
+    await page.getByLabel('Search symbols').fill('0700');
     await page.locator('.ws-search-item', { hasText: '0700' }).click();
 
     await expect(page.getByTestId('chart-legend')).toContainText('0700', { timeout: 10_000 });
@@ -723,15 +737,15 @@ test.describe('Workspace shell', () => {
     await page.goto(`${FRONTEND_URL}/workspace`);
     await page.waitForLoadState('networkidle');
 
-    await page.getByLabel('搜尋代號').click();
-    await expect(page.getByTestId('symbol-search-context')).toContainText('可選符號');
+    await page.getByLabel('Search symbols').click();
+    await expect(page.getByTestId('symbol-search-context')).toContainText('Available symbols');
 
     const rows = page.getByTestId('symbol-search-item');
     await expect(rows).toHaveCount(2);
     // Each row has to say which period it can actually answer for. A provider that
     // declares nothing shows UNKNOWN rather than borrowing another symbol's window.
-    await expect(rows.filter({ hasText: 'AAPL' })).toContainText('2023-01-03 至 2025-12-31');
-    await expect(rows.filter({ hasText: '0700' })).toContainText('數據期間未知（UNKNOWN）');
+    await expect(rows.filter({ hasText: 'AAPL' })).toContainText('2023-01-03 to 2025-12-31');
+    await expect(rows.filter({ hasText: '0700' })).toContainText('Data period unknown (UNKNOWN)');
   });
 
   test('symbol picker drops the previous query rows while the next search is in flight', async ({ page }) => {
@@ -759,16 +773,16 @@ test.describe('Workspace shell', () => {
     await page.goto(`${FRONTEND_URL}/workspace`);
     await page.waitForLoadState('networkidle');
 
-    const search = page.getByLabel('搜尋代號');
+    const search = page.getByLabel('Search symbols');
     const rows = page.getByTestId('symbol-search-item');
     await search.click();
     await search.fill('aapl');
     await expect(rows.filter({ hasText: 'AAPL' })).toHaveCount(1);
 
     // The 0700 response is held, so this is the window in which rows left over from
-    // 'aapl' would sit under the 「搜尋「0700」」 heading and be clicked as a match.
+    // 'aapl' would sit under the Search “0700” heading and be clicked as a match.
     await search.fill('0700');
-    await expect(page.getByText('搜尋中…')).toBeVisible();
+    await expect(page.getByText('Searching…')).toBeVisible();
     await expect(rows).toHaveCount(0);
 
     releaseNext();
@@ -819,7 +833,7 @@ test.describe('Workspace shell', () => {
     await page.waitForLoadState('networkidle');
 
     const panel = page.getByTestId('watchlist-panel');
-    await expect(panel).toContainText('還沒有觀察列表');
+    await expect(panel).toContainText('No watchlists yet');
     await expect(panel.getByTestId('watchlist-group-empty')).toHaveCount(0);
 
     await page.getByTestId('watchlist-add-current').click();
@@ -829,11 +843,13 @@ test.describe('Workspace shell', () => {
     // One click, one create, one add — into the list that was just created.
     expect(added).toEqual(['/watchlists/wl-1/items :: US:AAPL']);
 
-    await panel.locator('button[aria-label="從 Default 移除 US:AAPL"]').click();
+    await panel.locator('button[aria-label="Remove US:AAPL from Default"]').click();
 
     await expect(panel.locator('.ws-symbol-row')).toHaveCount(0);
     // An emptied group must not read as a dead end.
-    await expect(panel.getByTestId('watchlist-group-empty')).toContainText('或以頂部搜尋框選取其他符號');
+    await expect(panel.getByTestId('watchlist-group-empty')).toContainText(
+      'pick another symbol in the search at the top'
+    );
   });
 
   test('watchlist symbol click switches chart', async ({ page }) => {
@@ -847,7 +863,7 @@ test.describe('Workspace shell', () => {
 
     await page
       .getByTestId('watchlist-panel')
-      .getByRole('button', { name: '選取標的 HK:0700' })
+      .getByRole('button', { name: 'Select HK:0700' })
       .click();
     await expect(page.getByTestId('chart-legend')).toContainText('0700', { timeout: 10_000 });
   });
@@ -866,7 +882,7 @@ test.describe('Workspace shell', () => {
     await page.getByTestId('tab-orders-fills').click();
     await page
       .getByTestId('watchlist-panel')
-      .getByRole('button', { name: '選取標的 HK:0700' })
+      .getByRole('button', { name: 'Select HK:0700' })
       .click();
     await expect(page.getByTestId('chart-legend')).toContainText('0700', { timeout: 10_000 });
 
@@ -918,17 +934,17 @@ test.describe('Workspace shell', () => {
 
     await page.goto(`${FRONTEND_URL}/workspace`);
     await page.waitForLoadState('networkidle');
-    // the dock opens on 持倉; the registry tabs are reached by clicking them
+    // the dock opens on Positions; the registry tabs are reached by clicking them
     await expect(page.getByTestId('tab-positions')).toHaveClass(/ws-tab-active/);
     await page.getByTestId('tab-research').click();
     await expect(page.getByTestId('evidence-tabpanel-research')).toContainText('動能策略驗證');
 
     await page.getByTestId('tab-models').click();
-    await expect(page.getByTestId('evidence-tabpanel-models')).toContainText('沒有模型');
+    await expect(page.getByTestId('evidence-tabpanel-models')).toContainText('No models.');
     await page.getByTestId('tab-orders-fills').click();
-    await expect(page.getByTestId('evidence-tabpanel-orders-fills')).toContainText('沒有執行意向');
+    await expect(page.getByTestId('evidence-tabpanel-orders-fills')).toContainText('No execution intents.');
     await page.getByTestId('tab-log').click();
-    await expect(page.getByTestId('evidence-tabpanel-log')).toContainText('沒有系統活動紀錄');
+    await expect(page.getByTestId('evidence-tabpanel-log')).toContainText('No system activity records.');
   });
 
   test('order preview panel: create → authorize → submit intent flow', async ({ page }) => {
@@ -941,13 +957,13 @@ test.describe('Workspace shell', () => {
 
     // quantity derived from lot size (AAPL lot 1)
     await page.getByTestId('order-lots').fill('10');
-    await expect(page.getByTestId('order-quantity')).toHaveText('10 股');
+    await expect(page.getByTestId('order-quantity')).toHaveText('10 shares');
 
     await page.getByTestId('order-create-intent').click();
     await expect(page.getByTestId('order-intent-id')).toBeVisible({ timeout: 10_000 });
     await expect(page.getByTestId('order-intent-status')).toContainText('pending');
 
-    await page.getByRole('button', { name: '確認授權' }).click();
+    await page.getByRole('button', { name: 'Authorize' }).click();
     await expect(page.getByTestId('order-intent-status')).toContainText('authorized', { timeout: 10_000 });
 
     await page.getByTestId('order-submit').click();
@@ -987,7 +1003,7 @@ test.describe('Workspace shell', () => {
     // handles back before converting the floor into a panel percentage
     expect(box?.width).toBeGreaterThanOrEqual(224);
 
-    const pick = panel.getByRole('button', { name: '選取標的 US:AAPL' });
+    const pick = panel.getByRole('button', { name: 'Select US:AAPL' });
     await expect(pick).toBeVisible();
     // the instrument code must not be ellipsised away at the narrowest three-column width
     expect(
@@ -999,7 +1015,7 @@ test.describe('Workspace shell', () => {
     await expect(page.getByTestId('mobile-watchlist-toggle')).toBeVisible();
     await page.getByTestId('mobile-watchlist-toggle').click();
     await expect(panel).toBeVisible();
-    await expect(panel.getByRole('button', { name: '選取標的 HK:0700' })).toBeVisible();
+    await expect(panel.getByRole('button', { name: 'Select HK:0700' })).toBeVisible();
     await expect(page.getByTestId('price-chart')).toBeVisible();
   });
 
@@ -1067,7 +1083,7 @@ test.describe('Workspace shell', () => {
     const toggle = page.getByTestId('mobile-watchlist-toggle');
     await toggle.click();
 
-    const drawer = page.getByRole('dialog', { name: '觀察列表' });
+    const drawer = page.getByRole('dialog', { name: 'Watchlist' });
     await expect(drawer).toBeVisible();
     await expect(drawer).toBeFocused();
 
@@ -1209,22 +1225,22 @@ test.describe('Workspace shell', () => {
     const controller = page.getByTestId('replay-controller');
     await expect(controller).toBeVisible();
     await expect(page.getByTestId('replay-clock-value')).toContainText(REPLAY_CURSOR);
-    await expect(page.getByTestId('replay-status')).toHaveText('進行中');
-    await expect(controller).toContainText('逐日');
+    await expect(page.getByTestId('replay-status')).toHaveText('In progress');
+    await expect(controller).toContainText('Per day');
 
     // ⑥ keeps one compact row by default: the provenance a user asks for once
     // (dataset, observed points, strategy version) costs the centre column
-    // nothing until 資料摘要 is opened, and it opens on a real click.
+    // nothing until Data summary is opened, and it opens on a real click.
     const summaryToggle = controller.getByTestId('replay-meta-toggle');
     await expect(page.getByTestId('replay-summary')).toHaveCount(0);
-    await expect(summaryToggle).toHaveAccessibleName('資料摘要');
+    await expect(summaryToggle).toHaveAccessibleName('Data summary');
     await expect(summaryToggle).toHaveAttribute('aria-expanded', 'false');
     await summaryToggle.click();
     const summary = page.getByTestId('replay-summary');
     await expect(summary).toBeVisible();
     await expect(summaryToggle).toHaveAttribute('aria-expanded', 'true');
     await expect(summary).toContainText('demo-dataset');
-    await expect(summary).toContainText('12 個觀測點');
+    await expect(summary).toContainText('12 observations');
     await expect(summary).toContainText('aaaaaaaa');
     await summaryToggle.click();
     await expect(page.getByTestId('replay-summary')).toHaveCount(0);
@@ -1251,7 +1267,7 @@ test.describe('Workspace shell', () => {
     // the session bound at mount, an uncut request can only mean the gate is gone.
     expect(barsWindow.every((end) => end === REPLAY_CURSOR || end === REPLAY_ADVANCED)).toBe(true);
     await expect(page.getByTestId('instrument-header')).toContainText(REPLAY_CURSOR);
-    await expect(page.getByTestId('chart-meta-line')).toContainText(`數據截至 ${REPLAY_CURSOR}`);
+    await expect(page.getByTestId('chart-meta-line')).toContainText(`Data as of ${REPLAY_CURSOR}`);
     // the price summary is the close of the last bar inside the cursor window,
     // not of the newest stored bar — proof it is computed from clipped data
     const priceAt = (end: string) => {
@@ -1271,32 +1287,32 @@ test.describe('Workspace shell', () => {
     await expect
       .poll(() => barsWindow[barsWindow.length - 1])
       .toBe(REPLAY_ADVANCED);
-    await expect(page.getByTestId('chart-meta-line')).toContainText(`數據截至 ${REPLAY_ADVANCED}`);
+    await expect(page.getByTestId('chart-meta-line')).toContainText(`Data as of ${REPLAY_ADVANCED}`);
     await expect(page.getByTestId('instrument-last-price')).toContainText(priceAt(REPLAY_ADVANCED));
     expect(priceAt(REPLAY_ADVANCED)).not.toBe(priceAt(REPLAY_CURSOR));
     expect(barsWindow).not.toContain(addDays(REPLAY_CURSOR, 1));
     expect(REPLAY_ADVANCED).not.toBe(addDays(REPLAY_CURSOR, 1));
     // the whole window travels with the server cursor, start included
     expect(barsStarts[barsStarts.length - 1]).toBe(addDays(REPLAY_ADVANCED, -366));
-    await expect(page.getByTestId('replay-summary')).toContainText('13 個觀測點');
+    await expect(page.getByTestId('replay-summary')).toContainText('13 observations');
 
     // Only the steps the backend implements are exposed: forward advance plus
     // pause/resume, and the toggle that opens the provenance. No backward, seek
     // or speed control — and nothing that could set a speed.
     const buttons = controller.getByRole('button');
     const labels = await buttons.allTextContents();
-    expect(labels.sort()).toEqual(['暫停', '下一日', '資料摘要'].sort());
+    expect(labels.sort()).toEqual(['Data summary', 'Next day', 'Pause'].sort());
     await expect(controller.locator('input, select')).toHaveCount(0);
-    await expect(page.getByTestId('replay-hint')).toContainText('沒有回溯、跳轉或變速');
+    await expect(page.getByTestId('replay-hint')).toContainText('no rewind, seek or speed control');
 
     // pause → the advance step is withdrawn by the server status, resume → back
     await page.getByTestId('replay-pause').click();
-    await expect(page.getByTestId('replay-status')).toHaveText('已暫停');
+    await expect(page.getByTestId('replay-status')).toHaveText('Paused');
     await expect(page.getByTestId('replay-advance')).toBeDisabled();
-    await expect(page.getByTestId('replay-advance-disabled-reason')).toContainText('已暫停');
+    await expect(page.getByTestId('replay-advance-disabled-reason')).toContainText('Paused');
     await expect(page.getByTestId('replay-pause')).toBeHidden();
     await page.getByTestId('replay-resume').click();
-    await expect(page.getByTestId('replay-status')).toHaveText('進行中');
+    await expect(page.getByTestId('replay-status')).toHaveText('In progress');
     await expect(page.getByTestId('replay-advance')).toBeEnabled();
 
     // the replay clock in the persistent context bar is the same server cursor
@@ -1370,11 +1386,11 @@ test.describe('Workspace shell', () => {
     await page.waitForLoadState('networkidle');
 
     await expect(page.getByTestId('replay-clock-value')).toContainText(`${REPLAY_DAY} 14:35`);
-    await expect(page.getByTestId('replay-clock')).toContainText('逐根 K 線');
+    await expect(page.getByTestId('replay-clock')).toContainText('Per bar');
     // the per-bar step is labelled with the actual timeframe
-    await expect(page.getByTestId('replay-advance')).toHaveText('下一根 5m K 線');
+    await expect(page.getByTestId('replay-advance')).toHaveText('Next 5m bar');
 
-    // The timeframe itself is a secondary fact: open 資料摘要 to read it.
+    // The timeframe itself is a secondary fact: open Data summary to read it.
     const summaryToggle = page.getByTestId('replay-controller').getByTestId('replay-meta-toggle');
     await expect(page.getByTestId('replay-summary')).toHaveCount(0);
     await summaryToggle.click();
@@ -1392,7 +1408,7 @@ test.describe('Workspace shell', () => {
     expect(barsStarts[barsStarts.length - 1]).toBe(addDays(REPLAY_PREV_DAY, -366));
     expect(addDays(REPLAY_PREV_DAY, -366)).not.toBe(addDays(REPLAY_LAST_BAR, -366));
     await expect(page.getByTestId('replay-bars-end')).toHaveText(REPLAY_PREV_DAY);
-    await expect(page.getByTestId('replay-hint')).toContainText('/bars 目前僅提供日線');
+    await expect(page.getByTestId('replay-hint')).toContainText('currently serves daily bars only');
   });
 
   // ── ⑦ Action Panel ─────────────────────────────────────────────────────────
@@ -1405,7 +1421,7 @@ test.describe('Workspace shell', () => {
   // a pending order with no fill and leaves the cursor to /advance; this fixture still
   // replies with a submission-time fill and an advanced cursor, because every
   // assertion below reads the receipt the panel echoes. The actual
-  // 提交→待執行→成交→結算 record is proven against the live backend by
+  // submit → pending → filled → settled record is proven against the live backend by
   // e2e/order-lifecycle-flow.spec.ts, not here.
   const ACTION_VERSION_ID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 
@@ -1448,7 +1464,7 @@ test.describe('Workspace shell', () => {
       } as Record<string, any>,
       decisions: [] as Record<string, any>[],
       submissions: [] as Record<string, any>[],
-      // ⑦ reads its 掛單簿 from GET /simulations/{id}/orders. Unmocked, that request reaches
+      // ⑦ reads its order book from GET /simulations/{id}/orders. Unmocked, that request reaches
       // the real backend with the mock token, 401s, and the whole page bounces to /login —
       // so every ⑦ locator would time out on the login screen. The book is served empty on
       // purpose: this lane only has to answer the read, it does not model pending/filled/
@@ -1629,9 +1645,9 @@ test.describe('Workspace shell', () => {
     await page.waitForLoadState('networkidle');
 
     const panel = page.getByTestId('action-panel');
-    await expect(panel.getByRole('tablist', { name: '操作面板' })).toHaveCount(1);
-    const orderTab = panel.getByRole('tab', { name: '手動模擬單' });
-    const rulesTab = panel.getByRole('tab', { name: '策略規則' });
+    await expect(panel.getByRole('tablist', { name: 'Action panel' })).toHaveCount(1);
+    const orderTab = panel.getByRole('tab', { name: 'Manual paper order' });
+    const rulesTab = panel.getByRole('tab', { name: 'Strategy rules' });
     await expect(orderTab).toHaveAttribute('aria-selected', 'true');
     await expect(rulesTab).toHaveAttribute('aria-selected', 'false');
     await expect(orderTab).toHaveAttribute('tabindex', '0');
@@ -1645,7 +1661,9 @@ test.describe('Workspace shell', () => {
     await panel.getByTestId('order-lots').fill('3');
     await rulesTab.click();
     await expect(rulesPane).toBeVisible();
-    await expect(panel.getByTestId('rules-no-session')).toContainText('沒有綁定歷史回放工作階段');
+    await expect(panel.getByTestId('rules-no-session')).toContainText(
+      'No historical replay session is bound'
+    );
     // no session means no effective version — the panel must not invent one
     await expect(panel.getByTestId('rules-table')).toHaveCount(0);
 
@@ -1673,34 +1691,36 @@ test.describe('Workspace shell', () => {
 
     const panel = page.getByTestId('action-panel');
 
-    // 策略規則 tab: every row comes from the version response
-    await panel.getByRole('tab', { name: '策略規則' }).click();
+    // Strategy rules tab: every row comes from the version response
+    await panel.getByRole('tab', { name: 'Strategy rules' }).click();
     await expect(panel.getByTestId('rules-table')).toBeVisible();
     await expect(panel.getByTestId('rules-experiment')).toContainText('動能反轉研究');
     await expect(panel.getByTestId('rules-effective-version')).toContainText('v2');
     await expect(panel.getByTestId('rules-saved-version')).toContainText('aaaaaaaa');
     await expect(panel.getByTestId('rules-assets')).toHaveText('US:AAPL');
-    await expect(panel.getByTestId('rules-data-nature')).toContainText('合成（synthetic=true）');
+    await expect(panel.getByTestId('rules-data-nature')).toContainText('Synthetic (synthetic=true)');
     await expect(panel.getByTestId('rules-initial-cash')).toHaveText('100000');
     await expect(panel.getByTestId('rules-risk-parameters')).toContainText('stop_pct=0.05');
-    // fields the API does not return stay 未提供 — never 0, never a guess
-    await expect(panel.getByTestId('rules-config-hash')).toHaveText('未提供');
-    await expect(panel.getByTestId('rules-approved-at')).toHaveText('未提供');
-    await expect(panel.getByTestId('rules-assumptions')).toHaveText('未提供');
+    // fields the API does not return stay Not provided — never 0, never a guess
+    await expect(panel.getByTestId('rules-config-hash')).toHaveText('Not provided');
+    await expect(panel.getByTestId('rules-approved-at')).toHaveText('Not provided');
+    await expect(panel.getByTestId('rules-assumptions')).toHaveText('Not provided');
     // the version→experiment mapping limit is disclosed, not hidden
     await expect(panel.getByTestId('rules-mapping-note')).toContainText('current_version_id');
 
-    await panel.getByRole('tab', { name: '手動模擬單' }).click();
-    await expect(panel.getByTestId('order-target')).toContainText('歷史回放工作階段 sess-1');
+    await panel.getByRole('tab', { name: 'Manual paper order' }).click();
+    await expect(panel.getByTestId('order-target')).toContainText(
+      'historical replay session sess-1'
+    );
     await expect(panel.getByTestId('order-target')).toContainText(REPLAY_CURSOR);
     await expect(panel.getByTestId('order-blocked')).toHaveCount(0);
-    await expect(panel.getByTestId('order-manual-semantics')).toContainText('沒有限價');
+    await expect(panel.getByTestId('order-manual-semantics')).toContainText('no limit orders');
     await expect(panel.getByTestId('order-manual-semantics')).toContainText('next_open_no_lookahead');
     // only the order kinds the backend implements
     expect(await panel.getByTestId('order-action').locator('option').allTextContents()).toEqual([
-      '買入',
-      '賣出',
-      '觀望（不成交）',
+      'Buy',
+      'Sell',
+      'Hold (no fill)',
     ]);
 
     await panel.getByTestId('order-quantity-input').fill('5');
@@ -1719,7 +1739,7 @@ test.describe('Workspace shell', () => {
     await expect(panel.getByTestId('order-submit-manual')).toBeDisabled();
     await panel.getByTestId('order-build-review').click();
     await expect(panel.getByTestId('order-review-stale')).toBeHidden();
-    await expect(panel.getByTestId('order-quantity')).toContainText('7 股');
+    await expect(panel.getByTestId('order-quantity')).toContainText('7 shares');
 
     await Promise.all([
       page.waitForResponse(
@@ -1740,9 +1760,9 @@ test.describe('Workspace shell', () => {
     // the panel echoes the server price verbatim — it never re-formats or re-prices it
     await expect(result).toContainText('191.5');
     await expect(result).toContainText('next_open_no_lookahead');
-    await expect(result).toContainText('步驟 13');
+    await expect(result).toContainText('step 13');
     await expect(result).toContainText('90000 / 100100');
-    await expect(result).not.toContainText('未提供 · 步驟');
+    await expect(result).not.toContainText('Not provided · step');
     await expect(review).toBeHidden();
 
     // one clock only: the server-advanced cursor drives the controller, the chart
@@ -1769,13 +1789,13 @@ test.describe('Workspace shell', () => {
 
     const panel = page.getByTestId('action-panel');
     // the rules DO resolve — the block is the instrument mismatch, not missing data
-    await panel.getByRole('tab', { name: '策略規則' }).click();
+    await panel.getByRole('tab', { name: 'Strategy rules' }).click();
     await expect(panel.getByTestId('rules-assets')).toHaveText('DEMO-ALPHA');
 
-    await panel.getByRole('tab', { name: '手動模擬單' }).click();
+    await panel.getByRole('tab', { name: 'Manual paper order' }).click();
     await expect(panel.getByTestId('order-blocked')).toContainText('US:AAPL');
     await expect(panel.getByTestId('order-blocked')).toContainText('DEMO-ALPHA');
-    await expect(panel.getByTestId('order-target')).toContainText('停用');
+    await expect(panel.getByTestId('order-target')).toContainText('disabled');
     await expect(panel.getByTestId('order-action')).toHaveCount(0);
     await expect(panel.getByTestId('order-submit-manual')).toHaveCount(0);
     await expect(panel.getByTestId('order-build-review')).toHaveCount(0);
@@ -1790,16 +1810,16 @@ test.describe('Workspace shell', () => {
       .not.toBe(REPLAY_CURSOR);
     expect(REPLAY_LAST_BAR > REPLAY_CURSOR).toBe(true);
     await expect(page.getByTestId('chart-meta-line')).toContainText(
-      `數據截至 ${REPLAY_LAST_BAR}`
+      `Data as of ${REPLAY_LAST_BAR}`
     );
 
-    // ⑥ says so out loud, and its 圖表截止 reports the truth instead of the foreign date
+    // ⑥ says so out loud, and its Chart cut-off reports the truth instead of the foreign date
     const controller = page.getByTestId('replay-controller');
     await expect(controller.getByTestId('replay-instrument-note')).toContainText('DEMO-ALPHA');
     await expect(controller.getByTestId('replay-instrument-note')).toContainText('US:AAPL');
     await controller.getByTestId('replay-meta-toggle').click();
-    await expect(page.getByTestId('replay-bars-end')).toHaveText('未裁切');
-    await expect(page.getByTestId('replay-hint')).toContainText('圖表未依此游標裁切');
+    await expect(page.getByTestId('replay-bars-end')).toHaveText('Not cut');
+    await expect(page.getByTestId('replay-hint')).toContainText('The chart is not cut to this cursor');
     // the session clock itself stays reported — it is a real fact about the session
     await expect(page.getByTestId('replay-clock-value')).toContainText(REPLAY_CURSOR);
 
@@ -1822,13 +1842,15 @@ test.describe('Workspace shell', () => {
     await page.waitForLoadState('networkidle');
 
     const panel = page.getByTestId('action-panel');
-    await panel.getByRole('tab', { name: '策略規則' }).click();
-    await expect(panel.getByTestId('rules-unresolved')).toContainText('未提供');
+    await panel.getByRole('tab', { name: 'Strategy rules' }).click();
+    await expect(panel.getByTestId('rules-unresolved')).toContainText('Not provided');
     await expect(panel.getByTestId('rules-unresolved')).toContainText('current_version_id');
     await expect(panel.getByTestId('rules-table')).toHaveCount(0);
 
-    await panel.getByRole('tab', { name: '手動模擬單' }).click();
-    await expect(panel.getByTestId('order-blocked')).toContainText('策略規則未提供');
+    await panel.getByRole('tab', { name: 'Manual paper order' }).click();
+    await expect(panel.getByTestId('order-blocked')).toContainText(
+      'strategy rules bound to this session are Not provided'
+    );
     await expect(panel.getByTestId('order-submit-manual')).toHaveCount(0);
   });
 
@@ -1852,22 +1874,22 @@ test.describe('Workspace shell', () => {
     await panel.getByTestId('order-submit-manual').click();
 
     // round 1 — the request died before the server saw it
-    await expect(panel.getByTestId('order-unknown')).toContainText('提交結果未知');
-    await expect(panel.getByTestId('order-unknown')).toContainText('同一冪等鍵');
+    await expect(panel.getByTestId('order-unknown')).toContainText('Submission outcome unknown');
+    await expect(panel.getByTestId('order-unknown')).toContainText('same idempotency key');
     // the review must survive: dropping it would generate a new key and double-fill
     await expect(panel.getByTestId('order-review')).toBeVisible();
     await panel.getByTestId('order-reconcile-manual').click();
-    await expect(panel.getByTestId('order-reconcile')).toContainText('可以安全重試');
+    await expect(panel.getByTestId('order-reconcile')).toContainText('safe to retry');
     await expect(panel.getByTestId('order-manual-result')).toHaveCount(0);
 
     // round 2 — retry with the key the first review already generated
     await panel.getByTestId('order-submit-manual').click();
-    await expect(panel.getByTestId('order-unknown')).toContainText('提交結果未知');
+    await expect(panel.getByTestId('order-unknown')).toContainText('Submission outcome unknown');
     expect(backend.submissions.length).toBe(2);
     expect(backend.submissions[1].idempotency_key).toBe(backend.submissions[0].idempotency_key);
 
     await panel.getByTestId('order-reconcile-manual').click();
-    await expect(panel.getByTestId('order-reconcile')).toContainText('決策已成立');
+    await expect(panel.getByTestId('order-reconcile')).toContainText('the decision exists');
     await expect(panel.getByTestId('order-manual-result')).toContainText('next_open_no_lookahead');
     // the recovered decision consumed the review, so no blind third POST is possible
     await expect(panel.getByTestId('order-review')).toHaveCount(0);
@@ -1894,8 +1916,8 @@ test.describe('Workspace shell', () => {
     await panel.getByTestId('order-build-review').click();
     await panel.getByTestId('order-submit-manual').click();
 
-    await expect(panel.getByTestId('order-error')).toContainText('狀態版本衝突');
-    await expect(panel.getByTestId('order-error')).toContainText('重新檢視');
+    await expect(panel.getByTestId('order-error')).toContainText('State version conflict');
+    await expect(panel.getByTestId('order-error')).toContainText('re-check');
     // a rejected decision must not look like a filled one
     await expect(panel.getByTestId('order-manual-result')).toHaveCount(0);
     expect(backend.decisions.length).toBe(0);
@@ -1937,7 +1959,7 @@ test.describe('Workspace shell', () => {
     await expect(panel).toBeVisible();
     // below 1280 the floor is intentionally released to keep the chart usable, but
     // the tab labels must still be fully legible
-    for (const name of ['手動模擬單', '策略規則']) {
+    for (const name of ['Manual paper order', 'Strategy rules']) {
       const tab = panel.getByRole('tab', { name });
       await expect(tab).toBeVisible();
       expect(
@@ -1966,30 +1988,30 @@ test.describe('Workspace shell', () => {
 
     // the ⑦ action panel is a second tablist on the same page — the dock's own
     // must be addressable by name, and must hold exactly the seven design tabs
-    const tablist = page.getByRole('tablist', { name: '證據面板分頁' });
+    const tablist = page.getByRole('tablist', { name: 'Evidence panel tabs' });
     await expect(tablist).toHaveCount(1);
     const tabs = tablist.getByRole('tab');
     await expect(tabs).toHaveCount(7);
     expect(await tabs.allTextContents()).toEqual([
-      '持倉',
-      '訂單與成交',
-      '自動交易日誌',
-      '結果',
-      '研究',
-      '模型',
-      '系統紀錄',
+      'Positions',
+      'Orders & fills',
+      'Automated journal',
+      'Results',
+      'Research',
+      'Models',
+      'System log',
     ]);
 
     // roving tabindex: only the selected tab is in the tab order
     await expect(page.getByTestId('tab-positions')).toHaveClass(/ws-tab-active/);
     await expect(page.getByTestId('tab-positions')).toHaveAttribute('aria-selected', 'true');
     await expect(page.getByTestId('tab-positions')).toHaveAttribute('tabindex', '0');
-    const inactive = tablist.getByRole('tab', { name: '結果' });
+    const inactive = tablist.getByRole('tab', { name: 'Results' });
     await expect(inactive).toHaveAttribute('aria-selected', 'false');
     await expect(inactive).toHaveAttribute('tabindex', '-1');
     await expect(inactive).toHaveAttribute('aria-controls', 'evidence-tabpanel-results');
     // the inactive pane is not mounted at all, so a screen reader cannot reach
-    // another book's rows while 持倉 is selected
+    // another book's rows while Positions is selected
     await expect(page.getByTestId('evidence-tabpanel-results')).toHaveCount(0);
 
     // keyboard navigation among the seven
@@ -2011,7 +2033,7 @@ test.describe('Workspace shell', () => {
     // it must be the same book the order form names, not a second resolution
     await expect(page.getByTestId('evidence-portfolio-id')).toHaveText('pf-1');
     await expect(page.getByTestId('evidence-resolution')).toContainText(
-      '與「手動模擬單」目前所選組合一致'
+      'Matches the portfolio currently selected in Manual paper order'
     );
     await expect(page.getByTestId('order-account-context')).toContainText('pf-1');
 
@@ -2024,7 +2046,7 @@ test.describe('Workspace shell', () => {
     await expect(page.getByTestId('evidence-scope')).toHaveCount(0);
   });
 
-  test('⑧ positions: a null is 未提供／無法計算, never a fabricated 0.00', async ({ page }) => {
+  test('⑧ positions: a null is Not provided / Cannot be computed, never a fabricated 0.00', async ({ page }) => {
     const mocks: WorkspaceMocks = { savedLayout: null, lastIntent: null };
     await setupAuth(page);
     mockWorkspaceApis(page, mocks);
@@ -2039,9 +2061,9 @@ test.describe('Workspace shell', () => {
     const aapl = table.locator('tr', { has: page.getByTestId('evidence-position-pos-aapl') });
     await expect(aapl.locator('td').nth(1)).toHaveText('25');
     await expect(aapl.locator('td').nth(2)).toHaveText('181.50 USD');
-    await expect(aapl.locator('td').nth(3)).toHaveText('未提供');
-    await expect(aapl.locator('td').nth(4)).toHaveText('無法計算');
-    await expect(aapl.locator('td').nth(5)).toHaveText('持有中');
+    await expect(aapl.locator('td').nth(3)).toHaveText('Not provided');
+    await expect(aapl.locator('td').nth(4)).toHaveText('Cannot be computed');
+    await expect(aapl.locator('td').nth(5)).toHaveText('Open');
     await expect(aapl.locator('td').nth(6)).toHaveText('2026-01-05 15:31:00');
 
     // HK:0700 IS priced, and the sign travels with it
@@ -2052,15 +2074,15 @@ test.describe('Workspace shell', () => {
     await page.getByTestId('evidence-position-pos-aapl').click();
     const drawer = page.getByTestId('evidence-drawer');
     await expect(drawer).toBeVisible();
-    await expect(page.getByTestId('drawer-position-unrealized')).toHaveText('無法計算');
-    await expect(page.getByTestId('drawer-position-realized')).toHaveText('未提供');
-    await expect(page.getByTestId('drawer-position-closed')).toHaveText('不適用');
+    await expect(page.getByTestId('drawer-position-unrealized')).toHaveText('Cannot be computed');
+    await expect(page.getByTestId('drawer-position-realized')).toHaveText('Not provided');
+    await expect(page.getByTestId('drawer-position-closed')).toHaveText('Not applicable');
     await expect(page.getByTestId('drawer-position-cost')).toHaveText('181.50 USD');
     await page.getByTestId('evidence-drawer-close').click();
     await expect(drawer).toHaveCount(0);
   });
 
-  test('⑧ scope filter: 目前標的 narrows the loaded rows and clears in one click', async ({
+  test('⑧ scope filter: Current instrument narrows the loaded rows and clears in one click', async ({
     page,
   }) => {
     const mocks: WorkspaceMocks = { savedLayout: null, lastIntent: null };
@@ -2088,8 +2110,10 @@ test.describe('Workspace shell', () => {
     await page.goto(`${FRONTEND_URL}/workspace`);
     await page.waitForLoadState('networkidle');
 
-    await expect(page.getByTestId('evidence-scope-note')).toContainText('客戶端篩選');
-    await expect(page.getByTestId('evidence-scope-current')).toContainText('目前標的（US:AAPL）');
+    await expect(page.getByTestId('evidence-scope-note')).toContainText('Client-side filter');
+    await expect(page.getByTestId('evidence-scope-current')).toContainText(
+      'Current instrument (US:AAPL)'
+    );
     await expect(page.getByTestId('evidence-scope-clear')).toHaveCount(0);
 
     await page.getByTestId('evidence-scope-current').click();
@@ -2108,19 +2132,19 @@ test.describe('Workspace shell', () => {
     // be unreachable.
     await page
       .getByTestId('watchlist-panel')
-      .getByRole('button', { name: '選取標的 US:TSLA' })
+      .getByRole('button', { name: 'Select US:TSLA' })
       .click();
     await expect(page.getByTestId('chart-legend')).toContainText('TSLA', { timeout: 10_000 });
     await page.getByTestId('evidence-scope-current').click();
-    const empty = page.getByTestId('evidence-empty-持倉');
-    await expect(empty).toContainText('目前標的（US:TSLA）');
-    await expect(empty).toContainText('已載入的 2 筆持倉之中沒有紀錄');
+    const empty = page.getByTestId('evidence-empty-positions');
+    await expect(empty).toContainText('No positions for the current instrument (US:TSLA)');
+    await expect(empty).toContainText('among the 2 positions this panel has loaded');
     await expect(page.getByTestId('evidence-no-positions')).toHaveCount(0);
-    await page.getByTestId('evidence-empty-clear-持倉').click();
+    await page.getByTestId('evidence-empty-clear-positions').click();
     await expect(page.getByTestId('evidence-position-pos-0700')).toBeVisible();
   });
 
-  test('⑧ 訂單與成交: three separate books, each with its own status and clock', async ({
+  test('⑧ Orders & fills: three separate books, each with its own status and clock', async ({
     page,
   }) => {
     const mocks: WorkspaceMocks = { savedLayout: null, lastIntent: null };
@@ -2133,39 +2157,41 @@ test.describe('Workspace shell', () => {
 
     const pane = page.getByTestId('evidence-tabpanel-orders-fills');
     // the sections are labelled so a paper order is never read as an intent
-    await expect(pane).toContainText('模擬訂單（paper orders）');
-    await expect(pane).toContainText('模擬成交（fills）');
-    await expect(pane).toContainText('執行意向（execution intents）');
-    await expect(pane).toContainText('沒有執行意向。');
+    await expect(pane).toContainText('Paper orders');
+    await expect(pane).toContainText('Fills');
+    await expect(pane).toContainText('Execution intents');
+    await expect(pane).toContainText('No execution intents.');
 
     const orders = page.getByTestId('evidence-orders-table');
     await expect(orders.locator('tbody tr')).toHaveCount(3);
     const human = orders.locator('tr', { has: page.getByTestId('evidence-order-ord-aapl') });
-    await expect(human.locator('td').nth(1)).toHaveText('本人');
-    await expect(human.locator('td').nth(2)).toHaveText('買入');
-    await expect(human.locator('td').nth(4)).toHaveText('已成交');
+    await expect(human.locator('td').nth(1)).toHaveText('You');
+    await expect(human.locator('td').nth(2)).toHaveText('Buy');
+    await expect(human.locator('td').nth(4)).toHaveText('Filled');
     await expect(human.locator('td').nth(5)).toHaveText('2026-01-05 15:30:00');
     await expect(page.getByTestId('evidence-order-exec-time-ord-aapl')).toHaveText('2026-01-06');
     await expect(human.locator('td').nth(7)).toHaveText(/\u22124,538\.50 USD/);
 
     const system = orders.locator('tr', { has: page.getByTestId('evidence-order-ord-0700') });
-    await expect(system.locator('td').nth(1)).toHaveText('系統規則');
+    await expect(system.locator('td').nth(1)).toHaveText('System rule');
     // the intraday fill shows both the trade date and the bar it filled on
     await expect(page.getByTestId('evidence-order-exec-time-ord-0700')).toHaveText(
       '2026-01-07 · 2026-01-07 14:35:00'
     );
 
     const pending = orders.locator('tr', { has: page.getByTestId('evidence-order-ord-pending') });
-    await expect(pending.locator('td').nth(1)).toHaveText('API 程式');
-    await expect(pending.locator('td').nth(4)).toHaveText('待成交');
+    await expect(pending.locator('td').nth(1)).toHaveText('API client');
+    await expect(pending.locator('td').nth(4)).toHaveText('Pending');
     // an order that never filled has no execution time and no cash movement —
     // neither is rendered as a date or a zero
-    await expect(page.getByTestId('evidence-order-exec-time-ord-pending')).toHaveText('不適用');
-    await expect(pending.locator('td').nth(7)).toHaveText('未提供');
+    await expect(page.getByTestId('evidence-order-exec-time-ord-pending')).toHaveText(
+      'Not applicable'
+    );
+    await expect(pending.locator('td').nth(7)).toHaveText('Not provided');
 
     const fills = page.getByTestId('evidence-fills-table');
     await expect(fills.locator('tbody tr')).toHaveCount(2);
-    await expect(page.getByTestId('evidence-fill-bar-time-fill-aapl')).toHaveText('不適用');
+    await expect(page.getByTestId('evidence-fill-bar-time-fill-aapl')).toHaveText('Not applicable');
     await expect(page.getByTestId('evidence-fill-bar-time-fill-0700')).toHaveText(
       '2026-01-07 14:35:00'
     );
@@ -2193,17 +2219,17 @@ test.describe('Workspace shell', () => {
     const drawer = page.getByTestId('evidence-drawer');
     await expect(drawer).toBeVisible();
     await expect(drawer).toHaveAttribute('aria-modal', 'true');
-    await expect(drawer).toHaveAttribute('aria-label', '模擬訂單明細 ord-aapl');
+    await expect(drawer).toHaveAttribute('aria-label', 'Paper order details ord-aapl');
     await expect(page.getByTestId('evidence-drawer-record-id')).toHaveText('ord-aapl');
     await expect(drawer).toBeFocused();
     // the workspace did not navigate: the same URL, the same chart
     expect(page.url()).toBe(urlBefore);
     await expect(page.getByTestId('chart-legend')).toContainText('AAPL');
 
-    await expect(page.getByTestId('drawer-order-actor')).toHaveText('本人');
+    await expect(page.getByTestId('drawer-order-actor')).toHaveText('You');
     await expect(page.getByTestId('drawer-order-created')).toHaveText('2026-01-05 15:30:00');
     await expect(page.getByTestId('drawer-order-cutoff')).toHaveText('2026-01-05');
-    await expect(page.getByTestId('drawer-order-version')).toHaveText('未提供');
+    await expect(page.getByTestId('drawer-order-version')).toHaveText('Not provided');
     await expect(page.getByTestId('drawer-order-decision')).toHaveText('dec-entry-1');
     await expect(page.getByTestId('drawer-order-idempotency')).toHaveText('ws-pf-1-1');
     await expect(page.getByTestId('drawer-order-fill-id-0')).toHaveText('fill-aapl');
@@ -2236,13 +2262,13 @@ test.describe('Workspace shell', () => {
     // an order with no fills says so instead of showing an empty price row
     await page.getByTestId('evidence-order-ord-pending').click();
     await expect(page.getByTestId('drawer-order-no-fills')).toHaveText(
-      '此訂單在已載入的日誌中沒有成交列。'
+      'This order has no fill rows in the loaded journal.'
     );
-    await expect(page.getByTestId('drawer-order-rationale')).toHaveText('未提供');
+    await expect(page.getByTestId('drawer-order-rationale')).toHaveText('Not provided');
     await page.getByTestId('evidence-drawer-close').click();
   });
 
-  test('⑧ journal: one row per record, drawer carries all 27 columns and their semantics', async ({
+  test('⑧ journal: one row per record, drawer carries every declared column and its semantics', async ({
     page,
   }) => {
     const mocks: WorkspaceMocks = { savedLayout: null, lastIntent: null };
@@ -2256,28 +2282,35 @@ test.describe('Workspace shell', () => {
     const table = page.getByTestId('evidence-journal-table');
     await expect(table.locator('tbody tr')).toHaveCount(3);
     const fillRow = table.locator('tr', { has: page.getByTestId('evidence-journal-row-fill-aapl') });
-    await expect(fillRow.locator('td').nth(0)).toHaveText('成交紀錄');
-    await expect(fillRow.locator('td').nth(5)).toHaveText('模擬進場');
+    await expect(fillRow.locator('td').nth(0)).toHaveText('Fill');
+    await expect(fillRow.locator('td').nth(5)).toHaveText('Simulated entry');
     await expect(fillRow.locator('td').nth(6)).toHaveText('2026-01-05');
     await expect(fillRow.locator('td').nth(9)).toHaveText('2026-01-05 15:30:00');
 
     const orderRow = table.locator('tr', {
       has: page.getByTestId('evidence-journal-row-ord-pending'),
     });
-    await expect(orderRow.locator('td').nth(0)).toHaveText('未成交訂單');
-    await expect(orderRow.locator('td').nth(5)).toHaveText('未提供');
-    await expect(orderRow.locator('td').nth(7)).toHaveText('不適用');
+    await expect(orderRow.locator('td').nth(0)).toHaveText('Unfilled order');
+    await expect(orderRow.locator('td').nth(5)).toHaveText('Not provided');
+    await expect(orderRow.locator('td').nth(7)).toHaveText('Not applicable');
 
     await page.getByTestId('evidence-journal-row-fill-aapl').click();
     const drawer = page.getByTestId('evidence-drawer');
-    await expect(page.getByTestId('evidence-drawer-title')).toHaveText('成交日誌明細');
+    await expect(page.getByTestId('evidence-drawer-title')).toHaveText('Fill journal details');
     await expect(page.getByTestId('evidence-drawer-record-id')).toHaveText('fill-aapl');
     // the drawer renders exactly the column set the endpoint declared
-    await expect(drawer.locator('.ws-evidence-drawer-row')).toHaveCount(27);
+    await expect(drawer.locator('.ws-evidence-drawer-row')).toHaveCount(
+      JOURNAL_COLUMNS_FIXTURE.length
+    );
+    // Settlement travels with the row, so the drawer must show the stored values.
+    await expect(page.getByTestId('drawer-journal-settlement_date')).toHaveText('2026-01-07');
+    await expect(page.getByTestId('drawer-journal-settlement_policy')).toHaveText(
+      'T+1 (next stored trading session of the bound dataset)'
+    );
     await expect(page.getByTestId('drawer-journal-net_cash_change')).toHaveText(
       /\u22124,538\.50 USD/
     );
-    await expect(page.getByTestId('drawer-journal-bar_timestamp')).toHaveText('不適用');
+    await expect(page.getByTestId('drawer-journal-bar_timestamp')).toHaveText('Not applicable');
     await expect(page.getByTestId('drawer-journal-execution_date')).toHaveText('2026-01-06');
     await expect(page.getByTestId('drawer-journal-simulated_fill_reason')).toHaveText('rule_entry');
     // the note behind each column is the backend's own semantics text
@@ -2285,13 +2318,15 @@ test.describe('Workspace shell', () => {
       'title',
       'Decimal in `currency`, signed cash movement (negative on BUY, positive on SELL). Empty = null, never 0.'
     );
-    await expect(page.getByTestId('drawer-journal-semantics')).toContainText('而不是零');
+    await expect(page.getByTestId('drawer-journal-semantics')).toContainText('not zero');
 
     await page.getByTestId('evidence-drawer-close').click();
     await page.getByTestId('evidence-journal-row-ord-pending').click();
-    await expect(page.getByTestId('evidence-drawer-title')).toHaveText('未成交訂單日誌明細');
-    await expect(page.getByTestId('drawer-journal-observed_price')).toHaveText('不適用');
-    await expect(page.getByTestId('drawer-journal-fill_id')).toHaveText('未提供');
+    await expect(page.getByTestId('evidence-drawer-title')).toHaveText(
+      'Unfilled order journal details'
+    );
+    await expect(page.getByTestId('drawer-journal-observed_price')).toHaveText('Not applicable');
+    await expect(page.getByTestId('drawer-journal-fill_id')).toHaveText('Not provided');
   });
 
   test('⑧ results: only what the endpoints compute, with the missing endpoint disclosed', async ({
@@ -2308,10 +2343,10 @@ test.describe('Workspace shell', () => {
     await expect(page.getByTestId('results-initial-cash')).toHaveText('100,000.00 USD');
     await expect(page.getByTestId('results-cash')).toHaveText('95,461.50 USD');
     await expect(page.getByTestId('results-cash-return')).toHaveText(/\u22124\.54%/);
-    // 0 returned by the backend prints as 0; null prints as 無法計算
+    // 0 returned by the backend prints as 0; null prints as Cannot be computed
     await expect(page.getByTestId('results-realized-pnl')).toHaveText('0.00 USD');
-    await expect(page.getByTestId('results-unrealized-pnl')).toHaveText('無法計算');
-    await expect(page.getByTestId('results-valuation-basis')).toContainText('最新收盤價');
+    await expect(page.getByTestId('results-unrealized-pnl')).toHaveText('Cannot be computed');
+    await expect(page.getByTestId('results-valuation-basis')).toContainText('Latest close');
     await expect(page.getByTestId('results-unpriced-assets')).toHaveText('US:AAPL');
     await expect(page.getByTestId('results-open-positions')).toHaveText('2');
     await expect(page.getByTestId('results-order-count')).toHaveText('3');
@@ -2319,17 +2354,19 @@ test.describe('Workspace shell', () => {
     await expect(page.getByTestId('results-decision-count')).toHaveText('2');
 
     // the cash-only figure is named for what it is
-    await expect(page.getByTestId('evidence-results-table')).toContainText('現金變動（不含未實現）');
+    await expect(page.getByTestId('evidence-results-table')).toContainText(
+      'Cash change (excluding unrealized P&L)'
+    );
 
     const gap = page.getByTestId('evidence-results-gap');
     await expect(gap).toHaveCount(1);
-    await expect(gap).toContainText('後端沒有組合層級的成果端點');
-    await expect(gap).toContainText('沒有淨值曲線');
-    await expect(gap).toContainText('不是總報酬率');
-    await expect(gap).toContainText('實驗回測指標屬於策略版本');
+    await expect(gap).toContainText('The backend has no portfolio-level results endpoint');
+    await expect(gap).toContainText('no equity curve');
+    await expect(gap).toContainText('not a total return');
+    await expect(gap).toContainText('Experiment backtest metrics belong to the strategy version');
     // no backtest metric is allowed to stand in for this book's own result
     await expect(page.getByTestId('evidence-results-table')).not.toContainText('Sharpe');
-    await expect(page.getByTestId('evidence-results-table')).not.toContainText('回撤');
+    await expect(page.getByTestId('evidence-results-table')).not.toContainText('drawdown');
     await expect(page.getByTestId('evidence-results-link')).toHaveAttribute('href', '/paper-portfolio/pf-1');
   });
 
@@ -2350,7 +2387,7 @@ test.describe('Workspace shell', () => {
     // The band's own clip box, the dock's scroll container, and whether the last control
     // of the tallest tab sits inside that clip. The defect this guards: the dock grew to
     // its content height inside a resize Panel that clips with overflow:hidden, so
-    // everything under the line — the whole 結果 body — was painted and then lost.
+    // everything under the line — the whole Results body — was painted and then lost.
     const geom = () =>
       dock.evaluate((el) => {
         const panel = el.closest('[data-panel-id]') as HTMLElement;
@@ -2436,7 +2473,7 @@ test.describe('Workspace shell', () => {
           await page.mouse.wheel(0, 300);
           return (await geom()).linkInsideBand;
         },
-        { timeout: 10_000, message: 'scrolling must bring 組合完整頁面 into the band' }
+        { timeout: 10_000, message: 'scrolling must bring the full portfolio link into the band' }
       )
       .toBe(true);
 
@@ -2592,7 +2629,7 @@ test.describe('Workspace shell', () => {
     expect(DEFAULT_LAYOUT.panels.bottom.size).not.toBe(dragged);
   });
 
-  test('D-2 intent paths: keyboard resize and 收合 persist, a non-persisted splitter and a stuck pointer do not', async ({
+  test('D-2 intent paths: keyboard resize and collapse persist, a non-persisted splitter and a stuck pointer do not', async ({
     page,
   }) => {
     const mocks: WorkspaceMocks = { savedLayout: null, lastIntent: null };
@@ -2610,7 +2647,7 @@ test.describe('Workspace shell', () => {
     const stored = () =>
       mocks.savedLayout as { panels: Record<string, { size: number; collapsed: boolean }> };
 
-    /** Centre of a resize handle: by `data-ws-handle` value, or the 詳情/操作 splitter inside
+    /** Centre of a resize handle: by `data-ws-handle` value, or the details/actions splitter inside
      * ⑦ that deliberately carries no marker. */
     const handleRect = (which: 'dock' | 'unmarked-row-splitter') =>
       page.evaluate((which) => {
@@ -2650,7 +2687,7 @@ test.describe('Workspace shell', () => {
     expect(await bandH(), 'the keyboard step moved the band').not.toBe(before);
     expect(stored().panels.bottom.size).not.toBe(DEFAULT_LAYOUT.panels.bottom.size);
 
-    // ② the gate is scoped to this shell's persisted slots. The 詳情/操作 splitter inside ⑦
+    // ② the gate is scoped to this shell's persisted slots. The details/actions splitter inside ⑦
     // reports sizes for a group nothing stores, so it must not open the gate — otherwise a
     // clamp report racing a drag would be written as intent.
     const inner = await handleRect('unmarked-row-splitter');
@@ -2679,12 +2716,12 @@ test.describe('Workspace shell', () => {
 
     // ④ an explicit collapse button is a user action, so the flag it changes is stored
     // exactly once — and it is the collapsed field, not a dragged size.
-    await page.getByRole('button', { name: '收合詳情與操作' }).click();
+    await page.getByRole('button', { name: 'Collapse details and actions' }).click();
     await expect.poll(writes, { timeout: 10_000 }).toBe(beforeClamp + 1);
-    expect(stored().panels.right.collapsed, '收合 stores the collapse').toBe(true);
+    expect(stored().panels.right.collapsed, 'collapse stores the collapse').toBe(true);
   });
 
-  test('⑧ CSV export is labelled 匯出整個組合 and ignores the scope filter', async ({ page }) => {
+  test('⑧ CSV export is labelled Export whole portfolio and ignores the scope filter', async ({ page }) => {
     const mocks: WorkspaceMocks = { savedLayout: null, lastIntent: null };
     await setupAuth(page);
     mockWorkspaceApis(page, mocks);
@@ -2693,9 +2730,15 @@ test.describe('Workspace shell', () => {
     await page.waitForLoadState('networkidle');
     await page.getByTestId('tab-journal').click();
 
-    await expect(page.getByTestId('evidence-export-csv')).toHaveText('匯出整個組合（CSV）');
-    await expect(page.getByTestId('evidence-export-scope-note')).toContainText('匯出範圍：整個組合');
-    await expect(page.getByTestId('evidence-export-scope-note')).toContainText('不受上方「標的範圍」篩選影響');
+    await expect(page.getByTestId('evidence-export-csv')).toHaveText(
+      'Export whole portfolio (CSV)'
+    );
+    await expect(page.getByTestId('evidence-export-scope-note')).toContainText(
+      'Export scope: every order and fill in the whole portfolio'
+    );
+    await expect(page.getByTestId('evidence-export-scope-note')).toContainText(
+      'ignoring the “Instrument scope” filter above'
+    );
 
     // narrow the table to the current instrument first: the download must still
     // be the whole book, which is exactly what the button promises
@@ -2708,12 +2751,12 @@ test.describe('Workspace shell', () => {
     ]);
     expect(download.suggestedFilename()).toBe('trade-journal-pf-1.csv');
     const csv = readFileSync((await download.path()) as string, 'utf8');
-    expect(csv.split('\r\n')[0].split(',')).toHaveLength(27);
+    expect(csv.split('\r\n')[0].split(',')).toHaveLength(JOURNAL_COLUMNS_FIXTURE.length);
     expect(csv).toContain('HK:0700');
     expect(csv).toContain('US:AAPL');
   });
 
-  test('⑧ a stored legacy tab key still opens 訂單與成交', async ({ page }) => {
+  test('⑧ a stored legacy tab key still opens Orders & fills', async ({ page }) => {
     // Every phase replays a stored payload through `layoutOverride` rather than
     // `savedLayout`: the app PUTs a legitimate floor correction on mount, and the
     // mock would otherwise serve that write-back as the next phase's stored layout.
@@ -2728,7 +2771,7 @@ test.describe('Workspace shell', () => {
     await page.goto(`${FRONTEND_URL}/workspace`);
     await page.waitForLoadState('networkidle');
 
-    // the tab this workspace used to call `fills` is now part of 訂單與成交
+    // the tab this workspace used to call `fills` is now part of Orders & fills
     await expect(page.getByTestId('tab-fills')).toHaveCount(0);
     await expect(page.getByTestId('tab-orders-fills')).toHaveClass(/ws-tab-active/);
     await expect(page.getByTestId('tab-orders-fills')).toHaveAttribute('aria-selected', 'true');
@@ -2794,7 +2837,10 @@ test.describe('Workspace shell', () => {
 
     await expect(page.getByTestId('ai-conversation-select')).toContainText('研究：AAPL 動能');
     await page.getByTestId('ai-test-connection').click();
-    await expect(page.locator('.ws-ai-conn')).toContainText('模擬供應商連線正常', { timeout: 10_000 });
+    await expect(page.locator('.ws-ai-conn')).toContainText(
+      'Mock provider is ready (offline, deterministic, no external calls)',
+      { timeout: 10_000 }
+    );
   });
 
   test('AI panel: send message renders reply and quota', async ({ page }) => {
@@ -2810,7 +2856,7 @@ test.describe('Workspace shell', () => {
 
     await expect(page.getByTestId('ai-thread')).toContainText('AAPL 近期動能如何？', { timeout: 10_000 });
     await expect(page.getByTestId('ai-thread')).toContainText('[symbol:US:AAPL]');
-    await expect(page.locator('.ws-ai-quota')).toHaveText('AI 用量：1', { timeout: 10_000 });
+    await expect(page.locator('.ws-ai-quota')).toHaveText('AI usage: 1', { timeout: 10_000 });
   });
 
   test('AI panel: assistant reply can be saved as pending review draft', async ({ page }) => {
@@ -2828,10 +2874,10 @@ test.describe('Workspace shell', () => {
     await page.getByTestId('ai-save-draft').click();
     await expect(page.getByTestId('ai-draft-form')).toBeVisible();
     await page.getByTestId('ai-draft-form').locator('input').fill('AI 動能假說草稿');
-    await page.getByTestId('ai-draft-form').getByRole('button', { name: '建立待審核草稿' }).click();
+    await page.getByTestId('ai-draft-form').getByRole('button', { name: 'Create draft for review' }).click();
 
-    await expect(page.getByTestId('ai-thread')).toContainText('已建立待審核草稿 33333333', { timeout: 10_000 });
-    await expect(page.getByTestId('ai-thread')).toContainText('待人工審核');
+    await expect(page.getByTestId('ai-thread')).toContainText('Draft 33333333', { timeout: 10_000 });
+    await expect(page.getByTestId('ai-thread')).toContainText('awaiting human review');
   });
 });
 
@@ -2886,10 +2932,10 @@ test.describe('Workspace context semantics', () => {
   }
 
   const openFormTab = async (page: Page) => {
-    await page.getByTestId('action-panel').getByRole('tab', { name: '手動模擬單' }).click();
+    await page.getByTestId('action-panel').getByRole('tab', { name: 'Manual paper order' }).click();
   };
 
-  test('資料詳情 disclosure is keyboard operable and reports aria state', async ({ page }) => {
+  test('Data details disclosure is keyboard operable and reports aria state', async ({ page }) => {
     const mocks: WorkspaceMocks = { savedLayout: null, lastIntent: null };
     await setupAuth(page);
     mockWorkspaceApis(page, mocks);
@@ -2996,7 +3042,7 @@ test.describe('Workspace context semantics', () => {
     await expect(note).toContainText('does not place live orders');
   });
 
-  test('missing current_virtual_cash shows 未提供 instead of a fabricated 0', async ({ page }) => {
+  test('missing current_virtual_cash shows Not provided instead of a fabricated 0', async ({ page }) => {
     const mocks: WorkspaceMocks = { savedLayout: null, lastIntent: null };
     await setupAuth(page);
     mockWorkspaceApis(page, mocks);
@@ -3007,13 +3053,13 @@ test.describe('Workspace context semantics', () => {
 
     const account = page.getByTestId('order-account-context');
     await expect(account).toContainText('pf-nocsh');
-    await expect(account).toContainText('虛擬現金');
-    await expect(account).toContainText('未提供');
+    await expect(account).toContainText('Virtual cash');
+    await expect(account).toContainText('Not provided');
     await expect(account).not.toContainText('0.00');
     await expect(account).not.toContainText(' USD 0');
   });
 
-  test('buying power is 未提供 because no API field carries it', async ({ page }) => {
+  test('buying power is Not provided because no API field carries it', async ({ page }) => {
     const mocks: WorkspaceMocks = { savedLayout: null, lastIntent: null };
     await setupAuth(page);
     mockWorkspaceApis(page, mocks);
@@ -3021,11 +3067,11 @@ test.describe('Workspace context semantics', () => {
     await page.waitForLoadState('networkidle');
     await openFormTab(page);
 
-    await expect(page.getByTestId('order-buying-power')).toHaveText('未提供');
-    await expect(page.getByTestId('order-account-context')).toContainText('不由虛擬現金推算');
+    await expect(page.getByTestId('order-buying-power')).toHaveText('Not provided');
+    await expect(page.getByTestId('order-account-context')).toContainText('not derived from virtual cash');
   });
 
-  test('no portfolio: strip and form both say 未選擇 rather than inventing one', async ({
+  test('no portfolio: strip and form both say “No paper portfolio selected” rather than inventing one', async ({
     page,
   }) => {
     const mocks: WorkspaceMocks = { savedLayout: null, lastIntent: null };
@@ -3041,8 +3087,8 @@ test.describe('Workspace context semantics', () => {
       'title',
       /No paper portfolio created yet/
     );
-    await expect(page.getByTestId('order-account-context')).toContainText('未選擇模擬組合');
-    await expect(page.getByTestId('order-blocked')).toContainText('尚未建立模擬投資組合');
+    await expect(page.getByTestId('order-account-context')).toContainText('No paper portfolio selected');
+    await expect(page.getByTestId('order-blocked')).toContainText('No paper portfolio exists yet');
   });
 
   test('several active portfolios: nothing is auto-chosen, the form stays empty', async ({
@@ -3066,7 +3112,7 @@ test.describe('Workspace context semantics', () => {
       /none was auto-selected/
     );
     await expect(page.locator('#order-portfolio-select')).toHaveValue('');
-    await expect(page.getByTestId('order-blocked')).toContainText('不自動代選');
+    await expect(page.getByTestId('order-blocked')).toContainText('none was chosen automatically');
   });
 
   test('completed portfolio stays viewable in the strip and picker, but cannot be ordered', async ({
@@ -3090,15 +3136,15 @@ test.describe('Workspace context semantics', () => {
     await expect(page.getByTestId('ctx-portfolio-identity')).toContainText('pf-old');
     await expect(page.getByTestId('ctx-portfolio-identity')).toContainText('(Completed)');
     await expect(page.locator('#order-portfolio-select option[value="pf-old"]')).toContainText(
-      '已完成'
+      'Completed'
     );
-    await expect(page.getByTestId('order-blocked')).toContainText('均非進行中');
+    await expect(page.getByTestId('order-blocked')).toContainText('None of the 1 portfolios is active');
     await expect(page.getByTestId('order-create-portfolio')).toBeVisible();
 
     // picking it explicitly is allowed for viewing, and the block names the rule
     await page.locator('#order-portfolio-select').selectOption('pf-old');
     await expect(page.getByTestId('order-account-context')).toContainText('pf-old');
-    await expect(page.getByTestId('order-blocked')).toContainText('retired/completed 回傳 400');
+    await expect(page.getByTestId('order-blocked')).toContainText('returns 400 for retired/completed');
   });
 
   test('explicit pick moves the workspace binding, and the chart cursor moves with it', async ({
@@ -3143,7 +3189,7 @@ test.describe('Workspace context semantics', () => {
     await expect
       .poll(() => barsEnds[barsEnds.length - 1])
       .not.toBe(cursor);
-    await expect(page.getByTestId('order-target')).toContainText('受控執行器意向');
+    await expect(page.getByTestId('order-target')).toContainText('controlled executor intent');
 
     await page.getByTestId('ctx-system-toggle').click();
     await expect(page.getByTestId('ctx-system-panel')).toContainText('Not bound');
@@ -3165,7 +3211,7 @@ test.describe('Workspace context semantics', () => {
     await page.waitForLoadState('networkidle');
 
     // several orderable books, no replay binding: the dock reports for none of them
-    await expect(page.getByTestId('evidence-no-portfolio')).toContainText('不自動選第一個');
+    await expect(page.getByTestId('evidence-no-portfolio')).toContainText('the first was not chosen automatically');
     await expect(page.getByTestId('evidence-portfolio-id')).toHaveCount(0);
 
     await openFormTab(page);
@@ -3174,10 +3220,10 @@ test.describe('Workspace context semantics', () => {
     // the retired account is viewable evidence, not a trade-ready context
     await expect(page.getByTestId('evidence-portfolio-id')).toHaveText('pf-ret');
     await expect(page.getByTestId('evidence-resolution')).toContainText(
-      '與「手動模擬單」目前所選組合一致'
+      'Matches the portfolio currently selected in Manual paper order'
     );
-    await expect(page.getByTestId('evidence-resolution')).toContainText('僅唯讀檢視');
-    await expect(page.getByTestId('order-blocked')).toContainText('retired/completed 回傳 400');
+    await expect(page.getByTestId('evidence-resolution')).toContainText('read-only view');
+    await expect(page.getByTestId('order-blocked')).toContainText('returns 400 for retired/completed');
   });
 
   test('a slow earlier book cannot repaint the dock after the user switches', async ({ page }) => {
@@ -3253,7 +3299,7 @@ test.describe('Workspace context semantics', () => {
     await expect(page.getByTestId('evidence-order-ord-slow-only')).toHaveCount(0);
   });
 
-  test('operational-status failure shows 未提供, not a default mode', async ({ page }) => {
+  test('operational-status failure shows Not provided, not a default mode', async ({ page }) => {
     const mocks: WorkspaceMocks = { savedLayout: null, lastIntent: null };
     await setupAuth(page);
     mockWorkspaceApis(page, mocks);

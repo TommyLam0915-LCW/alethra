@@ -9,12 +9,12 @@ const BROWSE_LIMIT = 20;
 /** What the provider says about bars for this instrument — never a guess. */
 function windowLabel(win: DataWindow | null | undefined): { text: string; missing: boolean } {
   if (!win || win.availability_source !== 'provider_declared') {
-    return { text: '數據期間未知（UNKNOWN）', missing: false };
+    return { text: 'Data period unknown (UNKNOWN)', missing: false };
   }
   if (!win.available_start || !win.available_end) {
-    return { text: '無可用數據', missing: true };
+    return { text: 'No data available', missing: true };
   }
-  return { text: `${win.available_start} 至 ${win.available_end}`, missing: false };
+  return { text: `${win.available_start} to ${win.available_end}`, missing: false };
 }
 
 export default function SymbolSearch({ onSelect }: { onSelect: (instrumentId: string) => void }) {
@@ -110,7 +110,7 @@ export default function SymbolSearch({ onSelect }: { onSelect: (instrumentId: st
     <div className="ws-search-wrap" ref={wrapRef}>
       <input
         className="ws-search-input"
-        placeholder="搜尋代號 / 名稱（US、HK）…"
+        placeholder="Search symbol or name (US, HK)…"
         value={query}
         onChange={(e) => {
           setQuery(e.target.value);
@@ -118,7 +118,7 @@ export default function SymbolSearch({ onSelect }: { onSelect: (instrumentId: st
         }}
         onFocus={() => setOpen(true)}
         onKeyDown={onKeyDown}
-        aria-label="搜尋代號"
+        aria-label="Search symbols"
         aria-expanded={open}
         role="combobox"
         aria-controls="symbol-search-listbox"
@@ -126,11 +126,11 @@ export default function SymbolSearch({ onSelect }: { onSelect: (instrumentId: st
       {open && (
         <div className="ws-search-dropdown" id="symbol-search-listbox" data-testid="symbol-search-dropdown">
           <div className="ws-search-group-label" data-testid="symbol-search-context">
-            {searching ? `搜尋「${query.trim()}」` : `可選符號（最多 ${BROWSE_LIMIT} 個）`}
+            {searching ? `Search “${query.trim()}”` : `Available symbols (up to ${BROWSE_LIMIT})`}
           </div>
-          {searching && loading && <div className="ws-muted" style={{ padding: 10 }}>搜尋中…</div>}
+          {searching && loading && <div className="ws-muted" style={{ padding: 10 }}>Searching…</div>}
           {!loading && items.length === 0 && (
-            <div className="ws-muted" style={{ padding: 10 }}>沒有符合的代號</div>
+            <div className="ws-muted" style={{ padding: 10 }}>No matching symbols</div>
           )}
           {items.map((inst, i) => {
             const win = windowLabel(inst.data_window);

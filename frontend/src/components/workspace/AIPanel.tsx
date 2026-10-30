@@ -161,13 +161,15 @@ export default function AIPanel({ currentSymbol }: { currentSymbol: string }) {
           err instanceof ApiError && err.status === 400 && /instrument/i.test(err.message);
         if (!unknownSymbol) throw err;
         created = await api.aiAssistant.createConversation({});
-        setPanelError(`目前標的 ${currentSymbol} 不在可辨識的清單，已建立不含標的脈絡的對話。`);
+        setPanelError(
+          `The current symbol ${currentSymbol} is not in the recognised list, so the conversation was created without a symbol context.`,
+        );
       }
       await loadConversations();
       setActiveId(created.id);
       setMessages([]);
     } catch (err) {
-      setPanelError(err instanceof Error ? err.message : '無法建立對話');
+      setPanelError(err instanceof Error ? err.message : 'Could not create the conversation');
     }
   };
 
@@ -177,7 +179,7 @@ export default function AIPanel({ currentSymbol }: { currentSymbol: string }) {
       await api.aiAssistant.deleteConversation(activeId);
       await loadConversations();
     } catch (err) {
-      setPanelError(err instanceof Error ? err.message : '無法刪除對話');
+      setPanelError(err instanceof Error ? err.message : 'Could not delete the conversation');
     }
   };
 
@@ -195,7 +197,7 @@ export default function AIPanel({ currentSymbol }: { currentSymbol: string }) {
       });
       await loadConversations();
     } catch (err) {
-      setPanelError(err instanceof Error ? err.message : '無法更新脈絡');
+      setPanelError(err instanceof Error ? err.message : 'Could not update the context');
     }
   };
 
@@ -242,7 +244,7 @@ export default function AIPanel({ currentSymbol }: { currentSymbol: string }) {
       await loadConversations();
     } catch (err) {
       setCtxSelection(ctxSelection);
-      setPanelError(err instanceof Error ? err.message : '無法更新脈絡');
+      setPanelError(err instanceof Error ? err.message : 'Could not update the context');
     }
   };
 
@@ -267,7 +269,7 @@ export default function AIPanel({ currentSymbol }: { currentSymbol: string }) {
       // bubble and put the text back so the user does not lose what they typed.
       setMessages((prev) => prev.filter((m) => m.id !== optimisticId));
       setInput((current) => (current ? current : content));
-      setPanelError(err instanceof Error ? err.message : '傳送失敗');
+      setPanelError(err instanceof Error ? err.message : 'Send failed');
       loadConversations();
     } finally {
       setSending(false);
@@ -275,12 +277,12 @@ export default function AIPanel({ currentSymbol }: { currentSymbol: string }) {
   };
 
   const testConnection = async () => {
-    setConnResult('測試中…');
+    setConnResult('Testing…');
     try {
       const result = await api.aiAssistant.testConnection();
       setConnResult(result.ok ? `✓ ${result.detail}` : `✗ ${result.detail}`);
     } catch (err) {
-      setConnResult(err instanceof Error ? `✗ ${err.message}` : '✗ 測試失敗');
+      setConnResult(err instanceof Error ? `✗ ${err.message}` : '✗ Test failed');
     }
   };
 
@@ -292,12 +294,12 @@ export default function AIPanel({ currentSymbol }: { currentSymbol: string }) {
         hypothesis: draftHypothesis.trim() || null,
         source_message_id: draftFormFor,
       });
-      setDraftSaved(`已建立待審核草稿 ${draft.id.slice(0, 8)}…`);
+      setDraftSaved(`Draft ${draft.id.slice(0, 8)}… created for review.`);
       setDraftFormFor(null);
       setDraftTitle('');
       setDraftHypothesis('');
     } catch (err) {
-      setPanelError(err instanceof Error ? err.message : '儲存草稿失敗');
+      setPanelError(err instanceof Error ? err.message : 'Could not save the draft');
     }
   };
 
@@ -308,27 +310,31 @@ export default function AIPanel({ currentSymbol }: { currentSymbol: string }) {
   return (
     <div className="ws-ai-panel" data-testid="ai-panel">
       <div className="ws-ai-headrow">
-        <span className="ws-ai-title">🤖 個人 AI 助手</span>
+        <span className="ws-ai-title">Personal AI assistant</span>
         {status && (
           <span className={`ws-badge ${status.mode === 'live' ? 'ws-badge-live' : ''}`} data-testid="ai-mode-badge">
-            {status.mode === 'live' ? `AI 即時（${status.provider}）` : 'AI 模擬'}
+            {status.mode === 'live' ? `AI live (${status.provider})` : 'AI simulated'}
           </span>
         )}
-        <button className="ws-icon-btn" title="測試供應商連線" onClick={testConnection} data-testid="ai-test-connection">
-          測試
+        <button className="ws-icon-btn" title="Test provider connection" onClick={testConnection} data-testid="ai-test-connection">
+          Test
         </button>
       </div>
-      {connResult && <div className="ws-ai-conn">{connResult}</div>}
+      {connResult && (
+        <div className="ws-ai-conn" role="status">
+          {connResult}
+        </div>
+      )}
 
       <div className="ws-ai-conv-row">
         <select
           className="ws-ai-select"
           value={activeId ?? ''}
           onChange={(e) => setActiveId(e.target.value || null)}
-          aria-label="選擇 AI 對話"
+          aria-label="Choose an AI conversation"
           data-testid="ai-conversation-select"
         >
-          {conversations.length === 0 && <option value="">（尚無對話）</option>}
+          {conversations.length === 0 && <option value="">(No conversations yet)</option>}
           {conversations.map((c) => (
             <option key={c.id} value={c.id}>
               {c.title}
@@ -337,18 +343,18 @@ export default function AIPanel({ currentSymbol }: { currentSymbol: string }) {
         </select>
         <button
           className="ws-icon-btn"
-          title="新對話"
-          aria-label="新對話"
+          title="New conversation"
+          aria-label="New conversation"
           onClick={newConversation}
           data-testid="ai-new-conversation"
           style={{ whiteSpace: 'nowrap' }}
         >
-          ＋ 新對話
+          + New conversation
         </button>
         <button
           className="ws-icon-btn"
-          title="刪除此對話"
-          aria-label="刪除此對話"
+          title="Delete this conversation"
+          aria-label="Delete this conversation"
           onClick={deleteConversation}
           disabled={!activeId}
         >
@@ -358,7 +364,8 @@ export default function AIPanel({ currentSymbol }: { currentSymbol: string }) {
 
       {conversations.length === 0 && (
         <div className="ws-muted" data-testid="ai-conversation-hint">
-          尚無對話：按「＋ 新對話」建立第一個研究對話。
+          No conversations yet: choose “+ New conversation” to start your first research
+          conversation.
         </div>
       )}
 
@@ -366,34 +373,34 @@ export default function AIPanel({ currentSymbol }: { currentSymbol: string }) {
         {ctxSymbols.map((s) => (
           <span key={s} className="ws-chip">{s}</span>
         ))}
-        {ctxDraftCount > 0 && <span className="ws-chip">草稿×{ctxDraftCount}</span>}
-        {ctxMemoryCount > 0 && <span className="ws-chip">記憶×{ctxMemoryCount}</span>}
+        {ctxDraftCount > 0 && <span className="ws-chip">Drafts ×{ctxDraftCount}</span>}
+        {ctxMemoryCount > 0 && <span className="ws-chip">Memory ×{ctxMemoryCount}</span>}
         {currentSymbol && (
           <button
             className="ws-icon-btn"
-            title={`把目前標的 ${currentSymbol} 加入 AI 脈絡`}
-            aria-label={`把目前標的 ${currentSymbol} 加入 AI 脈絡`}
+            title={`Add the current symbol ${currentSymbol} to the AI context`}
+            aria-label={`Add the current symbol ${currentSymbol} to the AI context`}
             onClick={addCurrentSymbol}
             disabled={!activeId}
           >
-            ＋ {currentSymbol}
+            + {currentSymbol}
           </button>
         )}
         <button
           className="ws-icon-btn"
-          title="選擇要提供給 AI 的研究草稿與個人記憶"
-          aria-label="編輯研究脈絡"
+          title="Choose the research drafts and personal memory to give the AI"
+          aria-label="Edit research context"
           onClick={openContextEditor}
           disabled={!activeId}
         >
-          脈絡
+          Context
         </button>
       </div>
 
       {ctxOpen && activeConversation && (
         <div className="ws-ai-ctx-editor" data-testid="ai-context-editor">
-          <div className="ws-ai-ctx-section">研究草稿</div>
-          {draftOptions.length === 0 && <div className="ws-muted">沒有可選草稿</div>}
+          <div className="ws-ai-ctx-section">Research drafts</div>
+          {draftOptions.length === 0 && <div className="ws-muted">No drafts available</div>}
           {draftOptions.slice(0, 8).map((d) => (
             <label key={d.id} className="ws-ai-ctx-item">
               <input
@@ -404,8 +411,8 @@ export default function AIPanel({ currentSymbol }: { currentSymbol: string }) {
               <span className="ws-ai-ctx-label">{d.title}</span>
             </label>
           ))}
-          <div className="ws-ai-ctx-section">已授權個人記憶</div>
-          {memoryOptions.length === 0 && <div className="ws-muted">沒有已授權的記憶</div>}
+          <div className="ws-ai-ctx-section">Approved personal memory</div>
+          {memoryOptions.length === 0 && <div className="ws-muted">No approved memory</div>}
           {memoryOptions.slice(0, 8).map((m) => (
             <label key={m.id} className="ws-ai-ctx-item">
               <input
@@ -419,13 +426,15 @@ export default function AIPanel({ currentSymbol }: { currentSymbol: string }) {
         </div>
       )}
 
-      <div className="ws-ai-advisory">⚠ AI 回覆僅供研究參考，不構成交易授權</div>
+      <div className="ws-ai-advisory">
+        AI replies are for research reference only and do not authorize trading.
+      </div>
 
       <div className="ws-ai-thread" ref={threadRef} data-testid="ai-thread">
         {messages.length === 0 && (
           <div className="ws-muted ws-ai-empty">
-            按「＋ 新對話」建立或選擇一段對話；再用「脈絡」加入研究草稿、記憶與標的。
-            （當前供應商：{status?.provider ?? '未知'}）
+            Choose “+ New conversation” or pick an existing one; use “Context” to add research
+            drafts, memory and instruments. (Current provider: {status?.provider ?? 'Unknown'})
           </div>
         )}
         {messages.map((m) => (
@@ -438,13 +447,13 @@ export default function AIPanel({ currentSymbol }: { currentSymbol: string }) {
                   className="ws-icon-btn"
                   onClick={() => {
                     setDraftFormFor(m.id);
-                    setDraftTitle(`AI 提議：${m.content.slice(0, 30)}`);
+                    setDraftTitle(`AI proposal: ${m.content.slice(0, 30)}`);
                     setDraftHypothesis(m.content);
                     setDraftSaved('');
                   }}
                   data-testid="ai-save-draft"
                 >
-                  儲存為研究草稿
+                  Save as research draft
                 </button>
                 <span className="ws-muted">{m.completion_tokens ?? 0} tokens</span>
               </div>
@@ -457,35 +466,43 @@ export default function AIPanel({ currentSymbol }: { currentSymbol: string }) {
               className="ws-input"
               value={draftTitle}
               onChange={(e) => setDraftTitle(e.target.value)}
-              placeholder="草稿標題"
+              placeholder="Draft title"
             />
             <textarea
               className="ws-input"
               value={draftHypothesis}
               onChange={(e) => setDraftHypothesis(e.target.value)}
-              placeholder="研究假設／AI 提議內容"
+              placeholder="Research hypothesis / AI proposal"
               rows={4}
               style={{ marginTop: 8, resize: 'vertical' }}
             />
             <div className="ws-ai-draft-form-actions">
               <button className="btn btn-primary" onClick={saveDraft} disabled={!draftTitle.trim()}>
-                建立待審核草稿
+                Create draft for review
               </button>
               <button className="ws-icon-btn" onClick={() => setDraftFormFor(null)}>
-                取消
+                Cancel
               </button>
             </div>
           </div>
         )}
-        {draftSaved && <div className="ws-ai-saved">{draftSaved}（待人工審核）</div>}
+        {draftSaved && (
+          <div className="ws-ai-saved" role="status">
+            {draftSaved} (awaiting human review)
+          </div>
+        )}
       </div>
 
-      {panelError && <div className="ws-message-error">{panelError}</div>}
+      {panelError && (
+        <div className="ws-message-error" role="alert">
+          {panelError}
+        </div>
+      )}
 
       <div className="ws-ai-input-row">
         <textarea
           className="ws-ai-input"
-          aria-label="向 AI 助手提問研究問題"
+          aria-label="Ask the AI assistant a research question"
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => {
@@ -494,15 +511,15 @@ export default function AIPanel({ currentSymbol }: { currentSymbol: string }) {
               send();
             }
           }}
-          placeholder="向 AI 助手提問研究問題…"
+          placeholder="Ask the AI assistant a research question…"
           rows={2}
           data-testid="ai-input"
         />
         <button className="btn btn-primary" onClick={send} disabled={sending || !activeId || !input.trim()} data-testid="ai-send">
-          {sending ? '傳送中…' : '傳送'}
+          {sending ? 'Sending…' : 'Send'}
         </button>
       </div>
-      {quotaUsed !== null && <div className="ws-muted ws-ai-quota">AI 用量：{quotaUsed}</div>}
+      {quotaUsed !== null && <div className="ws-muted ws-ai-quota">AI usage: {quotaUsed}</div>}
     </div>
   );
 }

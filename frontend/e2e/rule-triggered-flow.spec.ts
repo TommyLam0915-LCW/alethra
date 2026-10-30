@@ -24,10 +24,10 @@ import { test, expect, type Page } from '@playwright/test';
  *     checksum, and writes its OWN bars so this flow never depends on any
  *     ad-hoc manually-seeded bars or any pre-existing account/session/portfolio.
  *   - EVERY product action this spec verifies is a real UI gesture: typing the
- *     login, clicking 開始模擬 / 自動推進一日 / the link-portfolio button / the
- *     portfolio link / the journal tabs. No API call stands in for a user step,
- *     and no API call writes product state. Waits are waitForURL / waitForResponse
- *     / expect-poll, never arbitrary sleeps.
+ *     login, clicking Start simulation / Advance one day / the link-portfolio
+ *     button / the portfolio link / the journal tabs. No API call stands in for a
+ *     user step, and no API call writes product state. Waits are waitForURL /
+ *     waitForResponse / expect-poll, never arbitrary sleeps.
  */
 
 interface Runtime {
@@ -64,8 +64,8 @@ const ASSET = 'DEMO-ALPHA';
 const MAX_ADVANCES = 30;
 // The order-side cell renders SIDE_LABELS[o.side] (paper-portfolio/[id]/page.tsx),
 // so the DOM shows the localized labels, never the raw BUY/SELL enum.
-const SIDE_LABEL_BUY = '買入';
-const SIDE_LABEL_SELL = '賣出';
+const SIDE_LABEL_BUY = 'Buy';
+const SIDE_LABEL_SELL = 'Sell';
 
 const journey = {
   experimentId: '',
@@ -89,9 +89,9 @@ test.describe('rule-triggered forward replay', () => {
     await page.waitForURL('**/dashboard');
 
     // The seeded rule-flow experiment must be on the dashboard exactly once.
-    const card = page.locator('.dash-experiment-item', { hasText: EXPERIMENT_TITLE });
+    const card = page.getByRole('link', { name: EXPERIMENT_TITLE, exact: true });
     await expect(card, 'seeded rule-flow experiment must be listed').toHaveCount(1);
-    const href = (await card.first().getAttribute('href')) ?? '';
+    const href = (await card.getAttribute('href')) ?? '';
     journey.experimentId = new URL(href, runtime.frontendBase).pathname.split('/').pop() ?? '';
     expect(journey.experimentId, 'experiment id resolved from the dashboard card').not.toBe('');
   });
@@ -102,11 +102,11 @@ test.describe('rule-triggered forward replay', () => {
 
   test('creates a forward-simulation session through the UI', async () => {
     await page.goto(`${runtime.frontendBase}/experiments/${journey.experimentId}/simulation`);
-    const createBtn = page.locator('button.btn-primary', { hasText: '開始模擬' });
+    const createBtn = page.locator('button.btn-primary', { hasText: 'Start simulation' });
     await createBtn.waitFor({ state: 'visible', timeout: 20000 });
     await createBtn.click();
     // The advance control only appears once a session exists.
-    const advanceBtn = page.locator('button.btn-primary', { hasText: '自動推進一日' });
+    const advanceBtn = page.locator('button.btn-primary', { hasText: 'Advance one day' });
     await expect(advanceBtn, 'session creation must reveal the advance control').toBeVisible({ timeout: 20000 });
   });
 
@@ -120,7 +120,7 @@ test.describe('rule-triggered forward replay', () => {
 
   test('advances day-by-day until the declared stop fires', async () => {
     for (let i = 0; i < MAX_ADVANCES; i += 1) {
-      const btn = page.locator('button.btn-primary', { hasText: '自動推進一日' });
+      const btn = page.locator('button.btn-primary', { hasText: 'Advance one day' });
       await btn.waitFor({ state: 'visible', timeout: 15000 }).catch(() => undefined);
       if (!(await btn.isVisible().catch(() => false))) break;
 
@@ -168,7 +168,7 @@ test.describe('rule-triggered forward replay', () => {
     const actors = (await page.locator('[data-testid="pp-order-actor"]').allTextContents())
       .map((a) => a.replace(/\s+/g, ' ').trim());
     expect(
-      actors.some((a) => /系統|system|規則|rule|自動/i.test(a)),
+      actors.some((a) => /system|rule|automatic/i.test(a)),
       'the rule-triggered orders must be attributed to a system/rule actor, not a human',
     ).toBe(true);
 
@@ -180,7 +180,7 @@ test.describe('rule-triggered forward replay', () => {
       .toBeGreaterThan(0);
     const exitReasons = (await page.locator('[data-testid="pp-decision-exit-reason"]').allTextContents())
       .map((e) => e.replace(/\s+/g, ' ').trim());
-    expect(exitReasons.some((r) => /stop|停損/i.test(r)), 'the exit must carry the stop reason').toBe(true);
+    expect(exitReasons.some((r) => /stop/i.test(r)), 'the exit must carry the stop reason').toBe(true);
 
     // Headline metrics: cash and realised P&L are present and numeric.
     const cash = (await page.locator('[data-testid="pp-cash"]').textContent()) ?? '';

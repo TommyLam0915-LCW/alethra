@@ -1,13 +1,13 @@
 'use client';
 
+import {
+  ADJUSTMENT_LABELS,
+  DATA_NATURE_LABELS,
+  MARKET_STATUS_LABELS,
+  PRICE_MODE_LABELS,
+  label,
+} from '@/lib/copy';
 import type { BarsResponse, DataCoverage, InstrumentDetail } from './types';
-
-const NATURE_LABELS: Record<string, string> = {
-  synthetic: '模擬數據',
-  live: '即時數據',
-  delayed: '延遲數據',
-  unknown: '數據性質未知',
-};
 
 const NATURE_CLASSES: Record<string, string> = {
   synthetic: 'ws-nature-badge ws-nature-synthetic',
@@ -30,13 +30,6 @@ const STATUS_CLASSES: Record<string, string> = {
   stale: 'ws-nature-badge ws-nature-synthetic',
   no_data: 'ws-nature-badge ws-nature-unknown',
   disconnected: 'ws-nature-badge ws-nature-delayed',
-};
-
-const ADJUSTMENT_LABELS: Record<string, string> = {
-  adjusted: '復權：已調整',
-  unadjusted: '復權：未調整',
-  not_applicable: '復權：不適用',
-  unknown: '復權狀態未知',
 };
 
 interface Props {
@@ -64,19 +57,31 @@ export default function InstrumentHeader({ data, loading, coverage }: Props) {
   const cov = coverage ?? detail?.data_coverage ?? null;
   const declaredWindow =
     cov && cov.availability_source === 'provider_declared' && cov.available_start && cov.available_end
-      ? `${cov.available_start} 至 ${cov.available_end}`
+      ? `${cov.available_start} – ${cov.available_end}`
       : null;
   const periodLabel =
     bars && bars.bars.length === 0 && declaredWindow
-      ? `此範圍沒有數據，可用期間 ${declaredWindow}`
-      : `數據截至 ${asOf || '—'}`;
+      ? `No data in this range; available period ${declaredWindow}`
+      : `Data as of ${asOf || '—'}`;
+
+  const natureLabel = nature ? label(DATA_NATURE_LABELS, nature) : null;
+  const modeLabel = data?.mode ? label(PRICE_MODE_LABELS, data.mode) : null;
+  const statusLabel = data?.market_status
+    ? label(MARKET_STATUS_LABELS, data.market_status)
+    : null;
+  // The same word twice in one row reads as a rendering bug, not as emphasis:
+  // synthetic fixtures report both nature and price mode as "Synthetic".
+  // The stale badge is never suppressed: data freshness is a separate fact from
+  // market status, even when both happen to be labelled "Stale".
+  const showModeBadge = !!modeLabel && modeLabel !== natureLabel;
+  const showStaleBadge = !!isStale;
 
   const statusTooltip = data?.market_status
     ? [
         data.market_status_reason,
-        data.current_session ? `目前時段 ${data.current_session}` : null,
-        data.next_regular_open ? `下次常規交易 ${data.next_regular_open}` : null,
-        data.holiday_calendar_populated === false ? '假期日曆未載入' : null,
+        data.current_session ? `Current session ${data.current_session}` : null,
+        data.next_regular_open ? `Next regular session ${data.next_regular_open}` : null,
+        data.holiday_calendar_populated === false ? 'Holiday calendar not loaded' : null,
       ]
         .filter(Boolean)
         .join(' · ')
@@ -86,20 +91,20 @@ export default function InstrumentHeader({ data, loading, coverage }: Props) {
     <div className="ws-instrument-header" data-testid="instrument-header">
       <div className="ws-instrument-identity" data-testid="chart-legend">
         <h2 className="ws-instrument-title">
-          {data ? `${data.symbol} · ${data.name}` : loading ? '載入中…' : '—'}
+          {data ? `${data.symbol} · ${data.name}` : loading ? 'Loading…' : '—'}
         </h2>
         {nature && (
           <span className={NATURE_CLASSES[nature] || NATURE_CLASSES.unknown} data-testid="chart-nature-badge">
-            {NATURE_LABELS[nature] || nature}
+            {natureLabel}
           </span>
         )}
-        {data?.mode && (
+        {data?.mode && showModeBadge && (
           <span
             className={MODE_CLASSES[data.mode] || MODE_CLASSES.unknown}
             data-testid="chart-mode-badge"
             title={data.timestamp_semantics ?? undefined}
           >
-            {data.mode_label_zh || data.mode}
+            {modeLabel}
           </span>
         )}
         {data?.market_status && (
@@ -108,12 +113,12 @@ export default function InstrumentHeader({ data, loading, coverage }: Props) {
             data-testid="chart-market-status-badge"
             title={statusTooltip}
           >
-            {data.market_status_label_zh || data.market_status}
+            {statusLabel}
           </span>
         )}
-        {isStale && (
+        {showStaleBadge && (
           <span className="ws-nature-badge ws-nature-delayed" data-testid="chart-stale-badge">
-            陳舊
+            Stale
           </span>
         )}
         <span className="ws-instrument-price" style={{ marginLeft: 'auto' }} data-testid="instrument-last-price">
@@ -122,18 +127,18 @@ export default function InstrumentHeader({ data, loading, coverage }: Props) {
               {lastBar.close.toFixed(2)} {data?.currency}
             </>
           ) : (
-            <span className="ws-muted">無報價</span>
+            <span className="ws-muted">No quote</span>
           )}
         </span>
       </div>
       {data && (
         <div className="ws-muted ws-instrument-meta" data-testid="chart-meta-line">
-          {bars ? `${bars.bar_count} 條 · ` : ''}
-          {data.timeframe || '1d'} · {data.exchange}（{data.timezone}）
-          {provider ? ` · 供應商 ${provider}` : ''} · {periodLabel}
-          {receivedUtc ? ` · 擷取於 ${receivedUtc} UTC` : ''}
+          {bars ? `${bars.bar_count} bars · ` : ''}
+          {data.timeframe || '1d'} · {data.exchange} ({data.timezone})
+          {provider ? ` · Provider ${provider}` : ''} · {periodLabel}
+          {receivedUtc ? ` · Fetched ${receivedUtc} UTC` : ''}
           {data.data_quality?.adjustment
-            ? ` · ${ADJUSTMENT_LABELS[data.data_quality.adjustment] || data.data_quality.adjustment}`
+            ? ` · Adjustment: ${label(ADJUSTMENT_LABELS, data.data_quality.adjustment)}`
             : ''}
         </div>
       )}

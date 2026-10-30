@@ -170,13 +170,13 @@ export type EvidenceTabKey =
   | 'log';
 
 export const EVIDENCE_TABS: { key: EvidenceTabKey; label: string }[] = [
-  { key: 'positions', label: '持倉' },
-  { key: 'orders-fills', label: '訂單與成交' },
-  { key: 'journal', label: '自動交易日誌' },
-  { key: 'results', label: '結果' },
-  { key: 'research', label: '研究' },
-  { key: 'models', label: '模型' },
-  { key: 'log', label: '系統紀錄' },
+  { key: 'positions', label: 'Positions' },
+  { key: 'orders-fills', label: 'Orders & fills' },
+  { key: 'journal', label: 'Automated journal' },
+  { key: 'results', label: 'Results' },
+  { key: 'research', label: 'Research' },
+  { key: 'models', label: 'Models' },
+  { key: 'log', label: 'System log' },
 ];
 
 const LEGACY_TAB_ALIASES: Record<string, EvidenceTabKey> = {

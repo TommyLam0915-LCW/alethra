@@ -12,6 +12,7 @@ import {
   type ISeriesApi,
   type Time,
 } from 'lightweight-charts';
+import { DATA_NATURE_LABELS, PRICE_MODE_LABELS, label } from '@/lib/copy';
 import type { BarsResponse } from './types';
 
 export const RANGES = ['3M', '6M', '1Y', 'ALL'] as const;
@@ -152,10 +153,10 @@ export default function PriceChart({
       <div className="ws-chart-toolbar">
         {samplePeriodActive && data && availablePeriod && (
           <span className="ws-chart-sample-note" data-testid="chart-sample-note">
-            顯示數據集期間 {availablePeriod.start} – {availablePeriod.end}（非最近日期）
+            Showing dataset period {availablePeriod.start} – {availablePeriod.end} (not the most recent dates)
           </span>
         )}
-        <div className="ws-range-btns" data-testid="chart-range-buttons" role="group" aria-label="日期範圍">
+        <div className="ws-range-btns" data-testid="chart-range-buttons" role="group" aria-label="Date range">
           {RANGES.map((r) => (
             <button
               key={r}
@@ -163,39 +164,41 @@ export default function PriceChart({
               onClick={() => onRangeChange(r)}
               aria-pressed={r === range && !samplePeriodActive}
             >
-              {r === 'ALL' ? '全部' : r}
+              {r === 'ALL' ? 'All' : r}
             </button>
           ))}
         </div>
       </div>
       <div ref={containerRef} className="ws-chart-canvas" />
       {loading && (
-        <div className="ws-muted" style={{ position: 'absolute', bottom: 8, left: 10 }}>
-          載入數據中…
+        <div className="ws-muted" style={{ position: 'absolute', bottom: 8, left: 10 }} role="status">
+          Loading data…
         </div>
       )}
       {!loading && data && data.bars.length === 0 && (
         <div className="ws-chart-empty" data-testid="chart-empty-state">
-          <div className="ws-chart-empty-title">此日期範圍沒有數據</div>
+          <div className="ws-chart-empty-title">No data in this date range</div>
           <div className="ws-chart-empty-detail">
-            {data.symbol} 在 {data.start_date} 至 {data.end_date} 沒有{' '}
-            {data.timeframe ?? '1d'} K 線。
+            {data.symbol} has no {data.timeframe ?? '1d'} bars from {data.start_date} to {data.end_date}.
           </div>
           {availablePeriod ? (
             <div className="ws-chart-empty-detail">
-              可用期間：<strong>{availablePeriod.start} 至 {availablePeriod.end}</strong>
+              Available period: <strong>{availablePeriod.start} – {availablePeriod.end}</strong>
               <br />
-              數據源：{data.provider}｜{data.mode_label_zh ?? data.data_quality?.data_nature ?? 'UNKNOWN'}
+              Source: {data.provider} |{' '}
+              {label(PRICE_MODE_LABELS, data.mode === 'unknown' ? null : data.mode) === 'Not provided'
+                ? label(DATA_NATURE_LABELS, data.data_quality?.data_nature)
+                : label(PRICE_MODE_LABELS, data.mode)}
             </div>
           ) : (
             <div className="ws-chart-empty-detail">
-              數據源：{data.provider}｜{data.data_quality?.data_nature ?? 'UNKNOWN'} —
-              該數據源未提供可用期間（UNKNOWN）。
+              Source: {data.provider} | {label(DATA_NATURE_LABELS, data.data_quality?.data_nature)} —
+              the provider did not declare an available period (UNKNOWN).
             </div>
           )}
           {availablePeriod && !samplePeriodActive && (
             <button className="ws-btn ws-btn-accent" onClick={onUseSamplePeriod} data-testid="chart-use-sample-period">
-              查看可用示例期間
+              View available sample period
             </button>
           )}
         </div>

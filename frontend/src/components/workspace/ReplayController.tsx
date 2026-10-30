@@ -1,16 +1,9 @@
 'use client';
 
 import { useState } from 'react';
+import { label, NOT_PROVIDED, SESSION_STATUS_LABELS } from '@/lib/copy';
 
 export const INTRADAY_TIMEFRAMES = new Set(['1m', '5m', '15m', '30m', '1h']);
-
-const STATUS_LABELS: Record<string, string> = {
-  pending: '待開始',
-  active: '進行中',
-  paused: '已暫停',
-  completed: '已完成',
-  retired: '已停用',
-};
 
 export interface ReplaySession {
   id: string;
@@ -59,12 +52,12 @@ export default function ReplayController({
     ? session.current_bar_timestamp?.slice(0, 16).replace('T', ' ') ?? null
     : session.current_snapshot_date;
   const canAdvance = session.status === 'pending' || session.status === 'active';
-  const advanceLabel = intraday ? `下一根 ${session.timeframe} K 線` : '下一日';
+  const advanceLabel = intraday ? `Next ${session.timeframe} bar` : 'Next day';
 
   return (
     <section
       className="ws-replay"
-      aria-label="歷史回放控制器"
+      aria-label="Historical replay controls"
       data-testid="replay-controller"
       data-summary-open={summaryOpen}
     >
@@ -73,22 +66,22 @@ export default function ReplayController({
           stacked three rows, and the centre column has to spend those pixels on ⑤'s
           plotted area and ⑧'s band instead. */}
       <div className="ws-replay-clock" data-testid="replay-clock">
-        <span className="ws-replay-badge">歷史回放・非即時</span>
-        <span className="ctx-label">狀態</span>
+        <span className="ws-replay-badge">Historical replay · not live</span>
+        <span className="ctx-label">Status</span>
         <span className="ctx-value" data-testid="replay-status">
-          {STATUS_LABELS[session.status] ?? session.status}
+          {label(SESSION_STATUS_LABELS, session.status)}
         </span>
-        <span className="ctx-label">回放時鐘</span>
+        <span className="ctx-label">Replay clock</span>
         <span className="ctx-value numeric" data-testid="replay-clock-value">
-          {clock ?? '尚未推進'}
-          {clock && intraday ? '（交易所當地時間）' : ''}
+          {clock ?? 'Not advanced yet'}
+          {clock && intraday ? ' (exchange local time)' : ''}
         </span>
-        <span className="ctx-label">節奏</span>
-        <span className="ctx-value">{intraday ? '逐根 K 線' : '逐日'}</span>
+        <span className="ctx-label">Rhythm</span>
+        <span className="ctx-value">{intraday ? 'Per bar' : 'Per day'}</span>
       </div>
 
       {/* Whose series the cursor cuts is not a secondary fact: when it is another
-          instrument's, the 「未裁切」 below is the honest reading, not a bug. */}
+          instrument's, the “Not cut” below is the honest reading, not a bug. */}
       {instrumentNote && (
         <p className="ws-replay-mismatch" data-testid="replay-instrument-note">
           {instrumentNote}
@@ -104,7 +97,7 @@ export default function ReplayController({
           onClick={() => setSummaryOpen((open) => !open)}
           data-testid="replay-meta-toggle"
         >
-          資料摘要
+          Data summary
         </button>
         <button
           type="button"
@@ -123,7 +116,7 @@ export default function ReplayController({
             disabled={busy}
             data-testid="replay-pause"
           >
-            暫停
+            Pause
           </button>
         )}
         {session.status === 'paused' && (
@@ -134,12 +127,13 @@ export default function ReplayController({
             disabled={busy}
             data-testid="replay-resume"
           >
-            繼續
+            Resume
           </button>
         )}
         {!canAdvance && (
           <span className="ws-muted" data-testid="replay-advance-disabled-reason">
-            此工作階段已{STATUS_LABELS[session.status] ?? session.status}，無法再推進
+            This session is already {label(SESSION_STATUS_LABELS, session.status)} and cannot
+            advance further.
           </span>
         )}
       </div>
@@ -150,17 +144,17 @@ export default function ReplayController({
           id="replay-summary"
           data-testid="replay-summary"
         >
-          <span className="ctx-label">已觀察</span>
-          <span className="ctx-value numeric">{session.observed_days} 個觀測點</span>
-          <span className="ctx-label">資料集</span>
-          <span className="ctx-value">{session.provider_id ?? '未提供'}</span>
-          <span className="ctx-label">週期</span>
+          <span className="ctx-label">Observed</span>
+          <span className="ctx-value numeric">{session.observed_days} observations</span>
+          <span className="ctx-label">Dataset</span>
+          <span className="ctx-value">{session.provider_id ?? NOT_PROVIDED}</span>
+          <span className="ctx-label">Timeframe</span>
           <span className="ctx-value">{session.timeframe ?? '1d'}</span>
-          <span className="ctx-label">策略版本</span>
+          <span className="ctx-label">Strategy version</span>
           <span className="ctx-value numeric">{session.experiment_version_id.slice(0, 8)}</span>
-          <span className="ctx-label">圖表截止</span>
+          <span className="ctx-label">Chart cut-off</span>
           <span className="ctx-value numeric" data-testid="replay-bars-end">
-            {barsEnd ?? '未裁切'}
+            {barsEnd ?? 'Not cut'}
           </span>
         </div>
       )}
@@ -174,11 +168,11 @@ export default function ReplayController({
           <p className="ws-replay-hint" data-testid="replay-hint">
             {clock
               ? instrumentNote
-                ? '圖表未依此游標裁切：這個游標屬於另一個標的，裁切目前圖表會製造出該工作階段從未產生的回放視圖。後端僅支援向前逐步，沒有回溯、跳轉或變速。'
+                ? 'The chart is not cut to this cursor: the cursor belongs to a different instrument, and cutting the current chart would fabricate a replay view this session never produced. The backend only supports stepping forward — there is no rewind, seek or speed control.'
                 : intraday
-                  ? `圖表、指標與摘要一律依回放時鐘裁切，不含未來資料；日內游標之下，圖表只顯示至 ${barsEnd}（後端 /bars 目前僅提供日線）。後端僅支援向前逐步，沒有回溯、跳轉或變速。`
-                  : '圖表、指標與摘要一律依回放時鐘裁切，不含未來 K 線。後端僅支援向前逐步，沒有回溯、跳轉或變速。'
-              : '尚未推進：回放時鐘沒有游標，圖表顯示整個已儲存資料集。按下「下一日」或「下一根 K 線」後才會依回放時鐘裁切未來資料。'}
+                  ? `The chart, indicators and summary are all cut to the replay clock and never include future data. With an intraday cursor the chart only shows up to ${barsEnd} (the backend /bars endpoint currently serves daily bars only). The backend only supports stepping forward — there is no rewind, seek or speed control.`
+                  : 'The chart, indicators and summary are all cut to the replay clock and never include future bars. The backend only supports stepping forward — there is no rewind, seek or speed control.'
+              : 'Not advanced yet: the replay clock has no cursor, so the chart shows the whole stored dataset. Future data is cut to the replay clock only after you choose “Next day” or “Next bar”.'}
           </p>
         )
       )}

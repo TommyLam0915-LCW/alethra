@@ -39,6 +39,8 @@ export default function WorkspaceShell() {
   const [bars, setBars] = useState<BarsResponse | null>(null);
   const [barsLoading, setBarsLoading] = useState(false);
   const [barsError, setBarsError] = useState('');
+  /** A waiting state, distinct from a failure: the replay binding is not chosen yet. */
+  const [barsPendingNote, setBarsPendingNote] = useState('');
   const [symbolInvalid, setSymbolInvalid] = useState(false);
   const [detail, setDetail] = useState<InstrumentDetail | null>(null);
   /**
@@ -73,6 +75,13 @@ export default function WorkspaceShell() {
    * for the whole stored dataset and paint the future bars the replay cursor cuts.
    */
   const [replayReady, setReplayReady] = useState(false);
+  /**
+   * Whether this account owns any portfolio bound to a replay session. A bound
+   * account must never fall back to a today-anchored window while its binding is
+   * unresolved: those are exactly the bars the session's cursor is supposed to
+   * hide. `unknown` (list unreadable or still loading) is not `none`.
+   */
+  const [accountReplayBinding, setAccountReplayBinding] = useState<'unknown' | 'none' | 'bound'>('unknown');
   const [replayBusy, setReplayBusy] = useState(false);
   const [replayActionError, setReplayActionError] = useState('');
   const { status, usageCount } = useOperationalStatus();
@@ -170,6 +179,7 @@ export default function WorkspaceShell() {
       setReplayReady(false);
       setReplaySession(null);
       setReplayLoadError('');
+      setAccountReplayBinding('unknown');
       try {
         const list = await api.paperPortfolio.list();
         if (cancelled) return;
@@ -178,6 +188,7 @@ export default function WorkspaceShell() {
           // candidate here belongs to the signed-in user. Choosing is still not
           // the same as guessing: bind only when the choice is unambiguous.
           const bound = list.filter((p: any) => !!p.simulation_session_id);
+          setAccountReplayBinding(bound.length > 0 ? 'bound' : 'none');
           const chosen =
             list.length === 1 ? list[0] : bound.length === 1 ? bound[0] : null;
           if (chosen) {
@@ -226,7 +237,7 @@ export default function WorkspaceShell() {
   const replaySessionId = contextPortfolio?.simulation_session_id ?? null;
 
   /** The session this effect loaded because an account named it — not one the user
-   * started in the 策略 tab, which stays in use until the account changes. */
+   * started in the strategy tab, which stays in use until the account changes. */
   const sessionFromBindingRef = useRef<string | null>(null);
   const replaySessionRef = useRef<ReplaySession | null>(null);
   useEffect(() => {
@@ -237,7 +248,7 @@ export default function WorkspaceShell() {
    * One binding, one cursor: the replay session is whichever session the account in
    * context names, so switching account moves the chart cut, the ⑥ controller and
    * the order form's settlement basis together. Keyed on the binding alone, so an
-   * advance (same id) or a session created by the 策略 tab is never re-fetched over.
+   * advance (same id) or a session created by the strategy tab is never re-fetched over.
    */
   useEffect(() => {
     if (!authed) return;
@@ -264,7 +275,7 @@ export default function WorkspaceShell() {
         setReplaySession(data);
       } catch (err) {
         if (!cancelled) {
-          setReplayLoadError(err instanceof Error ? err.message : '回放工作階段無法載入');
+          setReplayLoadError(err instanceof Error ? err.message : 'Replay session could not be loaded');
         }
       } finally {
         if (!cancelled) setReplayReady(true);
@@ -276,6 +287,20 @@ export default function WorkspaceShell() {
   }, [authed, replaySessionId]);
 
   const replaySessionLoaded = !!replaySession;
+
+  /**
+   * A today-anchored window may only be requested once the account is known to
+   * own no replay-bound portfolio, or the user explicitly chose an unbound one.
+   * The portfolio list settling is not the same as the binding settling: when
+   * several bound portfolios exist none is picked for the user, and painting the
+   * stored series meanwhile would put bars past the cursor in front of someone
+   * whose account is about to cut them.
+   */
+  const replayBindingSettled =
+    replaySessionLoaded ||
+    (replaySessionId === null &&
+      (accountReplayBinding === 'none' ||
+        (!!explicitPortfolio && !explicitPortfolio.simulation_session_id)));
 
   const replayIsIntraday =
     !!replaySession?.timeframe && INTRADAY_TIMEFRAMES.has(replaySession.timeframe);
@@ -306,7 +331,7 @@ export default function WorkspaceShell() {
   /**
    * A replay cursor is a statement about one price series. When the session is
    * known to trade a different instrument than the plotted symbol, its cursor is
-   * not this chart's cutoff — clipping 「US:AAPL」 candles at another instrument's
+   * not this chart's cutoff — clipping US:AAPL candles at another instrument's
    * clock would sell a replay view the session never produced. Rules that could
    * not be resolved keep the existing cut, because nothing is claimed about them.
    */
@@ -330,7 +355,7 @@ export default function WorkspaceShell() {
       const res = await call;
       setReplaySession(res?.session ?? res);
     } catch (err) {
-      setReplayActionError(err instanceof Error ? err.message : '回放操作失敗');
+      setReplayActionError(err instanceof Error ? err.message : 'Replay action failed');
     } finally {
       setReplayBusy(false);
     }
@@ -350,12 +375,27 @@ export default function WorkspaceShell() {
   useEffect(() => {
     if (!authed || !replayReady) return;
     // A portfolio bound to a session whose cursor could not be read has no trustworthy
-    // cut. Requesting the full stored window would paint the bars the replay hides, so
-    // the chart stays unavailable until the cursor is known.
-    if (replaySessionId && !replaySessionLoaded) {
+    // cut, and a bound account whose binding is not in context yet has no cursor at
+    // all. Requesting the full stored window in either state would paint the bars the
+    // replay hides, so the chart stays unavailable until the binding is settled.
+    if (!replayBindingSettled) {
       setBars(null);
       setBarsLoading(false);
-      setBarsError('回放游標未能載入：取得游標前不請求歷史數據，避免顯示未來 K 線');
+      if (!replaySessionId && accountReplayBinding === 'bound') {
+        // Not a failure: the account is replay-bound but no portfolio is in context
+        // yet, and the order panel's own pick normally resolves it within a frame.
+        setBarsError('');
+        setBarsPendingNote(
+          'Choose the portfolio to replay in Manual paper order. Prices are not requested before that replay cursor is known, so no bar after it can reach this page.'
+        );
+      } else {
+        setBarsPendingNote('');
+        setBarsError(
+          replaySessionId
+            ? 'Replay cursor could not be read: historical data is not requested before the cursor is known, so future bars are never shown.'
+            : "This account's replay binding could not be read, so prices are not requested until it is known — a chart is never painted past a replay cursor that is still to be established."
+        );
+      }
       return;
     }
     // The replay cursor is a hard cut: it outranks a sample period, which may
@@ -366,18 +406,19 @@ export default function WorkspaceShell() {
     let cancelled = false;
     setBarsLoading(true);
     setBarsError('');
+    setBarsPendingNote('');
     setSymbolInvalid(false);
     (async () => {
       try {
         const data = await api.instruments.bars(symbol, reqWindow.start, reqWindow.end);
         if (!data || !Array.isArray(data.bars)) {
-          throw new Error('無效的數據回應');
+          throw new Error('Invalid data response');
         }
         if (!cancelled) setBars(data);
       } catch (err) {
         if (!cancelled) {
           setBars(null);
-          setBarsError(err instanceof Error ? err.message : '無法載入數據');
+          setBarsError(err instanceof Error ? err.message : 'Data could not be loaded');
           setSymbolInvalid(err instanceof ApiError && err.status === 404);
         }
       } finally {
@@ -394,8 +435,9 @@ export default function WorkspaceShell() {
     samplePeriod,
     chartBarsEnd,
     replayReady,
+    replayBindingSettled,
     replaySessionId,
-    replaySessionLoaded,
+    accountReplayBinding,
   ]);
 
   useEffect(() => {
@@ -556,7 +598,7 @@ export default function WorkspaceShell() {
     // the way in, before the handle's own handler runs.
     //
     // The match is our own `data-ws-handle` marker, not `[role="separator"]`: a splitter
-    // that persists nothing (⑦'s inner 詳情/操作 divider) would otherwise open this gate too,
+    // that persists nothing (⑦'s inner details/actions divider) would otherwise open this gate too,
     // and any clamp report that arrived while the flag was still up would be stored.
     const onPointerDown = (event: PointerEvent) => {
       if ((event.target as HTMLElement | null)?.closest?.('[data-ws-handle]')) {
@@ -748,7 +790,7 @@ export default function WorkspaceShell() {
   };
 
   /**
-   * 回復預設版面. The stored intent goes back to the design defaults and the live
+   * Restore default layout. The stored intent goes back to the design defaults and the live
    * panels follow in the same action — the library reads `defaultSize` only on mount,
    * so without the imperative resize the button would change the record but not the
    * room. The resize reports sizes without a gesture, so it cannot re-persist itself.
@@ -761,8 +803,8 @@ export default function WorkspaceShell() {
   if (!authed || !ready) {
     return (
       <AppShell active="workspace" fullHeight>
-        <div style={{ margin: 'auto' }} className="ws-muted">
-          載入工作台…
+        <div style={{ margin: 'auto' }} className="ws-muted" role="status" aria-live="polite">
+          Loading workspace…
         </div>
       </AppShell>
     );
@@ -787,8 +829,8 @@ export default function WorkspaceShell() {
   const drawerCloseButton = (
     <button
       className="ws-icon-btn"
-      title="收合觀察列表"
-      aria-label="收合觀察列表"
+      title="Collapse watchlist"
+      aria-label="Collapse watchlist"
       onClick={() => setMobileDrawer(false)}
       data-testid="watchlist-drawer-close"
     >
@@ -800,10 +842,15 @@ export default function WorkspaceShell() {
     <>
       <InstrumentHeader data={bars ?? detail} loading={barsLoading} coverage={coverage} />
       {barsError ? (
-        <div className="ws-message-error" style={{ margin: 10 }} data-testid="workspace-bars-error">
+        <div
+          className="ws-message-error"
+          style={{ margin: 10 }}
+          data-testid="workspace-bars-error"
+          role="alert"
+        >
           <div>
             {symbolInvalid
-              ? `已儲存的標的「${symbol}」不存在，無法載入數據。`
+              ? `The saved instrument ${symbol} does not exist, so its data could not be loaded.`
               : barsError}
           </div>
           {symbolInvalid && (
@@ -824,11 +871,20 @@ export default function WorkspaceShell() {
                   fontSize: 12,
                 }}
               >
-                改用預設標的（{DEFAULT_LAYOUT.symbol}）
+                Use the default instrument ({DEFAULT_LAYOUT.symbol})
               </button>
-              <span style={{ fontSize: 12 }}>或在搜尋欄選擇其他標的</span>
+              <span style={{ fontSize: 12 }}>or pick another instrument in search</span>
             </div>
           )}
+        </div>
+      ) : barsPendingNote ? (
+        <div
+          className="ws-message-info"
+          style={{ margin: 10 }}
+          data-testid="workspace-bars-pending"
+          role="status"
+        >
+          {barsPendingNote}
         </div>
       ) : (
         <div className="ws-panel" style={{ flex: 1, minHeight: 0, position: 'relative' }}>
@@ -862,7 +918,7 @@ export default function WorkspaceShell() {
     />
   ) : replayLoadError ? (
     <div className="ws-replay" data-testid="replay-load-error">
-      <span className="ws-replay-badge">歷史回放</span>
+      <span className="ws-replay-badge">Historical replay</span>
       <span className="ws-replay-error" role="alert">
         {replayLoadError}
       </span>
@@ -876,13 +932,13 @@ export default function WorkspaceShell() {
     ? {
         id: explicitPortfolio.id,
         reason:
-          `與「手動模擬單」目前所選組合一致（${
+          `Matches the portfolio currently selected in Manual paper order (${
             explicitPortfolio.status === 'active'
-              ? '狀態為進行中；實際能否送單以該面板的提交目標為準'
-              : '僅唯讀檢視，此狀態送單會被後端拒絕'
-          }）` +
+              ? 'status is active; whether an order can actually be submitted is decided by that panel\'s submission target'
+              : 'read-only view — orders are rejected by the backend in this status'
+          })` +
           (replaySession && explicitPortfolio.simulation_session_id !== replaySession.id
-            ? `；其回放綁定與目前工作階段 ${replaySession.id.slice(0, 8)} 不同步，圖表游標仍跟隨工作階段`
+            ? `; its replay binding is out of sync with the current session ${replaySession.id.slice(0, 8)}, so the chart cursor still follows the session`
             : ''),
       }
     : null;
@@ -922,11 +978,11 @@ export default function WorkspaceShell() {
   const chosenBound = explicitPortfolio?.simulation_session_id ?? null;
   const contextPortfolioHint =
     explicitPortfolio && chosenBound !== (replaySession?.id ?? null)
-      ? `已在「手動模擬單」選擇組合 ${explicitPortfolio.id.slice(0, 8)}，其回放綁定（${
-          chosenBound ? chosenBound.slice(0, 8) : '未綁定'
-        }）與目前工作階段（${
-          replaySession ? replaySession.id.slice(0, 8) : '未載入'
-        }）不同步：圖表游標仍跟隨目前工作階段，送單前請確認組合與成交基準。`
+      ? `Portfolio ${explicitPortfolio.id.slice(0, 8)} is selected in Manual paper order, but its replay binding (${
+          chosenBound ? chosenBound.slice(0, 8) : 'unbound'
+        }) is out of sync with the current session (${
+          replaySession ? replaySession.id.slice(0, 8) : 'not loaded'
+        }): the chart cursor still follows the current session, so confirm the portfolio and settlement basis before submitting.`
       : portfolioHint;
 
   const contextBar = (
@@ -939,25 +995,25 @@ export default function WorkspaceShell() {
         meta={bars ?? detail}
         status={status}
         usageCount={usageCount}
-        replayTimestamp={replaySession ? replayClock ?? '尚未推進' : null}
+        replayTimestamp={replaySession ? replayClock ?? 'Not started' : null}
         replayInstrumentNote={replayInstrumentNote}
       />
       <div className="ws-contextbar-tools">
         <button
           className="ws-text-btn"
           type="button"
-          title="只重設面板寬度與高度，不影響投資組合、回放 session 或訂單"
-          aria-label="回復預設版面"
+          title="Resets panel widths and heights only; portfolios, replay session and orders are untouched"
+          aria-label="Reset to default layout"
           onClick={onResetPanelLayout}
           data-testid="reset-layout"
         >
-          回復預設版面
+          Reset layout
         </button>
         <button
           ref={watchlistToggleRef}
           className="ws-icon-btn ws-watchlist-toggle"
-          title="觀察列表"
-          aria-label={mobileDrawer ? '收合觀察列表' : '展開觀察列表'}
+          title="Watchlist"
+          aria-label={mobileDrawer ? 'Collapse watchlist' : 'Expand watchlist'}
           aria-expanded={mobileDrawer}
           aria-controls={mobileDrawer ? 'watchlist-drawer' : undefined}
           onClick={() => setMobileDrawer((v) => !v)}
@@ -999,7 +1055,7 @@ export default function WorkspaceShell() {
             data-testid="bottom-tabs"
             style={{ height: 480, flexShrink: 0, display: 'flex', flexDirection: 'column' }}
           >
-            <div className="ws-panel-header">交易證據</div>
+            <div className="ws-panel-header">Trading evidence</div>
             {evidenceDock}
           </div>
         </div>
@@ -1028,8 +1084,8 @@ export default function WorkspaceShell() {
                     {renderWatchlist(
                       <button
                         className="ws-icon-btn"
-                        title="收合"
-                        aria-label="收合觀察列表"
+                        title="Collapse"
+                        aria-label="Collapse watchlist"
                         onClick={() => togglePanel('left')}
                       >
                         ⟨
@@ -1083,9 +1139,9 @@ export default function WorkspaceShell() {
                     >
                       <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
                         <div className="ws-panel-header">
-                          交易證據
+                          Trading evidence
                           <div className="ws-panel-header-actions">
-                            <button className="ws-icon-btn" title="收合" aria-label="收合交易證據" onClick={() => togglePanel('bottom')}>
+                            <button className="ws-icon-btn" title="Collapse" aria-label="Collapse trading evidence" onClick={() => togglePanel('bottom')}>
                               ⌄
                             </button>
                           </div>
@@ -1128,9 +1184,9 @@ export default function WorkspaceShell() {
                   >
                     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
                       <div className="ws-panel-header">
-                        AI 助手
+                        AI assistant
                         <div className="ws-panel-header-actions">
-                          <button className="ws-icon-btn" title="收合 AI 面板" aria-label="收合 AI 面板" onClick={toggleAIPanel}>
+                          <button className="ws-icon-btn" title="Collapse AI panel" aria-label="Collapse AI panel" onClick={toggleAIPanel}>
                             ⌃
                           </button>
                         </div>
@@ -1148,9 +1204,9 @@ export default function WorkspaceShell() {
                   <Panel minSize={10}>
                     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
                       <div className="ws-panel-header">
-                        詳情 / 操作
+                        Details / actions
                         <div className="ws-panel-header-actions">
-                          <button className="ws-icon-btn" title="收合" aria-label="收合詳情與操作" onClick={() => togglePanel('right')}>
+                          <button className="ws-icon-btn" title="Collapse" aria-label="Collapse details and actions" onClick={() => togglePanel('right')}>
                             ⟩
                           </button>
                         </div>

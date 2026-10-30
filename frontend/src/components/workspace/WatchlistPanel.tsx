@@ -44,36 +44,41 @@ export default function WatchlistPanel({
   return (
     <div className={`ws-panel${className ? ` ${className}` : ''}`} data-testid="watchlist-panel">
       <h3 className="ws-panel-header">
-        觀察列表
+        Watchlists
         <div className="ws-panel-header-actions">
           <button
             className="ws-icon-btn"
-            title="將當前代號加入觀察列表"
-            aria-label={`將 ${currentSymbol} 加入觀察列表`}
+            title="Add the current symbol to a watchlist"
+            aria-label={`Add ${currentSymbol} to a watchlist`}
             onClick={handleAdd}
             disabled={busy}
             data-testid="watchlist-add-current"
           >
-            ＋
+            +
           </button>
           {watchlists.length === 0 && (
             <button
               className="ws-icon-btn"
-              title="建立觀察列表"
+              title="Create a watchlist"
               onClick={() => onCreate()}
               data-testid="watchlist-create"
             >
-              新增
+              New
             </button>
           )}
           {extraActions}
         </div>
       </h3>
       <div className="ws-panel-body">
-        {loading && <div className="ws-muted" style={{ padding: 10 }}>載入中…</div>}
+        {loading && (
+          <div className="ws-muted" style={{ padding: 10 }} role="status">
+            Loading…
+          </div>
+        )}
         {!loading && watchlists.length === 0 && (
           <div className="ws-muted" style={{ padding: 10 }}>
-            還沒有觀察列表。按「＋」將當前代號加入，會自動建立預設列表。
+            No watchlists yet. Choose “+” to add the current symbol and a default list is created
+            automatically.
           </div>
         )}
         {watchlists.map((wl) => (
@@ -86,8 +91,8 @@ export default function WatchlistPanel({
               <button
                 className="ws-icon-btn"
                 style={{ marginLeft: 'auto' }}
-                title="刪除此觀察列表"
-                aria-label={`刪除觀察列表 ${wl.name}`}
+                title="Delete this watchlist"
+                aria-label={`Delete watchlist ${wl.name}`}
                 onClick={() => onDelete(wl.id)}
               >
                 ✕
@@ -95,7 +100,8 @@ export default function WatchlistPanel({
             </div>
             {wl.items.length === 0 && (
               <div className="ws-muted" style={{ padding: '6px 10px' }} data-testid="watchlist-group-empty">
-                這個列表還沒有代號。按「＋」加入 {currentSymbol}，或以頂部搜尋框選取其他符號。
+                This list has no symbols yet. Choose “+” to add {currentSymbol}, or pick another
+                symbol in the search at the top.
               </div>
             )}
             {wl.items.map((item, idx) => {
@@ -111,7 +117,7 @@ export default function WatchlistPanel({
                     className="ws-symbol-pick"
                     onClick={() => onSelectSymbol(item.symbol)}
                     aria-current={active ? 'true' : undefined}
-                    aria-label={`選取標的 ${item.symbol}`}
+                    aria-label={`Select ${item.symbol}`}
                   >
                     <span className="ws-market-badge">{market}</span>
                     <span className="ws-symbol-label">{code}</span>
@@ -119,8 +125,8 @@ export default function WatchlistPanel({
                   <div className="ws-row-actions">
                     <button
                       className="ws-icon-btn"
-                      title="上移"
-                      aria-label={`上移 ${item.symbol}`}
+                      title="Move up"
+                      aria-label={`Move ${item.symbol} up`}
                       onClick={() => onMoveItem(wl.id, item.symbol, -1)}
                       disabled={idx === 0}
                     >
@@ -128,8 +134,8 @@ export default function WatchlistPanel({
                     </button>
                     <button
                       className="ws-icon-btn"
-                      title="下移"
-                      aria-label={`下移 ${item.symbol}`}
+                      title="Move down"
+                      aria-label={`Move ${item.symbol} down`}
                       onClick={() => onMoveItem(wl.id, item.symbol, 1)}
                       disabled={idx === wl.items.length - 1}
                     >
@@ -137,8 +143,8 @@ export default function WatchlistPanel({
                     </button>
                     <button
                       className="ws-icon-btn"
-                      title="移除"
-                      aria-label={`從 ${wl.name} 移除 ${item.symbol}`}
+                      title="Remove"
+                      aria-label={`Remove ${item.symbol} from ${wl.name}`}
                       onClick={() => onRemoveItem(wl.id, item.symbol)}
                     >
                       ✕

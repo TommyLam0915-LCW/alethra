@@ -69,7 +69,7 @@ export default function WatchlistDrawer({
       className="ws-watchlist-drawer"
       role="dialog"
       aria-modal="true"
-      aria-label="觀察列表"
+      aria-label="Watchlist"
       tabIndex={-1}
       data-testid="watchlist-drawer"
     >

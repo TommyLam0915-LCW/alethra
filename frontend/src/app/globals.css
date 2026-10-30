@@ -883,6 +883,17 @@ textarea:disabled {
 .ws-table a { color: #5b8def; text-decoration: none; }
 .ws-table a:hover { text-decoration: underline; }
 
+/* Read-only spec rows carry free text (experiment titles, periods); in the narrow
+   side rail a nowrap cell would clip the identity instead of wrapping it. */
+.ws-table-wrap td {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+/* Field names are short; only the recorded value needs to wrap. */
+.ws-table-wrap td:first-child {
+  white-space: nowrap;
+}
+
 .ws-form-row {
   display: flex;
   gap: 8px;
@@ -1028,6 +1039,17 @@ textarea:disabled {
   background: #08998122;
   color: #7be0c8;
   border: 1px solid #08998155;
+  border-radius: 5px;
+  padding: 8px 10px;
+  font-size: 12px;
+  margin-bottom: 8px;
+  word-break: break-word;
+}
+
+.ws-message-info {
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-subtle);
   border-radius: 5px;
   padding: 8px 10px;
   font-size: 12px;

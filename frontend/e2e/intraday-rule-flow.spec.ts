@@ -31,7 +31,7 @@ import { test, expect, type Page } from '@playwright/test';
  *     (MarketDataBar has no timeframe column; unique key is instrument+timestamp+provider),
  *     so these bars can never be confused with the daily "demo" bars.
  *   - EVERY product action this spec verifies is a real UI gesture: typing the login,
- *     clicking 開始模擬 / 推進下一根 5 分鐘 K 線 / the link-portfolio button / the portfolio
+ *     clicking Start simulation / Advance one 5 minutes bar / the link-portfolio button / the portfolio
  *     link / the journal tabs / the CSV download. No API call stands in for a user step and
  *     no API call writes product state. Waits are waitForURL / waitForResponse /
  *     waitForEvent / expect-poll, never arbitrary sleeps.
@@ -78,9 +78,10 @@ const TIMEFRAME = '5m';
 const EXPECTED_BARS = 18;
 const MAX_ADVANCES = EXPECTED_BARS + 3;
 const EXPECTED_FILL_COUNT = 6; // rule_entry x3 + rule_target + rule_session_end + rule_stop
-// The order-side cell renders SIDE_LABELS[o.side], so the DOM shows localized labels.
-const SIDE_LABEL_BUY = '買入';
-const SIDE_LABEL_SELL = '賣出';
+// The order-side cell renders SIDE_LABELS[o.side], so the DOM shows the English
+// labels, never the raw BUY/SELL enum.
+const SIDE_LABEL_BUY = 'Buy';
+const SIDE_LABEL_SELL = 'Sell';
 
 interface AdvanceDecision {
   decision_type: string;
@@ -140,9 +141,9 @@ test.describe('intraday 5-minute rule-triggered forward replay', () => {
     await page.waitForURL('**/dashboard');
 
     // The seeded intraday experiment must be on the dashboard exactly once.
-    const card = page.locator('.dash-experiment-item', { hasText: EXPERIMENT_TITLE });
+    const card = page.getByRole('link', { name: EXPERIMENT_TITLE, exact: true });
     await expect(card, 'seeded intraday experiment must be listed exactly once').toHaveCount(1);
-    const href = (await card.first().getAttribute('href')) ?? '';
+    const href = (await card.getAttribute('href')) ?? '';
     journey.experimentId = new URL(href, runtime.frontendBase).pathname.split('/').pop() ?? '';
     expect(journey.experimentId, 'experiment id resolved from the dashboard card').not.toBe('');
   });
@@ -162,19 +163,19 @@ test.describe('intraday 5-minute rule-triggered forward replay', () => {
     await expect(badge, 'intraday session must reveal the synthetic/replay/non-live badge')
       .toBeVisible({ timeout: 20000 });
     await expect(badge, 'badge must state synthetic / historical replay / non-live')
-      .toContainText('合成資料');
-    await expect(badge).toContainText('歷史回放');
-    await expect(badge).toContainText('非即時行情');
-    await expect(page.locator('[data-testid="sim-intraday-timeframe"]'), 'timeframe label must be 5 分鐘')
-      .toContainText('5 分鐘');
+      .toContainText('Synthetic data');
+    await expect(badge).toContainText('Historical replay');
+    await expect(badge).toContainText('Not a live feed');
+    await expect(page.locator('[data-testid="sim-intraday-timeframe"]'), 'timeframe label must be 5 minutes')
+      .toContainText('5 minutes');
     await expect(page.locator('[data-testid="sim-intraday-provider"]'), 'provider must be the timeframe-isolated demo-5m')
       .toHaveText(PROVIDER);
 
-    // The advance control must read the PER-BAR intraday label, never the daily 自動推進一日.
+    // The advance control must read the PER-BAR intraday label, never the daily "Advance one day".
     const advanceBtn = page.locator('[data-testid="sim-advance-btn"]');
     await expect(advanceBtn, 'session creation must reveal the per-bar advance control').toBeVisible({ timeout: 20000 });
-    await expect(advanceBtn, 'advance label must be per-bar (推進下一根 5 分鐘 K 線)')
-      .toContainText('推進下一根 5 分鐘 K 線');
+    await expect(advanceBtn, 'advance label must be per-bar ("Advance one 5 minutes bar")')
+      .toContainText('Advance one 5 minutes bar');
   });
 
   test('links a paper portfolio through the UI', async () => {
@@ -258,7 +259,7 @@ test.describe('intraday 5-minute rule-triggered forward replay', () => {
     // The portfolio page must disclose the intraday synthetic replay too.
     const pfBadge = page.locator('[data-testid="pp-intraday-badge"]');
     await expect(pfBadge, 'portfolio must disclose the intraday synthetic/replay/non-live basis').toBeVisible({ timeout: 20000 });
-    await expect(pfBadge).toContainText('非即時行情');
+    await expect(pfBadge).toContainText('Not a live feed');
     await expect(page.locator('[data-testid="pp-intraday-provider"]'), 'portfolio badge provider must be demo-5m').toHaveText(PROVIDER);
 
     // Orders tab: system-actor entry BUY(s) and exit SELL(s).
@@ -271,7 +272,7 @@ test.describe('intraday 5-minute rule-triggered forward replay', () => {
     const actors = (await page.locator('[data-testid="pp-order-actor"]').allTextContents())
       .map((a) => a.replace(/\s+/g, ' ').trim());
     expect(
-      actors.some((a) => /系統|system|規則|rule|自動/i.test(a)),
+      actors.some((a) => /system|rule|automatic/i.test(a)),
       'the rule-triggered orders must be attributed to a system/rule actor, not a human',
     ).toBe(true);
 
@@ -283,9 +284,9 @@ test.describe('intraday 5-minute rule-triggered forward replay', () => {
       .toBeGreaterThan(0);
     const journalExitReasons = (await page.locator('[data-testid="pp-decision-exit-reason"]').allTextContents())
       .map((e) => e.replace(/\s+/g, ' ').trim());
-    expect(journalExitReasons.some((r) => /target|目標/.test(r)), 'journal must show the target exit').toBe(true);
-    expect(journalExitReasons.some((r) => /stop|停損/.test(r)), 'journal must show the stop exit').toBe(true);
-    expect(journalExitReasons.some((r) => /session_end|收盤/.test(r)), 'journal must show the session-end exit').toBe(true);
+    expect(journalExitReasons.some((r) => /take-profit|target/i.test(r)), 'journal must show the target exit').toBe(true);
+    expect(journalExitReasons.some((r) => /stop-loss/i.test(r)), 'journal must show the stop exit').toBe(true);
+    expect(journalExitReasons.some((r) => /session-end/i.test(r)), 'journal must show the session-end exit').toBe(true);
 
     // Headline metrics: cash and realised P&L are present and numeric.
     const cash = (await page.locator('[data-testid="pp-cash"]').textContent()) ?? '';

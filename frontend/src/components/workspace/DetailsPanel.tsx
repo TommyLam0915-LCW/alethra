@@ -2,21 +2,8 @@
 
 import { useEffect, useState } from 'react';
 import { api } from '@/lib/api';
+import { ADJUSTMENT_LABELS, DATA_NATURE_LABELS, label } from '@/lib/copy';
 import type { InstrumentDetail } from './types';
-
-const NATURE_LABELS: Record<string, string> = {
-  synthetic: '模擬數據',
-  live: '即時數據',
-  delayed: '延遲數據',
-  unknown: '未知',
-};
-
-const STALE_LABELS: Record<string, string> = {
-  not_applicable: '不適用',
-  unadjusted: '未調整',
-  adjusted: '已調整',
-  unknown: '未知',
-};
 
 export default function DetailsPanel({ instrumentId }: { instrumentId: string }) {
   const [detail, setDetail] = useState<InstrumentDetail | null>(null);
@@ -31,7 +18,7 @@ export default function DetailsPanel({ instrumentId }: { instrumentId: string })
         const data = await api.instruments.get(instrumentId);
         if (!cancelled) setDetail(data);
       } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : '載入失敗');
+        if (!cancelled) setError(err instanceof Error ? err.message : 'Could not load details');
       }
     })();
     return () => {
@@ -41,10 +28,18 @@ export default function DetailsPanel({ instrumentId }: { instrumentId: string })
 
   return (
     <div className="ws-panel" data-testid="details-panel">
-      <div className="ws-panel-header">代號詳情</div>
+      <div className="ws-panel-header">Instrument details</div>
       <div className="ws-panel-body" style={{ padding: 10 }}>
-        {error && <div className="ws-message-error">{error}</div>}
-        {!detail && !error && <div className="ws-muted">載入中…</div>}
+        {error && (
+          <div className="ws-message-error" role="alert">
+            {error}
+          </div>
+        )}
+        {!detail && !error && (
+          <div className="ws-muted" role="status">
+            Loading…
+          </div>
+        )}
         {detail && (
           <div style={{ display: 'grid', gap: 6 }}>
             <div>
@@ -56,30 +51,30 @@ export default function DetailsPanel({ instrumentId }: { instrumentId: string })
             <table className="ws-table">
               <tbody>
                 <tr>
-                  <td className="ws-muted">市場</td>
+                  <td className="ws-muted">Market</td>
                   <td>
                     {detail.market} · {detail.exchange}
                   </td>
                 </tr>
                 <tr>
-                  <td className="ws-muted">貨幣</td>
+                  <td className="ws-muted">Currency</td>
                   <td>{detail.currency}</td>
                 </tr>
                 <tr>
-                  <td className="ws-muted">時區</td>
+                  <td className="ws-muted">Timezone</td>
                   <td>{detail.timezone}</td>
                 </tr>
                 <tr>
-                  <td className="ws-muted">每手股數</td>
+                  <td className="ws-muted">Lot size</td>
                   <td>
                     {detail.lot_size ?? '—'}
                     {detail.lot_size_verified ? (
                       <span className="ws-status-badge" style={{ marginLeft: 6 }}>
-                        已驗證
+                        Verified
                       </span>
                     ) : (
                       <span className="ws-status-badge" style={{ marginLeft: 6 }}>
-                        未驗證
+                        Unverified
                       </span>
                     )}
                   </td>
@@ -87,68 +82,68 @@ export default function DetailsPanel({ instrumentId }: { instrumentId: string })
                 {detail.latest_bar && (
                   <>
                     <tr>
-                      <td className="ws-muted">最新收市</td>
+                      <td className="ws-muted">Latest close</td>
                       <td>{detail.latest_bar.close.toFixed(2)}</td>
                     </tr>
                     <tr>
-                      <td className="ws-muted">日期</td>
+                      <td className="ws-muted">Date</td>
                       <td>{detail.latest_bar.date}</td>
                     </tr>
                     <tr>
-                      <td className="ws-muted">成交量</td>
+                      <td className="ws-muted">Volume</td>
                       <td>{detail.latest_bar.volume?.toLocaleString() ?? '—'}</td>
                     </tr>
                   </>
                 )}
                 {detail.data_quality && (
                   <tr>
-                    <td className="ws-muted">數據性質</td>
+                    <td className="ws-muted">Data nature</td>
                     <td>
                       <span className="ws-nature-badge ws-nature-unknown" style={{ marginRight: 6 }}>
-                        {NATURE_LABELS[detail.data_quality.data_nature] || detail.data_quality.data_nature}
+                        {label(DATA_NATURE_LABELS, detail.data_quality.data_nature)}
                       </span>
                       {detail.data_quality.is_stale && (
-                        <span className="ws-nature-badge ws-nature-delayed">陳舊</span>
+                        <span className="ws-nature-badge ws-nature-delayed">Stale</span>
                       )}
                     </td>
                   </tr>
                 )}
                 {detail.data_quality?.adjustment && (
                   <tr>
-                    <td className="ws-muted">復權</td>
-                    <td>{STALE_LABELS[detail.data_quality.adjustment] || detail.data_quality.adjustment}</td>
+                    <td className="ws-muted">Adjustment</td>
+                    <td>{label(ADJUSTMENT_LABELS, detail.data_quality.adjustment)}</td>
                   </tr>
                 )}
                 {detail.data_coverage && (
                   <tr>
-                    <td className="ws-muted">可用數據期間</td>
+                    <td className="ws-muted">Available period</td>
                     <td>
                       {detail.data_coverage.availability_source === 'provider_declared' &&
                       detail.data_coverage.available_start &&
                       detail.data_coverage.available_end ? (
                         <>
-                          {detail.data_coverage.available_start} 至 {detail.data_coverage.available_end}
-                          <span className="ws-muted">（{detail.data_coverage.timeframe}）</span>
+                          {detail.data_coverage.available_start} – {detail.data_coverage.available_end}
+                          <span className="ws-muted"> ({detail.data_coverage.timeframe})</span>
                         </>
                       ) : (
                         <>
                           UNKNOWN
-                          <span className="ws-muted">（該數據源未提供可用期間）</span>
+                          <span className="ws-muted"> (the provider did not declare a period)</span>
                         </>
                       )}
                     </td>
                   </tr>
                 )}
                 <tr>
-                  <td className="ws-muted">數據源</td>
+                  <td className="ws-muted">Data source</td>
                   <td>
-                    {detail.data_source}（{detail.feed_mode}）
+                    {detail.data_source} ({detail.feed_mode})
                   </td>
                 </tr>
               </tbody>
             </table>
-            {detail.data_quality?.note_zh && (
-              <div className="ws-muted">{detail.data_quality.note_zh}</div>
+            {(detail.data_quality?.note || detail.data_quality?.note_zh) && (
+              <div className="ws-muted">{detail.data_quality.note ?? detail.data_quality.note_zh}</div>
             )}
           </div>
         )}

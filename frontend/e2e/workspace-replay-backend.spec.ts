@@ -22,13 +22,13 @@ import {
  * dataset genuinely contains future bars: a leak caught here is a real leak, not a
  * fixture artefact.
  *
- * DATA IS SYNTHETIC DEMO DATA, NOT LIVE QUOTES — historical replay, 非即時行情. A fixed
+ * DATA IS SYNTHETIC DEMO DATA, NOT LIVE QUOTES — historical replay, not a live feed. A fixed
  * demo series is not market-data validation, and advancing a disposable demo session is
  * not broker integration. Missing live-provider credentials do not block this tier.
  *
  * UI GESTURES vs ORACLE READS (disclosed):
  *   - Every product action is a real browser gesture: typing the login, opening
- *     /workspace, clicking 「下一日」. No API call performs a product step.
+ *     /workspace, clicking “Next day”. No API call performs a product step.
  *   - GETs issued through the request context are independent reads of server state
  *     (session row, full stored window) compared against what the page shows. They write
  *     nothing.
@@ -36,13 +36,13 @@ import {
  *     it and the test must know which session row to read. The replicated pick is
  *     cross-checked against the page's own session fingerprint (the 8-char strategy
  *     version), so the oracle cannot silently diverge.
- *   - Container ⑦ (操作面板) is covered by real clicks on its tabs and on its review
+ *   - Container ⑦ (actions panel) is covered by real clicks on its tabs and on its review
  *     control, and its proof is an ABSENCE: the stored dataset makes the honest submit
  *     target unresolvable, so the correct product behaviour is to refuse. Every ⑦
  *     assertion is an oracle read plus a client-side write log, in which the shell's
  *     layout-preference save is classified apart from decision/order/execution writes —
  *     only the latter must be absent. Nothing in this tier writes through ⑦.
- *   - Container ⑧ (證據面板) is covered read-only over the portfolio the session is
+ *   - Container ⑧ (evidence panel) is covered read-only over the portfolio the session is
  *     bound to: positions, paper orders, fills, the journal envelope and the portfolio
  *     detail are each fetched through the same endpoints the panel calls and compared
  *     cell for cell, including the real CSV download and the detail drawer's
@@ -97,8 +97,14 @@ function loadRuntime(): Runtime {
 
 const runtime = loadRuntime();
 const SYMBOL = 'US:AAPL';
+/** A second stored instrument: charting it creates a real session/picture mismatch. */
+const OTHER_SYMBOL = 'US:MSFT';
 
 interface BarsCall {
+  /** Instrument id taken from the request path, so a stray series cannot hide in the set. */
+  path: string;
+  /** Milliseconds after the journey navigation; negative means it belongs to setup. */
+  at: number;
   start: string | null;
   end: string | null;
   dates: string[];
@@ -149,6 +155,13 @@ const journey = {
   sessionId: '',
   session: null as SessionRow | null,
   bars: [] as BarsCall[],
+  /**
+   * Only requests made while the journey under test is on screen count. Setup loads
+   * the workspace too, and a response body can still be decoding when a test starts.
+   */
+  captureBars: false,
+  /** Wall clock of the journey navigation, so each capture says which document asked. */
+  navigatedAt: 0,
   stored: [] as BarRow[],
   /** Every non-GET the browser issued (path only), so a test can prove it wrote nothing. */
   writes: [] as string[],
@@ -183,6 +196,20 @@ function printedMoney(text: string): number {
   return match ? Number(match[0]) : NaN;
 }
 
+/**
+ * Point the persisted workspace layout at an instrument through the product's own
+ * symbol search — a real UI gesture, not a direct layout write — and wait for the
+ * header to adopt it. The header prints the ticker without its venue prefix while
+ * the API path and stored rows use the full instrument id.
+ */
+async function selectChartSymbol(page: Page, query: string, ticker: string): Promise<void> {
+  const rows = page.getByTestId('symbol-search-item');
+  await page.getByLabel('Search symbols').fill(query);
+  await expect(rows.filter({ hasText: query })).toHaveCount(1);
+  await rows.filter({ hasText: query }).click();
+  await expect(page.getByTestId('instrument-header')).toContainText(ticker);
+}
+
 test.describe('workspace replay against the real local backend (tier B)', () => {
   test.describe.configure({ mode: 'serial' });
 
@@ -211,6 +238,7 @@ test.describe('workspace replay against the real local backend (tier B)', () => 
       const url = new URL(res.url());
       if (!url.pathname.startsWith('/api/v1/instruments/') || !url.pathname.endsWith('/bars')) return;
       if (res.status() !== 200) return;
+      if (!journey.captureBars) return;
       let dates: string[] = [];
       try {
         const body = await res.json();
@@ -219,6 +247,8 @@ test.describe('workspace replay against the real local backend (tier B)', () => 
         return;
       }
       journey.bars.push({
+        path: url.pathname,
+        at: journey.navigatedAt ? Date.now() - journey.navigatedAt : -1,
         start: url.searchParams.get('start_date'),
         end: url.searchParams.get('end_date'),
         dates,
@@ -243,8 +273,12 @@ test.describe('workspace replay against the real local backend (tier B)', () => 
     journey.token = await page.evaluate(() => localStorage.getItem('token') ?? '');
     expect(journey.token.length, 'real login must yield a session token').toBeGreaterThan(20);
 
-    // SETUP: find a locked daily version to bind the test session to.
-    // This is scaffolding, not a product action under test.
+    // SETUP: bind the test session to a version that DEMONSTRABLY trades the charted
+    // symbol. Picking "the first locked version" made the suite depend on database
+    // order: once an earlier journey left an experiment trading a different asset at
+    // the top of the list, the session and the chart disagreed and the cursor-cut
+    // checks below could not hold. The rules resolution only works through an
+    // experiment's current_version_id, so the version must be current as well.
     const experiments = await oracleGet<ExperimentRow[]>('/api/v1/experiments');
     expect(experiments.length, 'the E2E runtime must hold at least one experiment').toBeGreaterThan(0);
 
@@ -252,18 +286,20 @@ test.describe('workspace replay against the real local backend (tier B)', () => 
     for (const exp of experiments) {
       if (!exp.current_version_id) continue;
       const versions = await oracleGet<VersionRow[]>(`/api/v1/experiments/${exp.id}/versions`);
-      const locked = versions.find((v) => v.locked_at !== null);
-      if (locked) {
-        // Check if this version is daily (timeframe null or '1d' in strategy_spec)
-        const spec = locked.strategy_spec || {};
-        const timeframe = spec.timeframe as string | undefined;
-        if (!timeframe || timeframe === '1d') {
-          lockedVersionId = locked.id;
-          break;
-        }
+      const current = versions.find((v) => v.id === exp.current_version_id) ?? null;
+      if (!current || current.locked_at === null) continue;
+      const spec = current.strategy_spec || {};
+      const timeframe = spec.timeframe as string | undefined;
+      const assets = Array.isArray(spec.asset_ids) ? spec.asset_ids : [];
+      if ((!timeframe || timeframe === '1d') && assets[0] === SYMBOL) {
+        lockedVersionId = current.id;
+        break;
       }
     }
-    expect(lockedVersionId, 'must find a locked daily version for test session creation').not.toBeNull();
+    expect(
+      lockedVersionId,
+      `must find a locked daily current version whose first asset is ${SYMBOL} for test session creation`
+    ).not.toBeNull();
 
     // SETUP: create a fresh session for this test run.
     // POST /api/v1/simulations/versions/{version_id} with initial_virtual_cash.
@@ -319,7 +355,7 @@ test.describe('workspace replay against the real local backend (tier B)', () => 
 
     // SETUP: advance the session once to move it from 'pending' to 'active' and establish the initial cursor.
     // A pending session has no cursor yet; the test needs an active session with a cursor to verify the UI.
-    // This is scaffolding, not part of the UI test. The actual "下一日" click test will advance it again.
+    // This is scaffolding, not part of the UI test. The actual "Next day" click test will advance it again.
     const advanceRes = await apiRead.post(`${runtime.backendBase}/api/v1/simulations/${journey.sessionId}/advance`, {
       headers: {
         Authorization: `Bearer ${journey.token}`,
@@ -327,6 +363,26 @@ test.describe('workspace replay against the real local backend (tier B)', () => 
       },
     });
     expect(advanceRes.status(), 'initial advance must succeed').toBe(200);
+
+    // SETUP: the saved workspace layout is per-account, so an earlier journey on the
+    // same account can leave another symbol there. Point this account's layout at the
+    // symbol under test through the product's own search rather than writing layout
+    // state directly, so the run does not depend on which spec ran before it.
+    await page.goto(`${runtime.frontendBase}/workspace`);
+    await page.waitForLoadState('networkidle');
+    const instrumentHeader = page.getByTestId('instrument-header');
+    if (!((await instrumentHeader.textContent()) ?? '').includes('AAPL')) {
+      const layoutSaved = page.waitForResponse(
+        (res) =>
+          new URL(res.url()).pathname === '/api/v1/layouts/workspace' &&
+          res.request().method() === 'PUT'
+      );
+      await selectChartSymbol(page, 'AAPL', 'AAPL');
+      // The product debounces this save; leaving the page before it lands reopens the
+      // previous symbol, and the cursor cut then legitimately reads "Not cut". Wait for
+      // the save the product actually sends rather than sleeping.
+      expect((await layoutSaved).ok(), 'the workspace layout save must succeed').toBe(true);
+    }
   });
 
   test.afterAll(async () => {
@@ -344,13 +400,19 @@ test.describe('workspace replay against the real local backend (tier B)', () => 
     expect(cursor, 'an active daily session must carry a server cursor').toBeTruthy();
     journey.session = before;
 
+    // Setup may have charted an instrument other than the session's before the layout
+    // was normalized; those responses are not part of this journey, so the leak check
+    // below judges only the bars fetched for the workspace it is about to open.
+    journey.bars.length = 0;
+    journey.captureBars = true;
+    journey.navigatedAt = Date.now();
     await page.goto(`${runtime.frontendBase}/workspace`);
     await page.waitForLoadState('networkidle');
 
     const controller = page.getByTestId('replay-controller');
     await expect(controller, 'a bound session must render the replay controller').toBeVisible();
     await expect(page.getByTestId('replay-clock-value')).toHaveText(cursor as string);
-    await expect(page.getByTestId('replay-status')).toHaveText('進行中');
+    await expect(page.getByTestId('replay-status')).toHaveText('In progress');
     // The provenance is ⑥'s second layer: collapsed by default, revealed by a
     // real click, and it carries the same server-owned values.
     const summaryToggle = controller.getByTestId('replay-meta-toggle');
@@ -358,7 +420,7 @@ test.describe('workspace replay against the real local backend (tier B)', () => 
     await summaryToggle.click();
     const summary = page.getByTestId('replay-summary');
     await expect(summary).toBeVisible();
-    await expect(summary).toContainText(before.provider_id ?? '未提供');
+    await expect(summary).toContainText(before.provider_id ?? 'Not provided');
     await expect(summary).toContainText(before.experiment_version_id.slice(0, 8));
     await expect(page.getByTestId('replay-bars-end')).toHaveText(cursor as string);
     await summaryToggle.click();
@@ -379,7 +441,10 @@ test.describe('workspace replay against the real local backend (tier B)', () => 
 
     await expect.poll(() => journey.bars.length).toBeGreaterThan(0);
     for (const call of journey.bars) {
-      expect(call.end, 'in a replay context every bars request must carry the cursor cut').toBe(cursor);
+      expect(
+        call.end,
+        `every bars request in a replay context must carry the cursor cut (${call.path} start=${call.start} end=${call.end} at=${call.at}ms)`
+      ).toBe(cursor);
       expect(
         (call.start as string) < (cursor as string),
         `start ${call.start} must sit behind the cursor, never after it`
@@ -393,7 +458,7 @@ test.describe('workspace replay against the real local backend (tier B)', () => 
 
     // Summary and price must come from the clipped series, not the newest stored bar.
     const lastVisible = storedThrough(cursor as string);
-    await expect(page.getByTestId('chart-meta-line')).toContainText(`數據截至 ${lastVisible.date}`);
+    await expect(page.getByTestId('chart-meta-line')).toContainText(`Data as of ${lastVisible.date}`);
     await expect(page.getByTestId('instrument-last-price')).toContainText(lastVisible.close.toFixed(2));
     expect(
       lastVisible.close.toFixed(2) !== newestStored.close.toFixed(2),
@@ -428,56 +493,82 @@ test.describe('workspace replay against the real local backend (tier B)', () => 
     await page.goto(`${runtime.frontendBase}/workspace`);
     await page.waitForLoadState('networkidle');
 
-    // 策略規則 first: ⑦'s order guard is only meaningful if the rules really resolved.
+    // Strategy rules first: ⑦'s order guard is only meaningful if the rules really resolved.
     await page.getByTestId('action-tab-rules').click();
     const rules = page.getByTestId('strategy-rules-panel');
     await expect(rules.getByTestId('rules-table')).toBeVisible({ timeout: 15_000 });
     // A missing API field renders as this literal, never as 0, '—' or an engine default.
-    const NOT_PROVIDED_UI = '未提供';
+    const NOT_PROVIDED_UI = 'Not provided';
     const shown = (value: unknown): string =>
       value === null || value === undefined || value === '' ? NOT_PROVIDED_UI : String(value);
 
-    await expect(rules.getByTestId('rules-experiment')).toHaveText(`${owner!.title}（${owner!.status}）`);
+    await expect(rules.getByTestId('rules-experiment')).toHaveText(`${owner!.title} (${owner!.status})`);
     await expect(rules.getByTestId('rules-effective-version')).toHaveText(
       `${versionId.slice(0, 8)} · v${version!.version_number}`
     );
     await expect(rules.getByTestId('rules-saved-version')).toHaveText(owner!.current_version_id!.slice(0, 8));
     await expect(rules.getByTestId('rules-template')).toHaveText(shown(spec.template_type));
-    await expect(rules.getByTestId('rules-assets')).toHaveText(assets.join('、'));
+    await expect(rules.getByTestId('rules-assets')).toHaveText(assets.join(', '));
     await expect(rules.getByTestId('rules-period')).toHaveText(
-      `${shown(spec.start_date)} ~ ${shown(spec.end_date)}`
+      `${shown(spec.start_date)} – ${shown(spec.end_date)}`
     );
     await expect(rules.getByTestId('rules-initial-cash')).toHaveText(shown(spec.initial_cash));
     await expect(rules.getByTestId('rules-config-hash')).toHaveText(shown(version!.config_hash));
     await expect(rules.getByTestId('rules-locked-at')).toHaveText(shown(version!.locked_at));
     await expect(rules.getByTestId('rules-approved-at')).toHaveText(shown(version!.user_approved_at));
     await expect(rules.getByTestId('rules-change-reason')).toHaveText(shown(version!.change_reason));
-    // Assumed-cost and signal fields the spec does not carry must stay 未提供: printing
-    // an engine default here would make a synthetic session look like a priced one.
+    // Fields the spec does not carry must stay Not provided: printing an engine
+    // default here would make a synthetic session look like a priced one. Fields it
+    // does carry must show the stored values themselves — the panel prints nested
+    // parameters as key=value pairs, so each stored leaf must appear in the cell.
+    const leaves = (value: unknown): string[] => {
+      if (Array.isArray(value)) return value.flatMap(leaves);
+      if (value && typeof value === 'object') {
+        return Object.entries(value as Record<string, unknown>).flatMap(([k, v]) => [k, ...leaves(v)]);
+      }
+      if (value === null || value === undefined || value === '') return [];
+      return [String(value)];
+    };
     for (const [key, testId] of [
       ['commission_rate', 'rules-commission-rate'],
       ['slippage_rate', 'rules-slippage-rate'],
       ['signal_parameters', 'rules-signal-parameters'],
     ] as const) {
-      await expect(
-        rules.getByTestId(testId),
-        `${key} is absent from the stored strategy_spec`
-      ).toHaveText(key in spec ? String(spec[key]) : NOT_PROVIDED_UI);
+      const cell = rules.getByTestId(testId);
+      if (key in spec) {
+        const text = (await cell.textContent()) ?? '';
+        await expect(cell, `${key} is stored, so the panel must not say it is ${NOT_PROVIDED_UI}`).not.toHaveText(
+          NOT_PROVIDED_UI
+        );
+        for (const leaf of leaves(spec[key])) {
+          expect(text, `${key} must print the stored value ${leaf}`).toContain(leaf);
+        }
+      } else {
+        await expect(cell, `${key} is absent from the stored strategy_spec`).toHaveText(NOT_PROVIDED_UI);
+      }
     }
 
-    // 手動模擬單: the session trades assets[0], the workspace is on a different
-    // instrument, and manual-decision only fills assets[0] — so the honest target is
-    // unknown and the panel must refuse rather than guess.
+    // Manual paper order: this session was bound to a version trading the charted
+    // symbol, so the panel can submit. Charting another stored instrument while the
+    // session still trades assets[0] makes the honest fill target unknown —
+    // manual-decision only fills asset_ids[0] — so the panel must refuse to guess.
     await page.getByTestId('action-tab-order').click();
     const order = page.getByTestId('order-preview-panel');
-    await expect(order.getByTestId('order-target')).toContainText('停用');
+    const layoutPath = '/api/v1/layouts/workspace';
+    await expect(
+      order.getByTestId('order-target'),
+      'before the mismatch the panel must be able to submit for this session'
+    ).toContainText('historical replay session');
+
+    await selectChartSymbol(page, 'MSFT', 'MSFT');
+    await expect(order.getByTestId('order-target')).toContainText('disabled');
     const blocked = order.getByTestId('order-blocked');
     await expect(blocked).toBeVisible();
-    await expect(blocked).toContainText(SYMBOL);
+    await expect(blocked).toContainText(OTHER_SYMBOL);
     await expect(blocked).toContainText(assets[0]);
     expect(
-      assets[0] !== SYMBOL,
-      `non-vacuity: the guard only has teeth while the session asset (${assets[0]}) differs from ${SYMBOL}`
+      assets[0] !== OTHER_SYMBOL,
+      `non-vacuity: the guard only has teeth while the session asset (${assets[0]}) differs from the charted ${OTHER_SYMBOL}`
     ).toBe(true);
 
     // Not cosmetic: with no trustworthy target the panel offers no form, no review
@@ -493,11 +584,21 @@ test.describe('workspace replay against the real local backend (tier B)', () => 
       await expect(order.getByTestId(absent), `⑦ must not render ${absent} while blocked`).toHaveCount(0);
     }
 
+    // Restore the charted instrument through the same product gesture, so the later
+    // tests read the cut chart for this session's own asset. The layout save is
+    // debounced on the server side, so read it back before moving on.
+    await selectChartSymbol(page, 'AAPL', 'AAPL');
+    await expect
+      .poll(
+        () => oracleGet<{ layout: { symbol?: string } | null }>(layoutPath).then((r) => r.layout?.symbol),
+        { timeout: 15_000, message: 'the layout must persist the restored charted symbol' }
+      )
+      .toBe(SYMBOL);
+
     // The write classification below must not be vacuous, so this test makes one real
     // preference write with an ordinary click and then reads it back. The range is
     // chosen against what the server already stores: clicking the range that is already
     // saved is a genuine no-op, the shell's no-op filter drops it, and nothing is PUT.
-    const layoutPath = '/api/v1/layouts/workspace';
     const storedLayout = await oracleGet<{ layout: { range?: string } | null }>(layoutPath);
     const storedRange = storedLayout.layout?.range ?? '';
     const nextRange = (['6M', '3M', '1Y', 'ALL'] as const).find((r) => r !== storedRange) as string;
@@ -576,7 +677,7 @@ test.describe('workspace replay against the real local backend (tier B)', () => 
     expect(journal.row_count, 'the journal envelope must carry rows').toBeGreaterThan(0);
     expect(journal.records).toHaveLength(journal.row_count);
 
-    // 持倉 — the row set is the endpoint's, cell for cell.
+    // Positions — the row set is the endpoint's, cell for cell.
     await page.getByTestId('tab-positions').click();
     await expect(page.getByTestId('tab-positions')).toHaveAttribute('aria-selected', 'true');
     const positionsTable = page.getByTestId('evidence-positions-table');
@@ -592,7 +693,7 @@ test.describe('workspace replay against the real local backend (tier B)', () => 
     expect(printedQty, 'the quantity cell must print the stored quantity').toBe(openPosition.quantity);
     const costCell = (await positionRow.locator('td').nth(2).textContent()) ?? '';
     if (openPosition.average_entry_price === null) {
-      expect(costCell).toBe('未提供');
+      expect(costCell).toBe('Not provided');
     } else {
       expect(printedMoney(costCell)).toBe(Number(openPosition.average_entry_price.toFixed(2)));
       expect(costCell).toContain(currency);
@@ -603,7 +704,7 @@ test.describe('workspace replay against the real local backend (tier B)', () => 
     const realizedCell = positionRow.locator('td').nth(3);
     const unrealizedCell = positionRow.locator('td').nth(4);
     if (openPosition.realized_pnl === null) {
-      await expect(realizedCell).toHaveText('未提供');
+      await expect(realizedCell).toHaveText('Not provided');
     } else {
       // Signed: a stored loss must not render as a gain.
       expect(printedMoney((await realizedCell.textContent()) ?? '')).toBe(
@@ -611,19 +712,19 @@ test.describe('workspace replay against the real local backend (tier B)', () => 
       );
     }
     if (openPosition.unrealized_pnl === null) {
-      await expect(unrealizedCell).toHaveText('無法計算');
+      await expect(unrealizedCell).toHaveText('Cannot be computed');
     } else {
       expect(printedMoney((await unrealizedCell.textContent()) ?? '')).toBe(
         Number(openPosition.unrealized_pnl.toFixed(2))
       );
     }
-    // Column-level: 無法計算 may only appear on rows whose stored unrealized figure
+    // Column-level: Cannot be computed may only appear on rows whose stored unrealized figure
     // is null. A fabricated 0.00 (or a fabricated sentinel) breaks this equality.
     await expect(
-      positionsTable.locator('tbody tr').filter({ hasText: '無法計算' })
+      positionsTable.locator('tbody tr').filter({ hasText: 'Cannot be computed' })
     ).toHaveCount(positions.filter((p) => p.unrealized_pnl === null).length);
 
-    // 訂單與成交 — three books, each with its own clock column.
+    // Orders & fills — three books, each with its own clock column.
     await page.getByTestId('tab-orders-fills').click();
     const ordersTable = page.getByTestId('evidence-orders-table');
     await expect(ordersTable).toBeVisible();
@@ -645,14 +746,14 @@ test.describe('workspace replay against the real local backend (tier B)', () => 
       'the two clocks must be far enough apart for the separation check to have teeth'
     ).toBe(true);
     const targetRow = ordersTable.locator('tr', { has: page.getByTestId(`evidence-order-${targetOrder.id}`) });
-    await expect(targetRow.locator('td').nth(1)).toHaveText('系統規則');
+    await expect(targetRow.locator('td').nth(1)).toHaveText('System rule');
     expect(targetOrder.actor_type, 'this dataset records the order as system-authored').toBe('system');
     // The side label depends on which order we got (SELL or BUY fallback)
-    const expectedSideLabel = targetOrder.side === 'SELL' ? '賣出' : '買入';
+    const expectedSideLabel = targetOrder.side === 'SELL' ? 'Sell' : 'Buy';
     await expect(targetRow.locator('td').nth(2)).toHaveText(expectedSideLabel);
     await expect(targetRow.locator('td').nth(5)).toContainText((targetOrder.created_at as string).slice(0, 10));
 
-    // A stored 0.00 cost is a real zero and prints as one; only an absent value is 未提供.
+    // A stored 0.00 cost is a real zero and prints as one; only an absent value is Not provided.
     const targetFillRow = fillsTable.locator('tr', {
       has: page.getByTestId(`evidence-fill-${targetFill!.fill_id}`),
     });
@@ -665,46 +766,75 @@ test.describe('workspace replay against the real local backend (tier B)', () => 
     expect(printedMoney((await targetFillRow.locator('td').nth(6).textContent()) ?? '')).toBe(
       Number((targetFill!.net_cash_change as number).toFixed(2))
     );
-    // Daily replay has no bar instant: 不適用, which is neither 未提供 nor 無法計算.
-    await expect(page.getByTestId(`evidence-fill-bar-time-${targetFill!.fill_id}`)).toHaveText('不適用');
+    // Daily replay has no bar instant: Not applicable, which is neither Not provided nor Cannot be computed.
+    await expect(page.getByTestId(`evidence-fill-bar-time-${targetFill!.fill_id}`)).toHaveText('Not applicable');
     expect(targetFill!.bar_timestamp, 'this session is daily, so the bar column must be empty').toBeNull();
 
     // Execution intents are a different book and this account has none — the panel
     // must say so rather than leave the section out or show the paper fills again.
     const intents = await oracleGet<{ intent_id: string }[]>('/api/v1/execution/intents');
     if (intents.length === 0) {
-      await expect(page.getByTestId('evidence-no-intents')).toHaveText('沒有執行意向。');
+      await expect(page.getByTestId('evidence-no-intents')).toHaveText('No execution intents.');
     } else {
       await expect(page.getByTestId('evidence-intents-table')).toBeVisible();
     }
 
-    // 自動交易日誌 + the real CSV. The table shows twelve curated columns; the 27-column
-    // contract is proven in the detail drawer and in the exported file below.
+    // Automated journal + the real CSV. The table shows twelve curated columns; the full
+    // contract is proven in the detail drawer and in the exported file below. The contract
+    // is asserted by name, not by count: the backend owns the column list and grew it with
+    // the cost columns, so a fixed length here would fail on a legitimate addition while
+    // proving nothing about which columns are actually carried.
     await page.getByTestId('tab-journal').click();
     const journalTable = page.getByTestId('evidence-journal-table');
     await expect(journalTable).toBeVisible();
     await expect(journalTable.locator('tbody tr')).toHaveCount(journal.row_count);
     await expect(journalTable.locator('thead th')).toHaveCount(12);
-    expect(journal.columns.length, 'the journal contract carries 27 named columns').toBe(27);
+    expect(new Set(journal.columns).size, 'the journal contract must not repeat a column').toBe(
+      journal.columns.length
+    );
+    for (const column of [
+      'record_type',
+      'order_id',
+      'fill_id',
+      'execution_date',
+      'settlement_policy',
+      'observed_price',
+      'execution_price_before_costs',
+      'slippage_amount',
+      'commission_amount',
+      'net_cash_change',
+      'simulated_fill_reason',
+      'rationale',
+    ]) {
+      expect(journal.columns, `the journal contract must carry ${column}`).toContain(column);
+    }
+    // Every exported row carries every named column — the fill-only ones as null, never absent.
+    for (const record of journal.records) {
+      expect(Object.keys(record).sort(), 'every journal record must carry the whole contract').toEqual(
+        [...journal.columns].sort()
+      );
+    }
 
     // The scope control must show which symbol it filters on, and the rows it leaves
     // must be exactly the rows that carry it — derived from the fetched data, because
     // the chart symbol and this book's traded asset need not agree.
     const scopeLabel = ((await page.getByTestId('evidence-scope-current').textContent()) ?? '').trim();
-    const scopeSymbol = /^目前標的（(.+)）$/.exec(scopeLabel)?.[1] ?? '';
+    const scopeSymbol = /^Current instrument \((.+)\)$/.exec(scopeLabel)?.[1] ?? '';
     expect(scopeSymbol, '⑧ must name the symbol the client-side scope filters on').toBeTruthy();
     const journalForSymbol = journal.records.filter((r) => r.asset_id === scopeSymbol).length;
     await page.getByTestId('evidence-scope-current').click();
     if (journalForSymbol === 0) {
-      const empty = page.getByTestId('evidence-empty-日誌紀錄');
+      const empty = page.getByTestId('evidence-empty-journal');
       await expect(empty).toBeVisible();
       await expect(journalTable).toHaveCount(0);
       // The panel says how many rows it hid rather than implying the book is empty.
-      await expect(empty).toContainText(`在本面板已載入的 ${journal.row_count} 筆`);
+      await expect(empty).toContainText(
+        `among the ${journal.row_count} journal records this panel has loaded`
+      );
     } else {
       await expect(journalTable.locator('tbody tr')).toHaveCount(journalForSymbol);
     }
-    await expect(page.getByTestId('evidence-scope-note')).toContainText('不向後端查詢');
+    await expect(page.getByTestId('evidence-scope-note')).toContainText('does not query the backend');
     // One-click clear restores the whole book.
     await page.getByTestId('evidence-scope-clear').click();
     await expect(journalTable.locator('tbody tr')).toHaveCount(journal.row_count);
@@ -716,16 +846,20 @@ test.describe('workspace replay against the real local backend (tier B)', () => 
     expect(download.suggestedFilename()).toBe(`trade-journal-${portfolioId}.csv`);
     const csv = readFileSync((await download.path()) as string, 'utf-8');
     const csvLines = csv.trim().split('\r\n');
-    expect(csvLines[0].split(',')).toHaveLength(journal.columns.length);
+    // The exported header is the endpoint's own column list, in the same order — not
+    // merely the same length, so a reordered or renamed column cannot slip through.
+    expect(csvLines[0].split(',')).toEqual(journal.columns);
     // Header + every row: the export is the whole portfolio, not the filtered view.
     expect(csvLines.length).toBe(journal.row_count + 1);
-    await expect(page.getByTestId('evidence-export-scope-note')).toContainText('匯出範圍：整個組合');
-    await expect(page.getByTestId('evidence-export-csv')).toContainText('匯出整個組合');
+    await expect(page.getByTestId('evidence-export-scope-note')).toContainText(
+      'Export scope: every order and fill in the whole portfolio'
+    );
+    await expect(page.getByTestId('evidence-export-csv')).toContainText('Export whole portfolio (CSV)');
     expect(csvLines.some((line) => line.includes(targetFill!.fill_id as string)), 'the fill must be in the export').toBe(true);
     expect(csvLines[0]).toContain('simulated_fill_reason');
 
     // Detail drawer: keyed by the exact record id it was opened from, and rendering
-    // one line per stored contract column — that is where the 27 columns surface.
+    // one line per stored contract column — that is where the whole contract surfaces.
     const journalLink = page.getByTestId(`evidence-journal-row-${targetFill!.fill_id}`);
     await journalLink.click();
     const drawer = page.getByTestId('evidence-drawer');
@@ -735,15 +869,15 @@ test.describe('workspace replay against the real local backend (tier B)', () => 
     for (const key of ['execution_date', 'simulated_fill_reason', 'asset_id', 'order_id']) {
       await expect(drawer.getByTestId(`drawer-journal-${key}`)).toContainText(String(targetFill![key]));
     }
-    // A null bar_timestamp is 不適用 in the drawer too, never an empty string or 0.
-    await expect(drawer.getByTestId('drawer-journal-bar_timestamp')).toHaveText('不適用');
+    // A null bar_timestamp is Not applicable in the drawer too, never an empty string or 0.
+    await expect(drawer.getByTestId('drawer-journal-bar_timestamp')).toHaveText('Not applicable');
     await expect(drawer).toContainText('column_semantics');
     await page.keyboard.press('Escape');
     await expect(drawer).toHaveCount(0);
     // Focus returns to the row that opened it.
     await expect(journalLink).toBeFocused();
 
-    // 結果 — only fields the portfolio detail endpoint really returns.
+    // Results — only fields the portfolio detail endpoint really returns.
     const detail = await oracleGet<{
       initial_virtual_cash: number;
       current_virtual_cash: number;
@@ -767,7 +901,7 @@ test.describe('workspace replay against the real local backend (tier B)', () => 
     await expect(page.getByTestId('results-fill-count')).toHaveText(String(fillRows.length));
     await expect(page.getByTestId('results-decision-count')).toHaveText(String(decisions.length));
     if (detail.total_unrealized_pnl === null) {
-      await expect(page.getByTestId('results-unrealized-pnl')).toHaveText('無法計算');
+      await expect(page.getByTestId('results-unrealized-pnl')).toHaveText('Cannot be computed');
     } else {
       expect(printedMoney((await page.getByTestId('results-unrealized-pnl').textContent()) ?? '')).toBe(
         Number(detail.total_unrealized_pnl.toFixed(2))
@@ -775,7 +909,9 @@ test.describe('workspace replay against the real local backend (tier B)', () => 
     }
     // The disclosure that no portfolio-level performance endpoint exists must stay
     // visible: backtest metrics belong to the run, not to this book.
-    await expect(page.getByTestId('evidence-results-gap')).toContainText('後端沒有組合層級的成果端點');
+    await expect(page.getByTestId('evidence-results-gap')).toContainText(
+      'The backend has no portfolio-level results endpoint'
+    );
 
     // The joint ⑤/⑧ floors, measured under the real runtime's own chrome (app bar,
     // context bar and the replay strip inside ⑤ all take height here, unlike the mocked
@@ -841,7 +977,7 @@ test.describe('workspace replay against the real local backend (tier B)', () => 
           await page.mouse.wheel(0, 300);
           return (await dockGeom()).linkInsideBand;
         },
-        { timeout: 15_000, message: 'scrolling must bring 組合完整頁面 into the band' }
+        { timeout: 15_000, message: 'scrolling must bring Full portfolio page into the band' }
       )
       .toBe(true);
 
@@ -859,12 +995,12 @@ test.describe('workspace replay against the real local backend (tier B)', () => 
     ).toEqual([]);
   });
 
-  test('one real 下一日 click moves the server cursor and the chart window together', async () => {
+  test('one real Next day click moves the server cursor and the chart window together', async () => {
     const beforeCursor = journey.session?.current_snapshot_date as string;
     const beforeObserved = journey.session?.observed_days as number;
 
     const advance = page.getByTestId('replay-advance');
-    await expect(advance).toHaveText('下一日');
+    await expect(advance).toHaveText('Next day');
     const requestsBefore = journey.bars.length;
     // The click's POST is what moves the cursor, so the server read must not race it.
     const [advanceResponse] = await Promise.all([
@@ -898,7 +1034,7 @@ test.describe('workspace replay against the real local backend (tier B)', () => 
       .getByTestId('replay-meta-toggle');
     await summaryToggle.click();
     await expect(page.getByTestId('replay-bars-end')).toHaveText(newCursor);
-    await expect(page.getByTestId('replay-summary')).toContainText(`${beforeObserved + 1} 個觀測點`);
+    await expect(page.getByTestId('replay-summary')).toContainText(`${beforeObserved + 1} observations`);
     await expect(page.getByTestId('ctx-replay-clock')).toContainText(newCursor);
 
     await expect.poll(() => journey.bars.length).toBeGreaterThan(requestsBefore);
@@ -908,7 +1044,7 @@ test.describe('workspace replay against the real local backend (tier B)', () => 
     expect(latest.dates[latest.dates.length - 1] <= newCursor).toBe(true);
 
     const lastVisible = storedThrough(newCursor);
-    await expect(page.getByTestId('chart-meta-line')).toContainText(`數據截至 ${lastVisible.date}`);
+    await expect(page.getByTestId('chart-meta-line')).toContainText(`Data as of ${lastVisible.date}`);
     await expect(page.getByTestId('instrument-last-price')).toContainText(lastVisible.close.toFixed(2));
   });
 });

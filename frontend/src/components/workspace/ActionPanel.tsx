@@ -11,8 +11,8 @@ import type { BarsResponse, InstrumentDetail } from './types';
 type ActionTabKey = 'rules' | 'order';
 
 const TABS: { key: ActionTabKey; label: string }[] = [
-  { key: 'order', label: '手動模擬單' },
-  { key: 'rules', label: '策略規則' },
+  { key: 'order', label: 'Manual paper order' },
+  { key: 'rules', label: 'Strategy rules' },
 ];
 
 /**
@@ -57,11 +57,11 @@ export default function ActionPanel({
 
   return (
     <section className="ws-panel ws-panel-fill" data-testid="action-panel">
-      <div className="ws-panel-header">操作</div>
+      <div className="ws-panel-header">Actions</div>
       <div
         className="ws-tabs"
         role="tablist"
-        aria-label="操作面板"
+        aria-label="Action panel"
         data-testid="action-tabs"
         onKeyDown={(e) => {
           if (e.key === 'ArrowRight') {

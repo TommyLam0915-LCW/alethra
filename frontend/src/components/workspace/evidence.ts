@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '@/lib/api';
+import { NOT_PROVIDED, CANNOT_COMPUTE } from '@/lib/copy';
 import type { FillRecord } from './types';
 import type { ReplaySession } from './ReplayController';
 
@@ -13,9 +14,20 @@ import type { ReplaySession } from './ReplayController';
  * API never sent, a value that cannot be computed, and a value that does not
  * apply to the record — none of them may collapse into `0.00`.
  */
-export const NOT_PROVIDED = '未提供';
-export const CANNOT_COMPUTE = '無法計算';
-export const NOT_APPLICABLE = '不適用';
+export {
+  ACTOR_LABELS,
+  ORDER_STATUS_LABELS,
+  POSITION_STATUS_LABELS,
+  INTENT_STATUS_LABELS,
+  SIDE_LABELS,
+  RECORD_TYPE_LABELS,
+  DECISION_TYPE_LABELS,
+  PORTFOLIO_STATUS_LABELS,
+  NOT_PROVIDED,
+  CANNOT_COMPUTE,
+  NOT_APPLICABLE,
+  label,
+} from '@/lib/copy';
 
 /** How the dock came to show this portfolio — shown to the user, never implicit. */
 export type PortfolioResolution =
@@ -160,7 +172,7 @@ export interface EvidenceData {
 
 const EMPTY: Omit<EvidenceData, 'reload'> = {
   portfolio: null,
-  resolution: { kind: 'none', reason: '尚未查詢組合清單。' },
+  resolution: { kind: 'none', reason: 'The portfolio list has not been loaded yet.' },
   positions: [],
   orders: [],
   journal: [],
@@ -187,12 +199,25 @@ export function resolvePortfolio(
 ): { portfolio: PortfolioRow | null; resolution: PortfolioResolution } {
   if (chosen) {
     const picked = list.find((p) => p.id === chosen.id) ?? null;
-    if (picked) return { portfolio: picked, resolution: { kind: 'chosen', reason: chosen.reason } };
+    if (picked) {
+      // The evidence line must name the replay binding this book belongs to, not
+      // only the fact that it was picked: the same book is quoted against a cursor.
+      const binding = picked.simulation_session_id
+        ? `Its simulation_session_id is the replay session ${picked.simulation_session_id.slice(0, 8)}.`
+        : '';
+      return {
+        portfolio: picked,
+        resolution: {
+          kind: 'chosen',
+          reason: [chosen.reason, binding].filter(Boolean).join(' '),
+        },
+      };
+    }
     return {
       portfolio: null,
       resolution: {
         kind: 'none',
-        reason: `已選擇的組合 ${chosen.id.slice(0, 8)} 不在清單中，因此未顯示任何組合的證據；未擅自改選其他組合。`,
+        reason: `The selected portfolio ${chosen.id.slice(0, 8)} is not in the list, so no portfolio evidence is shown; another portfolio was not substituted.`,
       },
     };
   }
@@ -203,7 +228,7 @@ export function resolvePortfolio(
         portfolio: bound,
         resolution: {
           kind: 'session-bound',
-          reason: `此組合的 simulation_session_id 等於目前回放工作階段 ${sessionId.slice(0, 8)}。`,
+          reason: `This portfolio's simulation_session_id matches the current replay session ${sessionId.slice(0, 8)}.`,
         },
       };
     }
@@ -211,7 +236,7 @@ export function resolvePortfolio(
       portfolio: null,
       resolution: {
         kind: 'none',
-        reason: `${list.length} 個組合沒有任何一個的 simulation_session_id 等於目前工作階段 ${sessionId.slice(0, 8)}，因此沒有綁定此回放階段的證據可顯示。`,
+        reason: `None of the ${list.length} portfolios has a simulation_session_id matching the current session ${sessionId.slice(0, 8)}, so there is no evidence bound to this replay session.`,
       },
     };
   }
@@ -219,7 +244,10 @@ export function resolvePortfolio(
   if (active.length === 1) {
     return {
       portfolio: active[0],
-      resolution: { kind: 'active-single', reason: '目前沒有回放工作階段；此帳戶只有一個進行中的組合，故顯示它。' },
+      resolution: {
+        kind: 'active-single',
+        reason: 'No replay session is active; this account has exactly one active portfolio, so it is shown.',
+      },
     };
   }
   if (active.length > 1) {
@@ -227,7 +255,7 @@ export function resolvePortfolio(
       portfolio: null,
       resolution: {
         kind: 'none',
-        reason: `${active.length} 個進行中的組合且無回放綁定，不自動選第一個 — 請在「手動模擬單」的組合選單中選擇要查看哪一個。`,
+        reason: `${active.length} portfolios are active and no replay binding applies; the first was not chosen automatically — pick one in the Manual paper order portfolio selector.`,
       },
     };
   }
@@ -237,8 +265,8 @@ export function resolvePortfolio(
       kind: 'none',
       reason:
         list.length === 0
-          ? '尚未建立模擬投資組合 — 可在「手動模擬單」建立一個。'
-          : `此帳戶 ${list.length} 個組合均非進行中；在「手動模擬單」選取其中一個即可查看其歷史紀錄（唯讀，不可送單）。`,
+          ? 'No paper portfolio yet — create one in Manual paper order.'
+          : `None of this account's ${list.length} portfolios is active; pick one in Manual paper order to view its history (read-only, orders cannot be sent).`,
     },
   };
 }
@@ -262,7 +290,7 @@ export function usePortfolioEvidence(
   // positions, orders and the journal without changing the session or the portfolio.
   // state_version covers the other half — a manual submission records a decision and
   // bumps it without moving the daily cursor, so the accepted order would otherwise
-  // stay out of ⑧ until the user pressed 重新載入. These are dependencies without
+  // stay out of ⑧ until the user pressed Reload. These are dependencies without
   // appearing in the body below, on purpose.
   const cursorDate = session?.current_snapshot_date ?? null;
   const cursorBar = session?.current_bar_timestamp ?? null;
@@ -340,10 +368,10 @@ export function usePortfolioEvidence(
         ...EMPTY,
         resolution: {
           kind: 'none',
-          reason: e instanceof Error ? `組合清單無法載入：${e.message}` : '組合清單無法載入。',
+          reason: e instanceof Error ? `Portfolio list could not be loaded: ${e.message}` : 'Portfolio list could not be loaded.',
         },
         loading: false,
-        errors: { portfolio: e instanceof Error ? e.message : '組合清單無法載入' },
+        errors: { portfolio: e instanceof Error ? e.message : 'Portfolio list could not be loaded' },
       });
     }
   }, [sessionId, chosenId, chosenReason, cursorDate, cursorBar, stateVersion, invalidationRevision]);
@@ -358,7 +386,7 @@ export function usePortfolioEvidence(
 /**
  * Execution-agent intents and their fills. They are a different book from the
  * paper orders (an intent is an authorization-gated request), so they load only
- * when the 訂單與成交 tab is opened, and their fills are fetched for a bounded
+ * when the Orders & fills tab is opened, and their fills are fetched for a bounded
  * prefix because the API only exposes them one intent at a time.
  */
 export function useExecutionEvidence(enabled: boolean) {
@@ -388,7 +416,7 @@ export function useExecutionEvidence(enabled: boolean) {
         setFills(Object.fromEntries(entries));
         setError('');
       } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : '執行意向無法載入');
+        if (!cancelled) setError(e instanceof Error ? e.message : 'Execution intents could not be loaded');
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -409,72 +437,6 @@ export function inScope(assetId: string | null | undefined, scope: Scope, symbol
   return !!assetId && assetId === symbol;
 }
 
-/* ── labels ─────────────────────────────────────────────────────────── */
-
-export const ACTOR_LABELS: Record<string, string> = {
-  system: '系統規則',
-  human: '本人',
-  ai_draft: 'AI 草稿',
-  human_approved_ai_draft: '本人核准 AI 草稿',
-  api_key: 'API 程式',
-  engine: '策略引擎',
-  user: '本人',
-};
-
-export const ORDER_STATUS_LABELS: Record<string, string> = {
-  pending: '待成交',
-  filled: '已成交',
-  partially_filled: '部分成交',
-  cancelled: '已取消',
-  canceled: '已取消',
-  rejected: '已拒絕',
-};
-
-export const POSITION_STATUS_LABELS: Record<string, string> = {
-  open: '持有中',
-  closed: '已平倉',
-};
-
-export const INTENT_STATUS_LABELS: Record<string, string> = {
-  pending: '待授權',
-  authorized: '已授權',
-  submitted: '已送出',
-  filled: '已成交',
-  partially_filled: '部分成交',
-  cancelled: '已取消',
-  canceled: '已取消',
-  rejected: '已拒絕',
-  uncertain: '結果不明',
-};
-
-export const SIDE_LABELS: Record<string, string> = { BUY: '買入', SELL: '賣出' };
-
-export const RECORD_TYPE_LABELS: Record<string, string> = {
-  fill: '成交紀錄',
-  order: '未成交訂單',
-};
-
-export const DECISION_TYPE_LABELS: Record<string, string> = {
-  simulated_entry: '模擬進場',
-  simulated_exit: '模擬出場',
-  no_action: '未行動',
-  blocked_action: '被阻擋',
-  entry: '進場',
-  exit: '出場',
-};
-
-export const PORTFOLIO_STATUS_LABELS: Record<string, string> = {
-  active: '進行中',
-  paused: '已暫停',
-  retired: '已停用',
-  completed: '已完成',
-};
-
-export const label = (map: Record<string, string>, value: string | null | undefined): string => {
-  if (value === null || value === undefined || value === '') return NOT_PROVIDED;
-  return map[value] ?? value;
-};
-
 /* ── formatters: null is never printed as a number ───────────────────── */
 
 export function fmtMoney(value: unknown, currency: string | null | undefined): string {
@@ -493,10 +455,11 @@ export function fmtSignedMoney(value: unknown, currency: string | null | undefin
 export function fmtScalar(value: unknown): string {
   if (value === null || value === undefined || value === '') return NOT_PROVIDED;
   if (typeof value === 'number') return String(value);
-  if (typeof value === 'boolean') return value ? '是' : '否';
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
   if (typeof value === 'object') {
     const entries = Object.entries(value as Record<string, unknown>);
-    return entries.length === 0 ? '（空）' : entries.map(([k, v]) => `${k}=${String(v)}`).join('、');
+    if (entries.length === 0) return '(empty)';
+    return entries.map(([k, v]) => `${k}=${String(v)}`).join(', ');
   }
   return String(value);
 }
