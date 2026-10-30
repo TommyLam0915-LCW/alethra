@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import Link from 'next/link';
 import { api, ApiError } from '@/lib/api';
+import { formatDateTime } from '@/lib/format';
 
 interface SimulationSession {
   id: string;
@@ -68,17 +69,17 @@ interface LinkedPortfolio {
 }
 
 const DECISION_LABELS: Record<string, { label: string; color: string; bg: string }> = {
-  no_action: { label: '無操作', color: '#666', bg: '#f5f5f5' },
-  simulated_entry: { label: '模擬買入', color: '#155724', bg: '#d4edda' },
-  simulated_exit: { label: '模擬賣出', color: '#721c24', bg: '#f8d7da' },
-  forced_exit: { label: '強制平倉', color: '#856404', bg: '#fff3cd' },
-  blocked_action: { label: '操作受阻', color: '#856404', bg: '#fff3cd' },
+  no_action: { label: '無操作', color: 'var(--text-secondary)', bg: 'var(--surface-2)' },
+  simulated_entry: { label: '模擬買入', color: 'var(--positive)', bg: 'rgba(34,197,94,0.14)' },
+  simulated_exit: { label: '模擬賣出', color: 'var(--negative)', bg: 'rgba(239,68,68,0.12)' },
+  forced_exit: { label: '強制平倉', color: 'var(--warning)', bg: 'rgba(245,158,11,0.14)' },
+  blocked_action: { label: '操作受阻', color: 'var(--warning)', bg: 'rgba(245,158,11,0.14)' },
 };
 
 // A submitted manual order that is queued for the next executable bar is stored
 // as blocked_action (native enum reuse) with reason awaiting_execution_window.
 // Rendering it as 操作受阻 would report an accepted order as a refusal.
-const PENDING_ORDER_STYLE = { label: '掛單待成交', color: '#0056b3', bg: '#e8f1fb' };
+const PENDING_ORDER_STYLE = { label: '掛單待成交', color: 'var(--primary-text)', bg: 'rgba(59,130,246,0.16)' };
 
 function isPendingOrder(d: Decision): boolean {
   return d.decision_detail?.rejection?.reason === 'awaiting_execution_window';
@@ -478,13 +479,13 @@ export default function SimulationPage() {
   return (
     <div className="container" style={{ paddingTop: '40px', paddingBottom: '40px' }}>
       <div style={{ marginBottom: '20px' }}>
-        <Link href={`/experiments/${experimentId}`} style={{ color: '#0070f3', textDecoration: 'none' }}>
+        <Link href={`/experiments/${experimentId}`} style={{ color: 'var(--primary-text)', textDecoration: 'none' }}>
           &larr; 返回實驗
         </Link>
       </div>
 
       <h1 style={{ marginBottom: '8px' }}>前進模擬</h1>
-      <p style={{ color: '#666', marginBottom: '24px' }}>
+      <p style={{ color: 'var(--text-secondary)', marginBottom: '24px' }}>
         {experiment?.title}
       </p>
 
@@ -502,7 +503,7 @@ export default function SimulationPage() {
             {session ? '建立新的模擬工作階段' : '建立模擬工作階段'}
           </h3>
           {session && (
-            <p style={{ fontSize: '13px', color: '#666', marginBottom: '12px' }}>
+            <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '12px' }}>
               新工作階段會由鎖定規格重新開始；現有重播紀錄不受影響。
             </p>
           )}
@@ -521,7 +522,7 @@ export default function SimulationPage() {
           </div>
           
           {loadingProviders ? (
-            <div style={{ padding: '12px', color: '#666' }}>載入資料來源中...</div>
+            <div style={{ padding: '12px', color: 'var(--text-secondary)' }}>載入資料來源中...</div>
           ) : availableProviders.length === 0 ? (
             <div className="alert alert-warning" style={{ marginTop: '12px' }}>
               此實驗標的無可用儲存資料
@@ -532,15 +533,15 @@ export default function SimulationPage() {
                 資料來源
               </label>
               {availableProviders.length === 1 ? (
-                <div style={{ padding: '10px', background: '#f8f9fa', borderRadius: '4px', border: '1px solid #dee2e6' }}>
+                <div style={{ padding: '10px', background: 'var(--surface-2)', borderRadius: '4px', border: '1px solid var(--border-strong)' }}>
                   <div style={{ fontWeight: 600 }}>{availableProviders[0].provider_id}</div>
-                  <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+                  <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px' }}>
                     {availableProviders[0].bar_count} 筆資料 | 
                     覆蓋區間: {availableProviders[0].min_date} 至 {availableProviders[0].max_date}
                   </div>
                   {availableProviders[0].min_date > availableProviders[0].requested_start || 
                    availableProviders[0].max_date < availableProviders[0].requested_end ? (
-                    <div style={{ fontSize: '12px', color: '#856404', marginTop: '4px' }}>
+                    <div style={{ fontSize: '12px', color: 'var(--warning)', marginTop: '4px' }}>
                       ⚠️ 部分覆蓋：請求區間 {availableProviders[0].requested_start} 至 {availableProviders[0].requested_end}
                     </div>
                   ) : null}
@@ -552,9 +553,9 @@ export default function SimulationPage() {
                       display: 'flex', 
                       alignItems: 'flex-start', 
                       padding: '10px', 
-                      background: selectedProvider === p.provider_id ? '#e7f3ff' : '#f8f9fa',
+                      background: selectedProvider === p.provider_id ? 'rgba(59,130,246,0.16)' : 'var(--surface-2)',
                       borderRadius: '4px', 
-                      border: selectedProvider === p.provider_id ? '2px solid #007bff' : '1px solid #dee2e6',
+                      border: selectedProvider === p.provider_id ? '2px solid var(--primary-text)' : '1px solid var(--border-strong)',
                       cursor: 'pointer',
                     }}>
                       <input
@@ -567,12 +568,12 @@ export default function SimulationPage() {
                       />
                       <div>
                         <div style={{ fontWeight: 600 }}>{p.provider_id}</div>
-                        <div style={{ fontSize: '12px', color: '#666', marginTop: '2px' }}>
+                        <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '2px' }}>
                           {p.bar_count} 筆資料 | 
                           覆蓋區間: {p.min_date} 至 {p.max_date}
                         </div>
                         {p.min_date > p.requested_start || p.max_date < p.requested_end ? (
-                          <div style={{ fontSize: '12px', color: '#856404', marginTop: '2px' }}>
+                          <div style={{ fontSize: '12px', color: 'var(--warning)', marginTop: '2px' }}>
                             ⚠️ 部分覆蓋：請求區間 {p.requested_start} 至 {p.requested_end}
                           </div>
                         ) : null}
@@ -626,9 +627,9 @@ export default function SimulationPage() {
               className="alert"
               style={{
                 marginBottom: '16px',
-                background: '#fde8ef',
-                border: '1px solid #f5a3c0',
-                color: '#7a1f45',
+                background: 'rgba(239,68,68,0.12)',
+                border: '1px solid rgba(239,68,68,0.34)',
+                color: 'var(--negative)',
                 fontSize: '13px',
                 lineHeight: 1.6,
               }}
@@ -648,7 +649,7 @@ export default function SimulationPage() {
                   </>
                 )}
               </span>
-              <div style={{ marginTop: '4px', color: '#8a4a63' }}>
+              <div style={{ marginTop: '4px', color: 'var(--text-secondary)' }}>
                 每次「推進」只釋放下一根已完成的 K 線；訊號於完成 bar 收盤形成，於下一根 bar 開盤成交。固定合成資料的獲利不代表策略真實有效。
               </div>
             </div>
@@ -660,24 +661,24 @@ export default function SimulationPage() {
             marginBottom: '24px',
           }}>
             <div className="card" style={{ padding: '16px' }}>
-              <div style={{ fontSize: '12px', color: '#666', marginBottom: '4px' }}>狀態</div>
+              <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '4px' }}>狀態</div>
               <div style={{ fontSize: '20px', fontWeight: 700 }}>
                 {STATUS_LABELS[session.status] || session.status}
               </div>
             </div>
             <div className="card" style={{ padding: '16px' }} data-testid="sim-paper-equity">
-              <div style={{ fontSize: '12px', color: '#666', marginBottom: '4px' }}>虛擬淨值</div>
+              <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '4px' }}>虛擬淨值</div>
               {session.paper_equity === null ? (
                 <>
                   <div style={{ fontSize: '20px', fontWeight: 700 }}>—</div>
-                  <div style={{ fontSize: '12px', color: '#666' }}>未連結紙上帳戶</div>
+                  <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>未連結紙上帳戶</div>
                 </>
               ) : (
                 <>
                   <div style={{ fontSize: '20px', fontWeight: 700 }}>
                     ${session.paper_equity.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                   </div>
-                  <div style={{ fontSize: '12px', color: session.paper_equity >= session.initial_virtual_cash ? '#155724' : '#721c24' }}>
+                  <div style={{ fontSize: '12px', color: session.paper_equity >= session.initial_virtual_cash ? 'var(--positive)' : 'var(--negative)' }}>
                     {session.paper_equity >= session.initial_virtual_cash ? '+' : ''}
                     {((session.paper_equity - session.initial_virtual_cash) / session.initial_virtual_cash * 100).toFixed(2)}%
                   </div>
@@ -685,50 +686,50 @@ export default function SimulationPage() {
               )}
             </div>
             <div className="card" style={{ padding: '16px' }}>
-              <div style={{ fontSize: '12px', color: '#666', marginBottom: '4px' }}>
+              <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '4px' }}>
                 {isIntraday ? '觀察根數（K 線）' : '觀察天數'}
               </div>
               <div data-testid="sim-observed-count" style={{ fontSize: '20px', fontWeight: 700 }}>{session.observed_days}</div>
             </div>
             <div className="card" style={{ padding: '16px' }}>
-              <div style={{ fontSize: '12px', color: '#666', marginBottom: '4px' }}>決策次數</div>
+              <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '4px' }}>決策次數</div>
               <div style={{ fontSize: '20px', fontWeight: 700 }}>{session.total_decisions}</div>
             </div>
             {session.provider_id && (
               <div className="card" style={{ padding: '16px' }}>
-                <div style={{ fontSize: '12px', color: '#666', marginBottom: '4px' }}>資料來源</div>
+                <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '4px' }}>資料來源</div>
                 <div style={{ fontSize: '16px', fontWeight: 700 }}>{session.provider_id}</div>
-                <div style={{ fontSize: '11px', color: '#888', marginTop: '2px' }}>儲存資料</div>
+                <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>儲存資料</div>
               </div>
             )}
           </div>
 
           {session.current_position_json && (
-            <div className="card" style={{ marginBottom: '24px', borderLeft: '4px solid #0070f3' }}>
+            <div className="card" style={{ marginBottom: '24px', borderLeft: '4px solid var(--primary)' }}>
               <h3 style={{ marginBottom: '8px' }}>目前部位</h3>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '12px' }}>
                 <div>
-                  <span style={{ fontSize: '12px', color: '#666' }}>標的</span>
+                  <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>標的</span>
                   <div style={{ fontWeight: 600 }}>{session.current_position_json.symbol}</div>
                 </div>
                 <div>
-                  <span style={{ fontSize: '12px', color: '#666' }}>股數</span>
+                  <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>股數</span>
                   <div style={{ fontWeight: 600 }}>{session.current_position_json.shares}</div>
                 </div>
                 <div>
-                  <span style={{ fontSize: '12px', color: '#666' }}>進場價</span>
+                  <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>進場價</span>
                   <div style={{ fontWeight: 600 }}>${session.current_position_json.entry_price?.toFixed(2)}</div>
                 </div>
                 <div>
-                  <span style={{ fontSize: '12px', color: '#666' }}>進場日</span>
+                  <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>進場日</span>
                   <div style={{ fontWeight: 600 }}>{session.current_position_json.entry_date}</div>
                 </div>
                 {session.current_position_json.unrealized_pnl !== undefined && (
                   <div>
-                    <span style={{ fontSize: '12px', color: '#666' }}>未實現損益</span>
+                    <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>未實現損益</span>
                     <div style={{
                       fontWeight: 600,
-                      color: session.current_position_json.unrealized_pnl >= 0 ? '#155724' : '#721c24',
+                      color: session.current_position_json.unrealized_pnl >= 0 ? 'var(--positive)' : 'var(--negative)',
                     }}>
                       ${session.current_position_json.unrealized_pnl?.toFixed(2)}
                     </div>
@@ -751,7 +752,7 @@ export default function SimulationPage() {
                 </button>
                 <button
                   className="btn"
-                  style={{ backgroundColor: manualMode ? '#0070f3' : '#eaeaea', color: manualMode ? '#fff' : '#000' }}
+                  style={{ backgroundColor: manualMode ? 'var(--primary-solid)' : 'var(--surface-2)', color: manualMode ? 'var(--text-white)' : 'var(--text-primary)' }}
                   onClick={() => setManualMode(!manualMode)}
                 >
                   {manualMode ? '切換至自動模式' : '切換至手動模式'}
@@ -759,7 +760,7 @@ export default function SimulationPage() {
               </>
             )}
             {session.status === 'active' && (
-              <button className="btn" style={{ backgroundColor: '#eaeaea' }} onClick={handlePause}>
+              <button className="btn" style={{ backgroundColor: 'var(--surface-2)' }} onClick={handlePause}>
                 暫停
               </button>
             )}
@@ -771,7 +772,7 @@ export default function SimulationPage() {
             {!['completed', 'retired'].includes(session.status) && (
               <button
                 className="btn"
-                style={{ backgroundColor: '#f8d7da', color: '#721c24' }}
+                style={{ backgroundColor: 'rgba(239,68,68,0.12)', color: 'var(--negative)' }}
                 onClick={handleRetire}
               >
                 退役
@@ -782,12 +783,12 @@ export default function SimulationPage() {
           <div
             data-testid="sim-linked-portfolio"
             className="card"
-            style={{ marginBottom: '24px', borderLeft: '4px solid #6f42c1' }}
+            style={{ marginBottom: '24px', borderLeft: '4px solid var(--primary)' }}
           >
             <h3 style={{ marginBottom: '8px' }}>連結的紙上帳戶</h3>
             {!linkedPortfolio ? (
               <>
-                <p style={{ fontSize: '13px', color: '#666', marginBottom: '12px' }}>
+                <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '12px' }}>
                   尚未連結紙上帳戶。連結後，鎖定策略觸發的進出場會自動寫入帳戶的委託、成交、部位、現金與決策日誌；
                   未連結時，此重播只記錄研究日誌，不會產生任何帳戶資料。
                 </p>
@@ -804,29 +805,29 @@ export default function SimulationPage() {
               <>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '12px', marginBottom: '12px' }}>
                   <div>
-                    <span style={{ fontSize: '12px', color: '#666' }}>帳戶狀態</span>
+                    <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>帳戶狀態</span>
                     <div data-testid="sim-portfolio-status" style={{ fontWeight: 600 }}>
                       {STATUS_LABELS[linkedPortfolio.status] || linkedPortfolio.status}
                     </div>
                   </div>
                   <div>
-                    <span style={{ fontSize: '12px', color: '#666' }}>可用虛擬現金</span>
+                    <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>可用虛擬現金</span>
                     <div data-testid="sim-portfolio-cash" style={{ fontWeight: 600 }}>
                       ${linkedPortfolio.current_virtual_cash.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                     </div>
                   </div>
                   <div>
-                    <span style={{ fontSize: '12px', color: '#666' }}>已實現損益</span>
+                    <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>已實現損益</span>
                     <div data-testid="sim-portfolio-realized" style={{
                       fontWeight: 600,
-                      color: linkedPortfolio.total_realized_pnl >= 0 ? '#155724' : '#721c24',
+                      color: linkedPortfolio.total_realized_pnl >= 0 ? 'var(--positive)' : 'var(--negative)',
                     }}>
                       ${linkedPortfolio.total_realized_pnl.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                     </div>
                   </div>
                   <div>
-                    <span style={{ fontSize: '12px', color: '#666' }}>未實現損益</span>
-                    <div data-testid="sim-portfolio-unrealized" style={{ fontWeight: 600, color: '#666' }}>
+                    <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>未實現損益</span>
+                    <div data-testid="sim-portfolio-unrealized" style={{ fontWeight: 600, color: 'var(--text-secondary)' }}>
                       {linkedPortfolio.total_unrealized_pnl === null
                         ? '無法估值'
                         : `$${linkedPortfolio.total_unrealized_pnl.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
@@ -838,7 +839,7 @@ export default function SimulationPage() {
                     data-testid="sim-portfolio-link"
                     href={`/paper-portfolio/${linkedPortfolio.id}`}
                     className="btn"
-                    style={{ backgroundColor: '#eaeaea', textDecoration: 'none' }}
+                    style={{ backgroundColor: 'var(--surface-2)', textDecoration: 'none' }}
                   >
                     開啟帳戶（委託／成交／日誌）
                   </Link>
@@ -846,7 +847,7 @@ export default function SimulationPage() {
                     <button
                       data-testid="sim-portfolio-pause"
                       className="btn"
-                      style={{ backgroundColor: '#fff3cd', color: '#856404' }}
+                      style={{ backgroundColor: 'rgba(245,158,11,0.14)', color: 'var(--warning)' }}
                       onClick={() => handlePortfolioStatus('pause')}
                       disabled={linking}
                     >
@@ -864,7 +865,7 @@ export default function SimulationPage() {
                     </button>
                   )}
                 </div>
-                <p style={{ fontSize: '12px', color: '#666', marginTop: '12px' }}>
+                <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '12px' }}>
                   帳戶暫停時，規則觸發的<strong>新進場</strong>會被記錄為受阻且不會成交；停損／停利等風險出場仍會執行。
                   帳戶退役後不再接受任何規則下單。手動模式提交的買賣會在這個帳戶建立掛單，於綁定數據集下一根可執行的 K 線成交；
                   HOLD 只寫入重播日誌，不動帳戶。
@@ -884,14 +885,14 @@ export default function SimulationPage() {
                     className="btn"
                     style={{
                       justifyContent: 'flex-start',
-                      backgroundColor: s.id === session?.id ? '#e7f0fe' : 'transparent',
-                      border: '1px solid #e0e0e0',
+                      backgroundColor: s.id === session?.id ? 'rgba(59,130,246,0.16)' : 'transparent',
+                      border: '1px solid var(--border-strong)',
                       fontSize: '13px',
                     }}
                     onClick={() => handleReopenSession(s)}
                     disabled={s.id === session?.id}
                   >
-                    {new Date(s.created_at).toLocaleString('zh-Hant')} — {STATUS_LABELS[s.status] || s.status}
+                    {formatDateTime(s.created_at)} — {STATUS_LABELS[s.status] || s.status}
                     {s.current_snapshot_date ? `（觀察日 ${s.current_snapshot_date}）` : '（尚未推進）'}
                   </button>
                 ))}
@@ -900,7 +901,7 @@ export default function SimulationPage() {
           )}
 
           {manualMode && (session.status === 'pending' || session.status === 'active') && (
-            <div className="card" style={{ marginBottom: '24px', borderLeft: '4px solid #0070f3' }}>
+            <div className="card" style={{ marginBottom: '24px', borderLeft: '4px solid var(--primary)' }}>
               <h3 style={{ marginBottom: '16px' }}>手動決策</h3>
               <div className="alert alert-info" style={{ marginBottom: '16px', fontSize: '13px' }}>
                 <strong>執行時序規則：</strong>決策於觀察日收盤後做出，成交於下一可用交易日開盤。
@@ -910,8 +911,8 @@ export default function SimulationPage() {
                 <button
                   className="btn"
                   style={{
-                    backgroundColor: manualAction === 'buy' ? '#28a745' : '#eaeaea',
-                    color: manualAction === 'buy' ? '#fff' : '#000',
+                    backgroundColor: manualAction === 'buy' ? 'var(--positive)' : 'var(--surface-2)',
+                    color: manualAction === 'buy' ? 'var(--text-on-bright)' : 'var(--text-primary)',
                     minWidth: '100px',
                   }}
                   onClick={() => setManualAction('buy')}
@@ -921,8 +922,8 @@ export default function SimulationPage() {
                 <button
                   className="btn"
                   style={{
-                    backgroundColor: manualAction === 'sell' ? '#dc3545' : '#eaeaea',
-                    color: manualAction === 'sell' ? '#fff' : '#000',
+                    backgroundColor: manualAction === 'sell' ? 'var(--negative)' : 'var(--surface-2)',
+                    color: manualAction === 'sell' ? 'var(--text-on-bright)' : 'var(--text-primary)',
                     minWidth: '100px',
                   }}
                   onClick={() => setManualAction('sell')}
@@ -932,8 +933,8 @@ export default function SimulationPage() {
                 <button
                   className="btn"
                   style={{
-                    backgroundColor: manualAction === 'hold' ? '#6c757d' : '#eaeaea',
-                    color: manualAction === 'hold' ? '#fff' : '#000',
+                    backgroundColor: manualAction === 'hold' ? 'var(--text-secondary)' : 'var(--surface-2)',
+                    color: manualAction === 'hold' ? 'var(--text-on-bright)' : 'var(--text-primary)',
                     minWidth: '100px',
                   }}
                   onClick={() => setManualAction('hold')}
@@ -993,7 +994,7 @@ export default function SimulationPage() {
                 {pendingDecision && (
                   <button
                     className="btn"
-                    style={{ backgroundColor: '#ffc107', color: '#000' }}
+                    style={{ backgroundColor: 'var(--warning)', color: 'var(--text-primary)' }}
                     onClick={handleRetryDecision}
                     disabled={submitting}
                   >
@@ -1003,7 +1004,7 @@ export default function SimulationPage() {
                 {pendingDecision && (
                   <button
                     className="btn"
-                    style={{ backgroundColor: '#eaeaea', color: '#000' }}
+                    style={{ backgroundColor: 'var(--surface-2)', color: 'var(--text-primary)' }}
                     onClick={() => {
                       if (confirm('放棄重試唔等於取消後端交易。如果決策已提交成功，佢仍然有效。確定要放棄重試並重新整理狀態？')) {
                         setPendingDecision(null);
@@ -1019,7 +1020,7 @@ export default function SimulationPage() {
                 )}
               </div>
               {pendingDecision && (
-                <div className="alert" style={{ marginTop: '12px', fontSize: '12px', background: '#fff3cd', border: '1px solid #ffc107' }}>
+                <div className="alert" style={{ marginTop: '12px', fontSize: '12px', background: 'rgba(245,158,11,0.14)', border: '1px solid rgba(245,158,11,0.34)' }}>
                   <strong>待重試決策：</strong>
                   idempotency_key=<code>{pendingDecision.idempotency_key}</code>,
                   action={pendingDecision.action},
@@ -1038,7 +1039,7 @@ export default function SimulationPage() {
                   <li key={i} style={{ marginBottom: '4px' }}>{w}</li>
                 ))}
                 {session.warnings.length > 5 && (
-                  <li style={{ color: '#999' }}>...及其他 {session.warnings.length - 5} 則</li>
+                  <li style={{ color: 'var(--text-muted)' }}>...及其他 {session.warnings.length - 5} 則</li>
                 )}
               </ul>
             </div>
@@ -1047,7 +1048,7 @@ export default function SimulationPage() {
           <div className="card">
             <h3 style={{ marginBottom: '16px' }}>決策時間線</h3>
             {decisions.length === 0 ? (
-              <p style={{ color: '#999' }}>
+              <p style={{ color: 'var(--text-muted)' }}>
                 尚無決策紀錄。點擊「{isIntraday ? `推進下一根 ${tfLabel} K 線` : '自動推進一日'}」開始模擬。
               </p>
             ) : (
@@ -1083,9 +1084,9 @@ export default function SimulationPage() {
                               style={{
                                 fontSize: '12px',
                                 fontWeight: 600,
-                                color: '#7a1f45',
-                                background: '#fde8ef',
-                                border: '1px solid #f5a3c0',
+                                color: 'var(--negative)',
+                                background: 'rgba(239,68,68,0.12)',
+                                border: '1px solid rgba(239,68,68,0.34)',
                                 borderRadius: '10px',
                                 padding: '1px 8px',
                               }}
@@ -1168,16 +1169,16 @@ export default function SimulationPage() {
                                   gridColumn: '1 / -1',
                                   padding: '8px',
                                   borderRadius: '4px',
-                                  backgroundColor: isPendingOrder(d) ? PENDING_ORDER_STYLE.bg : '#fff3cd',
-                                  color: isPendingOrder(d) ? '#0b3d75' : '#5c4500',
+                                  backgroundColor: isPendingOrder(d) ? PENDING_ORDER_STYLE.bg : 'rgba(245,158,11,0.14)',
+                                  color: isPendingOrder(d) ? 'var(--primary-text)' : 'var(--warning)',
                                 }}
                               >
-                                <span style={{ color: isPendingOrder(d) ? PENDING_ORDER_STYLE.color : '#856404', fontWeight: 600 }}>
+                                <span style={{ color: isPendingOrder(d) ? PENDING_ORDER_STYLE.color : 'var(--warning)', fontWeight: 600 }}>
                                   {isPendingOrder(d) ? '待成交:' : '拒絕:'}
                                 </span>{' '}
                                 {d.decision_detail.rejection.message || d.decision_detail.rejection.reason}
                                 {d.decision_detail.rejection.message && (
-                                  <span style={{ color: '#5a6b7a', fontSize: '11px', fontFamily: 'monospace' }}>
+                                  <span style={{ color: 'var(--text-muted)', fontSize: '11px', fontFamily: 'monospace' }}>
                                     {' '}({d.decision_detail.rejection.reason})
                                   </span>
                                 )}
@@ -1202,9 +1203,9 @@ export default function SimulationPage() {
                                     marginLeft: '8px',
                                     padding: '2px 8px',
                                     fontSize: '11px',
-                                    border: '1px solid #ccc',
+                                    border: '1px solid var(--border-strong)',
                                     borderRadius: '3px',
-                                    backgroundColor: '#fff',
+                                    backgroundColor: 'var(--surface-1)',
                                     cursor: 'pointer',
                                   }}
                                 >
@@ -1223,10 +1224,10 @@ export default function SimulationPage() {
                                   style={{
                                     padding: '4px 12px',
                                     fontSize: '12px',
-                                    border: '1px solid #0070f3',
+                                    border: '1px solid var(--primary-text)',
                                     borderRadius: '4px',
-                                    backgroundColor: '#fff',
-                                    color: '#0070f3',
+                                    backgroundColor: 'var(--surface-1)',
+                                    color: 'var(--primary-text)',
                                     cursor: 'pointer',
                                   }}
                                 >
@@ -1244,7 +1245,7 @@ export default function SimulationPage() {
                                     width: '100%',
                                     minHeight: '80px',
                                     padding: '8px',
-                                    border: '1px solid #ccc',
+                                    border: '1px solid var(--border-strong)',
                                     borderRadius: '4px',
                                     fontSize: '13px',
                                     fontFamily: 'inherit',
@@ -1260,8 +1261,8 @@ export default function SimulationPage() {
                                       fontSize: '12px',
                                       border: 'none',
                                       borderRadius: '4px',
-                                      backgroundColor: '#0070f3',
-                                      color: '#fff',
+                                      backgroundColor: 'var(--primary-solid)',
+                                      color: 'var(--text-white)',
                                       cursor: updatingReflection || !reflectionInput.trim() ? 'not-allowed' : 'pointer',
                                       opacity: updatingReflection || !reflectionInput.trim() ? 0.6 : 1,
                                     }}
@@ -1276,9 +1277,9 @@ export default function SimulationPage() {
                                     style={{
                                       padding: '6px 16px',
                                       fontSize: '12px',
-                                      border: '1px solid #ccc',
+                                      border: '1px solid var(--border-strong)',
                                       borderRadius: '4px',
-                                      backgroundColor: '#fff',
+                                      backgroundColor: 'var(--surface-1)',
                                       cursor: 'pointer',
                                     }}
                                   >

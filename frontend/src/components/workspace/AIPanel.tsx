@@ -485,6 +485,7 @@ export default function AIPanel({ currentSymbol }: { currentSymbol: string }) {
       <div className="ws-ai-input-row">
         <textarea
           className="ws-ai-input"
+          aria-label="向 AI 助手提問研究問題"
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => {

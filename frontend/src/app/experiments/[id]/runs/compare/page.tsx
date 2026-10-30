@@ -52,11 +52,11 @@ const PROVENANCE_LABELS: Record<string, string> = {
 };
 
 const PROVENANCE_COLORS: Record<string, string> = {
-  captured: '#d4edda',
-  current: '#fff3cd',
-  absent: '#e2e3e5',
-  unavailable: '#f8d7da',
-  derived: '#d1ecf1',
+  captured: 'rgba(34,197,94,0.14)',
+  current: 'rgba(245,158,11,0.14)',
+  absent: 'var(--surface-2)',
+  unavailable: 'rgba(239,68,68,0.12)',
+  derived: 'rgba(59,130,246,0.16)',
 };
 
 export default function RunComparisonPage() {
@@ -236,15 +236,15 @@ export default function RunComparisonPage() {
 
   const getStatusColor = (status: string) => {
     switch (status) {
-      case 'match': return '#d4edda';
-      case 'differ': return '#fff3cd';
-      case 'insufficient': return '#e2e3e5';
-      default: return '#f5f5f5';
+      case 'match': return 'rgba(34,197,94,0.14)';
+      case 'differ': return 'rgba(245,158,11,0.14)';
+      case 'insufficient': return 'var(--surface-2)';
+      default: return 'var(--surface-2)';
     }
   };
 
   const getProvenanceBadge = (provenance: string) => {
-    const color = PROVENANCE_COLORS[provenance] || '#e2e3e5';
+    const color = PROVENANCE_COLORS[provenance] || 'var(--surface-2)';
     return (
       <span style={{
         display: 'inline-block',
@@ -277,22 +277,22 @@ export default function RunComparisonPage() {
       const prefix = delta > 0 ? '+' : '';
       const suffix = isPercent ? ' 百分點' : '';
       return (
-        <span style={{ color: delta < 0 ? '#dc3545' : '#28a745', fontWeight: 600 }}>
+        <span style={{ color: delta < 0 ? 'var(--negative)' : 'var(--positive)', fontWeight: 600 }}>
           {prefix}{delta.toFixed(2)}{suffix}
         </span>
       );
     }
-    return <span style={{ color: '#dc3545' }}>Values differ</span>;
+    return <span style={{ color: 'var(--negative)' }}>Values differ</span>;
   };
 
   const renderEvidenceDetail = (evidence: EvidenceDetail | undefined, label: string) => {
-    if (!evidence) return <span style={{ color: '#999' }}>—</span>;
+    if (!evidence) return <span style={{ color: 'var(--text-muted)' }}>—</span>;
     return (
       <div style={{ marginBottom: '4px' }}>
         <strong>{label}:</strong>
         {evidence.source_category && <span> {evidence.source_category}</span>}
         {evidence.field_path && <span> · <code style={{ fontSize: '11px' }}>{evidence.field_path}</code></span>}
-        {evidence.derivation && <div style={{ color: '#666', fontSize: '12px', marginTop: '2px' }}>{evidence.derivation}</div>}
+        {evidence.derivation && <div style={{ color: 'var(--text-secondary)', fontSize: '12px', marginTop: '2px' }}>{evidence.derivation}</div>}
       </div>
     );
   };
@@ -306,8 +306,8 @@ export default function RunComparisonPage() {
     return (
       <div className="container" style={{ paddingTop: '40px' }}>
         <div style={{
-          background: errorStatus === 404 ? '#fff3cd' : '#f8d7da',
-          borderLeft: `4px solid ${errorStatus === 404 ? '#ffc107' : '#dc3545'}`,
+          background: errorStatus === 404 ? 'rgba(245,158,11,0.14)' : 'rgba(239,68,68,0.12)',
+          borderLeft: `4px solid ${errorStatus === 404 ? 'var(--warning)' : 'var(--negative)'}`,
           padding: '16px',
           marginBottom: '16px',
           borderRadius: '4px',
@@ -317,11 +317,11 @@ export default function RunComparisonPage() {
         </div>
         <div style={{ display: 'flex', gap: '8px' }}>
           {isRetryable && (
-            <button onClick={loadComparison} className="btn" style={{ backgroundColor: '#0070f3', color: '#fff' }}>
+            <button onClick={loadComparison} className="btn" style={{ backgroundColor: 'var(--primary-solid)', color: 'var(--text-white)' }}>
               重試
             </button>
           )}
-          <Link href={`/experiments/${experimentId}`} className="btn" style={{ backgroundColor: '#eaeaea', textDecoration: 'none' }}>
+          <Link href={`/experiments/${experimentId}`} className="btn" style={{ backgroundColor: 'var(--surface-2)', textDecoration: 'none' }}>
             返回實驗
           </Link>
         </div>
@@ -336,20 +336,20 @@ export default function RunComparisonPage() {
   return (
     <div className="container" style={{ paddingTop: '40px', paddingBottom: '40px' }}>
       <div style={{ marginBottom: '20px' }}>
-        <Link href={`/experiments/${experimentId}`} style={{ color: '#0070f3', textDecoration: 'none' }}>
+        <Link href={`/experiments/${experimentId}`} style={{ color: 'var(--primary-text)', textDecoration: 'none' }}>
           ← 返回實驗
         </Link>
       </div>
 
       <h1 style={{ marginBottom: '8px' }}>回測結果比較</h1>
-      <p style={{ color: '#666', marginBottom: '24px' }}>
+      <p style={{ color: 'var(--text-secondary)', marginBottom: '24px' }}>
         實驗 {experimentId.slice(0, 8)}...
       </p>
 
       {/* Task Prompt */}
       <div style={{
-        background: '#e7f3ff',
-        border: '2px solid #007bff',
+        background: 'rgba(59,130,246,0.16)',
+        border: '2px solid var(--primary-text)',
         padding: '15px',
         marginBottom: '24px',
         borderRadius: '4px',
@@ -359,8 +359,8 @@ export default function RunComparisonPage() {
 
       {/* Save Comparison Form */}
       <div style={{
-        background: '#f8f9fa',
-        border: '1px solid #dee2e6',
+        background: 'var(--surface-2)',
+        border: '1px solid var(--border-strong)',
         padding: '16px',
         marginBottom: '24px',
         borderRadius: '4px',
@@ -369,7 +369,7 @@ export default function RunComparisonPage() {
         
         <div style={{ marginBottom: '12px' }}>
           <label style={{ display: 'block', marginBottom: '4px', fontWeight: 500 }}>
-            比較目的 <span style={{ color: '#dc3545' }}>*</span>
+            比較目的 <span style={{ color: 'var(--negative)' }}>*</span>
           </label>
           <input
             type="text"
@@ -380,7 +380,7 @@ export default function RunComparisonPage() {
             style={{
               width: '100%',
               padding: '8px',
-              border: '1px solid #ced4da',
+              border: '1px solid var(--border-strong)',
               borderRadius: '4px',
               fontSize: '14px',
             }}
@@ -401,7 +401,7 @@ export default function RunComparisonPage() {
             style={{
               width: '100%',
               padding: '8px',
-              border: '1px solid #ced4da',
+              border: '1px solid var(--border-strong)',
               borderRadius: '4px',
               fontSize: '14px',
               resize: 'vertical',
@@ -412,9 +412,9 @@ export default function RunComparisonPage() {
 
         {saveError && (
           <div style={{
-            background: '#f8d7da',
-            border: '1px solid #f5c6cb',
-            color: '#721c24',
+            background: 'rgba(239,68,68,0.12)',
+            border: '1px solid rgba(239,68,68,0.34)',
+            color: 'var(--negative)',
             padding: '8px',
             marginBottom: '12px',
             borderRadius: '4px',
@@ -425,9 +425,9 @@ export default function RunComparisonPage() {
 
         {saveSuccess && (
           <div style={{
-            background: '#d4edda',
-            border: '1px solid #c3e6cb',
-            color: '#155724',
+            background: 'rgba(34,197,94,0.14)',
+            border: '1px solid rgba(34,197,94,0.34)',
+            color: 'var(--positive)',
             padding: '8px',
             marginBottom: '12px',
             borderRadius: '4px',
@@ -440,8 +440,8 @@ export default function RunComparisonPage() {
           onClick={handleSave}
           disabled={saving || !purpose.trim()}
           style={{
-            backgroundColor: saving ? '#6c757d' : '#0070f3',
-            color: '#fff',
+            backgroundColor: saving ? 'var(--text-secondary)' : 'var(--primary-text)',
+            color: 'var(--text-white)',
             padding: '8px 16px',
             border: 'none',
             borderRadius: '4px',
@@ -456,20 +456,20 @@ export default function RunComparisonPage() {
 
       {/* Run Identities */}
       <div style={{
-        background: '#d1ecf1',
-        borderLeft: '4px solid #17a2b8',
+        background: 'rgba(59,130,246,0.16)',
+        borderLeft: '4px solid var(--primary)',
         padding: '12px',
         marginBottom: '24px',
       }}>
         <strong>選取嘅結果：</strong>
         <ul style={{ margin: '8px 0 0 20px', listStyle: 'none', padding: 0 }}>
           <li style={{ marginBottom: '4px' }}>
-            Run A: <Link href={`/experiments/${experimentId}/runs/${comparison.run_a_id}`} style={{ color: '#0070f3', textDecoration: 'none' }}>
+            Run A: <Link href={`/experiments/${experimentId}/runs/${comparison.run_a_id}`} style={{ color: 'var(--primary-text)', textDecoration: 'none' }}>
               {comparison.run_a_id.slice(0, 8)}...
             </Link> (狀態: {comparison.status_a})
           </li>
           <li>
-            Run B: <Link href={`/experiments/${experimentId}/runs/${comparison.run_b_id}`} style={{ color: '#0070f3', textDecoration: 'none' }}>
+            Run B: <Link href={`/experiments/${experimentId}/runs/${comparison.run_b_id}`} style={{ color: 'var(--primary-text)', textDecoration: 'none' }}>
               {comparison.run_b_id.slice(0, 8)}...
             </Link> (狀態: {comparison.status_b})
           </li>
@@ -479,8 +479,8 @@ export default function RunComparisonPage() {
       {/* Limitations */}
       {comparison.limitations.length > 0 && (
         <div style={{
-          background: '#fff3cd',
-          borderLeft: '4px solid #ffc107',
+          background: 'rgba(245,158,11,0.14)',
+          borderLeft: '4px solid var(--warning)',
           padding: '12px',
           marginBottom: '24px',
         }}>
@@ -496,8 +496,8 @@ export default function RunComparisonPage() {
       {/* Period Overlap */}
       {comparison.period_overlap && (
         <div style={{
-          background: '#f8f9fa',
-          border: '1px solid #dee2e6',
+          background: 'var(--surface-2)',
+          border: '1px solid var(--border-strong)',
           padding: '12px',
           marginBottom: '24px',
           borderRadius: '4px',
@@ -506,7 +506,7 @@ export default function RunComparisonPage() {
           <div style={{ marginTop: '8px', fontSize: '13px' }}>
             <div>Run A: {comparison.period_overlap.run_a_period.start} 至 {comparison.period_overlap.run_a_period.end}</div>
             <div>Run B: {comparison.period_overlap.run_b_period.start} 至 {comparison.period_overlap.run_b_period.end}</div>
-            <div style={{ marginTop: '4px', color: '#007bff' }}>
+            <div style={{ marginTop: '4px', color: 'var(--primary-text)' }}>
               重疊期間: {comparison.period_overlap.overlap.start} 至 {comparison.period_overlap.overlap.end}
             </div>
           </div>
@@ -517,7 +517,7 @@ export default function RunComparisonPage() {
       <h2 style={{ marginBottom: '16px' }}>結果差異</h2>
       <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: '24px' }}>
         <thead>
-          <tr style={{ borderBottom: '2px solid #ddd' }}>
+          <tr style={{ borderBottom: '2px solid var(--border-strong)' }}>
             <th style={{ padding: '10px', textAlign: 'left', width: '30px' }}></th>
             <th style={{ padding: '10px', textAlign: 'left' }}>指標</th>
             <th style={{ padding: '10px', textAlign: 'right' }}>Run A</th>
@@ -533,7 +533,7 @@ export default function RunComparisonPage() {
             const hasEvidence = field.evidence_detail?.run_a || field.evidence_detail?.run_b;
             return (
               <tr key={i}>
-                <td colSpan={6} style={{ padding: 0, borderBottom: isExpanded ? 'none' : '1px solid #eee' }}>
+                <td colSpan={6} style={{ padding: 0, borderBottom: isExpanded ? 'none' : '1px solid var(--border-strong)' }}>
                   <div
                     style={{
                       display: 'grid',
@@ -543,7 +543,7 @@ export default function RunComparisonPage() {
                     }}
                     onClick={() => hasEvidence && toggleFieldExpand(fieldKey)}
                   >
-                    <div style={{ padding: '10px', fontSize: '12px', color: '#666' }}>
+                    <div style={{ padding: '10px', fontSize: '12px', color: 'var(--text-secondary)' }}>
                       {hasEvidence ? (isExpanded ? '▼' : '▶') : ''}
                     </div>
                     <div style={{ padding: '10px', fontWeight: 500 }}>{field.field}</div>
@@ -556,7 +556,7 @@ export default function RunComparisonPage() {
                     </div>
                   </div>
                   {isExpanded && hasEvidence && (
-                    <div style={{ padding: '8px 10px 12px 40px', background: '#f8f9fa', fontSize: '13px', borderBottom: '1px solid #eee' }}>
+                    <div style={{ padding: '8px 10px 12px 40px', background: 'var(--surface-2)', fontSize: '13px', borderBottom: '1px solid var(--border-strong)' }}>
                       {renderEvidenceDetail(field.evidence_detail?.run_a, 'Run A')}
                       {renderEvidenceDetail(field.evidence_detail?.run_b, 'Run B')}
                     </div>
@@ -572,7 +572,7 @@ export default function RunComparisonPage() {
       <h2 style={{ marginBottom: '16px' }}>執行條件差異</h2>
       <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: '24px' }}>
         <thead>
-          <tr style={{ borderBottom: '2px solid #ddd' }}>
+          <tr style={{ borderBottom: '2px solid var(--border-strong)' }}>
             <th style={{ padding: '10px', textAlign: 'left', width: '30px' }}></th>
             <th style={{ padding: '10px', textAlign: 'left' }}>欄位</th>
             <th style={{ padding: '10px', textAlign: 'right' }}>Run A</th>
@@ -588,7 +588,7 @@ export default function RunComparisonPage() {
             const hasEvidence = field.evidence_detail?.run_a || field.evidence_detail?.run_b;
             return (
               <tr key={i}>
-                <td colSpan={6} style={{ padding: 0, borderBottom: isExpanded ? 'none' : '1px solid #eee' }}>
+                <td colSpan={6} style={{ padding: 0, borderBottom: isExpanded ? 'none' : '1px solid var(--border-strong)' }}>
                   <div
                     style={{
                       display: 'grid',
@@ -598,7 +598,7 @@ export default function RunComparisonPage() {
                     }}
                     onClick={() => hasEvidence && toggleFieldExpand(fieldKey)}
                   >
-                    <div style={{ padding: '10px', fontSize: '12px', color: '#666' }}>
+                    <div style={{ padding: '10px', fontSize: '12px', color: 'var(--text-secondary)' }}>
                       {hasEvidence ? (isExpanded ? '▼' : '▶') : ''}
                     </div>
                     <div style={{ padding: '10px', fontWeight: 500 }}>{field.field}</div>
@@ -615,7 +615,7 @@ export default function RunComparisonPage() {
                     </div>
                   </div>
                   {isExpanded && hasEvidence && (
-                    <div style={{ padding: '8px 10px 12px 40px', background: '#f8f9fa', fontSize: '13px', borderBottom: '1px solid #eee' }}>
+                    <div style={{ padding: '8px 10px 12px 40px', background: 'var(--surface-2)', fontSize: '13px', borderBottom: '1px solid var(--border-strong)' }}>
                       {renderEvidenceDetail(field.evidence_detail?.run_a, 'Run A')}
                       {renderEvidenceDetail(field.evidence_detail?.run_b, 'Run B')}
                     </div>
@@ -629,7 +629,7 @@ export default function RunComparisonPage() {
 
       {/* Disclaimer */}
       <div style={{
-        background: '#fff3cd',
+        background: 'rgba(245,158,11,0.14)',
         padding: '12px',
         borderRadius: '4px',
         fontSize: '14px',

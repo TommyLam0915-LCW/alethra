@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { api, ApiError } from '@/lib/api';
+import { formatDateTime } from '@/lib/format';
 
 interface OwnedVersion {
   id: string;
@@ -794,6 +795,7 @@ export default function PersonalStrategyLearningPanel() {
   useEffect(() => {
     if (!versionId || !waitingForWorker || pollPaused) return;
     const timer = setInterval(() => {
+      if (document.hidden) return;
       // Background refresh: no spinner, but a failure still stops the loop
       // after three consecutive attempts instead of retrying forever.
       runStrategyLoad(versionId, { background: true }).catch(() => {
@@ -1722,7 +1724,7 @@ export default function PersonalStrategyLearningPanel() {
                                 {rev.note && <span>備註：{rev.note}</span>}
                                 <span style={{ color: 'var(--text-muted)' }}>
                                   {rev.created_at
-                                    ? new Date(rev.created_at).toLocaleString('zh-Hant')
+                                    ? formatDateTime(rev.created_at)
                                     : '時間未知'}
                                 </span>
                               </div>

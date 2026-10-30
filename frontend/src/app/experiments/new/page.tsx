@@ -317,9 +317,9 @@ function NewExperimentForm() {
       )}
 
       {showPreview && draft && (
-        <div className="card" style={{ marginBottom: '20px', backgroundColor: '#f8f9fa', border: '2px solid #0070f3' }}>
+        <div className="card" style={{ marginBottom: '20px', backgroundColor: 'var(--surface-2)', border: '2px solid var(--primary)' }}>
           <h2 style={{ marginBottom: '16px', fontSize: '18px' }}>預覽草稿欄位</h2>
-          <p style={{ fontSize: '13px', color: '#666', marginBottom: '16px' }}>
+          <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '16px' }}>
             以下欄位將從草稿套用到表單。請確認後點擊「確認套用」，或點擊「取消」返回。
           </p>
           <div style={{ display: 'grid', gap: '12px', marginBottom: '16px' }}>
@@ -327,11 +327,11 @@ function NewExperimentForm() {
               const value = (draft as any)[field];
               if (!value) return null;
               return (
-                <div key={field} style={{ display: 'flex', gap: '12px', padding: '8px 0', borderBottom: '1px solid #e0e0e0' }}>
-                  <div style={{ width: '120px', fontWeight: '500', fontSize: '14px', color: '#555', flexShrink: 0 }}>
+                <div key={field} style={{ display: 'flex', gap: '12px', padding: '8px 0', borderBottom: '1px solid var(--border-strong)' }}>
+                  <div style={{ width: '120px', fontWeight: '500', fontSize: '14px', color: 'var(--text-muted)', flexShrink: 0 }}>
                     {FIELD_LABELS[field] || field}
                   </div>
-                  <div style={{ fontSize: '14px', color: '#333', flex: 1 }}>
+                  <div style={{ fontSize: '14px', color: 'var(--text-primary)', flex: 1 }}>
                     <strong>{String(value)}</strong>
                   </div>
                 </div>
@@ -366,6 +366,7 @@ function NewExperimentForm() {
               type="text"
               className="input"
               data-testid="exp-title"
+              aria-label="實驗標題"
               value={title}
               onChange={(e) => setTitle(e.target.value)}
               placeholder="例如：測試 DEMO-ALPHA 的均線交叉策略"
@@ -377,6 +378,7 @@ function NewExperimentForm() {
             <label>研究假設</label>
             <textarea
               className="input"
+              aria-label="研究假設"
               value={hypothesis}
               onChange={(e) => setHypothesis(e.target.value)}
               placeholder="描述你的投資假設"
@@ -389,6 +391,7 @@ function NewExperimentForm() {
             <label>策略模板 *</label>
             <select
               className="input"
+              aria-label="策略模板"
               value={templateType}
               onChange={(e) => setTemplateType(e.target.value)}
             >
@@ -401,16 +404,17 @@ function NewExperimentForm() {
           <div className="form-group">
             <label>資產 *</label>
             <div style={{ display: 'flex', gap: '8px', marginBottom: '8px' }}>
-              <button type="button" className="btn" style={{ fontSize: '12px', padding: '4px 12px', background: assetTab === 'real' ? '#0070f3' : '#e0e0e0', color: assetTab === 'real' ? '#fff' : '#333' }} onClick={() => setAssetTab('real')}>
+              <button type="button" className={assetTab === 'real' ? 'btn btn-primary' : 'btn btn-secondary'} aria-pressed={assetTab === 'real'} style={{ fontSize: '12px', padding: '4px 12px' }} onClick={() => setAssetTab('real')}>
                 真實產品 (US/HK)
               </button>
-              <button type="button" className="btn" style={{ fontSize: '12px', padding: '4px 12px', background: assetTab === 'demo' ? '#0070f3' : '#e0e0e0', color: assetTab === 'demo' ? '#fff' : '#333' }} onClick={() => setAssetTab('demo')}>
+              <button type="button" className={assetTab === 'demo' ? 'btn btn-primary' : 'btn btn-secondary'} aria-pressed={assetTab === 'demo'} style={{ fontSize: '12px', padding: '4px 12px' }} onClick={() => setAssetTab('demo')}>
                 示範產品
               </button>
             </div>
             <select
               className="input"
               data-testid="exp-asset"
+              aria-label="資產"
               value={assetId}
               onChange={(e) => {
                 datesEditedRef.current = false;
@@ -452,6 +456,7 @@ function NewExperimentForm() {
             <label>基準 (Benchmark)</label>
             <select
               className="input"
+              aria-label="基準 (Benchmark)"
               value={benchmarkId}
               onChange={(e) => setBenchmarkId(e.target.value)}
             >
@@ -475,6 +480,7 @@ function NewExperimentForm() {
                 type="date"
                 className="input"
                 data-testid="exp-start-date"
+                aria-label="開始日期"
                 value={startDate}
                 onChange={(e) => {
                   datesEditedRef.current = true;
@@ -489,6 +495,7 @@ function NewExperimentForm() {
                 type="date"
                 className="input"
                 data-testid="exp-end-date"
+                aria-label="結束日期"
                 value={endDate}
                 onChange={(e) => {
                   datesEditedRef.current = true;
@@ -529,6 +536,7 @@ function NewExperimentForm() {
             <input
               type="number"
               className="input"
+              aria-label="初始資金 (USD)"
               value={initialCash}
               onChange={(e) => setInitialCash(e.target.value)}
               min="100"
@@ -543,6 +551,7 @@ function NewExperimentForm() {
               <input
                 type="number"
                 className="input"
+                aria-label="佣金率"
                 value={commissionRate}
                 onChange={(e) => setCommissionRate(e.target.value)}
                 min="0"
@@ -555,6 +564,7 @@ function NewExperimentForm() {
               <input
                 type="number"
                 className="input"
+                aria-label="滑價率"
                 value={slippageRate}
                 onChange={(e) => setSlippageRate(e.target.value)}
                 min="0"
@@ -571,6 +581,7 @@ function NewExperimentForm() {
                 type="number"
                 className="input"
                 data-testid="risk-stop-price"
+                aria-label="停損價 (USD)"
                 value={stopPrice}
                 onChange={(e) => setStopPrice(e.target.value)}
                 step="0.01"
@@ -583,6 +594,7 @@ function NewExperimentForm() {
                 type="number"
                 className="input"
                 data-testid="risk-stop-pct"
+                aria-label="停損幅度"
                 value={stopPct}
                 onChange={(e) => setStopPct(e.target.value)}
                 min="0"
@@ -597,6 +609,7 @@ function NewExperimentForm() {
                 type="number"
                 className="input"
                 data-testid="risk-target-price"
+                aria-label="目標價 (USD)"
                 value={targetPrice}
                 onChange={(e) => setTargetPrice(e.target.value)}
                 step="0.01"
@@ -609,6 +622,7 @@ function NewExperimentForm() {
                 type="number"
                 className="input"
                 data-testid="risk-target-pct"
+                aria-label="目標幅度"
                 value={targetPct}
                 onChange={(e) => setTargetPct(e.target.value)}
                 min="0"
@@ -631,6 +645,7 @@ function NewExperimentForm() {
                   type="number"
                   className="input"
                   data-testid="sma-short-window"
+                  aria-label="短均線天數"
                   value={shortWindow}
                   onChange={(e) => setShortWindow(e.target.value)}
                   min="2"
@@ -644,6 +659,7 @@ function NewExperimentForm() {
                   type="number"
                   className="input"
                   data-testid="sma-long-window"
+                  aria-label="長均線天數"
                   value={longWindow}
                   onChange={(e) => setLongWindow(e.target.value)}
                   min="3"
@@ -661,6 +677,7 @@ function NewExperimentForm() {
                 <input
                   type="number"
                   className="input"
+                  aria-label="回望天數"
                   value={lookbackDays}
                   onChange={(e) => setLookbackDays(e.target.value)}
                   min="1"
@@ -673,6 +690,7 @@ function NewExperimentForm() {
                 <input
                   type="number"
                   className="input"
+                  aria-label="跌幅門檻"
                   value={thresholdPct}
                   onChange={(e) => setThresholdPct(e.target.value)}
                   min="0.01"
@@ -686,6 +704,7 @@ function NewExperimentForm() {
                 <input
                   type="number"
                   className="input"
+                  aria-label="持有天數"
                   value={holdingDays}
                   onChange={(e) => setHoldingDays(e.target.value)}
                   min="1"

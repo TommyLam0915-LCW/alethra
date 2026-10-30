@@ -4,6 +4,8 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { api, ApiError } from '@/lib/api';
+import { formatDateTime } from '@/lib/format';
+import { statusPillClass } from '@/lib/status-styles';
 
 interface InferenceRun {
   id: string;
@@ -53,22 +55,9 @@ const RUN_STATUS_LABELS: Record<string, string> = {
   failed: '失敗',
 };
 
-const RUN_STATUS_COLORS: Record<string, { bg: string; text: string }> = {
-  pending: { bg: '#fff3cd', text: '#856404' },
-  running: { bg: '#cce5ff', text: '#004085' },
-  completed: { bg: '#d4edda', text: '#155724' },
-  failed: { bg: '#f8d7da', text: '#721c24' },
-};
-
 function describeError(err: unknown, fallback: string): string {
   if (err instanceof ApiError && err.message) return err.message;
   return err instanceof Error && err.message ? err.message : fallback;
-}
-
-function formatTime(value: string | null): string {
-  if (!value) return '—';
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString('zh-Hant');
 }
 
 export default function InferencePage() {
@@ -204,11 +193,6 @@ export default function InferencePage() {
     setExpandedRunId(expandedRunId === runId ? null : runId);
   };
 
-  const handleLogout = () => {
-    localStorage.removeItem('token');
-    router.push('/');
-  };
-
   return (
     <div className="container" style={{ paddingTop: '40px', paddingBottom: '40px' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
@@ -216,14 +200,6 @@ export default function InferencePage() {
         <div style={{ display: 'flex', gap: '12px' }}>
           <Link href="/models" className="btn btn-secondary">管理模型版本</Link>
           <Link href="/dashboard" className="btn btn-secondary">返回我的實驗</Link>
-          <button
-            type="button"
-            onClick={handleLogout}
-            className="btn btn-secondary"
-            data-testid="inference-logout"
-          >
-            登出
-          </button>
           <button
             type="button"
             onClick={() => setShowForm(!showForm)}
@@ -240,7 +216,7 @@ export default function InferencePage() {
         目前只有「規則型」版本會逐日計算；其他版本類型會如實回報不可執行或只提供說明。
       </p>
 
-      <div className="disclaimer" style={{ backgroundColor: '#fff3cd', border: '1px solid #ffc107', padding: '16px', borderRadius: '8px', marginBottom: '24px' }}>
+      <div className="disclaimer" role="note" style={{ marginBottom: '24px' }}>
         <strong>提醒：</strong>模型推論為規則式運算，使用演示資料 — 非 AI/ML 預測。
       </div>
 
@@ -258,7 +234,7 @@ export default function InferencePage() {
               data-testid="inference-versions-error"
               style={{ display: 'flex', gap: '12px', alignItems: 'center', flexWrap: 'wrap', marginBottom: '16px' }}
             >
-              <span style={{ color: '#721c24', fontSize: '14px' }}>{versionsError}</span>
+              <span style={{ color: 'var(--negative)', fontSize: '14px' }}>{versionsError}</span>
               <button type="button" className="btn btn-secondary" onClick={loadVersions}>
                 重試載入版本
               </button>
@@ -300,7 +276,7 @@ export default function InferencePage() {
                 {selectedVersion && (
                   <p data-testid="inference-version-detail" style={{ margin: '8px 0 0', fontSize: '12px', color: 'var(--text-muted)' }}>
                     類型：{MODEL_TYPE_LABELS[selectedVersion.model_type] ?? selectedVersion.model_type}
-                    {' · '}建立於 {formatTime(selectedVersion.created_at)}
+                    {' · '}建立於 {formatDateTime(selectedVersion.created_at)}
                     {selectedVersion.revoked_at ? ' · 此版本已撤銷，結果僅供歷史參考。' : ''}
                   </p>
                 )}
@@ -376,12 +352,12 @@ export default function InferencePage() {
               </button>
 
               {formError && (
-                <p role="alert" data-testid="inference-form-error" style={{ marginTop: '12px', color: '#721c24', fontSize: '14px' }}>
+                <p role="alert" data-testid="inference-form-error" style={{ marginTop: '12px', color: 'var(--negative)', fontSize: '14px' }}>
                   {formError}
                 </p>
               )}
               {notice && (
-                <p data-testid="inference-notice" style={{ marginTop: '12px', color: '#155724', fontSize: '14px' }}>
+                <p data-testid="inference-notice" style={{ marginTop: '12px', color: 'var(--positive)', fontSize: '14px' }}>
                   {notice}
                 </p>
               )}
@@ -401,7 +377,7 @@ export default function InferencePage() {
           role="alert"
           data-testid="inference-runs-error"
           className="card"
-          style={{ display: 'flex', gap: '12px', alignItems: 'center', justifyContent: 'center', flexWrap: 'wrap', padding: '32px', color: '#721c24' }}
+          style={{ display: 'flex', gap: '12px', alignItems: 'center', justifyContent: 'center', flexWrap: 'wrap', padding: '32px', color: 'var(--negative)' }}
         >
           <span>{runsError}</span>
           <button type="button" className="btn btn-secondary" onClick={loadRuns}>
@@ -410,12 +386,11 @@ export default function InferencePage() {
         </div>
       ) : runs.length === 0 ? (
         <div className="card" data-testid="inference-runs-empty" style={{ textAlign: 'center', padding: '60px' }}>
-          <p style={{ color: '#666', margin: 0 }}>尚無推論紀錄。建立任務後，結果會出現在這裡。</p>
+          <p style={{ color: 'var(--text-secondary)', margin: 0 }}>尚無推論紀錄。建立任務後，結果會出現在這裡。</p>
         </div>
       ) : (
         <div style={{ display: 'grid', gap: '16px' }}>
           {runs.map((run) => {
-            const colors = RUN_STATUS_COLORS[run.status] || { bg: '#eaeaea', text: '#666' };
             return (
               <div key={run.id} className="card" data-testid="inference-run">
                 <button
@@ -448,20 +423,11 @@ export default function InferencePage() {
                         : ''}
                     </div>
                     <div style={{ display: 'flex', gap: '24px', fontSize: '12px', color: 'var(--text-muted)', marginTop: '6px' }}>
-                      <span>建立：{formatTime(run.created_at)}</span>
-                      {run.completed_at && <span>完成：{formatTime(run.completed_at)}</span>}
+                      <span>建立：{formatDateTime(run.created_at)}</span>
+                      {run.completed_at && <span>完成：{formatDateTime(run.completed_at)}</span>}
                     </div>
                   </div>
-                  <span
-                    style={{
-                      padding: '4px 12px',
-                      borderRadius: '12px',
-                      fontSize: '12px',
-                      backgroundColor: colors.bg,
-                      color: colors.text,
-                      whiteSpace: 'nowrap',
-                    }}
-                  >
+                  <span className={statusPillClass(run.status)}>
                     {RUN_STATUS_LABELS[run.status] ?? run.status}
                   </span>
                 </button>
@@ -470,7 +436,7 @@ export default function InferencePage() {
                   <div style={{ marginTop: '16px', borderTop: '1px solid var(--border)', paddingTop: '16px' }}>
                     <h4 style={{ marginBottom: '8px', fontSize: '14px', color: 'var(--text-secondary)' }}>輸入規格</h4>
                     <pre style={{
-                      backgroundColor: 'var(--surface-2, #f8f9fa)',
+                      backgroundColor: 'var(--surface-2, var(--surface-2))',
                       padding: '12px',
                       borderRadius: '4px',
                       fontSize: '13px',
@@ -488,7 +454,7 @@ export default function InferencePage() {
                           並非機率、準確率或可信度；本頁未提供任何經校準的預測值。
                         </p>
                         <pre style={{
-                          backgroundColor: 'var(--surface-2, #f8f9fa)',
+                          backgroundColor: 'var(--surface-2, var(--surface-2))',
                           padding: '12px',
                           borderRadius: '4px',
                           fontSize: '13px',

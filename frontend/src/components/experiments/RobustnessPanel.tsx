@@ -161,15 +161,15 @@ const ROLE_LABEL: Record<string, string> = {
 const th: React.CSSProperties = {
   padding: '6px 10px',
   textAlign: 'right',
-  borderBottom: '2px solid #ddd',
+  borderBottom: '2px solid var(--border-strong)',
   whiteSpace: 'nowrap',
   fontSize: '12px',
-  color: '#555',
+  color: 'var(--text-muted)',
 };
 const td: React.CSSProperties = {
   padding: '5px 10px',
   textAlign: 'right',
-  borderBottom: '1px solid #eee',
+  borderBottom: '1px solid var(--border-strong)',
   whiteSpace: 'nowrap',
   fontSize: '13px',
 };
@@ -345,12 +345,12 @@ export default function RobustnessPanel({
         }}
       >
         <h3 style={{ margin: 0 }}>進階研究與穩健性</h3>
-        <span style={{ fontSize: '12px', color: '#888' }}>
+        <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
           每次嘗試都是一次真實回測，會計入研究執行額度
         </span>
       </div>
 
-      <p style={{ color: '#666', fontSize: '13px', marginTop: 0 }}>
+      <p style={{ color: 'var(--text-secondary)', fontSize: '13px', marginTop: 0 }}>
         先預覽計劃（嘗試數、資料日曆、額度是否足夠），再建立並執行。研究不會修改策略版本；
         全部嘗試（包括失敗與跳過）都會列出，最佳單一結果不會被當成整體穩健性。
       </p>
@@ -363,7 +363,7 @@ export default function RobustnessPanel({
           marginBottom: '12px',
         }}
       >
-        <label style={{ display: 'block', fontSize: '13px', color: '#555' }}>
+        <label style={{ display: 'block', fontSize: '13px', color: 'var(--text-muted)' }}>
           策略版本
           <select
             className="input"
@@ -386,7 +386,7 @@ export default function RobustnessPanel({
           </select>
         </label>
 
-        <label style={{ display: 'block', fontSize: '13px', color: '#555' }}>
+        <label style={{ display: 'block', fontSize: '13px', color: 'var(--text-muted)' }}>
           研究種類
           <select
             className="input"
@@ -407,7 +407,7 @@ export default function RobustnessPanel({
           </select>
         </label>
 
-        <label style={{ display: 'block', fontSize: '13px', color: '#555' }}>
+        <label style={{ display: 'block', fontSize: '13px', color: 'var(--text-muted)' }}>
           分段數（2–4）
           <input
             type="number"
@@ -421,7 +421,7 @@ export default function RobustnessPanel({
           />
         </label>
 
-        <label style={{ display: 'block', fontSize: '13px', color: '#555' }}>
+        <label style={{ display: 'block', fontSize: '13px', color: 'var(--text-muted)' }}>
           折數（2–3）
           <input
             type="number"
@@ -435,7 +435,7 @@ export default function RobustnessPanel({
           />
         </label>
 
-        <label style={{ display: 'block', fontSize: '13px', color: '#555' }}>
+        <label style={{ display: 'block', fontSize: '13px', color: 'var(--text-muted)' }}>
           嘗試上限（1–24）
           <input
             type="number"
@@ -454,7 +454,7 @@ export default function RobustnessPanel({
         <button
           type="button"
           className="btn"
-          style={{ backgroundColor: '#eaeaea', fontSize: '13px' }}
+          style={{ backgroundColor: 'var(--surface-2)', fontSize: '13px' }}
           onClick={handlePlan}
           disabled={planLoading || busy || !versionId}
           data-testid="robustness-plan"
@@ -480,8 +480,8 @@ export default function RobustnessPanel({
           data-testid="robustness-plan-error"
           style={{
             padding: '10px 12px',
-            backgroundColor: '#f8d7da',
-            color: '#721c24',
+            backgroundColor: 'rgba(239,68,68,0.12)',
+            color: 'var(--negative)',
             borderRadius: '6px',
             fontSize: '13px',
             marginBottom: '12px',
@@ -493,20 +493,20 @@ export default function RobustnessPanel({
       )}
 
       {notice && (
-        <p data-testid="robustness-notice" style={{ color: '#155724', fontSize: '13px', margin: '0 0 12px' }}>
+        <p data-testid="robustness-notice" style={{ color: 'var(--positive)', fontSize: '13px', margin: '0 0 12px' }}>
           {notice}
         </p>
       )}
 
       {actionError && (
-        <p role="alert" data-testid="robustness-action-error" style={{ color: '#b00020', fontSize: '13px', margin: '0 0 12px' }}>
+        <p role="alert" data-testid="robustness-action-error" style={{ color: 'var(--negative)', fontSize: '13px', margin: '0 0 12px' }}>
           {actionError}
         </p>
       )}
 
       {plan && (
         <div
-          style={{ padding: '12px', backgroundColor: '#fafafa', borderRadius: '6px', marginBottom: '16px' }}
+          style={{ padding: '12px', backgroundColor: 'var(--surface-2)', borderRadius: '6px', marginBottom: '16px' }}
           data-testid="robustness-plan-preview"
         >
           <div style={{ fontSize: '13px', marginBottom: '8px' }} data-testid="robustness-estimated">
@@ -514,7 +514,7 @@ export default function RobustnessPanel({
             預計 <strong>{plan.estimated_attempts}</strong> 個嘗試（上限 {plan.max_attempts}） ·{' '}
             每段至少需要 {plan.required_bars} 個交易日
           </div>
-          <div style={{ fontSize: '13px', color: '#555', marginBottom: '8px' }}>
+          <div style={{ fontSize: '13px', color: 'var(--text-muted)', marginBottom: '8px' }}>
             資料日曆：
             {plan.calendar.source === 'stored' ? '已儲存市場資料' : '內建合成示範資料（非真實市場價格）'}
             {' · '}
@@ -530,18 +530,18 @@ export default function RobustnessPanel({
                   plan.quota.remaining ?? '—'
                 } 次。`}
             {plan.ready ? (
-              <span style={{ color: '#155724' }}> 額度足夠，可以建立研究。</span>
+              <span style={{ color: 'var(--positive)' }}> 額度足夠，可以建立研究。</span>
             ) : (
-              <span style={{ color: '#b00020' }}>
+              <span style={{ color: 'var(--negative)' }}>
                 {' '}
                 額度不足，後端會拒絕建立研究，不會執行任何回測。
               </span>
             )}
           </div>
-          <div style={{ fontSize: '12px', color: '#555', marginBottom: '6px' }}>
+          <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '6px' }}>
             選取規則：{plan.selection_rule}
           </div>
-          <ul style={{ margin: '6px 0 0 18px', padding: 0, fontSize: '12px', color: '#555' }}>
+          <ul style={{ margin: '6px 0 0 18px', padding: 0, fontSize: '12px', color: 'var(--text-muted)' }}>
             {plan.disclosures.map((line, i) => (
               <li key={i} style={{ marginBottom: '3px' }}>
                 {line}
@@ -552,11 +552,11 @@ export default function RobustnessPanel({
       )}
 
       <div style={{ marginBottom: '16px' }} data-testid="robustness-studies">
-        <div style={{ fontSize: '13px', color: '#555', marginBottom: '6px' }}>
+        <div style={{ fontSize: '13px', color: 'var(--text-muted)', marginBottom: '6px' }}>
           此實驗的研究紀錄（{studies.length}）
         </div>
         {studies.length === 0 ? (
-          <p style={{ fontSize: '13px', color: '#888', margin: 0 }}>
+          <p style={{ fontSize: '13px', color: 'var(--text-muted)', margin: 0 }}>
             尚未建立穩健性研究。先預覽計劃，再建立研究。
           </p>
         ) : (
@@ -574,14 +574,14 @@ export default function RobustnessPanel({
                 data-testid={`robustness-study-${s.id}`}
                 style={{
                   fontSize: '12px',
-                  backgroundColor: s.id === selected?.id ? '#e6f0ff' : '#f5f5f5',
-                  border: s.id === selected?.id ? '1px solid #7aa7ff' : '1px solid #e0e0e0',
+                  backgroundColor: s.id === selected?.id ? 'rgba(59,130,246,0.16)' : 'var(--surface-2)',
+                  border: s.id === selected?.id ? '1px solid var(--primary)' : '1px solid var(--border-strong)',
                   textAlign: 'left',
                 }}
               >
                 {KIND_LABEL[s.kind] ?? s.kind}
                 <br />
-                <span style={{ color: '#666' }}>
+                <span style={{ color: 'var(--text-secondary)' }}>
                   {STATUS_LABEL[s.status] ?? s.status} · {s.attempts.length}/{s.plan.estimated_attempts} 個嘗試
                 </span>
               </button>
@@ -606,7 +606,7 @@ export default function RobustnessPanel({
               <strong>{KIND_LABEL[selected.kind] ?? selected.kind}</strong> · v
               {selected.plan.version_number} · 狀態：{STATUS_LABEL[selected.status] ?? selected.status}
               {selected.error_details && (
-                <span style={{ color: '#b00020' }}> · {selected.error_details}</span>
+                <span style={{ color: 'var(--negative)' }}> · {selected.error_details}</span>
               )}
             </div>
             <div style={{ display: 'flex', gap: '8px' }}>
@@ -630,7 +630,7 @@ export default function RobustnessPanel({
                 <button
                   type="button"
                   className="btn"
-                  style={{ backgroundColor: '#eaeaea', fontSize: '13px' }}
+                  style={{ backgroundColor: 'var(--surface-2)', fontSize: '13px' }}
                   onClick={() => handleCancel(selected)}
                   disabled={busy}
                   data-testid="robustness-cancel"
@@ -642,7 +642,7 @@ export default function RobustnessPanel({
           </div>
 
           {selected.attempts.length === 0 ? (
-            <p style={{ fontSize: '13px', color: '#888', margin: '0 0 12px' }}>
+            <p style={{ fontSize: '13px', color: 'var(--text-muted)', margin: '0 0 12px' }}>
               尚未執行任何嘗試；按「執行研究」會逐格回測，每個嘗試都使用來源版本的規則。
             </p>
           ) : (
@@ -694,7 +694,7 @@ export default function RobustnessPanel({
                         <td style={td}>
                           {typeof a.metrics?.total_trades === 'number' ? a.metrics.total_trades : '—'}
                         </td>
-                        <td style={{ ...td, textAlign: 'left', fontSize: '12px', color: '#666' }}>
+                        <td style={{ ...td, textAlign: 'left', fontSize: '12px', color: 'var(--text-secondary)' }}>
                           {identity.data_source_used ?? '—'}／{natures}
                           {a.dataset_checksum ? (
                             <span title={a.dataset_checksum}>
@@ -721,7 +721,7 @@ export default function RobustnessPanel({
           )}
 
           <div
-            style={{ marginTop: '12px', padding: '12px', backgroundColor: '#fafafa', borderRadius: '6px' }}
+            style={{ marginTop: '12px', padding: '12px', backgroundColor: 'var(--surface-2)', borderRadius: '6px' }}
             data-testid="robustness-aggregate"
           >
             <div style={{ fontSize: '13px', fontWeight: 'bold', marginBottom: '6px' }}>
@@ -729,7 +729,7 @@ export default function RobustnessPanel({
               {selected.aggregate.scope === 'measurement_only' ? '只計測試期量測' : '全部嘗試'}）
             </div>
             {selected.aggregate.return_stats ? (
-              <div style={{ fontSize: '13px', color: '#333' }}>
+              <div style={{ fontSize: '13px', color: 'var(--text-primary)' }}>
                 完成 {selected.aggregate.return_stats.count} 次 · 中位數{' '}
                 {pct(selected.aggregate.return_stats.median)} · 平均{' '}
                 {pct(selected.aggregate.return_stats.mean)} · 最差{' '}
@@ -741,29 +741,29 @@ export default function RobustnessPanel({
                 {pct(selected.aggregate.drawdown_median)}
               </div>
             ) : (
-              <div style={{ fontSize: '13px', color: '#888' }}>沒有完成的嘗試，無法匯總。</div>
+              <div style={{ fontSize: '13px', color: 'var(--text-muted)' }}>沒有完成的嘗試，無法匯總。</div>
             )}
-            <div style={{ fontSize: '12px', color: '#666', marginTop: '6px' }}>
+            <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '6px' }}>
               嘗試狀態：完成 {selected.aggregate.counts.completed ?? 0} · 失敗{' '}
               {selected.aggregate.counts.failed ?? 0} · 跳過{' '}
               {selected.aggregate.counts.skipped ?? 0} · 未執行{' '}
               {selected.aggregate.counts.pending ?? 0}
             </div>
             {selected.aggregate.best_attempt && (
-              <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+              <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px' }}>
                 最好單一結果：{selected.aggregate.best_attempt.label}（
                 {pct(selected.aggregate.best_attempt.total_return_pct)}）；最差：
                 {selected.aggregate.worst_attempt?.label}（
                 {pct(selected.aggregate.worst_attempt?.total_return_pct)}）
               </div>
             )}
-            <div style={{ fontSize: '12px', color: '#8a6d3b', marginTop: '6px' }}>
+            <div style={{ fontSize: '12px', color: 'var(--warning)', marginTop: '6px' }}>
               {selected.aggregate.note}
             </div>
             {selected.aggregate.folds && selected.aggregate.folds.length > 0 && (
               <div style={{ marginTop: '8px' }}>
                 <div style={{ fontSize: '12px', fontWeight: 'bold', marginBottom: '4px' }}>各折結果</div>
-                <ul style={{ margin: '0 0 0 18px', padding: 0, fontSize: '12px', color: '#555' }}>
+                <ul style={{ margin: '0 0 0 18px', padding: 0, fontSize: '12px', color: 'var(--text-muted)' }}>
                   {selected.aggregate.folds.map((fold, i) => (
                     <li key={i}>
                       第 {fold.fold} 折 測試期 {fold.period.start_date} → {fold.period.end_date}：{' '}

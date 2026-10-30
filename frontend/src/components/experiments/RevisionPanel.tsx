@@ -3,6 +3,7 @@
 import { useMemo, useState, type ReactNode } from 'react';
 import Link from 'next/link';
 import { api, ApiError } from '@/lib/api';
+import { formatDateTime } from '@/lib/format';
 
 interface StrategyVersion {
   id: string;
@@ -420,13 +421,13 @@ export default function RevisionPanel({
         </button>
       </div>
 
-      <p style={{ color: '#666', fontSize: '13px', marginTop: 0 }}>
+      <p style={{ color: 'var(--text-secondary)', fontSize: '13px', marginTop: 0 }}>
         修訂會建立新版本，來源版本不會被改寫；來源版本、變更原因與預期結果都會保留在版本紀錄中。
       </p>
 
       {unsupported.blocked && (
         <div
-          style={{ padding: '12px', backgroundColor: '#fff3cd', borderRadius: '6px', fontSize: '13px', color: '#856404', marginBottom: '12px' }}
+          style={{ padding: '12px', backgroundColor: 'rgba(245,158,11,0.14)', borderRadius: '6px', fontSize: '13px', color: 'var(--warning)', marginBottom: '12px' }}
           data-testid="revision-unsupported"
         >
           <strong>此版本暫不支援 UI 修訂：</strong>{unsupported.reason}
@@ -435,10 +436,11 @@ export default function RevisionPanel({
 
       {!formOpen && (
         <div style={{ marginBottom: '12px' }}>
-          <label style={{ display: 'block', fontSize: '13px', color: '#666', marginBottom: '4px' }}>
+          <label htmlFor="revision-base-select" style={{ display: 'block', fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '4px' }}>
             修訂來源版本
           </label>
           <select
+            id="revision-base-select"
             className="input"
             style={{ maxWidth: '260px', fontSize: '13px' }}
             value={base.id}
@@ -458,10 +460,10 @@ export default function RevisionPanel({
 
       {formOpen && (
         <div
-          style={{ padding: '16px', backgroundColor: '#fafafa', borderRadius: '6px', marginBottom: '16px' }}
+          style={{ padding: '16px', backgroundColor: 'var(--surface-2)', borderRadius: '6px', marginBottom: '16px' }}
           data-testid="revision-form"
         >
-          <div style={{ fontSize: '13px', color: '#666', marginBottom: '12px' }}>
+          <div style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '12px' }}>
             來源：v{base.version_number}
             {base.locked_at ? '（已鎖定，修訂後仍保留原版本）' : ''}
             {experimentStatus === 'locked' ? ' · 此實驗已鎖定，修訂不會取代目前版本指標' : ''}
@@ -559,7 +561,7 @@ export default function RevisionPanel({
             </Field>
           </div>
 
-          <div style={{ marginTop: '12px', fontSize: '12px', color: '#666' }}>
+          <div style={{ marginTop: '12px', fontSize: '12px', color: 'var(--text-secondary)' }}>
             頻率固定為日線（1d）。盤中策略目前不能由此表單建立，後端亦會拒絕非 1d 的設定，不會自動降級。
           </div>
 
@@ -594,7 +596,7 @@ export default function RevisionPanel({
           </div>
 
           <div
-            style={{ marginTop: '16px', padding: '12px', backgroundColor: '#f0f4f8', borderRadius: '6px', fontSize: '13px' }}
+            style={{ marginTop: '16px', padding: '12px', backgroundColor: 'var(--surface-2)', borderRadius: '6px', fontSize: '13px' }}
             data-testid="revision-preview"
           >
             <strong>
@@ -603,7 +605,7 @@ export default function RevisionPanel({
                 : `${CHANGE_KIND_LABEL[preview.kind]} · ${preview.fields.length} 個欄位`}
             </strong>
             {preview.fields.length > 0 && (
-              <div style={{ marginTop: '6px', color: '#555', lineHeight: 1.6 }}>
+              <div style={{ marginTop: '6px', color: 'var(--text-muted)', lineHeight: 1.6 }}>
                 {preview.fields.map((field) => (
                   <div key={field}>
                     {field}：{JSON.stringify(baseFlat[field])} → {JSON.stringify(draftFlat[field])}
@@ -611,13 +613,13 @@ export default function RevisionPanel({
                 ))}
               </div>
             )}
-            <div style={{ marginTop: '6px', color: '#888', fontSize: '12px' }}>
+            <div style={{ marginTop: '6px', color: 'var(--text-muted)', fontSize: '12px' }}>
               資料期間、供應商與成本的差異會在執行與比較頁中顯示；如果只改期間，會標示為「只改研究期間」。
             </div>
           </div>
 
           {formError && (
-            <p role="alert" data-testid="revision-form-error" style={{ color: '#b00020', fontSize: '13px', marginTop: '12px' }}>
+            <p role="alert" data-testid="revision-form-error" style={{ color: 'var(--negative)', fontSize: '13px', marginTop: '12px' }}>
               {formError}
             </p>
           )}
@@ -635,7 +637,7 @@ export default function RevisionPanel({
             <button
               type="button"
               className="btn"
-              style={{ backgroundColor: '#eaeaea' }}
+              style={{ backgroundColor: 'var(--surface-2)' }}
               onClick={() => { setFormOpen(false); setFormError(''); }}
               disabled={submitting}
             >
@@ -646,18 +648,18 @@ export default function RevisionPanel({
       )}
 
       {actionNotice && (
-        <p data-testid="revision-notice" style={{ color: '#155724', fontSize: '13px', margin: '0 0 12px' }}>
+        <p data-testid="revision-notice" style={{ color: 'var(--positive)', fontSize: '13px', margin: '0 0 12px' }}>
           {actionNotice}
         </p>
       )}
       {actionError && (
-        <p role="alert" data-testid="revision-action-error" style={{ color: '#b00020', fontSize: '13px', margin: '0 0 12px' }}>
+        <p role="alert" data-testid="revision-action-error" style={{ color: 'var(--negative)', fontSize: '13px', margin: '0 0 12px' }}>
           {actionError}
         </p>
       )}
 
       {revisionVersions.length === 0 ? (
-        <p style={{ color: '#888', fontSize: '13px', margin: 0 }}>
+        <p style={{ color: 'var(--text-muted)', fontSize: '13px', margin: 0 }}>
           尚未建立任何修訂版本。建立修訂後，可在這裡執行回測、與來源版本比較，並記錄結果是否符合預期。
         </p>
       ) : (
@@ -681,24 +683,24 @@ export default function RevisionPanel({
               <div
                 key={version.id}
                 data-testid={`revision-row-${version.id}`}
-                style={{ padding: '14px', border: '1px solid #e0e0e0', borderRadius: '6px', backgroundColor: '#fff' }}
+                style={{ padding: '14px', border: '1px solid var(--border-strong)', borderRadius: '6px', backgroundColor: 'var(--surface-1)' }}
               >
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start', gap: '12px' }}>
                   <div>
                     <strong>v{version.version_number}</strong>
-                    <span style={{ color: '#666', marginLeft: '8px', fontSize: '13px' }}>
+                    <span style={{ color: 'var(--text-secondary)', marginLeft: '8px', fontSize: '13px' }}>
                       修訂自 v{meta.of_version_number}
                       {version.id === currentVersionId ? ' · 目前版本' : ''}
                     </span>
-                    <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+                    <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px' }}>
                       {CHANGE_KIND_LABEL[meta.change_kind] ?? meta.change_kind}：
                       {meta.changed_fields?.length ? meta.changed_fields.join('、') : '未記錄'}
                     </div>
-                    <div style={{ fontSize: '12px', color: '#666', marginTop: '2px' }}>
+                    <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '2px' }}>
                       變更原因：{version.change_reason ?? '未提供'}
                     </div>
                     {meta.expectation && (
-                      <div style={{ fontSize: '12px', color: '#666', marginTop: '2px' }}>
+                      <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '2px' }}>
                         預期：{meta.expectation}
                       </div>
                     )}
@@ -707,7 +709,7 @@ export default function RevisionPanel({
                     <button
                       type="button"
                       className="btn"
-                      style={{ backgroundColor: '#eaeaea', fontSize: '12px' }}
+                      style={{ backgroundColor: 'var(--surface-2)', fontSize: '12px' }}
                       data-testid={`revision-run-${version.id}`}
                       onClick={() => runVersion({ id: version.id, version_number: version.version_number })}
                       disabled={runningVersionId !== null}
@@ -724,14 +726,14 @@ export default function RevisionPanel({
                         與來源版本比較
                       </Link>
                     ) : (
-                      <span style={{ fontSize: '12px', color: '#888', alignSelf: 'center' }}>
+                      <span style={{ fontSize: '12px', color: 'var(--text-muted)', alignSelf: 'center' }}>
                         兩邊都有完成回測後才可比較
                       </span>
                     )}
                   </div>
                 </div>
 
-                <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap', fontSize: '12px', color: '#555', marginTop: '10px' }}>
+                <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap', fontSize: '12px', color: 'var(--text-muted)', marginTop: '10px' }}>
                   <span>
                     修訂回測：{revisionRun ? '已完成' : '未完成'}
                     {revisionRun?.metrics?.total_return_pct != null &&
@@ -744,21 +746,21 @@ export default function RevisionPanel({
                   </span>
                 </div>
 
-                <div style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid #eee' }}>
+                <div style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid var(--border-strong)' }}>
                   {meta.outcome ? (
                     <div data-testid={`revision-outcome-value-${version.id}`} style={{ fontSize: '13px' }}>
-                      <strong style={{ color: meta.met_expectation ? '#155724' : '#856404' }}>
+                      <strong style={{ color: meta.met_expectation ? 'var(--positive)' : 'var(--warning)' }}>
                         {meta.met_expectation ? '符合預期' : '未符合預期'}
                       </strong>
-                      <span style={{ marginLeft: '8px', color: '#555' }}>{meta.outcome}</span>
+                      <span style={{ marginLeft: '8px', color: 'var(--text-muted)' }}>{meta.outcome}</span>
                       {meta.outcome_recorded_at && (
-                        <span style={{ marginLeft: '8px', color: '#999', fontSize: '11px' }}>
-                          · {new Date(meta.outcome_recorded_at).toLocaleString('zh-Hant')}
+                        <span style={{ marginLeft: '8px', color: 'var(--text-muted)', fontSize: '11px' }}>
+                          · {formatDateTime(meta.outcome_recorded_at)}
                         </span>
                       )}
                     </div>
                   ) : (
-                    <div style={{ fontSize: '13px', color: '#888' }}>尚未記錄修訂結果</div>
+                    <div style={{ fontSize: '13px', color: 'var(--text-muted)' }}>尚未記錄修訂結果</div>
                   )}
 
                   <div style={{ display: 'flex', gap: '8px', marginTop: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
@@ -794,7 +796,7 @@ export default function RevisionPanel({
                     <button
                       type="button"
                       className="btn"
-                      style={{ backgroundColor: '#eaeaea', fontSize: '12px' }}
+                      style={{ backgroundColor: 'var(--surface-2)', fontSize: '12px' }}
                       data-testid={`revision-outcome-save-${version.id}`}
                       onClick={() => saveOutcome(version, meta)}
                       disabled={savingOutcomeId !== null}
@@ -815,7 +817,7 @@ export default function RevisionPanel({
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div>
-      <label style={{ display: 'block', fontSize: '12px', color: '#666', marginBottom: '4px' }}>{label}</label>
+      <label style={{ display: 'block', fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '4px' }}>{label}</label>
       {children}
     </div>
   );

@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
+import { formatDate } from '@/lib/format';
 
 interface MemoryRecord {
   id: string;
@@ -139,7 +140,7 @@ export default function PersonalMemoryPage() {
         </div>
       </div>
 
-      <p style={{ color: '#666', marginBottom: '16px' }}>
+      <p style={{ color: 'var(--text-secondary)', marginBottom: '16px' }}>
         管理你的研究偏好、約束與反思。所有記憶僅在你明確確認後才會生效。
       </p>
 
@@ -165,16 +166,17 @@ export default function PersonalMemoryPage() {
         <div className="card" style={{ marginBottom: '24px' }}>
           <h3 style={{ marginBottom: '16px' }}>新增記憶</h3>
           <div className="form-group">
-            <label>記憶類型</label>
-            <select className="input" value={newType} onChange={e => setNewType(e.target.value)}>
+            <label htmlFor="memory-new-type">記憶類型</label>
+            <select id="memory-new-type" className="input" value={newType} onChange={e => setNewType(e.target.value)}>
               {MEMORY_TYPES.map(t => (
                 <option key={t} value={t}>{MEMORY_TYPE_LABELS[t]}</option>
               ))}
             </select>
           </div>
           <div className="form-group">
-            <label>內容</label>
+            <label htmlFor="memory-new-content">內容</label>
             <textarea
+              id="memory-new-content"
               className="input"
               rows={3}
               value={newContent}
@@ -183,8 +185,8 @@ export default function PersonalMemoryPage() {
             />
           </div>
           <div className="form-group">
-            <label>隱私範圍</label>
-            <select className="input" value={newPrivacy} onChange={e => setNewPrivacy(e.target.value)}>
+            <label htmlFor="memory-new-privacy">隱私範圍</label>
+            <select id="memory-new-privacy" className="input" value={newPrivacy} onChange={e => setNewPrivacy(e.target.value)}>
               <option value="private_only">{PRIVACY_LABELS.private_only}</option>
               <option value="approved_for_personal_ai">{PRIVACY_LABELS.approved_for_personal_ai}</option>
             </select>
@@ -205,8 +207,9 @@ export default function PersonalMemoryPage() {
       )}
 
       <div style={{ marginBottom: '20px' }}>
-        <label style={{ marginRight: '8px', fontSize: '14px', color: '#666' }}>篩選類型：</label>
+        <label htmlFor="memory-type-filter" style={{ marginRight: '8px', fontSize: '14px', color: 'var(--text-secondary)' }}>篩選類型：</label>
         <select
+          id="memory-type-filter"
           className="input"
           style={{ width: 'auto', display: 'inline-block' }}
           value={typeFilter}
@@ -223,7 +226,7 @@ export default function PersonalMemoryPage() {
         <div className="card" style={{ textAlign: 'center', padding: '40px' }}>載入中...</div>
       ) : memories.length === 0 && !error ? (
         <div className="card" style={{ textAlign: 'center', padding: '60px' }}>
-          <p style={{ color: '#666' }}>尚無記憶記錄。點擊「新增記憶」開始。</p>
+          <p style={{ color: 'var(--text-secondary)' }}>尚無記憶記錄。點擊「新增記憶」開始。</p>
         </div>
       ) : (
         <div style={{ display: 'grid', gap: '16px' }}>
@@ -231,43 +234,36 @@ export default function PersonalMemoryPage() {
             <div key={mem.id} className="card" style={{ opacity: mem.active ? 1 : 0.6 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start', marginBottom: '8px' }}>
                 <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
-                  <span style={{
-                    padding: '2px 10px', borderRadius: '10px', fontSize: '12px',
-                    backgroundColor: '#eaeaea', color: '#555',
-                  }}>
+                  <span className="status-pill status-neutral">
                     {MEMORY_TYPE_LABELS[mem.memory_type] || mem.memory_type}
                   </span>
-                  <span style={{
-                    padding: '2px 10px', borderRadius: '10px', fontSize: '12px',
-                    backgroundColor: mem.privacy_scope === 'approved_for_personal_ai' ? '#d1ecf1' : '#eaeaea',
-                    color: mem.privacy_scope === 'approved_for_personal_ai' ? '#0c5460' : '#666',
-                  }}>
+                  <span className={`status-pill status-${mem.privacy_scope === 'approved_for_personal_ai' ? 'info' : 'neutral'}`}>
                     {PRIVACY_LABELS[mem.privacy_scope] || mem.privacy_scope}
                   </span>
                   {mem.is_confirmed ? (
-                    <span style={{ padding: '2px 10px', borderRadius: '10px', fontSize: '12px', backgroundColor: '#d4edda', color: '#155724' }}>
+                    <span className="status-pill status-ok">
                       已確認
                     </span>
                   ) : (
-                    <span style={{ padding: '2px 10px', borderRadius: '10px', fontSize: '12px', backgroundColor: '#fff3cd', color: '#856404' }}>
+                    <span className="status-pill status-warn">
                       待確認
                     </span>
                   )}
                   {!mem.active && (
-                    <span style={{ padding: '2px 10px', borderRadius: '10px', fontSize: '12px', backgroundColor: '#f5c6cb', color: '#721c24' }}>
+                    <span className="status-pill status-neutral">
                       已停用
                     </span>
                   )}
                 </div>
-                <span style={{ fontSize: '12px', color: '#999' }}>
-                  {new Date(mem.created_at).toLocaleDateString('zh-Hant')}
+                <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                  {formatDate(mem.created_at)}
                 </span>
               </div>
 
               <p style={{ marginBottom: '12px', whiteSpace: 'pre-wrap' }}>{mem.content}</p>
 
               {mem.general_model_training_opt_in && (
-                <p style={{ fontSize: '13px', color: '#0c5460', marginBottom: '12px' }}>
+                <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '12px' }}>
                   ✓ 已啟用一般模型訓練
                 </p>
               )}
@@ -315,7 +311,7 @@ export default function PersonalMemoryPage() {
                   </>
                 )}
                 {mem.active && (
-                  <button onClick={() => handleDeactivate(mem.id)} className="btn btn-secondary" style={{ fontSize: '13px', padding: '4px 12px', color: '#721c24' }}>
+                  <button onClick={() => handleDeactivate(mem.id)} className="btn btn-secondary" style={{ fontSize: '13px', padding: '4px 12px', color: 'var(--negative)' }}>
                     停用
                   </button>
                 )}

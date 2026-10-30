@@ -5,6 +5,8 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import { brand } from '@/lib/brand';
+import { statusPillClass } from '@/lib/status-styles';
+import { formatDateTime } from '@/lib/format';
 
 interface ExecutionIntent {
   intent_id: string;
@@ -36,16 +38,6 @@ const STATUS_LABELS: Record<string, string> = {
   cancelled: '已取消',
   rejected: '已拒絕',
   uncertain: '狀態不明',
-};
-
-const STATUS_COLORS: Record<string, { bg: string; color: string }> = {
-  pending: { bg: '#fff3cd', color: '#856404' },
-  authorized: { bg: '#cce5ff', color: '#004085' },
-  submitted: { bg: '#ffe0b2', color: '#e65100' },
-  filled: { bg: '#d4edda', color: '#155724' },
-  cancelled: { bg: '#e2e3e5', color: '#383d41' },
-  rejected: { bg: '#f8d7da', color: '#721c24' },
-  uncertain: { bg: '#e2e3e5', color: '#383d41' },
 };
 
 export default function ExecutionPage() {
@@ -91,11 +83,6 @@ export default function ExecutionPage() {
     } finally {
       setLoading(false);
     }
-  };
-
-  const handleLogout = () => {
-    localStorage.removeItem('token');
-    router.push('/');
   };
 
   const truncateId = (id: string) => {
@@ -226,7 +213,7 @@ export default function ExecutionPage() {
             onChange={(e) => setAuthTokenInputs({ ...authTokenInputs, [intent.intent_id]: e.target.value })}
             style={{
               padding: '6px 10px',
-              border: '1px solid #ccc',
+              border: '1px solid var(--border-strong)',
               borderRadius: '6px',
               fontSize: '13px',
               width: '160px',
@@ -277,40 +264,33 @@ export default function ExecutionPage() {
 
     if (intent.status === 'filled') {
       let fillLabel: string;
-      let fillColor: { bg: string; text: string };
+      let fillTone: string;
       let refLabel: string;
 
       if (intent.fill_source === 'simulated') {
         fillLabel = '模擬成交（離線）';
-        fillColor = { bg: '#fff3cd', text: '#856404' };
+        fillTone = 'warn';
         refLabel = intent.broker_ref || '—';
       } else if (intent.fill_source === 'broker' && intent.broker_confirmed_at) {
         fillLabel = '券商確認成交';
-        fillColor = { bg: '#d4edda', text: '#155724' };
+        fillTone = 'ok';
         refLabel = intent.broker_ref || '—';
       } else if (intent.fill_source === 'broker') {
         fillLabel = '券商來源（待確認）';
-        fillColor = { bg: '#ffe0b2', text: '#e65100' };
+        fillTone = 'warn';
         refLabel = intent.broker_ref || '待券商確認';
       } else {
         fillLabel = '來源不明';
-        fillColor = { bg: '#e2e3e5', text: '#383d41' };
+        fillTone = 'neutral';
         refLabel = intent.broker_ref || '無法取得參考編號';
       }
 
       return (
         <div style={{ display: 'flex', gap: '12px', alignItems: 'center', flexWrap: 'wrap' }}>
-          <span style={{
-            padding: '3px 10px',
-            borderRadius: '12px',
-            fontSize: '12px',
-            fontWeight: 500,
-            backgroundColor: fillColor.bg,
-            color: fillColor.text,
-          }}>
+          <span className={`status-pill status-${fillTone}`}>
             {fillLabel}
           </span>
-          <span style={{ fontSize: '12px', color: '#666' }}>
+          <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
             參考編號：{refLabel}
           </span>
           <button
@@ -337,35 +317,13 @@ export default function ExecutionPage() {
           <Link href="/dashboard" className="btn btn-secondary">
             返回我的實驗
           </Link>
-          <button onClick={handleLogout} className="btn btn-secondary">
-            {brand.ui.auth.logoutZh}
-          </button>
         </div>
       </div>
 
       {/* Offline simulation banner */}
-      <div
-        style={{
-          padding: '14px 20px',
-          backgroundColor: '#fff3cd',
-          border: '1px solid #ffc107',
-          borderRadius: '8px',
-          marginBottom: '24px',
-          display: 'flex',
-          alignItems: 'center',
-          gap: '10px',
-        }}
-      >
-        <span style={{ fontSize: '20px' }}>&#9888;</span>
-        <div>
-          <strong style={{ color: '#856404' }}>離線模擬模式</strong>
-          <span style={{ color: '#856404', marginLeft: '8px' }}>
-            — 不會送出真實訂單。所有操作僅供研究模擬使用。
-          </span>
-        </div>
-      </div>
-
-      <div className="disclaimer">
+      <div className="disclaimer" role="note">
+        <strong>離線模擬模式</strong> — 不會送出真實訂單。所有操作僅供研究模擬使用。
+        <br />
         <strong>提醒：</strong>{brand.disclaimer.zhFull}
       </div>
 
@@ -375,10 +333,11 @@ export default function ExecutionPage() {
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: '12px', marginBottom: '16px' }}>
           <div>
-            <label style={{ display: 'block', fontSize: '13px', color: '#666', marginBottom: '4px' }}>
+            <label htmlFor="exec-portfolio-id" style={{ display: 'block', fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '4px' }}>
               投資組合 ID
             </label>
             <input
+              id="exec-portfolio-id"
               type="text"
               value={portfolioId}
               onChange={(e) => setPortfolioId(e.target.value)}
@@ -386,7 +345,7 @@ export default function ExecutionPage() {
               style={{
                 width: '100%',
                 padding: '8px 12px',
-                border: '1px solid #ccc',
+                border: '1px solid var(--border-strong)',
                 borderRadius: '6px',
                 fontSize: '14px',
                 boxSizing: 'border-box',
@@ -395,20 +354,21 @@ export default function ExecutionPage() {
           </div>
 
           <div>
-            <label style={{ display: 'block', fontSize: '13px', color: '#666', marginBottom: '4px' }}>
+            <label htmlFor="exec-symbol" style={{ display: 'block', fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '4px' }}>
               標的
             </label>
             <select
+              id="exec-symbol"
               value={symbol}
               onChange={(e) => setSymbol(e.target.value)}
               style={{
                 width: '100%',
                 padding: '8px 12px',
-                border: '1px solid #ccc',
+                border: '1px solid var(--border-strong)',
                 borderRadius: '6px',
                 fontSize: '14px',
                 boxSizing: 'border-box',
-                backgroundColor: '#fff',
+                backgroundColor: 'var(--surface-1)',
               }}
             >
               {SYMBOLS.map((s) => (
@@ -418,20 +378,21 @@ export default function ExecutionPage() {
           </div>
 
           <div>
-            <label style={{ display: 'block', fontSize: '13px', color: '#666', marginBottom: '4px' }}>
+            <label htmlFor="exec-side" style={{ display: 'block', fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '4px' }}>
               方向
             </label>
             <select
+              id="exec-side"
               value={side}
               onChange={(e) => setSide(e.target.value)}
               style={{
                 width: '100%',
                 padding: '8px 12px',
-                border: '1px solid #ccc',
+                border: '1px solid var(--border-strong)',
                 borderRadius: '6px',
                 fontSize: '14px',
                 boxSizing: 'border-box',
-                backgroundColor: '#fff',
+                backgroundColor: 'var(--surface-1)',
               }}
             >
               {SIDES.map((s) => (
@@ -441,10 +402,11 @@ export default function ExecutionPage() {
           </div>
 
           <div>
-            <label style={{ display: 'block', fontSize: '13px', color: '#666', marginBottom: '4px' }}>
+            <label htmlFor="exec-quantity" style={{ display: 'block', fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '4px' }}>
               數量
             </label>
             <input
+              id="exec-quantity"
               type="number"
               value={quantity}
               onChange={(e) => setQuantity(e.target.value)}
@@ -453,7 +415,7 @@ export default function ExecutionPage() {
               style={{
                 width: '100%',
                 padding: '8px 12px',
-                border: '1px solid #ccc',
+                border: '1px solid var(--border-strong)',
                 borderRadius: '6px',
                 fontSize: '14px',
                 boxSizing: 'border-box',
@@ -462,20 +424,21 @@ export default function ExecutionPage() {
           </div>
 
           <div>
-            <label style={{ display: 'block', fontSize: '13px', color: '#666', marginBottom: '4px' }}>
+            <label htmlFor="exec-order-type" style={{ display: 'block', fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '4px' }}>
               訂單類型
             </label>
             <select
+              id="exec-order-type"
               value={orderType}
               onChange={(e) => setOrderType(e.target.value)}
               style={{
                 width: '100%',
                 padding: '8px 12px',
-                border: '1px solid #ccc',
+                border: '1px solid var(--border-strong)',
                 borderRadius: '6px',
                 fontSize: '14px',
                 boxSizing: 'border-box',
-                backgroundColor: '#fff',
+                backgroundColor: 'var(--surface-1)',
               }}
             >
               {ORDER_TYPES.map((t) => (
@@ -486,10 +449,11 @@ export default function ExecutionPage() {
 
           {orderType === 'LIMIT' && (
             <div>
-              <label style={{ display: 'block', fontSize: '13px', color: '#666', marginBottom: '4px' }}>
+              <label htmlFor="exec-limit-price" style={{ display: 'block', fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '4px' }}>
                 限價
               </label>
               <input
+                id="exec-limit-price"
                 type="number"
                 value={limitPrice}
                 onChange={(e) => setLimitPrice(e.target.value)}
@@ -499,7 +463,7 @@ export default function ExecutionPage() {
                 style={{
                   width: '100%',
                   padding: '8px 12px',
-                  border: '1px solid #ccc',
+                  border: '1px solid var(--border-strong)',
                   borderRadius: '6px',
                   fontSize: '14px',
                   boxSizing: 'border-box',
@@ -510,15 +474,15 @@ export default function ExecutionPage() {
         </div>
 
         {createError && (
-          <div style={{ color: '#721c24', backgroundColor: '#f8d7da', padding: '8px 12px', borderRadius: '6px', marginBottom: '12px', fontSize: '14px' }}>
+          <div className="notice notice-danger" role="alert">
             {createError}
           </div>
         )}
 
         {createdToken && (
-          <div style={{ color: '#155724', backgroundColor: '#d4edda', padding: '10px 14px', borderRadius: '6px', marginBottom: '12px', fontSize: '14px' }}>
+          <div className="notice notice-ok">
             <strong>意圖已建立！</strong> 請複製以下授權代碼以授權此意圖：
-            <code style={{ display: 'block', marginTop: '6px', padding: '8px', backgroundColor: '#fff', border: '1px solid #c3e6cb', borderRadius: '4px', wordBreak: 'break-all', fontFamily: 'monospace', fontSize: '13px' }}>
+            <code style={{ display: 'block', marginTop: '6px', padding: '8px', backgroundColor: 'var(--surface-2)', border: '1px solid var(--border-strong)', borderRadius: '4px', wordBreak: 'break-all', fontFamily: 'monospace', fontSize: '13px' }}>
               {createdToken}
             </code>
           </div>
@@ -537,7 +501,7 @@ export default function ExecutionPage() {
       <h2 style={{ marginBottom: '16px' }}>意圖列表</h2>
 
       {actionError && (
-        <div style={{ color: '#721c24', backgroundColor: '#f8d7da', padding: '8px 12px', borderRadius: '6px', marginBottom: '16px', fontSize: '14px' }}>
+        <div className="notice notice-danger" role="alert">
           {actionError}
         </div>
       )}
@@ -548,42 +512,32 @@ export default function ExecutionPage() {
         </div>
       ) : error ? (
         <div className="card" style={{ textAlign: 'center', padding: '40px' }}>
-          <p style={{ color: '#721c24', marginBottom: '16px' }}>{error}</p>
+          <p style={{ color: 'var(--negative-text)', marginBottom: '16px' }}>{error}</p>
           <button className="btn btn-secondary" onClick={loadIntents}>
             重試
           </button>
         </div>
       ) : intents.length === 0 ? (
         <div className="card" style={{ textAlign: 'center', padding: '60px' }}>
-          <p style={{ color: '#666', marginBottom: '8px' }}>尚無執行意圖。</p>
-          <p style={{ color: '#999', fontSize: '14px' }}>使用上方表單建立你的第一個執行意圖。</p>
+          <p style={{ color: 'var(--text-secondary)', marginBottom: '8px' }}>尚無執行意圖。</p>
+          <p style={{ color: 'var(--text-muted)', fontSize: '14px' }}>使用上方表單建立你的第一個執行意圖。</p>
         </div>
       ) : (
         <div style={{ display: 'grid', gap: '16px' }}>
           {intents.map((intent) => {
-            const statusStyle = STATUS_COLORS[intent.status] || { bg: '#eaeaea', color: '#666' };
             return (
               <div key={intent.intent_id} className="card">
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start', marginBottom: '12px' }}>
                   <div style={{ flex: 1 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '8px' }}>
-                      <code style={{ fontSize: '13px', color: '#555' }} title={intent.intent_id}>
+                      <code style={{ fontSize: '13px', color: 'var(--text-muted)' }} title={intent.intent_id}>
                         {truncateId(intent.intent_id)}
                       </code>
-                      <span
-                        style={{
-                          padding: '3px 10px',
-                          borderRadius: '12px',
-                          fontSize: '12px',
-                          fontWeight: 500,
-                          backgroundColor: statusStyle.bg,
-                          color: statusStyle.color,
-                        }}
-                      >
+                      <span className={statusPillClass(intent.status)}>
                         {STATUS_LABELS[intent.status] || intent.status}
                       </span>
                     </div>
-                    <div style={{ display: 'flex', gap: '20px', fontSize: '14px', color: '#333' }}>
+                    <div style={{ display: 'flex', gap: '20px', fontSize: '14px', color: 'var(--text-primary)' }}>
                       <span><strong>標的:</strong> {intent.symbol}</span>
                       <span><strong>方向:</strong> {intent.side === 'BUY' ? '買入' : '賣出'}</span>
                       <span><strong>數量:</strong> {intent.quantity}</span>
@@ -595,18 +549,18 @@ export default function ExecutionPage() {
                     <div style={{ marginTop: '6px' }}>
                       <Link
                         href={`/paper-portfolio/${intent.portfolio_id}`}
-                        style={{ fontSize: '13px', color: '#0070f3', textDecoration: 'none' }}
+                        style={{ fontSize: '13px', color: 'var(--primary-text)', textDecoration: 'none' }}
                       >
                         查看投資組合 →
                       </Link>
                     </div>
                     {intent.status === 'rejected' && intent.rejection_reason && (
-                      <div style={{ marginTop: '6px', fontSize: '13px', color: '#721c24' }}>
+                      <div style={{ marginTop: '6px', fontSize: '13px', color: 'var(--negative-text)' }}>
                         <strong>拒絕原因：</strong>{intent.rejection_reason}
                       </div>
                     )}
-                    <div style={{ fontSize: '12px', color: '#999', marginTop: '6px' }}>
-                      建立於 {new Date(intent.created_at).toLocaleString('zh-Hant')}
+                    <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '6px' }}>
+                      建立於 {formatDateTime(intent.created_at)}
                     </div>
                   </div>
                 </div>

@@ -5,6 +5,7 @@ import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import { api, ApiError } from '@/lib/api';
 import { describeRunStatus } from '@/lib/runStatus';
+import { formatDateTime } from '@/lib/format';
 
 interface RunDetail {
   id: string;
@@ -312,8 +313,8 @@ export default function RunDetailPage() {
             <div>Version ID</div><div style={{ fontFamily: 'monospace' }}>{run.experiment_version_id}</div>
             <div>Config hash</div><div style={{ fontFamily: 'monospace' }}>{run.config_hash}</div>
             <div>Engine version</div><div style={{ fontFamily: 'monospace' }}>{run.engine_version}</div>
-            <div>開始時間</div><div>{run.started_at ? new Date(run.started_at).toLocaleString('zh-Hant') : '—'}</div>
-            <div>完成時間</div><div>{run.completed_at ? new Date(run.completed_at).toLocaleString('zh-Hant') : '—'}</div>
+            <div>開始時間</div><div>{run.started_at ? formatDateTime(run.started_at) : '—'}</div>
+            <div>完成時間</div><div>{run.completed_at ? formatDateTime(run.completed_at) : '—'}</div>
           </div>
         </div>
       </div>

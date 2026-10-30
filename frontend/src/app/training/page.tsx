@@ -4,9 +4,11 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { api, ApiError, API_BASE_URL } from '@/lib/api';
+import { statusPillClass } from '@/lib/status-styles';
 import AppShell from '@/components/shell/AppShell';
 import PersonalizationPanel from '@/components/training/PersonalizationPanel';
 import PersonalStrategyLearningPanel from '@/components/training/PersonalStrategyLearningPanel';
+import { formatDate, formatDateTime } from '@/lib/format';
 
 interface TrainingJob {
   id: string;
@@ -150,6 +152,7 @@ export default function TrainingPage() {
   useEffect(() => {
     if (!hasActiveJobs) return;
     const timer = setInterval(() => {
+      if (document.hidden) return;
       loadJobs();
       loadMLData();
     }, 4000);
@@ -296,13 +299,6 @@ export default function TrainingPage() {
   };
 
   const getStatusBadge = (status: string) => {
-    const colors: Record<string, { bg: string; text: string }> = {
-      pending: { bg: '#fff3cd', text: '#856404' },
-      running: { bg: '#cce5ff', text: '#004085' },
-      completed: { bg: '#d4edda', text: '#155724' },
-      failed: { bg: '#f8d7da', text: '#721c24' },
-      cancelled: { bg: '#e2e3e5', text: '#383d42' },
-    };
     const labels: Record<string, string> = {
       pending: '待處理',
       running: '執行中',
@@ -310,17 +306,8 @@ export default function TrainingPage() {
       failed: '失敗',
       cancelled: '已取消',
     };
-    const color = colors[status] || { bg: '#eaeaea', text: '#666' };
     return (
-      <span
-        style={{
-          padding: '4px 12px',
-          borderRadius: '12px',
-          fontSize: '12px',
-          backgroundColor: color.bg,
-          color: color.text,
-        }}
-      >
+      <span className={statusPillClass(status)}>
         {labels[status] || status}
       </span>
     );
@@ -387,7 +374,7 @@ export default function TrainingPage() {
             </span>
             {quota.expiry_date && (
               <span style={{ color: 'var(--text-muted)' }}>
-                有效期至 {new Date(quota.expiry_date).toLocaleDateString('zh-Hant')}
+                有效期至 {formatDate(quota.expiry_date)}
               </span>
             )}
             {!quota.entitlement_active && (
@@ -504,9 +491,9 @@ export default function TrainingPage() {
                         )}
                       </div>
                       <div style={{ display: 'flex', gap: '24px', fontSize: '13px', color: 'var(--text-muted)', flexWrap: 'wrap' }}>
-                        <div>建立：{new Date(job.created_at).toLocaleString('zh-Hant')}</div>
+                        <div>建立：{formatDateTime(job.created_at)}</div>
                         {job.completed_at && (
-                          <div>完成：{new Date(job.completed_at).toLocaleString('zh-Hant')}</div>
+                          <div>完成：{formatDateTime(job.completed_at)}</div>
                         )}
                       </div>
                       {job.best_params && Object.keys(job.best_params).length > 0 && (
@@ -847,7 +834,7 @@ export default function TrainingPage() {
                               {model.metrics?.test?.accuracy != null ? model.metrics.test.accuracy : '-'}
                             </span>
                           </div>
-                          <div>訓練時間：{new Date(model.trained_at).toLocaleString('zh-Hant')}</div>
+                          <div>訓練時間：{formatDateTime(model.trained_at)}</div>
                         </div>
                         {model.data_provenance?.is_synthetic && (
                           <span style={{
@@ -856,8 +843,8 @@ export default function TrainingPage() {
                             padding: '2px 10px',
                             borderRadius: '10px',
                             fontSize: '12px',
-                            backgroundColor: '#f8d7da',
-                            color: '#721c24',
+                            backgroundColor: 'rgba(239,68,68,0.12)',
+                            color: 'var(--negative)',
                           }}>
                             模擬數據訓練
                           </span>

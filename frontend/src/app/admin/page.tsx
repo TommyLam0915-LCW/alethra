@@ -4,6 +4,8 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { api, ApiError } from '@/lib/api';
+import { statusPillClass } from '@/lib/status-styles';
+import { formatDate } from '@/lib/format';
 
 interface DashboardData {
   funnel: {
@@ -54,13 +56,6 @@ const STATUS_LABELS: Record<string, string> = {
   evidence_emerging: '證據浮現中',
   insufficient_evidence: '證據不足',
   contradicted: '已被反駁',
-};
-
-const STATUS_COLORS: Record<string, { bg: string; fg: string }> = {
-  untested: { bg: '#e2e3e5', fg: '#383d41' },
-  evidence_emerging: { bg: '#fff3cd', fg: '#856404' },
-  insufficient_evidence: { bg: '#e2e3e5', fg: '#666' },
-  contradicted: { bg: '#f8d7da', fg: '#721c24' },
 };
 
 export default function AdminDashboardPage() {
@@ -114,7 +109,9 @@ export default function AdminDashboardPage() {
         </div>
         <div
           data-testid="admin-access-error"
-          style={{ padding: '20px', backgroundColor: '#f8d7da', color: '#721c24', borderRadius: '8px' }}
+          className="notice notice-danger"
+          role="alert"
+          style={{ padding: '20px', fontSize: '14px' }}
         >
           {errorStatus === 403 || errorStatus === 401 || error.includes('403') || error.includes('Admin')
             ? '需要管理員權限才能訪問此頁面。'
@@ -173,23 +170,23 @@ export default function AdminDashboardPage() {
           <div className="card" style={{ marginBottom: '32px' }}>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '16px' }}>
               <div>
-                <div style={{ fontSize: '12px', color: '#666' }}>總註冊</div>
+                <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>總註冊</div>
                 <div style={{ fontSize: '24px', fontWeight: 600 }}>{dashboard.activation.total_signed_up}</div>
               </div>
               <div>
-                <div style={{ fontSize: '12px', color: '#666' }}>已啟動（至少一個實驗）</div>
+                <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>已啟動（至少一個實驗）</div>
                 <div style={{ fontSize: '24px', fontWeight: 600 }}>{dashboard.activation.activated_at_least_one_experiment}</div>
               </div>
               <div>
-                <div style={{ fontSize: '12px', color: '#666' }}>啟動率</div>
+                <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>啟動率</div>
                 <div style={{ fontSize: '24px', fontWeight: 600 }}>{(dashboard.activation.activation_rate * 100).toFixed(1)}%</div>
               </div>
               <div>
-                <div style={{ fontSize: '12px', color: '#666' }}>完成首次回測</div>
+                <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>完成首次回測</div>
                 <div style={{ fontSize: '24px', fontWeight: 600 }}>{dashboard.activation.completed_first_run}</div>
               </div>
               <div>
-                <div style={{ fontSize: '12px', color: '#666' }}>完成率</div>
+                <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>完成率</div>
                 <div style={{ fontSize: '24px', fontWeight: 600 }}>{(dashboard.activation.completion_rate * 100).toFixed(1)}%</div>
               </div>
             </div>
@@ -199,35 +196,35 @@ export default function AdminDashboardPage() {
           <div className="card" style={{ marginBottom: '32px' }}>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '16px', marginBottom: '20px' }}>
               <div>
-                <div style={{ fontSize: '12px', color: '#666' }}>總成本</div>
+                <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>總成本</div>
                 <div style={{ fontSize: '24px', fontWeight: 600 }}>${dashboard.cost_summary.total_cost.toFixed(2)}</div>
               </div>
               <div>
-                <div style={{ fontSize: '12px', color: '#666' }}>實際成本</div>
+                <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>實際成本</div>
                 <div style={{ fontSize: '24px', fontWeight: 600 }}>${dashboard.cost_summary.total_actual.toFixed(2)}</div>
               </div>
               <div>
-                <div style={{ fontSize: '12px', color: '#666' }}>估算成本</div>
+                <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>估算成本</div>
                 <div style={{ fontSize: '24px', fontWeight: 600 }}>${dashboard.cost_summary.total_estimate.toFixed(2)}</div>
               </div>
               <div>
-                <div style={{ fontSize: '12px', color: '#666' }}>每用戶成本</div>
+                <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>每用戶成本</div>
                 <div style={{ fontSize: '24px', fontWeight: 600 }}>${dashboard.cost_summary.cost_per_user.toFixed(2)}</div>
               </div>
               <div>
-                <div style={{ fontSize: '12px', color: '#666' }}>每活躍用戶成本</div>
+                <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>每活躍用戶成本</div>
                 <div style={{ fontSize: '24px', fontWeight: 600 }}>${dashboard.cost_summary.cost_per_active_user.toFixed(2)}</div>
               </div>
             </div>
 
             {Object.keys(dashboard.cost_summary.breakdown_by_type).length > 0 && (
               <div>
-                <h4 style={{ marginBottom: '8px', fontSize: '14px', color: '#666' }}>按類型分佈</h4>
+                <h4 style={{ marginBottom: '8px', fontSize: '14px', color: 'var(--text-secondary)' }}>按類型分佈</h4>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
                   {Object.entries(dashboard.cost_summary.breakdown_by_type).map(([type, amount]) => (
                     <span key={type} style={{
                       padding: '4px 12px',
-                      backgroundColor: '#f0f0f0',
+                      backgroundColor: 'var(--surface-2)',
                       borderRadius: '12px',
                       fontSize: '13px',
                     }}>
@@ -253,20 +250,15 @@ export default function AdminDashboardPage() {
 
           <div style={{ display: 'flex', gap: '12px', marginBottom: '24px', flexWrap: 'wrap' }}>
             {Object.entries(hypotheses.by_status).map(([status, count]) => (
-              <div key={status} style={{
-                padding: '8px 16px',
-                borderRadius: '8px',
-                backgroundColor: STATUS_COLORS[status]?.bg || '#eaeaea',
-                color: STATUS_COLORS[status]?.fg || '#666',
-              }}>
-                <span style={{ fontSize: '13px' }}>{STATUS_LABELS[status] || status}</span>
-                <span style={{ marginLeft: '8px', fontWeight: 600 }}>{count}</span>
-              </div>
+              <span key={status} className={statusPillClass(status)} style={{ padding: '6px 14px' }}>
+                {STATUS_LABELS[status] || status}
+                <strong style={{ marginLeft: '8px' }}>{count}</strong>
+              </span>
             ))}
           </div>
 
           {hypotheses.hypotheses.length === 0 ? (
-            <div className="card" style={{ textAlign: 'center', padding: '40px', color: '#666' }}>
+            <div className="card" style={{ textAlign: 'center', padding: '40px', color: 'var(--text-secondary)' }}>
               尚無產品假設。請透過 API 建立假設。
             </div>
           ) : (
@@ -275,30 +267,22 @@ export default function AdminDashboardPage() {
                 <div key={h.id} className="card">
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start', marginBottom: '8px' }}>
                     <p style={{ fontWeight: 500, flex: 1, marginRight: '12px' }}>{h.statement}</p>
-                    <span style={{
-                      padding: '4px 12px',
-                      borderRadius: '12px',
-                      fontSize: '12px',
-                      fontWeight: 600,
-                      backgroundColor: STATUS_COLORS[h.status]?.bg || '#eaeaea',
-                      color: STATUS_COLORS[h.status]?.fg || '#666',
-                      whiteSpace: 'nowrap',
-                    }}>
+                    <span className={statusPillClass(h.status)}>
                       {STATUS_LABELS[h.status] || h.status}
                     </span>
                   </div>
                   {h.evidence_criteria && (
-                    <p style={{ fontSize: '13px', color: '#666', marginBottom: '4px' }}>
+                    <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '4px' }}>
                       <strong>驗證標準：</strong>{h.evidence_criteria}
                     </p>
                   )}
                   {h.evidence_notes && (
-                    <p style={{ fontSize: '13px', color: '#666' }}>
+                    <p style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
                       <strong>證據筆記：</strong>{h.evidence_notes}
                     </p>
                   )}
-                  <p style={{ fontSize: '12px', color: '#999', marginTop: '8px' }}>
-                    建於 {new Date(h.created_at).toLocaleDateString('zh-Hant')}
+                  <p style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '8px' }}>
+                    建於 {formatDate(h.created_at)}
                   </p>
                 </div>
               ))}
@@ -313,7 +297,7 @@ export default function AdminDashboardPage() {
 function FunnelCard({ label, value }: { label: string; value: number }) {
   return (
     <div className="card" style={{ textAlign: 'center', padding: '20px' }}>
-      <div style={{ fontSize: '12px', color: '#666', marginBottom: '4px' }}>{label}</div>
+      <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '4px' }}>{label}</div>
       <div style={{ fontSize: '28px', fontWeight: 700 }}>{value}</div>
     </div>
   );

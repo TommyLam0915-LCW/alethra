@@ -142,9 +142,9 @@ const EXCLUDED_LABEL: Record<string, string> = {
 };
 
 function outcomeLabel(entry: RevisionEntry): { text: string; color: string } {
-  if (entry.met_expectation === true) return { text: '符合預期', color: '#155724' };
-  if (entry.met_expectation === false) return { text: '未符預期', color: '#856404' };
-  return { text: '未記錄結論', color: '#666' };
+  if (entry.met_expectation === true) return { text: '符合預期', color: 'var(--positive)' };
+  if (entry.met_expectation === false) return { text: '未符預期', color: 'var(--warning)' };
+  return { text: '未記錄結論', color: 'var(--text-secondary)' };
 }
 
 function CountChip({ label, value, testId }: { label: string; value: number; testId: string }) {
@@ -153,13 +153,13 @@ function CountChip({ label, value, testId }: { label: string; value: number; tes
       data-testid={testId}
       style={{
         padding: '8px 12px',
-        backgroundColor: '#f8f9fa',
-        border: '1px solid #eaeaea',
+        backgroundColor: 'var(--surface-2)',
+        border: '1px solid var(--border-strong)',
         borderRadius: '6px',
         minWidth: '96px',
       }}
     >
-      <div style={{ fontSize: '11px', color: '#888' }}>{label}</div>
+      <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{label}</div>
       <div style={{ fontSize: '18px', fontWeight: 600 }}>{value}</div>
     </div>
   );
@@ -221,7 +221,7 @@ export default function ResearchRecordPanel({ experimentId, refreshToken = 0 }: 
     return (
       <div className="card" style={{ marginBottom: '20px' }} data-testid="record-panel">
         <h3 style={{ marginTop: 0 }}>研究紀錄總覽</h3>
-        <p style={{ color: '#888', fontSize: '13px' }}>載入研究紀錄…</p>
+        <p style={{ color: 'var(--text-muted)', fontSize: '13px' }}>載入研究紀錄…</p>
       </div>
     );
   }
@@ -230,7 +230,7 @@ export default function ResearchRecordPanel({ experimentId, refreshToken = 0 }: 
     return (
       <div className="card" style={{ marginBottom: '20px' }} data-testid="record-panel">
         <h3 style={{ marginTop: 0 }}>研究紀錄總覽</h3>
-        <p role="alert" data-testid="record-error" style={{ color: '#b00020', fontSize: '13px' }}>
+        <p role="alert" data-testid="record-error" style={{ color: 'var(--negative)', fontSize: '13px' }}>
           {error || '研究紀錄載入失敗'}
         </p>
       </div>
@@ -269,7 +269,7 @@ export default function ResearchRecordPanel({ experimentId, refreshToken = 0 }: 
         </button>
       </div>
 
-      <p style={{ color: '#666', fontSize: '13px', marginTop: 0 }}>
+      <p style={{ color: 'var(--text-secondary)', fontSize: '13px', marginTop: 0 }}>
         這裡整理決策復盤需要的證據：修訂及其結論、每次穩健性嘗試、已儲存比較的理由、模擬決策的理由與反思。
         缺失的區段會以 0 顯示，不會自動補值。
       </p>
@@ -277,7 +277,7 @@ export default function ResearchRecordPanel({ experimentId, refreshToken = 0 }: 
       {notice && (
         <p
           data-testid="record-notice"
-          style={{ color: '#155724', fontSize: '13px', margin: '0 0 12px' }}
+          style={{ color: 'var(--positive)', fontSize: '13px', margin: '0 0 12px' }}
         >
           {notice}
         </p>
@@ -286,7 +286,7 @@ export default function ResearchRecordPanel({ experimentId, refreshToken = 0 }: 
         <p
           role="alert"
           data-testid="record-error"
-          style={{ color: '#b00020', fontSize: '13px', margin: '0 0 12px' }}
+          style={{ color: 'var(--negative)', fontSize: '13px', margin: '0 0 12px' }}
         >
           {error}
         </p>
@@ -331,14 +331,14 @@ export default function ResearchRecordPanel({ experimentId, refreshToken = 0 }: 
       <section style={{ marginBottom: '16px' }}>
         <h4 style={{ fontSize: '14px', margin: '0 0 8px' }}>修訂結論</h4>
         {review.revisions.length === 0 ? (
-          <p data-testid="record-revisions-empty" style={{ color: '#888', fontSize: '13px', margin: 0 }}>
+          <p data-testid="record-revisions-empty" style={{ color: 'var(--text-muted)', fontSize: '13px', margin: 0 }}>
             尚未建立修訂版本，因此沒有可復盤的變更結論。
           </p>
         ) : (
           <div data-testid="record-revisions" style={{ overflowX: 'auto' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
               <thead>
-                <tr style={{ borderBottom: '1px solid #ddd', textAlign: 'left' }}>
+                <tr style={{ borderBottom: '1px solid var(--border-strong)', textAlign: 'left' }}>
                   <th style={{ padding: '6px 8px' }}>版本</th>
                   <th style={{ padding: '6px 8px' }}>來源</th>
                   <th style={{ padding: '6px 8px' }}>變更</th>
@@ -354,32 +354,32 @@ export default function ResearchRecordPanel({ experimentId, refreshToken = 0 }: 
                     <tr
                       key={entry.version_id}
                       data-testid={`record-revision-${entry.version_id}`}
-                      style={{ borderBottom: '1px solid #f0f0f0', verticalAlign: 'top' }}
+                      style={{ borderBottom: '1px solid var(--surface-2)', verticalAlign: 'top' }}
                     >
                       <td style={{ padding: '6px 8px', fontWeight: 500 }}>
                         v{entry.version_number}
                       </td>
-                      <td style={{ padding: '6px 8px', color: '#666' }}>
+                      <td style={{ padding: '6px 8px', color: 'var(--text-secondary)' }}>
                         {entry.base_version_number != null ? `v${entry.base_version_number}` : '—'}
                       </td>
-                      <td style={{ padding: '6px 8px', color: '#666' }}>
+                      <td style={{ padding: '6px 8px', color: 'var(--text-secondary)' }}>
                         {entry.change_kind ? CHANGE_KIND_LABEL[entry.change_kind] ?? entry.change_kind : '—'}
                         {entry.changed_fields.length > 0 && (
-                          <div style={{ fontSize: '11px', color: '#999' }}>
+                          <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
                             {entry.changed_fields.join('、')}
                           </div>
                         )}
                       </td>
-                      <td style={{ padding: '6px 8px', color: '#555' }}>
+                      <td style={{ padding: '6px 8px', color: 'var(--text-muted)' }}>
                         {entry.change_reason || '—'}
                       </td>
-                      <td style={{ padding: '6px 8px', color: '#555' }}>
+                      <td style={{ padding: '6px 8px', color: 'var(--text-muted)' }}>
                         {entry.expectation || '—'}
                       </td>
                       <td style={{ padding: '6px 8px' }}>
                         <div style={{ color: label.color, fontWeight: 500 }}>{label.text}</div>
                         {entry.outcome && (
-                          <div style={{ fontSize: '12px', color: '#555' }}>{entry.outcome}</div>
+                          <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>{entry.outcome}</div>
                         )}
                       </td>
                     </tr>
@@ -394,7 +394,7 @@ export default function ResearchRecordPanel({ experimentId, refreshToken = 0 }: 
       <section style={{ marginBottom: '16px' }}>
         <h4 style={{ fontSize: '14px', margin: '0 0 8px' }}>穩健性研究</h4>
         {review.robustness_studies.length === 0 ? (
-          <p data-testid="record-studies-empty" style={{ color: '#888', fontSize: '13px', margin: 0 }}>
+          <p data-testid="record-studies-empty" style={{ color: 'var(--text-muted)', fontSize: '13px', margin: 0 }}>
             尚未執行穩健性研究；單一次回測不能當作穩健性證據。
           </p>
         ) : (
@@ -407,19 +407,19 @@ export default function ResearchRecordPanel({ experimentId, refreshToken = 0 }: 
                   data-testid={`record-study-${study.id}`}
                   style={{
                     padding: '10px 12px',
-                    backgroundColor: '#f8f9fa',
-                    border: '1px solid #eaeaea',
+                    backgroundColor: 'var(--surface-2)',
+                    border: '1px solid var(--border-strong)',
                     borderRadius: '6px',
                     fontSize: '13px',
                   }}
                 >
                   <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px' }}>
                     <strong>{KIND_LABEL[study.kind] ?? study.kind}</strong>
-                    <span style={{ color: '#555' }}>
+                    <span style={{ color: 'var(--text-muted)' }}>
                       {STUDY_STATUS_LABEL[study.status] ?? study.status}
                     </span>
                   </div>
-                  <div style={{ color: '#666', fontSize: '12px', marginTop: '4px' }}>
+                  <div style={{ color: 'var(--text-secondary)', fontSize: '12px', marginTop: '4px' }}>
                     嘗試 {study.attempts.length}（完成 {counts.completed ?? 0}、失敗{' '}
                     {counts.failed ?? 0}、跳過 {counts.skipped ?? 0}）
                     {study.aggregate?.return_stats
@@ -427,21 +427,21 @@ export default function ResearchRecordPanel({ experimentId, refreshToken = 0 }: 
                       : ''}
                   </div>
                   {study.attempts.length > 0 && (
-                    <div style={{ color: '#888', fontSize: '11px', marginTop: '4px' }}>
+                    <div style={{ color: 'var(--text-muted)', fontSize: '11px', marginTop: '4px' }}>
                       {study.attempts
                         .map((attempt) => `${attempt.label}（${attempt.status}）`)
                         .join('、')}
                     </div>
                   )}
                   {study.error_details && (
-                    <div style={{ color: '#856404', fontSize: '12px', marginTop: '4px' }}>
+                    <div style={{ color: 'var(--warning)', fontSize: '12px', marginTop: '4px' }}>
                       {study.error_details}
                     </div>
                   )}
                 </div>
               );
             })}
-            <p style={{ color: '#888', fontSize: '12px', margin: 0 }}>
+            <p style={{ color: 'var(--text-muted)', fontSize: '12px', margin: 0 }}>
               最佳單一嘗試不是穩健性證據：請同時看中位數、最差結果、分散程度與失敗次數。
             </p>
           </div>
@@ -453,7 +453,7 @@ export default function ResearchRecordPanel({ experimentId, refreshToken = 0 }: 
         {review.saved_comparisons.length === 0 ? (
           <p
             data-testid="record-comparisons-empty"
-            style={{ color: '#888', fontSize: '13px', margin: 0 }}
+            style={{ color: 'var(--text-muted)', fontSize: '13px', margin: 0 }}
           >
             尚未儲存任何比較；沒有比較理由，日後難以復盤當時為何作出判斷。
           </p>
@@ -466,8 +466,8 @@ export default function ResearchRecordPanel({ experimentId, refreshToken = 0 }: 
                 data-testid={`record-comparison-${entry.id}`}
                 style={{
                   padding: '10px 12px',
-                  backgroundColor: '#f8f9fa',
-                  border: '1px solid #eaeaea',
+                  backgroundColor: 'var(--surface-2)',
+                  border: '1px solid var(--border-strong)',
                   borderRadius: '6px',
                   textDecoration: 'none',
                   color: 'inherit',
@@ -475,7 +475,7 @@ export default function ResearchRecordPanel({ experimentId, refreshToken = 0 }: 
                 }}
               >
                 <div style={{ fontWeight: 500 }}>{entry.purpose}</div>
-                <div style={{ color: '#666', fontSize: '12px', marginTop: '2px' }}>
+                <div style={{ color: 'var(--text-secondary)', fontSize: '12px', marginTop: '2px' }}>
                   {entry.run_a_version_number != null ? `v${entry.run_a_version_number}` : '—'} →{' '}
                   {entry.run_b_version_number != null ? `v${entry.run_b_version_number}` : '—'}
                   {entry.notes ? ` · ${entry.notes}` : ''}
@@ -489,7 +489,7 @@ export default function ResearchRecordPanel({ experimentId, refreshToken = 0 }: 
       <section style={{ marginBottom: '16px' }}>
         <h4 style={{ fontSize: '14px', margin: '0 0 8px' }}>模擬決策與反思</h4>
         {review.simulation_sessions.length === 0 ? (
-          <p data-testid="record-sessions-empty" style={{ color: '#888', fontSize: '13px', margin: 0 }}>
+          <p data-testid="record-sessions-empty" style={{ color: 'var(--text-muted)', fontSize: '13px', margin: 0 }}>
             尚未進行前進模擬，因此沒有可復盤的決策紀錄。
           </p>
         ) : (
@@ -500,8 +500,8 @@ export default function ResearchRecordPanel({ experimentId, refreshToken = 0 }: 
                 data-testid={`record-session-${session.id}`}
                 style={{
                   padding: '10px 12px',
-                  backgroundColor: '#f8f9fa',
-                  border: '1px solid #eaeaea',
+                  backgroundColor: 'var(--surface-2)',
+                  border: '1px solid var(--border-strong)',
                   borderRadius: '6px',
                   fontSize: '13px',
                 }}
@@ -511,11 +511,11 @@ export default function ResearchRecordPanel({ experimentId, refreshToken = 0 }: 
                     {session.version_number != null ? `v${session.version_number}` : '—'} ·{' '}
                     {session.timeframe === '1d' ? '日線' : session.timeframe}
                   </strong>
-                  <span style={{ color: '#555' }}>
+                  <span style={{ color: 'var(--text-muted)' }}>
                     {session.status} · 資料截止 {session.data_cutoff_at}
                   </span>
                 </div>
-                <div style={{ color: '#666', fontSize: '12px', marginTop: '2px' }}>
+                <div style={{ color: 'var(--text-secondary)', fontSize: '12px', marginTop: '2px' }}>
                   決策 {session.decisions.length}、人工意向 {session.human_decisions.length}
                   {session.current_snapshot_date ? ` · 目前觀察至 ${session.current_snapshot_date}` : ''}
                 </div>
@@ -523,7 +523,7 @@ export default function ResearchRecordPanel({ experimentId, refreshToken = 0 }: 
                   <div
                     key={human.id}
                     data-testid={`record-human-${human.id}`}
-                    style={{ marginTop: '6px', fontSize: '12px', color: '#555' }}
+                    style={{ marginTop: '6px', fontSize: '12px', color: 'var(--text-muted)' }}
                   >
                     人工意向：{human.action}
                     {human.quantity != null ? ` ${human.quantity}` : ''}（{human.execution_status}）
@@ -543,11 +543,11 @@ export default function ResearchRecordPanel({ experimentId, refreshToken = 0 }: 
                 data-testid={`record-decision-${decision.id}`}
                 style={{
                   padding: '8px 12px',
-                  backgroundColor: '#fff',
-                  border: '1px solid #eee',
+                  backgroundColor: 'var(--surface-1)',
+                  border: '1px solid var(--border-strong)',
                   borderRadius: '6px',
                   fontSize: '12px',
-                  color: '#555',
+                  color: 'var(--text-muted)',
                 }}
               >
                 <span style={{ fontWeight: 500 }}>
@@ -555,11 +555,11 @@ export default function ResearchRecordPanel({ experimentId, refreshToken = 0 }: 
                 </span>
                 {decision.rationale && <span> · 理由：{decision.rationale}</span>}
                 {decision.reflection && (
-                  <div style={{ color: '#666', marginTop: '2px' }}>反思：{decision.reflection}</div>
+                  <div style={{ color: 'var(--text-secondary)', marginTop: '2px' }}>反思：{decision.reflection}</div>
                 )}
               </div>
             ))}
-            <p style={{ color: '#888', fontSize: '11px', margin: 0 }}>
+            <p style={{ color: 'var(--text-muted)', fontSize: '11px', margin: 0 }}>
               只列出有記錄理由或反思的決策；完整決策明細在匯出檔內。
             </p>
           </div>
@@ -570,10 +570,10 @@ export default function ResearchRecordPanel({ experimentId, refreshToken = 0 }: 
         data-testid="record-scope"
         style={{
           padding: '10px 12px',
-          backgroundColor: '#f0f4f8',
+          backgroundColor: 'var(--surface-2)',
           borderRadius: '6px',
           fontSize: '12px',
-          color: '#555',
+          color: 'var(--text-muted)',
         }}
       >
         匯出檔（{record.schema_version}）包含研究方法、版本、修訂結論、穩健性研究與嘗試、已儲存比較、模擬決策與事件。
@@ -586,7 +586,7 @@ export default function ResearchRecordPanel({ experimentId, refreshToken = 0 }: 
             ；需要時請到單次執行的詳情頁查看。
           </>
         )}
-        <div style={{ marginTop: '4px', color: '#888' }}>
+        <div style={{ marginTop: '4px', color: 'var(--text-muted)' }}>
           這是研究過程的整理，不是投資建議；紀錄不會改寫已發生的資料。
         </div>
       </div>

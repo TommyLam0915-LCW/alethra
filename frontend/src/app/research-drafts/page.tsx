@@ -4,6 +4,8 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
+import { statusPillClass } from '@/lib/status-styles';
+import { formatDate } from '@/lib/format';
 
 interface ResearchDraft {
   id: string;
@@ -20,13 +22,6 @@ const STATUS_LABELS: Record<string, string> = {
   pending_review: '待審閱',
   accepted: '已接受',
   rejected: '已退回',
-};
-
-const STATUS_COLORS: Record<string, { bg: string; color: string }> = {
-  draft: { bg: '#eaeaea', color: '#666' },
-  pending_review: { bg: '#fff3cd', color: '#856404' },
-  accepted: { bg: '#d4edda', color: '#155724' },
-  rejected: { bg: '#f8d7da', color: '#721c24' },
 };
 
 const TEMPLATE_OPTIONS = [
@@ -89,7 +84,7 @@ export default function ResearchDraftsPage() {
   return (
     <div className="container" style={{ paddingTop: '40px', paddingBottom: '40px' }}>
       <div style={{ marginBottom: '20px' }}>
-        <Link href="/dashboard" style={{ color: '#0070f3', textDecoration: 'none' }}>
+        <Link href="/dashboard" style={{ color: 'var(--primary-text)', textDecoration: 'none' }}>
           返回我的實驗
         </Link>
       </div>
@@ -113,7 +108,7 @@ export default function ResearchDraftsPage() {
       {showCreate && (
         <div className="card" style={{ marginBottom: '24px' }}>
           <h3 style={{ marginBottom: '8px' }}>建立新研究草稿</h3>
-          <p style={{ color: '#888', fontSize: '13px', marginBottom: '16px' }}>
+          <p style={{ color: 'var(--text-muted)', fontSize: '13px', marginBottom: '16px' }}>
             先記錄標題與假設即可。其他欄位可在草稿詳情頁補充；接受草稿後，可將欄位套用到新實驗。
           </p>
           <form onSubmit={handleCreateDraft}>
@@ -161,7 +156,7 @@ export default function ResearchDraftsPage() {
                 onChange={(e) => setCreateAsset(e.target.value)}
                 placeholder="例如 DEMO-ALPHA"
               />
-              <p style={{ color: '#999', fontSize: '12px', marginBottom: 0 }}>
+              <p style={{ color: 'var(--text-muted)', fontSize: '12px', marginBottom: 0 }}>
                 僅限大寫字母、數字、連字號與點號。
               </p>
             </div>
@@ -193,8 +188,8 @@ export default function ResearchDraftsPage() {
         </div>
       ) : drafts.length === 0 ? (
         <div className="card" style={{ textAlign: 'center', padding: '60px' }}>
-          <p style={{ color: '#666', marginBottom: '20px' }}>尚無研究草稿</p>
-          <p style={{ color: '#999', fontSize: '14px', marginBottom: '24px' }}>
+          <p style={{ color: 'var(--text-secondary)', marginBottom: '20px' }}>尚無研究草稿</p>
+          <p style={{ color: 'var(--text-muted)', fontSize: '14px', marginBottom: '24px' }}>
             研究草稿用於在正式建立實驗前，結構化地整理你的研究假設與方法論。
           </p>
           <button
@@ -207,7 +202,6 @@ export default function ResearchDraftsPage() {
       ) : (
         <div style={{ display: 'grid', gap: '16px' }}>
           {drafts.map((draft) => {
-            const statusStyle = STATUS_COLORS[draft.status] || STATUS_COLORS.draft;
             return (
               <Link
                 key={draft.id}
@@ -218,21 +212,13 @@ export default function ResearchDraftsPage() {
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start' }}>
                     <div>
                       <h3 style={{ marginBottom: '8px' }}>{draft.title}</h3>
-                      <p style={{ color: '#666', fontSize: '14px' }}>
+                      <p style={{ color: 'var(--text-secondary)', fontSize: '14px' }}>
                         {draft.strategy_template && <span style={{ marginRight: '16px' }}>模板: {draft.strategy_template}</span>}
                         {draft.asset_symbol && <span style={{ marginRight: '16px' }}>標的: {draft.asset_symbol}</span>}
-                        <span>建立於 {new Date(draft.created_at).toLocaleDateString('zh-Hant')}</span>
+                        <span>建立於 {formatDate(draft.created_at)}</span>
                       </p>
                     </div>
-                    <span
-                      style={{
-                        padding: '4px 12px',
-                        borderRadius: '12px',
-                        fontSize: '12px',
-                        backgroundColor: statusStyle.bg,
-                        color: statusStyle.color,
-                      }}
-                    >
+                    <span className={statusPillClass(draft.status)}>
                       {STATUS_LABELS[draft.status] || draft.status}
                     </span>
                   </div>

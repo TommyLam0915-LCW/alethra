@@ -41,11 +41,14 @@ const TOOL_LINKS = [
   { key: 'training' as NavKey, href: '/training', label: '訓練與模型', labelEn: 'Training & Models' },
   { href: '/models', label: '模型研究記錄', labelEn: 'Model research records' },
   { href: '/inference', label: '推論紀錄', labelEn: 'Inference runs' },
+  { href: '/research-drafts', label: '研究草稿', labelEn: 'Research drafts' },
   { key: 'market' as NavKey, href: '/market-data', label: '市場資料', labelEn: 'Market data' },
+  { href: '/execution', label: '執行意圖', labelEn: 'Execution intents' },
   { key: 'pilot' as NavKey, href: '/pilot', label: 'Pilot 計劃', labelEn: 'Pilot program' },
 ];
 
 const SETTINGS_LINKS = [
+  { href: '/personal-memory', label: '個人研究記憶', labelEn: 'Personal research memory' },
   { href: '/api-keys', label: 'API 金鑰', labelEn: 'API access' },
   { href: '/subscription', label: '訂閱與帳單', labelEn: 'Subscription' },
 ];

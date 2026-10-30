@@ -5,6 +5,8 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import AppShell from '@/components/shell/AppShell';
+import { statusPillClass } from '@/lib/status-styles';
+import { formatDate, formatDateTime } from '@/lib/format';
 
 interface Portfolio {
   id: string;
@@ -18,11 +20,11 @@ interface Portfolio {
   closed_at: string | null;
 }
 
-const STATUS_LABELS: Record<string, { label: string; color: string; bg: string }> = {
-  active: { label: '進行中', color: '#155724', bg: '#d4edda' },
-  paused: { label: '已暫停', color: '#856404', bg: '#fff3cd' },
-  retired: { label: '已退休', color: '#666', bg: '#f5f5f5' },
-  completed: { label: '已完成', color: '#0c5460', bg: '#d1ecf1' },
+const STATUS_LABELS: Record<string, string> = {
+  active: '進行中',
+  paused: '已暫停',
+  retired: '已退休',
+  completed: '已完成',
 };
 
 interface JournalRow {
@@ -184,7 +186,7 @@ export default function PaperPortfolioListPage() {
                     <tr key={`${row.portfolio_id}-${row.record_type}-${idx}`} style={{ borderTop: '1px solid var(--border-subtle)' }}>
                       <td style={{ padding: '0.6rem 0.75rem', whiteSpace: 'nowrap', color: 'var(--text-secondary)' }}>
                         {row.order_created_at_utc
-                          ? new Date(row.order_created_at_utc).toLocaleString('zh-Hant')
+                          ? formatDateTime(row.order_created_at_utc)
                           : '—'}
                       </td>
                       <td style={{ padding: '0.6rem 0.75rem', fontFamily: 'var(--font-code)' }}>
@@ -241,14 +243,9 @@ export default function PaperPortfolioListPage() {
         用於研究與行為記錄的虛擬組合，並非交易遊戲。
       </p>
 
-      <div style={{
-        background: 'rgba(245, 158, 11, 0.12)', border: '1px solid var(--warning)', borderRadius: '8px',
-        padding: '1rem', marginBottom: '1.5rem', fontSize: '0.875rem', color: 'var(--text-primary)',
-      }}>
+      <div className="notice notice-warn" style={{ marginBottom: '1.5rem', fontSize: '0.875rem' }}>
         <strong>免責聲明：</strong><br />
         模擬交易記錄基於既定假設的模擬執行，不構成投資建議。
-        無法重現真實資金心理、完整市場流動性、部分成交、交易所中斷、市場衝擊或實際券商執行。<br />
-        <strong>提醒：</strong>虛擬交易記錄基於既定假設的模擬執行，不構成投資建議。
         無法重現真實資金心理、完整市場流動性、部分成交、交易所中斷、市場衝擊或實際券商執行。
       </div>
 
@@ -259,10 +256,11 @@ export default function PaperPortfolioListPage() {
         <h2 style={{ fontSize: '1.2rem', marginBottom: '1rem' }}>建立新組合</h2>
         <div style={{ display: 'flex', gap: '1rem', alignItems: 'end' }}>
           <div style={{ flex: 1 }}>
-            <label style={{ display: 'block', marginBottom: '0.5rem', fontSize: '0.875rem' }}>
+            <label htmlFor="pp-new-cash" style={{ display: 'block', marginBottom: '0.5rem', fontSize: '0.875rem' }}>
               初始虛擬資金 (USD)
             </label>
             <input
+              id="pp-new-cash"
               type="number"
               data-testid="pp-new-cash"
               value={cashInput}
@@ -279,7 +277,7 @@ export default function PaperPortfolioListPage() {
             onClick={handleCreate}
             disabled={creating}
             style={{
-              padding: '0.5rem 1.5rem', background: '#0066cc', color: 'white',
+              padding: '0.5rem 1.5rem', background: 'var(--primary-solid)', color: 'var(--text-white)',
               border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '1rem',
               opacity: creating ? 0.6 : 1,
             }}
@@ -307,7 +305,7 @@ export default function PaperPortfolioListPage() {
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
           {portfolios.map((p) => {
-            const statusStyle = STATUS_LABELS[p.status] || STATUS_LABELS.active;
+            const statusLabel = STATUS_LABELS[p.status] || p.status;
             const hasUnrealized = typeof p.total_unrealized_pnl === 'number';
             const cashReturnPct = ((p.current_virtual_cash - p.initial_virtual_cash) / p.initial_virtual_cash * 100);
             return (
@@ -323,15 +321,11 @@ export default function PaperPortfolioListPage() {
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start' }}>
                   <div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
-                      <span style={{
-                        padding: '0.125rem 0.5rem', borderRadius: '4px',
-                        background: statusStyle.bg, color: statusStyle.color,
-                        fontSize: '0.75rem', fontWeight: 600,
-                      }}>
-                        {statusStyle.label}
+                      <span className={statusPillClass(p.status)}>
+                        {statusLabel}
                       </span>
                       <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                        {new Date(p.created_at).toLocaleDateString('zh-Hant')}
+                        {formatDate(p.created_at)}
                       </span>
                     </div>
                     <div style={{ fontSize: '1.1rem', fontWeight: 600 }}>

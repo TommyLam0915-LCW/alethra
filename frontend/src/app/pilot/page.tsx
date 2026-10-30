@@ -3,7 +3,9 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { api, ApiError } from '@/lib/api';
+import { statusPillClass } from '@/lib/status-styles';
 import AppShell from '@/components/shell/AppShell';
+import { formatDate } from '@/lib/format';
 
 interface Application {
   id: string;
@@ -113,16 +115,6 @@ export default function PilotApplicationPage() {
     return labels[s] || s;
   };
 
-  const getStatusColor = (s: string) => {
-    const colors: Record<string, { bg: string; fg: string }> = {
-      submitted: { bg: '#fff3cd', fg: '#856404' },
-      approved: { bg: '#d4edda', fg: '#155724' },
-      rejected: { bg: '#f8d7da', fg: '#721c24' },
-      waitlisted: { bg: '#e2e3e5', fg: '#383d41' },
-    };
-    return colors[s] || { bg: '#eaeaea', fg: '#666' };
-  };
-
   if (loading) {
     return (
       <AppShell active="pilot">
@@ -185,7 +177,7 @@ export default function PilotApplicationPage() {
             <div>
               <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>到期日</div>
               <div style={{ fontSize: '18px', fontWeight: 600 }}>
-                {entitlement.expiry_date ? new Date(entitlement.expiry_date).toLocaleDateString('zh-Hant') : '無限期'}
+                {entitlement.expiry_date ? formatDate(entitlement.expiry_date) : '無限期'}
               </div>
             </div>
           </div>
@@ -196,20 +188,11 @@ export default function PilotApplicationPage() {
         <div className="card">
           <h3 style={{ marginBottom: '16px' }}>申請狀態</h3>
           <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '16px' }}>
-            <span
-              style={{
-                padding: '6px 16px',
-                borderRadius: '16px',
-                fontSize: '14px',
-                fontWeight: 600,
-                backgroundColor: getStatusColor(application.status).bg,
-                color: getStatusColor(application.status).fg,
-              }}
-            >
+            <span className={statusPillClass(application.status)} style={{ padding: '6px 16px', fontSize: '14px' }}>
               {getStatusLabel(application.status)}
             </span>
             <span style={{ color: 'var(--text-muted)', fontSize: '14px' }}>
-              提交於 {new Date(application.created_at).toLocaleDateString('zh-Hant')}
+              提交於 {formatDate(application.created_at)}
             </span>
           </div>
           <div style={{ fontSize: '14px', color: 'var(--text-primary)' }}>
@@ -236,10 +219,11 @@ export default function PilotApplicationPage() {
 
           <form onSubmit={handleSubmit}>
             <div style={{ marginBottom: '16px' }}>
-              <label style={{ display: 'block', marginBottom: '6px', fontWeight: 500, fontSize: '14px' }}>
+              <label htmlFor="pilot-user-type" style={{ display: 'block', marginBottom: '6px', fontWeight: 500, fontSize: '14px' }}>
                 你的角色 *
               </label>
               <select
+                id="pilot-user-type"
                 className="input"
                 value={form.intended_user_type}
                 onChange={e => setForm({ ...form, intended_user_type: e.target.value })}
@@ -252,10 +236,11 @@ export default function PilotApplicationPage() {
             </div>
 
             <div style={{ marginBottom: '16px' }}>
-              <label style={{ display: 'block', marginBottom: '6px', fontWeight: 500, fontSize: '14px' }}>
+              <label htmlFor="pilot-workflow" style={{ display: 'block', marginBottom: '6px', fontWeight: 500, fontSize: '14px' }}>
                 目前的研究流程
               </label>
               <textarea
+                id="pilot-workflow"
                 className="input"
                 rows={3}
                 placeholder="描述你目前如何進行投資研究..."
@@ -265,10 +250,11 @@ export default function PilotApplicationPage() {
             </div>
 
             <div style={{ marginBottom: '16px' }}>
-              <label style={{ display: 'block', marginBottom: '6px', fontWeight: 500, fontSize: '14px' }}>
+              <label htmlFor="pilot-tools" style={{ display: 'block', marginBottom: '6px', fontWeight: 500, fontSize: '14px' }}>
                 目前使用的工具
               </label>
               <input
+                id="pilot-tools"
                 className="input"
                 type="text"
                 placeholder="例如：Excel, TradingView, Python..."
@@ -278,10 +264,11 @@ export default function PilotApplicationPage() {
             </div>
 
             <div style={{ marginBottom: '16px' }}>
-              <label style={{ display: 'block', marginBottom: '6px', fontWeight: 500, fontSize: '14px' }}>
+              <label htmlFor="pilot-pain-point" style={{ display: 'block', marginBottom: '6px', fontWeight: 500, fontSize: '14px' }}>
                 最大的痛點
               </label>
               <textarea
+                id="pilot-pain-point"
                 className="input"
                 rows={2}
                 placeholder="你在投資研究中遇到最大的困難是什麼？"
@@ -291,10 +278,11 @@ export default function PilotApplicationPage() {
             </div>
 
             <div style={{ marginBottom: '16px' }}>
-              <label style={{ display: 'block', marginBottom: '6px', fontWeight: 500, fontSize: '14px' }}>
+              <label htmlFor="pilot-usage-frequency" style={{ display: 'block', marginBottom: '6px', fontWeight: 500, fontSize: '14px' }}>
                 預期使用頻率
               </label>
               <select
+                id="pilot-usage-frequency"
                 className="input"
                 value={form.expected_usage_frequency}
                 onChange={e => setForm({ ...form, expected_usage_frequency: e.target.value })}

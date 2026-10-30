@@ -6,9 +6,11 @@ import Link from 'next/link';
 import { api } from '@/lib/api';
 import { describeRunStatus } from '@/lib/runStatus';
 import { brand } from '@/lib/brand';
+import { statusPillClass } from '@/lib/status-styles';
 import RevisionPanel from '@/components/experiments/RevisionPanel';
 import RobustnessPanel from '@/components/experiments/RobustnessPanel';
 import ResearchRecordPanel from '@/components/experiments/ResearchRecordPanel';
+import { formatDate, formatDateTime } from '@/lib/format';
 
 interface Experiment {
   id: string;
@@ -93,8 +95,8 @@ interface MethodReview {
   checks: CheckResult[];
 }
 
-const thStyle: React.CSSProperties = { padding: '6px 10px', textAlign: 'right' as const, borderBottom: '2px solid #ddd', whiteSpace: 'nowrap' as const };
-const tdStyle: React.CSSProperties = { padding: '5px 10px', textAlign: 'right' as const, borderBottom: '1px solid #eee', whiteSpace: 'nowrap' as const };
+const thStyle: React.CSSProperties = { padding: '6px 10px', textAlign: 'right' as const, borderBottom: '2px solid var(--border-strong)', whiteSpace: 'nowrap' as const };
+const tdStyle: React.CSSProperties = { padding: '5px 10px', textAlign: 'right' as const, borderBottom: '1px solid var(--border-strong)', whiteSpace: 'nowrap' as const };
 
 const EVENT_LABELS: Record<string, string> = {
   experiment_created: '實驗建立',
@@ -284,10 +286,10 @@ export default function ExperimentDetailPage() {
   };
 
   const STATUS_STYLE: Record<string, { bg: string; color: string; label: string }> = {
-    PASS: { bg: '#d4edda', color: '#155724', label: '通過' },
-    WARNING: { bg: '#fff3cd', color: '#856404', label: '警告' },
-    INSUFFICIENT_INFORMATION: { bg: '#e2e3e5', color: '#383d49', label: '資訊不足' },
-    NOT_APPLICABLE: { bg: '#f8f9fa', color: '#6c757d', label: '不適用' },
+    PASS: { bg: 'rgba(34,197,94,0.14)', color: 'var(--positive)', label: '通過' },
+    WARNING: { bg: 'rgba(245,158,11,0.14)', color: 'var(--warning)', label: '警告' },
+    INSUFFICIENT_INFORMATION: { bg: 'var(--surface-2)', color: 'var(--text-secondary)', label: '資訊不足' },
+    NOT_APPLICABLE: { bg: 'var(--surface-2)', color: 'var(--text-secondary)', label: '不適用' },
   };
 
   if (loading) {
@@ -305,19 +307,19 @@ export default function ExperimentDetailPage() {
   return (
     <div className="container" style={{ paddingTop: '40px', paddingBottom: '40px' }}>
       <div style={{ marginBottom: '20px' }}>
-        <Link href="/dashboard" style={{ color: '#0070f3', textDecoration: 'none' }}>
+        <Link href="/dashboard" style={{ color: 'var(--primary-text)', textDecoration: 'none' }}>
           返回我的實驗
         </Link>
       </div>
 
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start', marginBottom: '30px' }}>
-        <div>
-          <h1 style={{ marginBottom: '8px' }}>{experiment.title}</h1>
-          <p style={{ color: '#666' }}>
-            建立於 {new Date(experiment.created_at).toLocaleDateString('zh-Hant')}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '16px', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '30px' }}>
+        <div style={{ minWidth: 0, flex: '1 1 260px' }}>
+          <h1 style={{ marginBottom: '8px', overflowWrap: 'anywhere' }}>{experiment.title}</h1>
+          <p style={{ color: 'var(--text-secondary)' }}>
+            建立於 {formatDate(experiment.created_at)}
           </p>
         </div>
-        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', alignItems: 'center' }}>
           {experiment.status === 'locked' && (
             <Link href={`/experiments/${experimentId}/simulation`} data-testid="exp-simulation-link">
               <button className="btn btn-primary" style={{ fontSize: '13px' }}>
@@ -330,22 +332,17 @@ export default function ExperimentDetailPage() {
               onClick={() => setShowLockConfirm((open) => !open)}
               className="btn"
               data-testid="exp-lock-btn"
-              style={{ backgroundColor: '#eaeaea', fontSize: '13px' }}
+              style={{ backgroundColor: 'var(--surface-2)', fontSize: '13px' }}
             >
               {showLockConfirm ? '取消鎖定' : '鎖定策略'}
             </button>
           )}
-          <button onClick={handleExport} className="btn" style={{ backgroundColor: '#eaeaea', fontSize: '13px' }}>
+          <button onClick={handleExport} className="btn" style={{ backgroundColor: 'var(--surface-2)', fontSize: '13px' }}>
             匯出
           </button>
           <span
-            style={{
-              padding: '6px 16px',
-              borderRadius: '16px',
-              fontSize: '14px',
-              backgroundColor: experiment.status === 'locked' ? '#d1ecf1' : '#eaeaea',
-              color: experiment.status === 'locked' ? '#0c5460' : '#666',
-            }}
+            className={statusPillClass(experiment.status)}
+            style={{ padding: '6px 16px', fontSize: '14px' }}
           >
             {experiment.status === 'draft' ? '草稿' : experiment.status === 'locked' ? '已鎖定' : experiment.status}
           </span>
@@ -357,22 +354,22 @@ export default function ExperimentDetailPage() {
       {experiment.hypothesis && (
         <div className="card" style={{ marginBottom: '20px' }}>
           <h3 style={{ marginBottom: '12px' }}>研究假設</h3>
-          <p style={{ color: '#666' }}>{experiment.hypothesis}</p>
+          <p style={{ color: 'var(--text-secondary)' }}>{experiment.hypothesis}</p>
           {experiment.falsification_conditions && (
             <>
               <h4 style={{ marginTop: '16px', marginBottom: '8px', fontSize: '14px' }}>推翻條件</h4>
-              <p style={{ color: '#666' }}>{experiment.falsification_conditions}</p>
+              <p style={{ color: 'var(--text-secondary)' }}>{experiment.falsification_conditions}</p>
             </>
           )}
         </div>
       )}
 
       {!isLocked && showLockConfirm && (
-        <div className="card" style={{ marginBottom: '20px', borderLeft: '3px solid #0070f3' }}>
+        <div className="card" style={{ marginBottom: '20px', borderLeft: '3px solid var(--primary)' }}>
           <h3 style={{ marginTop: 0, marginBottom: '8px' }}>
             {currentVersion ? `鎖定版本 ${currentVersion.version_number}` : '尚無可鎖定的版本'}
           </h3>
-          <p style={{ color: '#666', fontSize: '14px', marginTop: 0, marginBottom: '16px' }}>
+          <p style={{ color: 'var(--text-secondary)', fontSize: '14px', marginTop: 0, marginBottom: '16px' }}>
             鎖定後這個版本的策略參數與數據截止即不可再修改；要調整參數必須建立新版本。
             前進模擬、回放游標與紙上交易成交都以此版本為準。
           </p>
@@ -389,38 +386,38 @@ export default function ExperimentDetailPage() {
               }}
             >
               <div>
-                <div style={{ color: '#888' }}>標的</div>
+                <div style={{ color: 'var(--text-muted)' }}>標的</div>
                 <strong>{(currentVersion.strategy_spec?.asset_ids ?? []).join('、') || '未提供'}</strong>
               </div>
               <div>
-                <div style={{ color: '#888' }}>模板</div>
+                <div style={{ color: 'var(--text-muted)' }}>模板</div>
                 <strong>{currentVersion.strategy_spec?.template_type ?? '未提供'}</strong>
               </div>
               <div>
-                <div style={{ color: '#888' }}>期間</div>
+                <div style={{ color: 'var(--text-muted)' }}>期間</div>
                 <strong>
                   {currentVersion.strategy_spec?.start_date ?? '?'} 至 {currentVersion.strategy_spec?.end_date ?? '?'}
                 </strong>
               </div>
               <div>
-                <div style={{ color: '#888' }}>數據截止</div>
+                <div style={{ color: 'var(--text-muted)' }}>數據截止</div>
                 <strong>{currentVersion.strategy_spec?.end_date ?? '未提供'}</strong>
               </div>
               <div>
-                <div style={{ color: '#888' }}>初始資金</div>
+                <div style={{ color: 'var(--text-muted)' }}>初始資金</div>
                 <strong>
                   {currentVersion.strategy_spec?.initial_cash ?? '未提供'} {currentVersion.strategy_spec?.currency ?? ''}
                 </strong>
               </div>
               <div>
-                <div style={{ color: '#888' }}>手續費／滑點</div>
+                <div style={{ color: 'var(--text-muted)' }}>手續費／滑點</div>
                 <strong>
                   {currentVersion.strategy_spec?.commission_rate ?? 0} ／ {currentVersion.strategy_spec?.slippage_rate ?? 0}
                 </strong>
               </div>
             </div>
           ) : (
-            <p style={{ color: '#856404', fontSize: '13px' }}>
+            <p style={{ color: 'var(--warning)', fontSize: '13px' }}>
               這個實驗還沒有策略版本，無法鎖定；請先建立實驗或修改參數以產生新版本。
             </p>
           )}
@@ -438,7 +435,7 @@ export default function ExperimentDetailPage() {
               onClick={() => setShowLockConfirm(false)}
               className="btn"
               data-testid="exp-lock-cancel"
-              style={{ backgroundColor: '#eaeaea' }}
+              style={{ backgroundColor: 'var(--surface-2)' }}
             >
               取消
             </button>
@@ -453,28 +450,28 @@ export default function ExperimentDetailPage() {
             <button
               onClick={() => setShowVersions(!showVersions)}
               className="btn"
-              style={{ backgroundColor: '#eaeaea', fontSize: '13px' }}
+              style={{ backgroundColor: 'var(--surface-2)', fontSize: '13px' }}
             >
               {showVersions ? '隱藏版本歷史' : `查看所有版本 (${versions.length})`}
             </button>
           </div>
-          <p style={{ color: '#666', fontSize: '14px', margin: 0 }}>
+          <p style={{ color: 'var(--text-secondary)', fontSize: '14px', margin: 0 }}>
             版本 {versions.find(v => v.id === experiment.current_version_id)?.version_number || versions.length}
             {versions.find(v => v.id === experiment.current_version_id)?.change_reason && (
               <> · 變更原因：{versions.find(v => v.id === experiment.current_version_id)?.change_reason}</>
             )}
           </p>
           {showVersions && (
-            <div style={{ marginTop: '16px', borderTop: '1px solid #eaeaea', paddingTop: '16px' }}>
+            <div style={{ marginTop: '16px', borderTop: '1px solid var(--border-strong)', paddingTop: '16px' }}>
               {versions.map((v, i) => (
-                <div key={v.id} style={{ padding: '12px', backgroundColor: '#fafafa', borderRadius: '6px', marginBottom: '8px' }}>
+                <div key={v.id} style={{ padding: '12px', backgroundColor: 'var(--surface-2)', borderRadius: '6px', marginBottom: '8px' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <div>
                       <strong>版本 {v.version_number}</strong>
-                      {v.change_reason && <span style={{ marginLeft: '8px', color: '#666' }}>· {v.change_reason}</span>}
+                      {v.change_reason && <span style={{ marginLeft: '8px', color: 'var(--text-secondary)' }}>· {v.change_reason}</span>}
                     </div>
-                    <span style={{ fontSize: '12px', color: '#999' }}>
-                      {new Date(v.created_at).toLocaleDateString('zh-Hant')}
+                    <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                      {formatDate(v.created_at)}
                     </span>
                   </div>
                 </div>
@@ -518,10 +515,10 @@ export default function ExperimentDetailPage() {
 
         {!latestRun ? (
           <div style={{ textAlign: 'center', padding: '40px' }}>
-            <p style={{ color: '#666', marginBottom: '12px' }}>
+            <p style={{ color: 'var(--text-secondary)', marginBottom: '12px' }}>
               尚未執行回測
             </p>
-            <p style={{ color: '#888', fontSize: '14px' }}>
+            <p style={{ color: 'var(--text-muted)', fontSize: '14px' }}>
               點擊上方按鈕開始測試你的策略假設。<br />
               回測使用歷史示範資料，結果僅供研究參考。
             </p>
@@ -541,35 +538,35 @@ export default function ExperimentDetailPage() {
 
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '16px' }}>
               {latestRun.metrics?.total_return_pct != null && (
-                <div style={{ padding: '16px', backgroundColor: '#f5f5f5', borderRadius: '6px' }}>
-                  <div style={{ fontSize: '12px', color: '#666', marginBottom: '4px' }}>總報酬</div>
+                <div style={{ padding: '16px', backgroundColor: 'var(--surface-2)', borderRadius: '6px' }}>
+                  <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '4px' }}>總報酬</div>
                   <div style={{ fontSize: '24px', fontWeight: 'bold' }}>{latestRun.metrics.total_return_pct.toFixed(2)}%</div>
                 </div>
               )}
               {latestRun.metrics?.final_equity != null && (
-                <div style={{ padding: '16px', backgroundColor: '#f5f5f5', borderRadius: '6px' }}>
-                  <div style={{ fontSize: '12px', color: '#666', marginBottom: '4px' }}>最終淨值</div>
+                <div style={{ padding: '16px', backgroundColor: 'var(--surface-2)', borderRadius: '6px' }}>
+                  <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '4px' }}>最終淨值</div>
                   <div style={{ fontSize: '24px', fontWeight: 'bold' }}>${latestRun.metrics.final_equity.toLocaleString('en-US', { maximumFractionDigits: 0 })}</div>
                 </div>
               )}
               {latestRun.metrics?.max_drawdown_pct != null && (
-                <div style={{ padding: '16px', backgroundColor: '#f5f5f5', borderRadius: '6px' }}>
-                  <div style={{ fontSize: '12px', color: '#666', marginBottom: '4px' }}>最大回撤</div>
+                <div style={{ padding: '16px', backgroundColor: 'var(--surface-2)', borderRadius: '6px' }}>
+                  <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '4px' }}>最大回撤</div>
                   <div style={{ fontSize: '24px', fontWeight: 'bold' }}>{latestRun.metrics.max_drawdown_pct.toFixed(2)}%</div>
                 </div>
               )}
               {latestRun.metrics?.total_trades != null && (
-                <div style={{ padding: '16px', backgroundColor: '#f5f5f5', borderRadius: '6px' }}>
-                  <div style={{ fontSize: '12px', color: '#666', marginBottom: '4px' }}>交易次數</div>
+                <div style={{ padding: '16px', backgroundColor: 'var(--surface-2)', borderRadius: '6px' }}>
+                  <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '4px' }}>交易次數</div>
                   <div style={{ fontSize: '24px', fontWeight: 'bold' }}>{latestRun.metrics.total_trades}</div>
                 </div>
               )}
             </div>
 
             {latestRun.methodology_json && (
-              <div style={{ marginTop: '16px', padding: '12px', backgroundColor: '#f0f4f8', borderRadius: '6px', fontSize: '13px' }}>
+              <div style={{ marginTop: '16px', padding: '12px', backgroundColor: 'var(--surface-2)', borderRadius: '6px', fontSize: '13px' }}>
                 <strong>方法摘要：</strong>
-                <span style={{ marginLeft: '8px', color: '#555' }}>
+                <span style={{ marginLeft: '8px', color: 'var(--text-muted)' }}>
                   引擎 v{latestRun.methodology_json.engine_version} |
                   模板: {latestRun.methodology_json.template_type}
                 </span>
@@ -577,14 +574,14 @@ export default function ExperimentDetailPage() {
             )}
 
             {latestRun.config_hash && (
-              <div style={{ marginTop: '8px', fontSize: '12px', color: '#999' }}>
+              <div style={{ marginTop: '8px', fontSize: '12px', color: 'var(--text-muted)' }}>
                 config_hash: {latestRun.config_hash.slice(0, 16)}...
                 {latestRun.dataset_checksum && <> | dataset: {latestRun.dataset_checksum.slice(0, 16)}...</>}
               </div>
             )}
 
             {latestRun.result_json?.data_provider && (
-              <div style={{ marginTop: '12px', padding: '10px', backgroundColor: '#e8f5e9', borderRadius: '6px', fontSize: '13px' }}>
+              <div style={{ marginTop: '12px', padding: '10px', backgroundColor: 'rgba(34,197,94,0.14)', borderRadius: '6px', fontSize: '13px' }}>
                 <strong>資料來源：</strong>
                 <span style={{ marginLeft: '8px' }}>
                   {latestRun.result_json.data_provider}
@@ -592,7 +589,7 @@ export default function ExperimentDetailPage() {
                   {latestRun.result_json.data_source_used && ` — ${latestRun.result_json.data_source_used}`}
                 </span>
                 {latestRun.result_json.data_nature && (
-                  <div style={{ marginTop: '4px', fontSize: '12px', color: '#555' }}>
+                  <div style={{ marginTop: '4px', fontSize: '12px', color: 'var(--text-muted)' }}>
                     數據性質：{Object.entries(latestRun.result_json.data_nature).map(([k, v]) => `${k}=${v}`).join(', ')}
                   </div>
                 )}
@@ -602,9 +599,9 @@ export default function ExperimentDetailPage() {
             {latestRun.result_json?.daily_accounting?.length > 0 && (
               <div style={{ marginTop: '16px' }}>
                 <h3 style={{ fontSize: '16px', marginBottom: '8px' }}>每日帳務明細</h3>
-                <div style={{ maxHeight: '400px', overflow: 'auto', border: '1px solid #e0e0e0', borderRadius: '6px' }}>
+                <div style={{ maxHeight: '400px', overflow: 'auto', border: '1px solid var(--border-strong)', borderRadius: '6px' }}>
                   <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
-                    <thead style={{ position: 'sticky', top: 0, backgroundColor: '#f5f5f5', zIndex: 1 }}>
+                    <thead style={{ position: 'sticky', top: 0, backgroundColor: 'var(--surface-2)', zIndex: 1 }}>
                       <tr>
                         <th style={thStyle}>日期</th>
                         <th style={thStyle}>現金</th>
@@ -617,7 +614,7 @@ export default function ExperimentDetailPage() {
                     </thead>
                     <tbody>
                       {latestRun.result_json.daily_accounting.map((day: any, i: number) => (
-                        <tr key={i} style={{ backgroundColor: i % 2 === 0 ? '#fff' : '#fafafa' }}>
+                        <tr key={i} style={{ backgroundColor: i % 2 === 0 ? 'var(--text-white)' : 'var(--surface-2)' }}>
                           <td style={tdStyle}>{day.date}</td>
                           <td style={tdStyle}>${day.cash.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}</td>
                           <td style={tdStyle}>{day.shares}</td>
@@ -626,7 +623,7 @@ export default function ExperimentDetailPage() {
                           <td style={{ ...tdStyle, fontWeight: 'bold' }}>${day.equity.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}</td>
                           <td style={tdStyle}>
                             {day.transactions?.map((t: any, j: number) => (
-                              <span key={j} style={{ display: 'inline-block', padding: '1px 6px', borderRadius: '3px', fontSize: '11px', marginRight: '4px', backgroundColor: t.side === 'BUY' ? '#e8f5e9' : '#ffebee', color: t.side === 'BUY' ? '#2e7d32' : '#c62828' }}>
+                              <span key={j} style={{ display: 'inline-block', padding: '1px 6px', borderRadius: '3px', fontSize: '11px', marginRight: '4px', backgroundColor: t.side === 'BUY' ? 'rgba(34,197,94,0.14)' : 'rgba(239,68,68,0.12)', color: t.side === 'BUY' ? 'var(--positive)' : 'var(--negative)' }}>
                                 {t.side === 'BUY' ? '買' : '賣'} {t.quantity}@${t.execution_price.toFixed(2)}
                               </span>
                             ))}
@@ -639,7 +636,7 @@ export default function ExperimentDetailPage() {
               </div>
             )}
 
-            <div style={{ marginTop: '16px', padding: '12px', backgroundColor: '#fff3cd', borderRadius: '6px', fontSize: '14px' }}>
+            <div style={{ marginTop: '16px', padding: '12px', backgroundColor: 'rgba(245,158,11,0.14)', borderRadius: '6px', fontSize: '14px' }}>
               <strong>提醒：</strong>以上結果基於歷史示範資料，不代表未來績效。本系統是研究工具，不構成投資建議。
             </div>
           </div>
@@ -653,34 +650,34 @@ export default function ExperimentDetailPage() {
           <button
             onClick={() => setShowTimeline(!showTimeline)}
             className="btn"
-            style={{ backgroundColor: '#eaeaea', fontSize: '13px' }}
+            style={{ backgroundColor: 'var(--surface-2)', fontSize: '13px' }}
           >
             {showTimeline ? '隱藏時間線' : `查看時間線 (${timeline.length} 事件)`}
           </button>
-          <Link href={`/experiments/${experimentId}/simulation`} className="btn" style={{ backgroundColor: '#eaeaea', fontSize: '13px', textDecoration: 'none' }}>
+          <Link href={`/experiments/${experimentId}/simulation`} className="btn" style={{ backgroundColor: 'var(--surface-2)', fontSize: '13px', textDecoration: 'none' }}>
             前進模擬 →
           </Link>
         </div>
 
         {showTimeline && timeline.length > 0 && (
-          <div style={{ marginTop: '16px', borderTop: '1px solid #eaeaea', paddingTop: '16px' }}>
+          <div style={{ marginTop: '16px', borderTop: '1px solid var(--border-strong)', paddingTop: '16px' }}>
             {timeline.slice(0, 10).map((event) => (
-              <div key={event.id} style={{ padding: '10px', backgroundColor: '#fafafa', borderRadius: '6px', marginBottom: '8px', fontSize: '13px' }}>
+              <div key={event.id} style={{ padding: '10px', backgroundColor: 'var(--surface-2)', borderRadius: '6px', marginBottom: '8px', fontSize: '13px' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <div>
                     <strong>{EVENT_LABELS[event.event_type] || event.event_type}</strong>
                     {event.payload_json?.summary && (
-                      <span style={{ marginLeft: '8px', color: '#666' }}>· {event.payload_json.summary}</span>
+                      <span style={{ marginLeft: '8px', color: 'var(--text-secondary)' }}>· {event.payload_json.summary}</span>
                     )}
                   </div>
-                  <span style={{ color: '#999', fontSize: '12px' }}>
-                    {new Date(event.created_at).toLocaleString('zh-Hant')}
+                  <span style={{ color: 'var(--text-muted)', fontSize: '12px' }}>
+                    {formatDateTime(event.created_at)}
                   </span>
                 </div>
               </div>
             ))}
             {timeline.length > 10 && (
-              <p style={{ color: '#888', fontSize: '12px', textAlign: 'center', marginTop: '12px' }}>
+              <p style={{ color: 'var(--text-muted)', fontSize: '12px', textAlign: 'center', marginTop: '12px' }}>
                 顯示最近 10 筆事件，共 {timeline.length} 筆
               </p>
             )}
@@ -689,7 +686,7 @@ export default function ExperimentDetailPage() {
 
         {showTimeline && timeline.length === 0 && (
           <div style={{ marginTop: '16px', textAlign: 'center', padding: '20px' }}>
-            <p style={{ color: '#888', fontSize: '14px' }}>尚無時間線事件</p>
+            <p style={{ color: 'var(--text-muted)', fontSize: '14px' }}>尚無時間線事件</p>
           </div>
         )}
       </div>
@@ -701,7 +698,7 @@ export default function ExperimentDetailPage() {
           <button
             onClick={handleRefreshReview}
             className="btn"
-            style={{ backgroundColor: '#eaeaea', fontSize: '13px' }}
+            style={{ backgroundColor: 'var(--surface-2)', fontSize: '13px' }}
             disabled={methodReviewLoading}
           >
             {methodReviewLoading ? '重新整理中...' : '重新整理'}
@@ -709,12 +706,12 @@ export default function ExperimentDetailPage() {
         </div>
 
         {!methodReview ? (
-          <p style={{ color: '#666', textAlign: 'center', padding: '20px' }}>
+          <p style={{ color: 'var(--text-secondary)', textAlign: 'center', padding: '20px' }}>
             方法審查暫時無法載入
           </p>
         ) : (
           <div>
-            <div style={{ display: 'flex', gap: '16px', fontSize: '12px', color: '#666', marginBottom: '16px', flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', gap: '16px', fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '16px', flexWrap: 'wrap' }}>
               <span>規則集 v{methodReview.rule_set_version}</span>
               {methodReview.run_id && (
                 <span>已審查執行: {methodReview.run_id.slice(0, 8)}...</span>
@@ -723,17 +720,17 @@ export default function ExperimentDetailPage() {
                 <span>版本: {methodReview.version_id.slice(0, 8)}...</span>
               )}
               {!methodReview.run_id && (
-                <span style={{ color: '#856404' }}>尚無已完成的回測執行</span>
+                <span style={{ color: 'var(--warning)' }}>尚無已完成的回測執行</span>
               )}
-              <span>產生於 {new Date(methodReview.generated_at).toLocaleString('zh-Hant')}</span>
+              <span>產生於 {formatDateTime(methodReview.generated_at)}</span>
             </div>
 
-            <div style={{ padding: '10px 12px', backgroundColor: '#fffbeb', borderRadius: '6px', fontSize: '12px', color: '#856404', marginBottom: '12px', lineHeight: '1.6' }}>
+            <div style={{ padding: '10px 12px', backgroundColor: 'rgba(245,158,11,0.10)', borderRadius: '6px', fontSize: '12px', color: 'var(--warning)', marginBottom: '12px', lineHeight: '1.6' }}>
               <strong>資料來源說明：</strong>RC-001 及 RC-002 檢查的是實驗目前的文字內容（假說、原始想法、否決條件）。這些欄位可隨時編輯，因此審查的文字可能與回測執行時不同。這並非歷史文字快照。
             </div>
 
             {methodReview.completed_at_available === false && (
-              <div style={{ padding: '10px 12px', backgroundColor: '#fff3cd', borderRadius: '6px', fontSize: '12px', color: '#856404', marginBottom: '12px', lineHeight: '1.6' }}>
+              <div style={{ padding: '10px 12px', backgroundColor: 'rgba(245,158,11,0.14)', borderRadius: '6px', fontSize: '12px', color: 'var(--warning)', marginBottom: '12px', lineHeight: '1.6' }}>
                 <strong>時間戳提醒：</strong>所選的回測執行缺少完成時間戳記。執行排序依據 ID 而非時間先後，因此「最新」不代表時間上最近。
               </div>
             )}
@@ -744,7 +741,7 @@ export default function ExperimentDetailPage() {
                 return (
                   <div key={check.rule_id} style={{
                     padding: '16px',
-                    backgroundColor: '#fafafa',
+                    backgroundColor: 'var(--surface-2)',
                     borderRadius: '6px',
                     borderLeft: `4px solid ${style.color}`,
                   }}>
@@ -761,11 +758,11 @@ export default function ExperimentDetailPage() {
                         {style.label}
                       </span>
                     </div>
-                    <div style={{ fontSize: '13px', color: '#333', whiteSpace: 'pre-line', lineHeight: '1.6' }}>
+                    <div style={{ fontSize: '13px', color: 'var(--text-primary)', whiteSpace: 'pre-line', lineHeight: '1.6' }}>
                       {check.explanation}
                     </div>
                     {check.limitations.length > 0 && (
-                      <div style={{ marginTop: '8px', fontSize: '12px', color: '#888' }}>
+                      <div style={{ marginTop: '8px', fontSize: '12px', color: 'var(--text-muted)' }}>
                         {check.limitations.map((lim, i) => (
                           <div key={i}>• {lim}</div>
                         ))}
@@ -776,7 +773,7 @@ export default function ExperimentDetailPage() {
               })}
             </div>
 
-            <div style={{ marginTop: '16px', padding: '12px', backgroundColor: '#f0f4f8', borderRadius: '6px', fontSize: '13px', color: '#555' }}>
+            <div style={{ marginTop: '16px', padding: '12px', backgroundColor: 'var(--surface-2)', borderRadius: '6px', fontSize: '13px', color: 'var(--text-muted)' }}>
               <strong>聲明：</strong>方法審查是確定性的規則檢查，不構成投資建議。PASS 不代表策略可獲利或適合實盤交易。本系統使用示範資料，非即時市場資料。
             </div>
           </div>
@@ -790,6 +787,7 @@ export default function ExperimentDetailPage() {
           <input
             type="text"
             className="input"
+            aria-label="研究筆記內容"
             placeholder="記錄你的研究想法..."
             value={noteText}
             onChange={(e) => setNoteText(e.target.value)}
@@ -801,14 +799,14 @@ export default function ExperimentDetailPage() {
           </button>
         </div>
         {notes.length === 0 ? (
-          <p style={{ color: '#999', fontSize: '14px' }}>尚無筆記</p>
+          <p style={{ color: 'var(--text-muted)', fontSize: '14px' }}>尚無筆記</p>
         ) : (
           <div style={{ display: 'grid', gap: '8px' }}>
             {notes.map((note) => (
-              <div key={note.id} style={{ padding: '12px', backgroundColor: '#f9f9f9', borderRadius: '6px', borderLeft: '3px solid #0070f3' }}>
+              <div key={note.id} style={{ padding: '12px', backgroundColor: 'var(--surface-2)', borderRadius: '6px', borderLeft: '3px solid var(--primary)' }}>
                 <p style={{ fontSize: '14px', marginBottom: '4px' }}>{note.content}</p>
-                <p style={{ fontSize: '12px', color: '#999' }}>
-                  {new Date(note.created_at).toLocaleString('zh-Hant')}
+                <p style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                  {formatDateTime(note.created_at)}
                 </p>
               </div>
             ))}
@@ -824,7 +822,7 @@ export default function ExperimentDetailPage() {
             <button
               onClick={() => setShowVersions(!showVersions)}
               className="btn"
-              style={{ backgroundColor: '#eaeaea', fontSize: '13px' }}
+              style={{ backgroundColor: 'var(--surface-2)', fontSize: '13px' }}
             >
               {showVersions ? '收合' : '展開'}
             </button>
@@ -835,7 +833,7 @@ export default function ExperimentDetailPage() {
                 {versions.map((v) => (
                   <div key={v.id} style={{
                     padding: '12px',
-                    backgroundColor: v.id === experiment.current_version_id ? '#e8f4fd' : '#f5f5f5',
+                    backgroundColor: v.id === experiment.current_version_id ? 'rgba(59,130,246,0.16)' : 'var(--surface-2)',
                     borderRadius: '6px',
                     display: 'flex',
                     justifyContent: 'space-between',
@@ -845,15 +843,15 @@ export default function ExperimentDetailPage() {
                       <div style={{ fontSize: '14px', fontWeight: '500' }}>
                         v{v.version_number}
                         {v.id === experiment.current_version_id && (
-                          <span style={{ marginLeft: '8px', fontSize: '12px', color: '#0070f3' }}>(目前)</span>
+                          <span style={{ marginLeft: '8px', fontSize: '12px', color: 'var(--primary-text)' }}>(目前)</span>
                         )}
                       </div>
-                      <div style={{ fontSize: '12px', color: '#666' }}>
-                        {new Date(v.created_at).toLocaleString('zh-Hant')}
+                      <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
+                        {formatDateTime(v.created_at)}
                         {v.change_reason && <> — {v.change_reason}</>}
                       </div>
                     </div>
-                    <div style={{ fontSize: '11px', color: '#999' }}>
+                    <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
                       {v.config_hash ? v.config_hash.slice(0, 12) + '...' : ''}
                     </div>
                   </div>
@@ -864,7 +862,7 @@ export default function ExperimentDetailPage() {
                   <select id="compare-a" className="input" style={{ flex: 1, fontSize: '13px' }} defaultValue={versions[versions.length - 1]?.id}>
                     {versions.map(v => <option key={v.id} value={v.id}>v{v.version_number}</option>)}
                   </select>
-                  <span style={{ color: '#999' }}>vs</span>
+                  <span style={{ color: 'var(--text-muted)' }}>vs</span>
                   <select id="compare-b" className="input" style={{ flex: 1, fontSize: '13px' }} defaultValue={versions[0]?.id}>
                     {versions.map(v => <option key={v.id} value={v.id}>v{v.version_number}</option>)}
                   </select>
@@ -881,18 +879,18 @@ export default function ExperimentDetailPage() {
                   </button>
                 </div>
               )}
-              {diffLoading && <p style={{ marginTop: '12px', color: '#666' }}>比較中...</p>}
+              {diffLoading && <p style={{ marginTop: '12px', color: 'var(--text-secondary)' }}>比較中...</p>}
               {diffResult && (
-                <div style={{ marginTop: '12px', padding: '12px', backgroundColor: '#f0f4f8', borderRadius: '6px' }}>
+                <div style={{ marginTop: '12px', padding: '12px', backgroundColor: 'var(--surface-2)', borderRadius: '6px' }}>
                   <h4 style={{ marginBottom: '8px', fontSize: '14px' }}>
                     v{diffResult.version_a_number} → v{diffResult.version_b_number} 差異
                   </h4>
                   {diffResult.diffs.length === 0 ? (
-                    <p style={{ color: '#666', fontSize: '13px' }}>無差異</p>
+                    <p style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>無差異</p>
                   ) : (
                     <table style={{ width: '100%', fontSize: '13px', borderCollapse: 'collapse' }}>
                       <thead>
-                        <tr style={{ borderBottom: '1px solid #ddd' }}>
+                        <tr style={{ borderBottom: '1px solid var(--border-strong)' }}>
                           <th style={{ textAlign: 'left', padding: '4px 8px' }}>欄位</th>
                           <th style={{ textAlign: 'left', padding: '4px 8px' }}>舊值</th>
                           <th style={{ textAlign: 'left', padding: '4px 8px' }}>新值</th>
@@ -900,10 +898,10 @@ export default function ExperimentDetailPage() {
                       </thead>
                       <tbody>
                         {diffResult.diffs.map((d, i) => (
-                          <tr key={i} style={{ borderBottom: '1px solid #eee' }}>
+                          <tr key={i} style={{ borderBottom: '1px solid var(--border-strong)' }}>
                             <td style={{ padding: '4px 8px', fontWeight: '500' }}>{d.field}</td>
-                            <td style={{ padding: '4px 8px', color: '#c00' }}>{JSON.stringify(d.old_value)}</td>
-                            <td style={{ padding: '4px 8px', color: '#080' }}>{JSON.stringify(d.new_value)}</td>
+                            <td style={{ padding: '4px 8px', color: 'var(--negative)' }}>{JSON.stringify(d.old_value)}</td>
+                            <td style={{ padding: '4px 8px', color: 'var(--positive)' }}>{JSON.stringify(d.new_value)}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -923,7 +921,7 @@ export default function ExperimentDetailPage() {
           <button
             onClick={() => setShowTimeline(!showTimeline)}
             className="btn"
-            style={{ backgroundColor: '#eaeaea', fontSize: '13px' }}
+            style={{ backgroundColor: 'var(--surface-2)', fontSize: '13px' }}
             data-testid="exp-timeline-toggle"
           >
             {showTimeline ? '收合' : '展開'}
@@ -932,30 +930,30 @@ export default function ExperimentDetailPage() {
         {showTimeline && (
           <div>
             {timeline.length === 0 ? (
-              <p style={{ color: '#999', fontSize: '14px' }}>尚無事件</p>
+              <p style={{ color: 'var(--text-muted)', fontSize: '14px' }}>尚無事件</p>
             ) : (
               <div style={{ display: 'grid', gap: '4px' }}>
                 {timeline.map((evt) => (
                   <div key={evt.id} style={{
                     padding: '8px 12px',
-                    backgroundColor: evt.recorded_before_outcome ? '#f8f9fa' : '#fff8e1',
+                    backgroundColor: evt.recorded_before_outcome ? 'var(--surface-2)' : 'rgba(245,158,11,0.10)',
                     borderRadius: '4px',
-                    borderLeft: `3px solid ${evt.actor_type === 'system' ? '#ffc107' : evt.rules_locked ? '#17a2b8' : '#0070f3'}`,
+                    borderLeft: `3px solid ${evt.actor_type === 'system' ? 'var(--warning)' : evt.rules_locked ? 'var(--primary)' : 'var(--primary-text)'}`,
                     fontSize: '13px',
                   }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                       <span style={{ fontWeight: '500' }}>
                         {EVENT_LABELS[evt.event_type] || evt.event_type}
                       </span>
-                      <span style={{ color: '#999', fontSize: '11px' }}>
-                        {new Date(evt.created_at).toLocaleString('zh-Hant')}
+                      <span style={{ color: 'var(--text-muted)', fontSize: '11px' }}>
+                        {formatDateTime(evt.created_at)}
                       </span>
                     </div>
-                    <div style={{ display: 'flex', gap: '8px', marginTop: '2px', fontSize: '11px', color: '#888' }}>
+                    <div style={{ display: 'flex', gap: '8px', marginTop: '2px', fontSize: '11px', color: 'var(--text-muted)' }}>
                       <span>{evt.entity_type}</span>
-                      {evt.actor_type === 'system' && <span style={{ color: '#ffc107' }}>system</span>}
-                      {evt.rules_locked && <span style={{ color: '#17a2b8' }}>locked</span>}
-                      {!evt.recorded_before_outcome && <span style={{ color: '#e67e22' }}>post-outcome</span>}
+                      {evt.actor_type === 'system' && <span style={{ color: 'var(--warning)' }}>system</span>}
+                      {evt.rules_locked && <span style={{ color: 'var(--primary)' }}>locked</span>}
+                      {!evt.recorded_before_outcome && <span style={{ color: 'var(--warning)' }}>post-outcome</span>}
                       {evt.data_cutoff_at && <span>cutoff: {evt.data_cutoff_at}</span>}
                     </div>
                   </div>
@@ -979,21 +977,21 @@ export default function ExperimentDetailPage() {
                 href={`/experiments/${experimentId}/runs/compare?saved_comparison_id=${saved.id}`}
                 style={{
                   padding: '12px',
-                  backgroundColor: '#f8f9fa',
+                  backgroundColor: 'var(--surface-2)',
                   borderRadius: '6px',
                   textDecoration: 'none',
                   color: 'inherit',
-                  border: '1px solid #dee2e6',
+                  border: '1px solid var(--border-strong)',
                 }}
               >
                 <div style={{ fontSize: '14px', fontWeight: 500, marginBottom: '4px' }}>
                   {saved.purpose}
                 </div>
-                <div style={{ fontSize: '12px', color: '#666' }}>
+                <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
                   Run A: {saved.run_a_id.slice(0, 8)}... → Run B: {saved.run_b_id.slice(0, 8)}...
                 </div>
-                <div style={{ fontSize: '11px', color: '#999', marginTop: '4px' }}>
-                  更新於 {new Date(saved.updated_at).toLocaleString('zh-Hant')}
+                <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '4px' }}>
+                  更新於 {formatDateTime(saved.updated_at)}
                 </div>
               </Link>
             ))}
@@ -1018,7 +1016,7 @@ export default function ExperimentDetailPage() {
             {selectedRuns.length > 0 && selectedRuns.length !== 2 && (
               <button
                 className="btn"
-                style={{ backgroundColor: '#eaeaea', fontSize: '13px' }}
+                style={{ backgroundColor: 'var(--surface-2)', fontSize: '13px' }}
                 onClick={() => setSelectedRuns([])}
               >
                 清除選取 ({selectedRuns.length}/2)
@@ -1035,12 +1033,12 @@ export default function ExperimentDetailPage() {
                   data-testid={`run-row-${run.id}`}
                   style={{
                     padding: '12px',
-                    backgroundColor: isSelected ? '#e7f3ff' : '#f5f5f5',
+                    backgroundColor: isSelected ? 'rgba(59,130,246,0.16)' : 'var(--surface-2)',
                     borderRadius: '6px',
                     display: 'flex',
                     justifyContent: 'space-between',
                     alignItems: 'center',
-                    border: isSelected ? '2px solid #007bff' : '2px solid transparent',
+                    border: isSelected ? '2px solid var(--primary-text)' : '2px solid transparent',
                   }}
                 >
                   <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
@@ -1063,11 +1061,11 @@ export default function ExperimentDetailPage() {
                       <div style={{ fontSize: '14px', fontWeight: 500 }} data-testid={`run-status-${run.id}`}>
                         {describeRunStatus(run.status, run.started_at).label}
                       </div>
-                      <div style={{ fontSize: '12px', color: '#666' }}>
-                        {run.started_at && new Date(run.started_at).toLocaleString('zh-Hant')}
+                      <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
+                        {run.started_at && formatDateTime(run.started_at)}
                       </div>
                       {describeRunStatus(run.status, run.started_at).stale && (
-                        <div style={{ fontSize: '12px', color: '#9a6700' }}>
+                        <div style={{ fontSize: '12px', color: 'var(--warning)' }}>
                           已超過 30 分鐘未完成，非目前執行中
                         </div>
                       )}
@@ -1085,7 +1083,7 @@ export default function ExperimentDetailPage() {
                       aria-label={`查看 run ${run.id.slice(0, 8)} 嘅執行結果`}
                       className="btn"
                       style={{
-                        backgroundColor: '#eaeaea',
+                        backgroundColor: 'var(--surface-2)',
                         fontSize: '12px',
                         padding: '6px 10px',
                         textDecoration: 'none',
@@ -1099,7 +1097,7 @@ export default function ExperimentDetailPage() {
             })}
           </div>
           {selectedRuns.length === 2 && (
-            <p style={{ marginTop: '12px', fontSize: '13px', color: '#007bff' }}>
+            <p style={{ marginTop: '12px', fontSize: '13px', color: 'var(--primary-text)' }}>
               已選取 2 個 runs，點擊上方按鈕進行比較
             </p>
           )}

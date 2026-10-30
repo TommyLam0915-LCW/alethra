@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import AppShell from '@/components/shell/AppShell';
+import { formatDate } from '@/lib/format';
 
 interface Instrument {
   instrument_id: string;
@@ -196,10 +197,6 @@ export default function MarketDataPage() {
     return num.toLocaleString('zh-Hant', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   };
 
-  const formatDate = (dateStr: string) => {
-    return new Date(dateStr).toLocaleDateString('zh-Hant');
-  };
-
   const maxClose = bars.length > 0 ? Math.max(...bars.map((b) => b.close)) : 0;
   const minClose = bars.length > 0 ? Math.min(...bars.map((b) => b.close)) : 0;
   const closeRange = maxClose - minClose || 1;
@@ -241,14 +238,8 @@ export default function MarketDataPage() {
               <div>
                 <div style={{ color: 'var(--text-secondary)', fontSize: '14px', marginBottom: '4px' }}>資料模式</div>
                 <div
-                  style={{
-                    display: 'inline-block',
-                    padding: '4px 12px',
-                    borderRadius: '12px',
-                    fontSize: '14px',
-                    backgroundColor: providerStatus.feed_mode === 'offline' ? '#fff3cd' : '#d4edda',
-                    color: providerStatus.feed_mode === 'offline' ? '#856404' : '#155724',
-                  }}
+                  className={`status-pill status-${providerStatus.feed_mode === 'offline' ? 'warn' : 'ok'}`}
+                  style={{ padding: '4px 12px', fontSize: '14px' }}
                 >
                   {providerStatus.feed_mode === 'offline' ? '離線（模擬）' : providerStatus.feed_mode}
                 </div>
@@ -314,6 +305,7 @@ export default function MarketDataPage() {
           {sourceTab === 'real' ? (
             <div style={{ marginBottom: '20px' }}>
               <select
+                aria-label="選擇標的"
                 value={selectedSymbol}
                 onChange={handleSymbolChange}
                 style={{
@@ -377,6 +369,7 @@ export default function MarketDataPage() {
           ) : (
             <div style={{ marginBottom: '20px' }}>
               <select
+                aria-label="選擇標的"
                 value={selectedSymbol}
                 onChange={handleSymbolChange}
                 style={{
@@ -412,15 +405,8 @@ export default function MarketDataPage() {
                   {selectedInstrument && ` (${selectedInstrument.name})`}
                   {dataQuality?.is_stale && (
                     <span
-                      style={{
-                        marginLeft: '12px',
-                        padding: '2px 10px',
-                        borderRadius: '12px',
-                        fontSize: '12px',
-                        backgroundColor: '#fff3cd',
-                        color: '#856404',
-                        verticalAlign: 'middle',
-                      }}
+                      className="status-pill status-warn"
+                      style={{ marginLeft: '12px', verticalAlign: 'middle' }}
                     >
                       資料已過期
                       {dataQuality.bar_age_days !== null && `（${dataQuality.bar_age_days} 天未更新）`}
@@ -505,7 +491,7 @@ export default function MarketDataPage() {
                               minWidth: '3px',
                             }}
                             onMouseEnter={(e) => {
-                              e.currentTarget.style.backgroundColor = '#2563eb';
+                              e.currentTarget.style.backgroundColor = 'var(--primary-solid)';
                             }}
                             onMouseLeave={(e) => {
                               e.currentTarget.style.backgroundColor = 'var(--primary)';

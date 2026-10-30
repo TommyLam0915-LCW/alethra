@@ -4,6 +4,8 @@ import { useEffect, useState, useCallback } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
+import { statusPillClass } from '@/lib/status-styles';
+import { formatDateTime } from '@/lib/format';
 
 interface ResearchDraft {
   id: string;
@@ -279,19 +281,10 @@ export default function ResearchDraftDetailPage() {
     rejected: '已退回',
   };
 
-  const statusColor: Record<string, { bg: string; color: string }> = {
-    draft: { bg: '#eaeaea', color: '#666' },
-    pending_review: { bg: '#fff3cd', color: '#856404' },
-    accepted: { bg: '#d4edda', color: '#155724' },
-    rejected: { bg: '#f8d7da', color: '#721c24' },
-  };
-
-  const sStyle = statusColor[draft.status] || statusColor.draft;
-
   return (
     <div className="container" style={{ paddingTop: '40px', paddingBottom: '40px' }}>
       <div style={{ marginBottom: '20px' }}>
-        <Link href="/research-drafts" style={{ color: '#0070f3', textDecoration: 'none' }}>
+        <Link href="/research-drafts" style={{ color: 'var(--primary-text)', textDecoration: 'none' }}>
           &larr; 返回研究草稿
         </Link>
       </div>
@@ -299,14 +292,14 @@ export default function ResearchDraftDetailPage() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start', marginBottom: '20px' }}>
         <div>
           <h1 style={{ marginBottom: '8px' }}>{draft.title || '（未命名草稿）'}</h1>
-          <p style={{ color: '#666', fontSize: '14px' }}>
-            建立於 {new Date(draft.created_at).toLocaleString('zh-Hant')}
+          <p style={{ color: 'var(--text-secondary)', fontSize: '14px' }}>
+            建立於 {formatDateTime(draft.created_at)}
             {' | '}
-            更新於 {new Date(draft.updated_at).toLocaleString('zh-Hant')}
+            更新於 {formatDateTime(draft.updated_at)}
           </p>
         </div>
         <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-          <span style={{ padding: '6px 16px', borderRadius: '16px', fontSize: '14px', backgroundColor: sStyle.bg, color: sStyle.color }}>
+          <span className={statusPillClass(draft.status)} style={{ padding: '6px 16px', fontSize: '14px' }}>
             {statusLabel[draft.status] || draft.status}
           </span>
         </div>
@@ -326,12 +319,9 @@ export default function ResearchDraftDetailPage() {
         {(['detail', 'revisions', 'audit'] as const).map((tab) => (
           <button
             key={tab}
-            className="btn"
-            style={{
-              backgroundColor: view === tab ? '#0070f3' : '#eaeaea',
-              color: view === tab ? 'white' : '#333',
-              fontSize: '13px',
-            }}
+            className={view === tab ? 'btn btn-primary' : 'btn btn-secondary'}
+            aria-pressed={view === tab}
+            style={{ fontSize: '13px' }}
             onClick={() => {
               setView(tab);
               setError('');
@@ -402,11 +392,11 @@ export default function ResearchDraftDetailPage() {
                 {EDITABLE_FIELDS.map((field) => {
                   const value = (draft as any)[field];
                   return (
-                    <div key={field} style={{ display: 'flex', gap: '12px', padding: '8px 0', borderBottom: '1px solid #f0f0f0' }}>
-                      <div style={{ width: '140px', fontWeight: '500', fontSize: '14px', color: '#555', flexShrink: 0 }}>
+                    <div key={field} style={{ display: 'flex', gap: '12px', padding: '8px 0', borderBottom: '1px solid var(--surface-2)' }}>
+                      <div style={{ width: '140px', fontWeight: '500', fontSize: '14px', color: 'var(--text-muted)', flexShrink: 0 }}>
                         {FIELD_LABELS[field]}
                       </div>
-                      <div style={{ fontSize: '14px', color: value ? '#333' : '#ccc' }}>
+                      <div style={{ fontSize: '14px', color: value ? 'var(--text-primary)' : 'var(--text-muted)' }}>
                         {field === 'strategy_template' && value
                           ? TEMPLATE_OPTIONS.find((o) => o.value === value)?.label || value
                           : value || '（未填寫）'}
@@ -428,22 +418,22 @@ export default function ResearchDraftDetailPage() {
                 </button>
               </div>
 
-              <div style={{ fontSize: '13px', color: '#666', marginBottom: '12px', padding: '8px 12px', backgroundColor: '#f8f9fa', borderRadius: '6px' }}>
+              <div style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '12px', padding: '8px 12px', backgroundColor: 'var(--surface-2)', borderRadius: '6px' }}>
                 模擬助手會針對尚未填寫的欄位產生問題。問題為確定性預先定義，非 AI 動態產生。
               </div>
 
               {showQuestions && draft.assistant_questions && draft.assistant_questions.length > 0 ? (
                 <div>
                   {draft.assistant_questions.map((q, idx) => (
-                    <div key={idx} style={{ marginBottom: '16px', padding: '12px', backgroundColor: '#f9f9f9', borderRadius: '6px' }}>
+                    <div key={idx} style={{ marginBottom: '16px', padding: '12px', backgroundColor: 'var(--surface-2)', borderRadius: '6px' }}>
                       <div style={{ fontWeight: '500', fontSize: '14px', marginBottom: '4px' }}>
                         {FIELD_LABELS[q.field] || q.field}
                       </div>
-                      <div style={{ fontSize: '13px', color: '#555', marginBottom: '8px' }}>
+                      <div style={{ fontSize: '13px', color: 'var(--text-muted)', marginBottom: '8px' }}>
                         {q.question}
                       </div>
                       {q.context && (
-                        <div style={{ fontSize: '12px', color: '#888', marginBottom: '8px' }}>
+                        <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '8px' }}>
                           提示: {q.context}
                         </div>
                       )}
@@ -475,7 +465,7 @@ export default function ResearchDraftDetailPage() {
                 </div>
               ) : draft.assistant_questions && draft.assistant_questions.length > 0 ? (
                 <div>
-                  <p style={{ fontSize: '14px', color: '#666', marginBottom: '12px' }}>
+                  <p style={{ fontSize: '14px', color: 'var(--text-secondary)', marginBottom: '12px' }}>
                     已產生 {draft.assistant_questions.length} 個問題。
                   </p>
                   <button className="btn btn-secondary" style={{ fontSize: '13px' }} onClick={() => setShowQuestions(true)}>
@@ -483,7 +473,7 @@ export default function ResearchDraftDetailPage() {
                   </button>
                 </div>
               ) : (
-                <p style={{ color: '#999', fontSize: '14px' }}>
+                <p style={{ color: 'var(--text-muted)', fontSize: '14px' }}>
                   尚未產生問題。點擊「產生問題」讓模擬助手檢查尚未填寫的欄位。
                 </p>
               )}
@@ -514,7 +504,7 @@ export default function ResearchDraftDetailPage() {
 
               {showApplyFields && (
                 <div>
-                  <p style={{ fontSize: '13px', color: '#666', marginBottom: '12px' }}>
+                  <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '12px' }}>
                     勾選你要套用的欄位。你會看到目前值與草稿建議值的比較。
                   </p>
                   {EDITABLE_FIELDS.map((field) => {
@@ -529,7 +519,7 @@ export default function ResearchDraftDetailPage() {
                           alignItems: 'start',
                           padding: '10px 12px',
                           marginBottom: '8px',
-                          backgroundColor: selectedFields.has(field) ? '#e8f4fd' : '#f9f9f9',
+                          backgroundColor: selectedFields.has(field) ? 'rgba(59,130,246,0.16)' : 'var(--surface-2)',
                           borderRadius: '6px',
                           cursor: 'pointer',
                         }}
@@ -547,7 +537,7 @@ export default function ResearchDraftDetailPage() {
                         />
                         <div>
                           <div style={{ fontWeight: '500', fontSize: '14px' }}>{FIELD_LABELS[field]}</div>
-                          <div style={{ fontSize: '13px', color: '#555', marginTop: '4px' }}>
+                          <div style={{ fontSize: '13px', color: 'var(--text-muted)', marginTop: '4px' }}>
                             草稿值: <strong>{proposedValue}</strong>
                           </div>
                         </div>
@@ -571,16 +561,16 @@ export default function ResearchDraftDetailPage() {
             <div className="card" style={{ marginBottom: '20px' }}>
               <h2 style={{ marginBottom: '16px' }}>審閱決定</h2>
               <div style={{ display: 'flex', gap: '8px' }}>
-                <button className="btn" style={{ backgroundColor: '#28a745', color: 'white', fontSize: '13px' }} onClick={() => { setShowApproveDialog(true); setError(''); }}>
+                <button className="btn" style={{ backgroundColor: 'var(--positive)', color: 'var(--text-on-bright)', fontSize: '13px' }} onClick={() => { setShowApproveDialog(true); setError(''); }}>
                   接受草稿
                 </button>
-                <button className="btn" style={{ backgroundColor: '#dc3545', color: 'white', fontSize: '13px' }} onClick={() => { setShowRejectDialog(true); setError(''); }}>
+                <button className="btn" style={{ backgroundColor: 'var(--negative)', color: 'var(--text-on-bright)', fontSize: '13px' }} onClick={() => { setShowRejectDialog(true); setError(''); }}>
                   退回草稿
                 </button>
               </div>
 
               {showApproveDialog && (
-                <div style={{ marginTop: '16px', padding: '16px', backgroundColor: '#f8f9fa', borderRadius: '6px' }}>
+                <div style={{ marginTop: '16px', padding: '16px', backgroundColor: 'var(--surface-2)', borderRadius: '6px' }}>
                   <p style={{ fontSize: '14px', marginBottom: '12px' }}>
                     接受此草稿表示你已審閱研究假設與方法論。
                     <strong>這不會建立可執行的策略。</strong>
@@ -594,14 +584,14 @@ export default function ResearchDraftDetailPage() {
                     style={{ marginBottom: '12px' }}
                   />
                   <div style={{ display: 'flex', gap: '8px' }}>
-                    <button className="btn" style={{ backgroundColor: '#28a745', color: 'white' }} onClick={handleApprove}>確認接受</button>
+                    <button className="btn" style={{ backgroundColor: 'var(--positive)', color: 'var(--text-on-bright)' }} onClick={handleApprove}>確認接受</button>
                     <button className="btn btn-secondary" onClick={() => { setShowApproveDialog(false); setApproveNotes(''); }}>取消</button>
                   </div>
                 </div>
               )}
 
               {showRejectDialog && (
-                <div style={{ marginTop: '16px', padding: '16px', backgroundColor: '#f8f9fa', borderRadius: '6px' }}>
+                <div style={{ marginTop: '16px', padding: '16px', backgroundColor: 'var(--surface-2)', borderRadius: '6px' }}>
                   <p style={{ fontSize: '14px', marginBottom: '12px' }}>退回此草稿，記錄退回原因。</p>
                   <textarea
                     className="input"
@@ -612,7 +602,7 @@ export default function ResearchDraftDetailPage() {
                     style={{ marginBottom: '12px' }}
                   />
                   <div style={{ display: 'flex', gap: '8px' }}>
-                    <button className="btn" style={{ backgroundColor: '#dc3545', color: 'white' }} onClick={handleReject}>確認退回</button>
+                    <button className="btn" style={{ backgroundColor: 'var(--negative)', color: 'var(--text-on-bright)' }} onClick={handleReject}>確認退回</button>
                     <button className="btn btn-secondary" onClick={() => { setShowRejectDialog(false); setApproveNotes(''); }}>取消</button>
                   </div>
                 </div>
@@ -623,21 +613,21 @@ export default function ResearchDraftDetailPage() {
           {/* Delete */}
           <div className="card" style={{ marginBottom: '20px' }}>
             <h2 style={{ marginBottom: '12px' }}>刪除草稿</h2>
-            <p style={{ fontSize: '14px', color: '#666', marginBottom: '12px' }}>
+            <p style={{ fontSize: '14px', color: 'var(--text-secondary)', marginBottom: '12px' }}>
               刪除草稿會一併移除所有修訂記錄與稽核事件。此操作無法復原。
             </p>
             {showDeleteConfirm ? (
-              <div style={{ padding: '12px', backgroundColor: '#f8d7da', borderRadius: '6px' }}>
-                <p style={{ fontSize: '14px', color: '#721c24', marginBottom: '12px' }}>
+              <div style={{ padding: '12px', backgroundColor: 'rgba(239,68,68,0.12)', borderRadius: '6px' }}>
+                <p style={{ fontSize: '14px', color: 'var(--negative)', marginBottom: '12px' }}>
                   確定要刪除此草稿嗎？所有修訂與稽核事件將一併刪除。
                 </p>
                 <div style={{ display: 'flex', gap: '8px' }}>
-                  <button className="btn" style={{ backgroundColor: '#dc3545', color: 'white' }} onClick={handleDelete}>確認刪除</button>
+                  <button className="btn" style={{ backgroundColor: 'var(--negative)', color: 'var(--text-on-bright)' }} onClick={handleDelete}>確認刪除</button>
                   <button className="btn btn-secondary" onClick={() => setShowDeleteConfirm(false)}>取消</button>
                 </div>
               </div>
             ) : (
-              <button className="btn" style={{ backgroundColor: '#eaeaea', color: '#dc3545', fontSize: '13px' }} onClick={() => setShowDeleteConfirm(true)}>
+              <button className="btn" style={{ backgroundColor: 'var(--surface-2)', color: 'var(--negative)', fontSize: '13px' }} onClick={() => setShowDeleteConfirm(true)}>
                 刪除此草稿
               </button>
             )}
@@ -650,18 +640,18 @@ export default function ResearchDraftDetailPage() {
         <div className="card">
           <h2 style={{ marginBottom: '16px' }}>修訂記錄 ({revisions.length})</h2>
           {revisions.length === 0 ? (
-            <p style={{ color: '#999', fontSize: '14px' }}>尚無修訂記錄</p>
+            <p style={{ color: 'var(--text-muted)', fontSize: '14px' }}>尚無修訂記錄</p>
           ) : (
             <div style={{ display: 'grid', gap: '8px' }}>
               {[...revisions].reverse().map((rev) => (
-                <div key={rev.id} style={{ padding: '12px', backgroundColor: '#f9f9f9', borderRadius: '6px', borderLeft: '3px solid #0070f3' }}>
+                <div key={rev.id} style={{ padding: '12px', backgroundColor: 'var(--surface-2)', borderRadius: '6px', borderLeft: '3px solid var(--primary)' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
                     <span style={{ fontWeight: '500', fontSize: '14px' }}>修訂 #{rev.revision_number}</span>
-                    <span style={{ fontSize: '12px', color: '#999' }}>
-                      {new Date(rev.created_at).toLocaleString('zh-Hant')}
+                    <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                      {formatDateTime(rev.created_at)}
                     </span>
                   </div>
-                  <div style={{ fontSize: '13px', color: '#666' }}>
+                  <div style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
                     <span style={{ marginRight: '12px' }}>狀態: {statusLabel[rev.status] || rev.status}</span>
                     {rev.title && <span>標題: {rev.title}</span>}
                   </div>
@@ -677,27 +667,27 @@ export default function ResearchDraftDetailPage() {
         <div className="card">
           <h2 style={{ marginBottom: '16px' }}>稽核事件 ({auditEvents.length})</h2>
           {auditEvents.length === 0 ? (
-            <p style={{ color: '#999', fontSize: '14px' }}>尚無稽核事件</p>
+            <p style={{ color: 'var(--text-muted)', fontSize: '14px' }}>尚無稽核事件</p>
           ) : (
             <div style={{ display: 'grid', gap: '4px' }}>
               {[...auditEvents].reverse().map((evt) => (
                 <div key={evt.id} style={{
                   padding: '8px 12px',
-                  backgroundColor: '#f8f9fa',
+                  backgroundColor: 'var(--surface-2)',
                   borderRadius: '4px',
-                  borderLeft: '3px solid #0070f3',
+                  borderLeft: '3px solid var(--primary)',
                   fontSize: '13px',
                 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <span style={{ fontWeight: '500' }}>
                       {EVENT_LABELS[evt.event_type] || evt.event_type}
                     </span>
-                    <span style={{ color: '#999', fontSize: '11px' }}>
-                      {new Date(evt.created_at).toLocaleString('zh-Hant')}
+                    <span style={{ color: 'var(--text-muted)', fontSize: '11px' }}>
+                      {formatDateTime(evt.created_at)}
                     </span>
                   </div>
                   {Object.keys(evt.event_data).length > 0 && (
-                    <div style={{ fontSize: '12px', color: '#888', marginTop: '4px' }}>
+                    <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '4px' }}>
                       {JSON.stringify(evt.event_data)}
                     </div>
                   )}

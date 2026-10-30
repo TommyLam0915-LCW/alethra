@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { api } from '@/lib/api';
 import { describeRunStatus } from '@/lib/runStatus';
 import AppShell from '@/components/shell/AppShell';
+import { formatDate } from '@/lib/format';
 
 interface LatestRun {
   id: string;
@@ -46,7 +47,7 @@ function LatestRunCell({ run }: { run: LatestRun | null }) {
         </span>
         {run.completed_at && (
           <div className="research-table-meta">
-            {new Date(run.completed_at).toLocaleDateString('zh-Hant')}
+            {formatDate(run.completed_at)}
           </div>
         )}
         {view.stale && (
@@ -66,7 +67,7 @@ function LatestRunCell({ run }: { run: LatestRun | null }) {
         {pct.toFixed(2)}%
       </span>
       <div className="research-table-meta">
-        {run.completed_at ? `${new Date(run.completed_at).toLocaleDateString('zh-Hant')} · ` : ''}
+        {run.completed_at ? `${formatDate(run.completed_at)} · ` : ''}
         {run.trading_days != null ? `${run.trading_days} 個交易日` : `${run.total_trades ?? 0} 筆交易`}
       </div>
     </div>
@@ -219,7 +220,7 @@ export default function DashboardPage() {
                           {exp.title}
                         </Link>
                         <div className="research-table-meta">
-                          建於 {new Date(exp.created_at).toLocaleDateString('zh-Hant')}
+                          建於 {formatDate(exp.created_at)}
                         </div>
                       </td>
                       <td>
@@ -231,7 +232,7 @@ export default function DashboardPage() {
                         </span>
                       </td>
                       <td className="research-table-date">
-                        {new Date(exp.updated_at).toLocaleDateString('zh-Hant')}
+                        {formatDate(exp.updated_at)}
                       </td>
                       <td>
                         <Link href={nextAction.href} className="research-table-action">

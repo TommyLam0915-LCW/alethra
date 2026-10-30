@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
+import { formatDate, formatDateTime } from '@/lib/format';
 
 interface ModelRecord {
   id: string;
@@ -345,8 +346,8 @@ export default function ModelDetailPage() {
   const activeNumber = activeVersion ? activeVersion.version_number : null;
 
   const tabStyle = (tab: string) => ({
-    padding: '8px 20px', cursor: 'pointer', border: 'none', borderBottom: activeTab === tab ? '2px solid #0066cc' : '2px solid transparent',
-    backgroundColor: 'transparent', color: activeTab === tab ? '#0066cc' : '#666', fontWeight: activeTab === tab ? 600 : 400,
+    padding: '8px 20px', cursor: 'pointer', border: 'none', borderBottom: activeTab === tab ? '2px solid var(--primary-text)' : '2px solid transparent',
+    backgroundColor: 'transparent', color: activeTab === tab ? 'var(--primary-text)' : 'var(--text-secondary)', fontWeight: activeTab === tab ? 600 : 400,
   });
 
   const formatSpecValue = (value: any) => {
@@ -357,20 +358,20 @@ export default function ModelDetailPage() {
 
   return (
     <div className="container" style={{ paddingTop: '40px', paddingBottom: '40px' }}>
-      <Link href="/models" style={{ color: '#0066cc', fontSize: '14px', marginBottom: '16px', display: 'inline-block' }}>
+      <Link href="/models" style={{ color: 'var(--primary-text)', fontSize: '14px', marginBottom: '16px', display: 'inline-block' }}>
         ← 返回模型列表
       </Link>
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start', marginBottom: '24px' }}>
         <div>
           <h1 style={{ marginBottom: '4px' }}>{record.title}</h1>
-          <p style={{ color: '#666' }}>{record.purpose}</p>
-          {record.description && <p style={{ color: '#888', fontSize: '14px', marginTop: '8px' }}>{record.description}</p>}
+          <p style={{ color: 'var(--text-secondary)' }}>{record.purpose}</p>
+          {record.description && <p style={{ color: 'var(--text-muted)', fontSize: '14px', marginTop: '8px' }}>{record.description}</p>}
         </div>
         <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
           <span style={{
             padding: '4px 12px', borderRadius: '12px', fontSize: '12px',
-            backgroundColor: '#d1ecf1', color: '#0c5460',
+            backgroundColor: 'rgba(59,130,246,0.16)', color: 'var(--text-secondary)',
           }}>
             {STATUS_LABELS[record.status] || record.status}
           </span>
@@ -405,20 +406,20 @@ export default function ModelDetailPage() {
         style={{
           display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px',
           padding: '12px 16px', marginBottom: '20px', borderRadius: '8px',
-          backgroundColor: '#f5f7fa', border: '1px solid #e0e6ed', flexWrap: 'wrap',
+          backgroundColor: 'var(--surface-2)', border: '1px solid var(--border-strong)', flexWrap: 'wrap',
         }}
       >
         <div>
           <strong data-testid="active-version-label">
             {activeNumber ? `目前使用版本：v${activeNumber}` : '尚未指定目前使用版本'}
           </strong>
-          <p style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+          <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px' }}>
             設定目前使用版本與回滾都不會改寫任何版本內容；每次切換都會留下原因與時間。
           </p>
         </div>
       </div>
 
-      <div style={{ display: 'flex', borderBottom: '1px solid #e0e0e0', marginBottom: '24px' }}>
+      <div style={{ display: 'flex', borderBottom: '1px solid var(--border-strong)', marginBottom: '24px' }}>
         <button style={tabStyle('versions')} onClick={() => setActiveTab('versions')}>
           版本 ({versions.length})
         </button>
@@ -452,7 +453,7 @@ export default function ModelDetailPage() {
           {showFromStrategy && (
             <div className="card" data-testid="from-strategy-panel" style={{ marginBottom: '20px' }}>
               <h4 style={{ marginBottom: '4px' }}>從已儲存的策略版本建立</h4>
-              <p style={{ fontSize: '12px', color: '#666', marginBottom: '16px' }}>
+              <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '16px' }}>
                 系統會複製該策略版本的規格與設定雜湊，不會持續連動；之後的策略修訂不會改變這個模型版本。
               </p>
               <div className="form-group">
@@ -532,7 +533,7 @@ export default function ModelDetailPage() {
           )}
 
           {versions.length === 0 ? (
-            <div className="card" style={{ textAlign: 'center', padding: '40px', color: '#666' }}>尚無版本。</div>
+            <div className="card" style={{ textAlign: 'center', padding: '40px', color: 'var(--text-secondary)' }}>尚無版本。</div>
           ) : (
             <div style={{ display: 'grid', gap: '12px' }}>
               {versionActionError && (
@@ -555,25 +556,25 @@ export default function ModelDetailPage() {
                               data-testid={`active-badge-${v.version_number}`}
                               style={{
                                 marginLeft: '8px', padding: '2px 8px', borderRadius: '10px',
-                                fontSize: '11px', backgroundColor: '#d4edda', color: '#155724',
+                                fontSize: '11px', backgroundColor: 'rgba(34,197,94,0.14)', color: 'var(--positive)',
                               }}
                             >
                               目前使用
                             </span>
                           )}
                         </h4>
-                        <p style={{ fontSize: '13px', color: '#666' }}>
-                          {MODEL_TYPE_LABELS[v.model_type] || v.model_type} · 建立於 {new Date(v.created_at).toLocaleDateString('zh-Hant')}
+                        <p style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
+                          {MODEL_TYPE_LABELS[v.model_type] || v.model_type} · 建立於 {formatDate(v.created_at)}
                         </p>
                         {source && (
-                          <p style={{ fontSize: '12px', color: '#888' }}>
+                          <p style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
                             來自策略版本 v{source.experiment_version_number}
                             {source.experiment_title ? `（${source.experiment_title}）` : ''}
                             {source.note ? ` · ${source.note}` : ''}
                           </p>
                         )}
-                        {v.locked_at && <p style={{ fontSize: '12px', color: '#0c5460' }}>已鎖定: {new Date(v.locked_at).toLocaleString('zh-Hant')}</p>}
-                        {v.revoked_at && <p style={{ fontSize: '12px', color: '#721c24' }}>已撤銷: {v.revocation_reason}</p>}
+                        {v.locked_at && <p style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>已鎖定: {formatDateTime(v.locked_at)}</p>}
+                        {v.revoked_at && <p style={{ fontSize: '12px', color: 'var(--negative)' }}>已撤銷: {v.revocation_reason}</p>}
                       </div>
                       <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
                         {!isActive && !v.revoked_at && (
@@ -608,8 +609,8 @@ export default function ModelDetailPage() {
                       </div>
                     </div>
                     {rollbackVersionId === v.id && (
-                      <div style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid #eee' }}>
-                        <p style={{ fontSize: '12px', color: '#666', marginBottom: '8px' }}>
+                      <div style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid var(--border-strong)' }}>
+                        <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '8px' }}>
                           回滾會把目前使用版本改回 v{v.version_number}，並要求在操作記錄留下原因；版本內容不會被刪除或改寫。
                         </p>
                         <input
@@ -633,14 +634,14 @@ export default function ModelDetailPage() {
                       </div>
                     )}
                     {revokingVersionId === v.id && (
-                      <div style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid #eee' }}>
+                      <div style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid var(--border-strong)' }}>
                         <input className="input" placeholder="撤銷原因..." value={revokeReason} onChange={e => setRevokeReason(e.target.value)} style={{ marginBottom: '8px' }} />
                         <button onClick={() => handleRevoke(v.id)} className="btn btn-primary" style={{ fontSize: '12px' }}>確認撤銷</button>
                       </div>
                     )}
                     <details style={{ marginTop: '8px' }}>
-                      <summary style={{ cursor: 'pointer', fontSize: '12px', color: '#888' }}>查看規格</summary>
-                      <pre style={{ fontSize: '11px', backgroundColor: '#f5f5f5', padding: '8px', borderRadius: '4px', overflow: 'auto', marginTop: '4px' }}>
+                      <summary style={{ cursor: 'pointer', fontSize: '12px', color: 'var(--text-muted)' }}>查看規格</summary>
+                      <pre style={{ fontSize: '11px', backgroundColor: 'var(--surface-2)', padding: '8px', borderRadius: '4px', overflow: 'auto', marginTop: '4px' }}>
                         {JSON.stringify(v.model_specification_json, null, 2)}
                       </pre>
                     </details>
@@ -655,13 +656,13 @@ export default function ModelDetailPage() {
       {activeTab === 'compare' && (
         <div>
           {versions.length < 2 ? (
-            <div className="card" data-testid="compare-empty" style={{ textAlign: 'center', padding: '40px', color: '#666' }}>
+            <div className="card" data-testid="compare-empty" style={{ textAlign: 'center', padding: '40px', color: 'var(--text-secondary)' }}>
               至少需要兩個版本才能比較。先建立或從策略版本匯入另一個版本。
             </div>
           ) : (
             <div className="card">
               <h3 style={{ marginBottom: '4px' }}>比較兩個版本</h3>
-              <p style={{ fontSize: '12px', color: '#666', marginBottom: '16px' }}>
+              <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '16px' }}>
                 比較只陳列兩個版本的規格差異與評估記錄；系統不會自動判定哪個版本更好。
               </p>
               <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', alignItems: 'end' }}>
@@ -715,7 +716,7 @@ export default function ModelDetailPage() {
 
               {compareResult && (
                 <div data-testid="compare-result" style={{ marginTop: '20px' }}>
-                  <p style={{ fontSize: '13px', color: '#666', marginBottom: '12px' }}>
+                  <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '12px' }}>
                     版本 A：v{compareResult.version_a.version_number}
                     {compareResult.version_a.is_active ? '（目前使用）' : ''}
                     {' · '}
@@ -724,14 +725,14 @@ export default function ModelDetailPage() {
                   </p>
 
                   {compareResult.spec_changes.length === 0 ? (
-                    <p data-testid="compare-no-changes" style={{ fontSize: '13px', color: '#666' }}>
+                    <p data-testid="compare-no-changes" style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
                       兩個版本的規格完全相同。
                     </p>
                   ) : (
                     <div style={{ overflowX: 'auto' }}>
                       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
                         <thead>
-                          <tr style={{ borderBottom: '1px solid #e0e0e0', textAlign: 'left' }}>
+                          <tr style={{ borderBottom: '1px solid var(--border-strong)', textAlign: 'left' }}>
                             <th style={{ padding: '8px' }}>欄位</th>
                             <th style={{ padding: '8px' }}>版本 A</th>
                             <th style={{ padding: '8px' }}>版本 B</th>
@@ -742,7 +743,7 @@ export default function ModelDetailPage() {
                             <tr
                               key={change.path}
                               data-testid={`compare-change-${index}`}
-                              style={{ borderBottom: '1px solid #f0f0f0' }}
+                              style={{ borderBottom: '1px solid var(--surface-2)' }}
                             >
                               <td style={{ padding: '8px', fontFamily: 'monospace', fontSize: '12px' }}>{change.path}</td>
                               <td style={{ padding: '8px' }}>
@@ -756,7 +757,7 @@ export default function ModelDetailPage() {
                         </tbody>
                       </table>
                       {compareResult.spec_changes_truncated && (
-                        <p style={{ fontSize: '12px', color: '#888', marginTop: '8px' }}>
+                        <p style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '8px' }}>
                           差異過多，只顯示前 200 項。
                         </p>
                       )}
@@ -767,9 +768,9 @@ export default function ModelDetailPage() {
                     <div>
                       <h4 style={{ fontSize: '13px', marginBottom: '6px' }}>版本 A 的評估</h4>
                       {compareResult.evaluations.a.length === 0 ? (
-                        <p style={{ fontSize: '12px', color: '#888' }}>尚無評估記錄。</p>
+                        <p style={{ fontSize: '12px', color: 'var(--text-muted)' }}>尚無評估記錄。</p>
                       ) : (
-                        <ul style={{ fontSize: '12px', color: '#444', paddingLeft: '18px' }}>
+                        <ul style={{ fontSize: '12px', color: 'var(--text-secondary)', paddingLeft: '18px' }}>
                           {compareResult.evaluations.a.map(ev => (
                             <li key={ev.id}>{ev.evaluation_type}{ev.result_summary ? ` — ${ev.result_summary}` : ''}</li>
                           ))}
@@ -779,9 +780,9 @@ export default function ModelDetailPage() {
                     <div>
                       <h4 style={{ fontSize: '13px', marginBottom: '6px' }}>版本 B 的評估</h4>
                       {compareResult.evaluations.b.length === 0 ? (
-                        <p style={{ fontSize: '12px', color: '#888' }}>尚無評估記錄。</p>
+                        <p style={{ fontSize: '12px', color: 'var(--text-muted)' }}>尚無評估記錄。</p>
                       ) : (
-                        <ul style={{ fontSize: '12px', color: '#444', paddingLeft: '18px' }}>
+                        <ul style={{ fontSize: '12px', color: 'var(--text-secondary)', paddingLeft: '18px' }}>
                           {compareResult.evaluations.b.map(ev => (
                             <li key={ev.id}>{ev.evaluation_type}{ev.result_summary ? ` — ${ev.result_summary}` : ''}</li>
                           ))}
@@ -790,7 +791,7 @@ export default function ModelDetailPage() {
                     </div>
                   </div>
 
-                  <p data-testid="compare-note" style={{ fontSize: '12px', color: '#666', marginTop: '16px' }}>
+                  <p data-testid="compare-note" style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '16px' }}>
                     {compareResult.note}
                   </p>
                 </div>
@@ -803,13 +804,13 @@ export default function ModelDetailPage() {
       {activeTab === 'evaluations' && (
         <div>
           {evaluations.length === 0 ? (
-            <div className="card" style={{ textAlign: 'center', padding: '40px', color: '#666' }}>尚無評估記錄。</div>
+            <div className="card" style={{ textAlign: 'center', padding: '40px', color: 'var(--text-secondary)' }}>尚無評估記錄。</div>
           ) : (
             <div style={{ display: 'grid', gap: '12px' }}>
               {evaluations.map((ev) => (
                 <div key={ev.id} className="card">
                   <h4 style={{ marginBottom: '4px' }}>{ev.evaluation_type}</h4>
-                  <p style={{ fontSize: '13px', color: '#666' }}>
+                  <p style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
                     評估者: {ev.evaluator} · 引擎: {ev.engine_version} · 數據截止: {ev.data_cutoff_at}
                   </p>
                   {ev.result_summary && <p style={{ fontSize: '13px', marginTop: '8px' }}>{ev.result_summary}</p>}
@@ -824,12 +825,12 @@ export default function ModelDetailPage() {
         <div>
           {versions.find(v => v.model_card_id) ? (
             <div className="card">
-              <p style={{ color: '#666', fontSize: '14px' }}>
+              <p style={{ color: 'var(--text-secondary)', fontSize: '14px' }}>
                 模型卡已建立。模型卡記錄了模型的目的、限制、已知風險及撤銷流程。
               </p>
             </div>
           ) : (
-            <div className="card" style={{ textAlign: 'center', padding: '40px', color: '#666' }}>
+            <div className="card" style={{ textAlign: 'center', padding: '40px', color: 'var(--text-secondary)' }}>
               尚未建立模型卡。模型卡在版本鎖定後建立，記錄模型的用途、限制與風險。
             </div>
           )}
@@ -885,10 +886,10 @@ export default function ModelDetailPage() {
           {exportResult && exportResult.status === 'completed' && (
             <div className="card">
               <h4 style={{ marginBottom: '12px' }}>匯出完成</h4>
-              <p style={{ fontSize: '13px', color: '#666', marginBottom: '8px' }}>
+              <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '8px' }}>
                 匯出 ID: {exportResult.id}<br />
                 校驗碼: <code style={{ fontSize: '11px' }}>{exportResult.package_checksum?.slice(0, 16)}...</code><br />
-                完成時間: {exportResult.completed_at ? new Date(exportResult.completed_at).toLocaleString('zh-Hant') : '-'}
+                完成時間: {exportResult.completed_at ? formatDateTime(exportResult.completed_at) : '-'}
               </p>
               <button onClick={handleDownload} className="btn btn-primary" style={{ marginTop: '8px' }}>
                 下載研究套件
