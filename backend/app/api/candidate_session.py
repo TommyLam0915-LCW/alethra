@@ -5,6 +5,13 @@ which Settings refuses outside a local development environment. They mint a
 short-lived ordinary JWT for one synthetic account named by the *server-side*
 allowlist, so every downstream authorization check still runs against a real
 identity. Nothing here writes passwords, replaces hashes, or widens a role.
+
+Lifetime semantics: the mode controls *issuance* only. Turning it off stops new
+sessions and hides the client's test-mode marker, but it does not revoke tokens
+already issued -- they are ordinary JWTs and stay valid until their own ``exp``
+(at most CANDIDATE_PASSWORDLESS_SESSION_MINUTES). A client whose token expires
+while the mode is off gets 404 from this endpoint and falls back to the normal
+sign-in page.
 """
 import logging
 from datetime import timedelta

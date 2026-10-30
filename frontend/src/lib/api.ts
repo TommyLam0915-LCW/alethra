@@ -1,4 +1,10 @@
-import type { CandidateSession, CandidateStatus } from './candidate';
+import {
+  clearCandidateMode,
+  readCandidateMode,
+  writeCandidateMode,
+  type CandidateSession,
+  type CandidateStatus,
+} from './candidate';
 
 export const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 const API_URL = API_BASE_URL;
@@ -39,30 +45,101 @@ export function formatErrorDetail(detail: unknown): string {
   return 'Request failed';
 }
 
-export async function apiFetch(endpoint: string, options: RequestInit = {}) {
-  const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+// A 401 inside a local candidate session is usually just the 30-minute test
+// session expiring. Renewing the same allowlisted role once keeps the current
+// page (and any unsaved input) alive. The credential endpoints are excluded, a
+// failed renewal is rate-limited so queued requests cannot spray attempts, and
+// the caller retries at most once, so nothing can loop.
+const NO_CANDIDATE_RENEWAL = [
+  '/api/auth/login',
+  '/api/auth/register',
+  '/api/auth/candidate-session',
+];
 
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    ...options.headers as Record<string, string>,
+let candidateRenewal: Promise<string | null> | null = null;
+let candidateRenewalBlockedUntil = 0;
+
+function renewCandidateSession(): Promise<string | null> {
+  if (candidateRenewal) return candidateRenewal;
+  if (Date.now() < candidateRenewalBlockedUntil) return Promise.resolve(null);
+  const mode = readCandidateMode();
+  if (!mode) return Promise.resolve(null);
+
+  candidateRenewal = (async () => {
+    try {
+      const response = await fetch(`${API_URL}/api/auth/candidate-session`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ role: mode.role }),
+      });
+      if (!response.ok) {
+        // The operator switched the mode off, or the account left the
+        // allowlist: stop advertising test scenarios and do not retry again in
+        // this burst.
+        candidateRenewalBlockedUntil = Date.now() + 5000;
+        return null;
+      }
+      const session = (await response.json()) as CandidateSession;
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('token', session.access_token);
+        writeCandidateMode({
+          ...mode,
+          role: session.role,
+          label_zh: session.mode_label_zh || mode.label_zh,
+        });
+      }
+      return session.access_token;
+    } catch {
+      candidateRenewalBlockedUntil = Date.now() + 5000;
+      return null;
+    } finally {
+      candidateRenewal = null;
+    }
+  })();
+  return candidateRenewal;
+}
+
+async function authorizedFetch(
+  endpoint: string,
+  options: RequestInit,
+  jsonContentType: boolean,
+): Promise<Response> {
+  const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+  const send = (bearer: string | null) => {
+    const headers: Record<string, string> = {
+      ...(jsonContentType ? { 'Content-Type': 'application/json' } : {}),
+      ...options.headers as Record<string, string>,
+    };
+    if (bearer) headers['Authorization'] = `Bearer ${bearer}`;
+    return fetch(`${API_URL}${endpoint}`, { ...options, headers });
   };
 
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`;
+  let response = await send(token);
+  if (
+    response.status === 401 &&
+    !NO_CANDIDATE_RENEWAL.some((path) => endpoint.startsWith(path))
+  ) {
+    const renewed = await renewCandidateSession();
+    if (renewed) response = await send(renewed);
   }
-
-  const response = await fetch(`${API_URL}${endpoint}`, {
-    ...options,
-    headers,
-  });
 
   if (response.status === 401) {
     if (typeof window !== 'undefined') {
+      // The session is over and could not be renewed: drop the dead token and
+      // its display marker, then fall back to sign-in (the login page offers
+      // the password-free entry again while the mode is on).
+      clearCandidateMode();
       localStorage.removeItem('token');
       window.location.href = '/login';
     }
     throw new Error('Unauthorized');
   }
+
+  return response;
+}
+
+export async function apiFetch(endpoint: string, options: RequestInit = {}) {
+  const response = await authorizedFetch(endpoint, options, true);
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({ detail: 'Request failed' }));
@@ -80,24 +157,7 @@ export async function apiFetch(endpoint: string, options: RequestInit = {}) {
 // Same authorization handling as apiFetch, but returns the raw body text so a
 // non-JSON download (e.g. the trade-journal CSV) is not forced through .json().
 export async function apiFetchText(endpoint: string, options: RequestInit = {}): Promise<string> {
-  const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
-
-  const headers: Record<string, string> = {
-    ...(options.headers as Record<string, string>),
-  };
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`;
-  }
-
-  const response = await fetch(`${API_URL}${endpoint}`, { ...options, headers });
-
-  if (response.status === 401) {
-    if (typeof window !== 'undefined') {
-      localStorage.removeItem('token');
-      window.location.href = '/login';
-    }
-    throw new Error('Unauthorized');
-  }
+  const response = await authorizedFetch(endpoint, options, false);
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({ detail: 'Request failed' }));

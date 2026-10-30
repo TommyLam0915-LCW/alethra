@@ -8,7 +8,7 @@ for the configured synthetic account.
 """
 import asyncio
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
@@ -254,6 +254,40 @@ class TestExistingAuthAndIsolation:
         me = _call(candidate_app, "GET", "/api/auth/me", token=token)
         assert me.status_code == 200
         assert me.json()["id"] == owner["id"]
+
+
+class TestSessionLifetime:
+    def test_expired_session_token_is_rejected(self, candidate_app):
+        token = jwt_module.create_access_token(
+            data={"sub": "00000000-0000-0000-0000-000000000000", "cand": "local_passwordless"},
+            expires_delta=timedelta(minutes=-1),
+        )
+        resp = _call(candidate_app, "GET", "/api/auth/me", token=token)
+        assert resp.status_code == 401
+
+    def test_mode_off_stops_issuance_but_keeps_live_sessions_until_expiry(
+        self, client, candidate_app
+    ):
+        """Turning the mode off is not a revocation: already-issued tokens stay valid.
+
+        The client therefore renews only on a 401 and never treats a missing
+        status as a sign that the current session was ended.
+        """
+        _register(client, OWNER_EMAIL)
+        issued = _call(candidate_app, "POST", "/api/auth/candidate-session", json={"role": "owner"})
+        assert issued.status_code == 200
+        token = issued.json()["access_token"]
+
+        candidate_app.dependency_overrides[get_settings] = lambda: _settings(
+            candidate_passwordless_mode=False, candidate_passwordless_accounts=""
+        )
+
+        refused = _call(candidate_app, "POST", "/api/auth/candidate-session", json={"role": "owner"})
+        assert refused.status_code == 404
+
+        still_valid = _call(candidate_app, "GET", "/api/auth/me", token=token)
+        assert still_valid.status_code == 200
+        assert still_valid.json()["email"] == OWNER_EMAIL
 
 
 class TestSettingsFailClosed:

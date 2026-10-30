@@ -172,6 +172,25 @@ export default function AppShell({
     setCandidate(readCandidateMode());
   }, []);
 
+  useEffect(() => {
+    if (!candidate) return;
+    let cancelled = false;
+    // The profile mode may have been turned off after this session started.
+    // Issuance stops, but the token already issued stays valid until its own
+    // expiry, so the session is kept and only the test-scenario banner drops.
+    api.candidateSession
+      .status()
+      .then((status) => {
+        if (cancelled || status.enabled) return;
+        clearCandidateMode();
+        setCandidate(null);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [candidate]);
+
   const handleLogout = () => {
     localStorage.removeItem('token');
     clearCandidateMode();
