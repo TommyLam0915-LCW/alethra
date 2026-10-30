@@ -11,6 +11,7 @@ import RevisionPanel from '@/components/experiments/RevisionPanel';
 import RobustnessPanel from '@/components/experiments/RobustnessPanel';
 import ResearchRecordPanel from '@/components/experiments/ResearchRecordPanel';
 import { formatDate, formatDateTime } from '@/lib/format';
+import { DATA_NATURE_LABELS, label } from '@/lib/copy';
 
 interface Experiment {
   id: string;
@@ -99,24 +100,24 @@ const thStyle: React.CSSProperties = { padding: '6px 10px', textAlign: 'right' a
 const tdStyle: React.CSSProperties = { padding: '5px 10px', textAlign: 'right' as const, borderBottom: '1px solid var(--border-strong)', whiteSpace: 'nowrap' as const };
 
 const EVENT_LABELS: Record<string, string> = {
-  experiment_created: '實驗建立',
-  hypothesis_updated: '假設更新',
-  falsification_condition_added: '推翻條件更新',
-  dataset_selected: '資料集選取',
-  strategy_template_selected: '策略模板選取',
-  parameter_changed: '參數變更',
-  strategy_version_created: '新版本建立',
-  research_run_started: '回測開始',
-  research_run_completed: '回測完成',
-  research_run_failed: '回測失敗',
-  warning_generated: '警告產生',
-  strategy_locked: '策略鎖定',
-  research_note_added: '研究筆記新增',
-  revision_outcome_recorded: '修訂結果記錄',
-  robustness_study_started: '穩健性研究開始',
-  robustness_study_completed: '穩健性研究完成',
-  robustness_study_stopped: '穩健性研究停止',
-  export_generated: '匯出產生',
+  experiment_created: 'Experiment created',
+  hypothesis_updated: 'Hypothesis updated',
+  falsification_condition_added: 'Falsification conditions updated',
+  dataset_selected: 'Dataset selected',
+  strategy_template_selected: 'Strategy template selected',
+  parameter_changed: 'Parameter changed',
+  strategy_version_created: 'New version created',
+  research_run_started: 'Backtest started',
+  research_run_completed: 'Backtest completed',
+  research_run_failed: 'Backtest failed',
+  warning_generated: 'Warning raised',
+  strategy_locked: 'Strategy locked',
+  research_note_added: 'Research note added',
+  revision_outcome_recorded: 'Revision outcome recorded',
+  robustness_study_started: 'Robustness study started',
+  robustness_study_completed: 'Robustness study completed',
+  robustness_study_stopped: 'Robustness study stopped',
+  export_generated: 'Export generated',
 };
 
 export default function ExperimentDetailPage() {
@@ -176,7 +177,7 @@ export default function ExperimentDetailPage() {
       // A reload that succeeded must not keep showing an earlier load failure.
       setError('');
     } catch (err) {
-      setError('載入失敗');
+      setError('Could not load the experiment.');
     } finally {
       setLoading(false);
     }
@@ -184,7 +185,7 @@ export default function ExperimentDetailPage() {
 
   const handleRunBacktest = async () => {
     if (!experiment?.current_version_id) {
-      setError('沒有可執行的版本');
+      setError('No version is available to run.');
       return;
     }
     setRunning(true);
@@ -199,7 +200,7 @@ export default function ExperimentDetailPage() {
       ]);
       setTimeline(timelineData);
     } catch (err: any) {
-      setError(err.message || '執行失敗');
+      setError(err.message || 'The backtest could not be started.');
     } finally {
       setRunning(false);
     }
@@ -214,7 +215,7 @@ export default function ExperimentDetailPage() {
   const handleLock = async () => {
     if (!experiment) return;
     if (!experiment.current_version_id) {
-      setError('這個實驗還沒有可鎖定的策略版本');
+      setError('This experiment has no strategy version to lock yet.');
       return;
     }
     setLocking(true);
@@ -226,7 +227,7 @@ export default function ExperimentDetailPage() {
       setShowLockConfirm(false);
       await loadData();
     } catch (err: any) {
-      setError(err.message || '鎖定失敗');
+      setError(err.message || 'The strategy could not be locked.');
     } finally {
       setLocking(false);
     }
@@ -241,7 +242,7 @@ export default function ExperimentDetailPage() {
       const timelineData = await api.timeline.get(experimentId);
       setTimeline(timelineData);
     } catch (err: any) {
-      setError(err.message || '筆記新增失敗');
+      setError(err.message || 'The note could not be added.');
     }
   };
 
@@ -252,7 +253,7 @@ export default function ExperimentDetailPage() {
       const result = await api.versions.compare(v1Id, v2Id);
       setDiffResult(result);
     } catch (err: any) {
-      setError(err.message || '比較失敗');
+      setError(err.message || 'The versions could not be compared.');
     } finally {
       setDiffLoading(false);
     }
@@ -269,7 +270,7 @@ export default function ExperimentDetailPage() {
       a.click();
       URL.revokeObjectURL(url);
     } catch (err: any) {
-      setError(err.message || '匯出失敗');
+      setError(err.message || 'The export could not be generated.');
     }
   };
 
@@ -279,25 +280,25 @@ export default function ExperimentDetailPage() {
       const reviewData = await api.experiments.methodReview(experimentId);
       setMethodReview(reviewData);
     } catch (err: any) {
-      setError(err.message || '方法審查載入失敗');
+      setError(err.message || 'The method review could not be loaded.');
     } finally {
       setMethodReviewLoading(false);
     }
   };
 
   const STATUS_STYLE: Record<string, { bg: string; color: string; label: string }> = {
-    PASS: { bg: 'rgba(34,197,94,0.14)', color: 'var(--positive)', label: '通過' },
-    WARNING: { bg: 'rgba(245,158,11,0.14)', color: 'var(--warning)', label: '警告' },
-    INSUFFICIENT_INFORMATION: { bg: 'var(--surface-2)', color: 'var(--text-secondary)', label: '資訊不足' },
-    NOT_APPLICABLE: { bg: 'var(--surface-2)', color: 'var(--text-secondary)', label: '不適用' },
+    PASS: { bg: 'rgba(34,197,94,0.14)', color: 'var(--positive)', label: 'Pass' },
+    WARNING: { bg: 'rgba(245,158,11,0.14)', color: 'var(--warning)', label: 'Warning' },
+    INSUFFICIENT_INFORMATION: { bg: 'var(--surface-2)', color: 'var(--text-secondary)', label: 'Insufficient information' },
+    NOT_APPLICABLE: { bg: 'var(--surface-2)', color: 'var(--text-secondary)', label: 'Not applicable' },
   };
 
   if (loading) {
-    return <div className="container" style={{ paddingTop: '40px' }}>載入中...</div>;
+    return <div className="container" style={{ paddingTop: '40px' }}>Loading…</div>;
   }
 
   if (!experiment) {
-    return <div className="container" style={{ paddingTop: '40px' }}>實驗不存在</div>;
+    return <div className="container" style={{ paddingTop: '40px' }}>Experiment not found.</div>;
   }
 
   const latestRun = runs.find(r => r.status === 'completed');
@@ -308,7 +309,7 @@ export default function ExperimentDetailPage() {
     <div className="container" style={{ paddingTop: '40px', paddingBottom: '40px' }}>
       <div style={{ marginBottom: '20px' }}>
         <Link href="/dashboard" style={{ color: 'var(--primary-text)', textDecoration: 'none' }}>
-          返回我的實驗
+          Back to my experiments
         </Link>
       </div>
 
@@ -316,14 +317,14 @@ export default function ExperimentDetailPage() {
         <div style={{ minWidth: 0, flex: '1 1 260px' }}>
           <h1 style={{ marginBottom: '8px', overflowWrap: 'anywhere' }}>{experiment.title}</h1>
           <p style={{ color: 'var(--text-secondary)' }}>
-            建立於 {formatDate(experiment.created_at)}
+            Created {formatDate(experiment.created_at)}
           </p>
         </div>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', alignItems: 'center' }}>
           {experiment.status === 'locked' && (
             <Link href={`/experiments/${experimentId}/simulation`} data-testid="exp-simulation-link">
               <button className="btn btn-primary" style={{ fontSize: '13px' }}>
-                前進模擬
+                Forward simulation
               </button>
             </Link>
           )}
@@ -334,17 +335,17 @@ export default function ExperimentDetailPage() {
               data-testid="exp-lock-btn"
               style={{ backgroundColor: 'var(--surface-2)', fontSize: '13px' }}
             >
-              {showLockConfirm ? '取消鎖定' : '鎖定策略'}
+              {showLockConfirm ? 'Cancel lock' : 'Lock strategy'}
             </button>
           )}
           <button onClick={handleExport} className="btn" style={{ backgroundColor: 'var(--surface-2)', fontSize: '13px' }}>
-            匯出
+            Export
           </button>
           <span
             className={statusPillClass(experiment.status)}
             style={{ padding: '6px 16px', fontSize: '14px' }}
           >
-            {experiment.status === 'draft' ? '草稿' : experiment.status === 'locked' ? '已鎖定' : experiment.status}
+            {experiment.status === 'draft' ? 'Draft' : experiment.status === 'locked' ? 'Locked' : experiment.status}
           </span>
         </div>
       </div>
@@ -353,11 +354,11 @@ export default function ExperimentDetailPage() {
 
       {experiment.hypothesis && (
         <div className="card" style={{ marginBottom: '20px' }}>
-          <h3 style={{ marginBottom: '12px' }}>研究假設</h3>
+          <h3 style={{ marginBottom: '12px' }}>Research hypothesis</h3>
           <p style={{ color: 'var(--text-secondary)' }}>{experiment.hypothesis}</p>
           {experiment.falsification_conditions && (
             <>
-              <h4 style={{ marginTop: '16px', marginBottom: '8px', fontSize: '14px' }}>推翻條件</h4>
+              <h4 style={{ marginTop: '16px', marginBottom: '8px', fontSize: '14px' }}>Falsification conditions</h4>
               <p style={{ color: 'var(--text-secondary)' }}>{experiment.falsification_conditions}</p>
             </>
           )}
@@ -367,11 +368,11 @@ export default function ExperimentDetailPage() {
       {!isLocked && showLockConfirm && (
         <div className="card" style={{ marginBottom: '20px', borderLeft: '3px solid var(--primary)' }}>
           <h3 style={{ marginTop: 0, marginBottom: '8px' }}>
-            {currentVersion ? `鎖定版本 ${currentVersion.version_number}` : '尚無可鎖定的版本'}
+            {currentVersion ? `Lock version ${currentVersion.version_number}` : 'No version to lock yet'}
           </h3>
           <p style={{ color: 'var(--text-secondary)', fontSize: '14px', marginTop: 0, marginBottom: '16px' }}>
-            鎖定後這個版本的策略參數與數據截止即不可再修改；要調整參數必須建立新版本。
-            前進模擬、回放游標與紙上交易成交都以此版本為準。
+            Locking freezes this version's strategy parameters and data cutoff. Changing parameters requires a new
+            version. Forward simulation, the replay cursor and paper fills all follow this version.
           </p>
 
           {currentVersion ? (
@@ -386,39 +387,40 @@ export default function ExperimentDetailPage() {
               }}
             >
               <div>
-                <div style={{ color: 'var(--text-muted)' }}>標的</div>
-                <strong>{(currentVersion.strategy_spec?.asset_ids ?? []).join('、') || '未提供'}</strong>
+                <div style={{ color: 'var(--text-muted)' }}>Instruments</div>
+                <strong>{(currentVersion.strategy_spec?.asset_ids ?? []).join(', ') || 'Not provided'}</strong>
               </div>
               <div>
-                <div style={{ color: 'var(--text-muted)' }}>模板</div>
-                <strong>{currentVersion.strategy_spec?.template_type ?? '未提供'}</strong>
+                <div style={{ color: 'var(--text-muted)' }}>Template</div>
+                <strong>{currentVersion.strategy_spec?.template_type ?? 'Not provided'}</strong>
               </div>
               <div>
-                <div style={{ color: 'var(--text-muted)' }}>期間</div>
+                <div style={{ color: 'var(--text-muted)' }}>Period</div>
                 <strong>
-                  {currentVersion.strategy_spec?.start_date ?? '?'} 至 {currentVersion.strategy_spec?.end_date ?? '?'}
+                  {currentVersion.strategy_spec?.start_date ?? '?'} to {currentVersion.strategy_spec?.end_date ?? '?'}
                 </strong>
               </div>
               <div>
-                <div style={{ color: 'var(--text-muted)' }}>數據截止</div>
-                <strong>{currentVersion.strategy_spec?.end_date ?? '未提供'}</strong>
+                <div style={{ color: 'var(--text-muted)' }}>Data cutoff</div>
+                <strong>{currentVersion.strategy_spec?.end_date ?? 'Not provided'}</strong>
               </div>
               <div>
-                <div style={{ color: 'var(--text-muted)' }}>初始資金</div>
+                <div style={{ color: 'var(--text-muted)' }}>Starting cash</div>
                 <strong>
-                  {currentVersion.strategy_spec?.initial_cash ?? '未提供'} {currentVersion.strategy_spec?.currency ?? ''}
+                  {currentVersion.strategy_spec?.initial_cash ?? 'Not provided'} {currentVersion.strategy_spec?.currency ?? ''}
                 </strong>
               </div>
               <div>
-                <div style={{ color: 'var(--text-muted)' }}>手續費／滑點</div>
+                <div style={{ color: 'var(--text-muted)' }}>Commission / slippage</div>
                 <strong>
-                  {currentVersion.strategy_spec?.commission_rate ?? 0} ／ {currentVersion.strategy_spec?.slippage_rate ?? 0}
+                  {currentVersion.strategy_spec?.commission_rate ?? 0} / {currentVersion.strategy_spec?.slippage_rate ?? 0}
                 </strong>
               </div>
             </div>
           ) : (
             <p style={{ color: 'var(--warning)', fontSize: '13px' }}>
-              這個實驗還沒有策略版本，無法鎖定；請先建立實驗或修改參數以產生新版本。
+              This experiment has no strategy version to lock yet. Create an experiment or change a parameter to
+              produce one.
             </p>
           )}
 
@@ -429,7 +431,7 @@ export default function ExperimentDetailPage() {
               data-testid="exp-lock-confirm"
               disabled={locking || !currentVersion}
             >
-              {locking ? '鎖定中…' : '確認鎖定'}
+              {locking ? 'Locking…' : 'Confirm lock'}
             </button>
             <button
               onClick={() => setShowLockConfirm(false)}
@@ -437,7 +439,7 @@ export default function ExperimentDetailPage() {
               data-testid="exp-lock-cancel"
               style={{ backgroundColor: 'var(--surface-2)' }}
             >
-              取消
+              Cancel
             </button>
           </div>
         </div>
@@ -446,19 +448,19 @@ export default function ExperimentDetailPage() {
       {experiment.current_version_id && versions.length > 0 && (
         <div className="card" style={{ marginBottom: '20px' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-            <h3 style={{ margin: 0 }}>目前策略版本</h3>
+            <h3 style={{ margin: 0 }}>Current strategy version</h3>
             <button
               onClick={() => setShowVersions(!showVersions)}
               className="btn"
               style={{ backgroundColor: 'var(--surface-2)', fontSize: '13px' }}
             >
-              {showVersions ? '隱藏版本歷史' : `查看所有版本 (${versions.length})`}
+              {showVersions ? 'Hide version history' : `View all versions (${versions.length})`}
             </button>
           </div>
           <p style={{ color: 'var(--text-secondary)', fontSize: '14px', margin: 0 }}>
-            版本 {versions.find(v => v.id === experiment.current_version_id)?.version_number || versions.length}
+            Version {versions.find(v => v.id === experiment.current_version_id)?.version_number || versions.length}
             {versions.find(v => v.id === experiment.current_version_id)?.change_reason && (
-              <> · 變更原因：{versions.find(v => v.id === experiment.current_version_id)?.change_reason}</>
+              <> · Reason for change: {versions.find(v => v.id === experiment.current_version_id)?.change_reason}</>
             )}
           </p>
           {showVersions && (
@@ -467,7 +469,7 @@ export default function ExperimentDetailPage() {
                 <div key={v.id} style={{ padding: '12px', backgroundColor: 'var(--surface-2)', borderRadius: '6px', marginBottom: '8px' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <div>
-                      <strong>版本 {v.version_number}</strong>
+                      <strong>Version {v.version_number}</strong>
                       {v.change_reason && <span style={{ marginLeft: '8px', color: 'var(--text-secondary)' }}>· {v.change_reason}</span>}
                     </div>
                     <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
@@ -503,31 +505,31 @@ export default function ExperimentDetailPage() {
 
       <div className="card" style={{ marginBottom: '20px' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-          <h2 style={{ margin: 0 }}>回測結果</h2>
+          <h2 style={{ margin: 0 }}>Backtest results</h2>
           <button
             onClick={handleRunBacktest}
             className="btn btn-primary"
             disabled={running || !experiment.current_version_id}
           >
-            {running ? brand.ui.experiment.runningZh : brand.ui.experiment.runBacktestZh}
+            {running ? brand.ui.experiment.running : brand.ui.experiment.runBacktest}
           </button>
         </div>
 
         {!latestRun ? (
           <div style={{ textAlign: 'center', padding: '40px' }}>
             <p style={{ color: 'var(--text-secondary)', marginBottom: '12px' }}>
-              尚未執行回測
+              No backtest has been run yet
             </p>
             <p style={{ color: 'var(--text-muted)', fontSize: '14px' }}>
-              點擊上方按鈕開始測試你的策略假設。<br />
-              回測使用歷史示範資料，結果僅供研究參考。
+              Use the button above to start testing your hypothesis.<br />
+              Backtests run on historical sample data; results are for research only.
             </p>
           </div>
         ) : (
           <div>
             {latestRun.warnings && latestRun.warnings.length > 0 && (
               <div className="alert alert-warning" style={{ marginBottom: '16px' }}>
-                <strong>警告：</strong>
+                <strong>Warnings:</strong>
                 <ul style={{ marginTop: '8px', marginLeft: '20px' }}>
                   {latestRun.warnings.map((w, i) => (
                     <li key={i}>{w}</li>
@@ -539,25 +541,25 @@ export default function ExperimentDetailPage() {
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '16px' }}>
               {latestRun.metrics?.total_return_pct != null && (
                 <div style={{ padding: '16px', backgroundColor: 'var(--surface-2)', borderRadius: '6px' }}>
-                  <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '4px' }}>總報酬</div>
+                  <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '4px' }}>Total return</div>
                   <div style={{ fontSize: '24px', fontWeight: 'bold' }}>{latestRun.metrics.total_return_pct.toFixed(2)}%</div>
                 </div>
               )}
               {latestRun.metrics?.final_equity != null && (
                 <div style={{ padding: '16px', backgroundColor: 'var(--surface-2)', borderRadius: '6px' }}>
-                  <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '4px' }}>最終淨值</div>
+                  <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '4px' }}>Final equity</div>
                   <div style={{ fontSize: '24px', fontWeight: 'bold' }}>${latestRun.metrics.final_equity.toLocaleString('en-US', { maximumFractionDigits: 0 })}</div>
                 </div>
               )}
               {latestRun.metrics?.max_drawdown_pct != null && (
                 <div style={{ padding: '16px', backgroundColor: 'var(--surface-2)', borderRadius: '6px' }}>
-                  <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '4px' }}>最大回撤</div>
+                  <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '4px' }}>Max drawdown</div>
                   <div style={{ fontSize: '24px', fontWeight: 'bold' }}>{latestRun.metrics.max_drawdown_pct.toFixed(2)}%</div>
                 </div>
               )}
               {latestRun.metrics?.total_trades != null && (
                 <div style={{ padding: '16px', backgroundColor: 'var(--surface-2)', borderRadius: '6px' }}>
-                  <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '4px' }}>交易次數</div>
+                  <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '4px' }}>Trades</div>
                   <div style={{ fontSize: '24px', fontWeight: 'bold' }}>{latestRun.metrics.total_trades}</div>
                 </div>
               )}
@@ -565,10 +567,10 @@ export default function ExperimentDetailPage() {
 
             {latestRun.methodology_json && (
               <div style={{ marginTop: '16px', padding: '12px', backgroundColor: 'var(--surface-2)', borderRadius: '6px', fontSize: '13px' }}>
-                <strong>方法摘要：</strong>
+                <strong>Method summary:</strong>
                 <span style={{ marginLeft: '8px', color: 'var(--text-muted)' }}>
-                  引擎 v{latestRun.methodology_json.engine_version} |
-                  模板: {latestRun.methodology_json.template_type}
+                  Engine v{latestRun.methodology_json.engine_version} |
+                  Template: {latestRun.methodology_json.template_type}
                 </span>
               </div>
             )}
@@ -582,7 +584,7 @@ export default function ExperimentDetailPage() {
 
             {latestRun.result_json?.data_provider && (
               <div style={{ marginTop: '12px', padding: '10px', backgroundColor: 'rgba(34,197,94,0.14)', borderRadius: '6px', fontSize: '13px' }}>
-                <strong>資料來源：</strong>
+                <strong>Data source:</strong>
                 <span style={{ marginLeft: '8px' }}>
                   {latestRun.result_json.data_provider}
                   {latestRun.result_json.feed_mode && ` (${latestRun.result_json.feed_mode})`}
@@ -590,7 +592,10 @@ export default function ExperimentDetailPage() {
                 </span>
                 {latestRun.result_json.data_nature && (
                   <div style={{ marginTop: '4px', fontSize: '12px', color: 'var(--text-muted)' }}>
-                    數據性質：{Object.entries(latestRun.result_json.data_nature).map(([k, v]) => `${k}=${v}`).join(', ')}
+                    Data nature:{' '}
+                    {Object.entries(latestRun.result_json.data_nature)
+                      .map(([k, v]) => `${label(DATA_NATURE_LABELS, String(v))} (${k})`)
+                      .join(', ')}
                   </div>
                 )}
               </div>
@@ -598,18 +603,18 @@ export default function ExperimentDetailPage() {
 
             {latestRun.result_json?.daily_accounting?.length > 0 && (
               <div style={{ marginTop: '16px' }}>
-                <h3 style={{ fontSize: '16px', marginBottom: '8px' }}>每日帳務明細</h3>
+                <h3 style={{ fontSize: '16px', marginBottom: '8px' }}>Daily accounting</h3>
                 <div style={{ maxHeight: '400px', overflow: 'auto', border: '1px solid var(--border-strong)', borderRadius: '6px' }}>
                   <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
                     <thead style={{ position: 'sticky', top: 0, backgroundColor: 'var(--surface-2)', zIndex: 1 }}>
                       <tr>
-                        <th style={thStyle}>日期</th>
-                        <th style={thStyle}>現金</th>
-                        <th style={thStyle}>持股</th>
-                        <th style={thStyle}>收盤價</th>
-                        <th style={thStyle}>部位價值</th>
-                        <th style={thStyle}>淨值</th>
-                        <th style={thStyle}>交易</th>
+                        <th style={thStyle}>Date</th>
+                        <th style={thStyle}>Cash</th>
+                        <th style={thStyle}>Shares</th>
+                        <th style={thStyle}>Close</th>
+                        <th style={thStyle}>Position value</th>
+                        <th style={thStyle}>Equity</th>
+                        <th style={thStyle}>Trades</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -624,7 +629,7 @@ export default function ExperimentDetailPage() {
                           <td style={tdStyle}>
                             {day.transactions?.map((t: any, j: number) => (
                               <span key={j} style={{ display: 'inline-block', padding: '1px 6px', borderRadius: '3px', fontSize: '11px', marginRight: '4px', backgroundColor: t.side === 'BUY' ? 'rgba(34,197,94,0.14)' : 'rgba(239,68,68,0.12)', color: t.side === 'BUY' ? 'var(--positive)' : 'var(--negative)' }}>
-                                {t.side === 'BUY' ? '買' : '賣'} {t.quantity}@${t.execution_price.toFixed(2)}
+                                {t.side === 'BUY' ? 'Buy' : 'Sell'} {t.quantity}@${t.execution_price.toFixed(2)}
                               </span>
                             ))}
                           </td>
@@ -637,7 +642,8 @@ export default function ExperimentDetailPage() {
             )}
 
             <div style={{ marginTop: '16px', padding: '12px', backgroundColor: 'rgba(245,158,11,0.14)', borderRadius: '6px', fontSize: '14px' }}>
-              <strong>提醒：</strong>以上結果基於歷史示範資料，不代表未來績效。本系統是研究工具，不構成投資建議。
+              <strong>Note:</strong> These results come from historical sample data and do not predict future
+              performance. Alethra is a research tool, not investment advice.
             </div>
           </div>
         )}
@@ -645,17 +651,17 @@ export default function ExperimentDetailPage() {
 
       {/* Workflow Continuity */}
       <div className="card" style={{ marginBottom: '20px' }}>
-        <h3 style={{ marginBottom: '16px' }}>研究紀錄</h3>
+        <h3 style={{ marginBottom: '16px' }}>Research log</h3>
         <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap' }}>
           <button
             onClick={() => setShowTimeline(!showTimeline)}
             className="btn"
             style={{ backgroundColor: 'var(--surface-2)', fontSize: '13px' }}
           >
-            {showTimeline ? '隱藏時間線' : `查看時間線 (${timeline.length} 事件)`}
+            {showTimeline ? 'Hide timeline' : `View timeline (${timeline.length} events)`}
           </button>
           <Link href={`/experiments/${experimentId}/simulation`} className="btn" style={{ backgroundColor: 'var(--surface-2)', fontSize: '13px', textDecoration: 'none' }}>
-            前進模擬 →
+            Forward simulation →
           </Link>
         </div>
 
@@ -678,7 +684,7 @@ export default function ExperimentDetailPage() {
             ))}
             {timeline.length > 10 && (
               <p style={{ color: 'var(--text-muted)', fontSize: '12px', textAlign: 'center', marginTop: '12px' }}>
-                顯示最近 10 筆事件，共 {timeline.length} 筆
+                Showing the latest 10 of {timeline.length} events
               </p>
             )}
           </div>
@@ -686,7 +692,7 @@ export default function ExperimentDetailPage() {
 
         {showTimeline && timeline.length === 0 && (
           <div style={{ marginTop: '16px', textAlign: 'center', padding: '20px' }}>
-            <p style={{ color: 'var(--text-muted)', fontSize: '14px' }}>尚無時間線事件</p>
+            <p style={{ color: 'var(--text-muted)', fontSize: '14px' }}>No timeline events yet</p>
           </div>
         )}
       </div>
@@ -694,44 +700,47 @@ export default function ExperimentDetailPage() {
       {/* Method Review */}
       <div className="card" style={{ marginBottom: '20px' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-          <h2>方法審查</h2>
+          <h2>Method review</h2>
           <button
             onClick={handleRefreshReview}
             className="btn"
             style={{ backgroundColor: 'var(--surface-2)', fontSize: '13px' }}
             disabled={methodReviewLoading}
           >
-            {methodReviewLoading ? '重新整理中...' : '重新整理'}
+            {methodReviewLoading ? 'Refreshing…' : 'Refresh'}
           </button>
         </div>
 
         {!methodReview ? (
           <p style={{ color: 'var(--text-secondary)', textAlign: 'center', padding: '20px' }}>
-            方法審查暫時無法載入
+            The method review could not be loaded right now.
           </p>
         ) : (
           <div>
             <div style={{ display: 'flex', gap: '16px', fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '16px', flexWrap: 'wrap' }}>
-              <span>規則集 v{methodReview.rule_set_version}</span>
+              <span>Rule set v{methodReview.rule_set_version}</span>
               {methodReview.run_id && (
-                <span>已審查執行: {methodReview.run_id.slice(0, 8)}...</span>
+                <span>Reviewed run: {methodReview.run_id.slice(0, 8)}...</span>
               )}
               {methodReview.version_id && (
-                <span>版本: {methodReview.version_id.slice(0, 8)}...</span>
+                <span>Version: {methodReview.version_id.slice(0, 8)}...</span>
               )}
               {!methodReview.run_id && (
-                <span style={{ color: 'var(--warning)' }}>尚無已完成的回測執行</span>
+                <span style={{ color: 'var(--warning)' }}>No completed backtest run yet</span>
               )}
-              <span>產生於 {formatDateTime(methodReview.generated_at)}</span>
+              <span>Generated {formatDateTime(methodReview.generated_at)}</span>
             </div>
 
             <div style={{ padding: '10px 12px', backgroundColor: 'rgba(245,158,11,0.10)', borderRadius: '6px', fontSize: '12px', color: 'var(--warning)', marginBottom: '12px', lineHeight: '1.6' }}>
-              <strong>資料來源說明：</strong>RC-001 及 RC-002 檢查的是實驗目前的文字內容（假說、原始想法、否決條件）。這些欄位可隨時編輯，因此審查的文字可能與回測執行時不同。這並非歷史文字快照。
+              <strong>Data source note:</strong> RC-001 and RC-002 check the experiment's current text (hypothesis,
+              original idea, falsification conditions). Those fields stay editable, so the reviewed text may differ
+              from what it was when the backtest ran. This is not a snapshot of the historical text.
             </div>
 
             {methodReview.completed_at_available === false && (
               <div style={{ padding: '10px 12px', backgroundColor: 'rgba(245,158,11,0.14)', borderRadius: '6px', fontSize: '12px', color: 'var(--warning)', marginBottom: '12px', lineHeight: '1.6' }}>
-                <strong>時間戳提醒：</strong>所選的回測執行缺少完成時間戳記。執行排序依據 ID 而非時間先後，因此「最新」不代表時間上最近。
+                <strong>Timestamp warning:</strong> The selected run has no completion timestamp. Runs are ordered
+                by ID rather than by time, so "latest" does not mean most recent.
               </div>
             )}
 
@@ -774,7 +783,9 @@ export default function ExperimentDetailPage() {
             </div>
 
             <div style={{ marginTop: '16px', padding: '12px', backgroundColor: 'var(--surface-2)', borderRadius: '6px', fontSize: '13px', color: 'var(--text-muted)' }}>
-              <strong>聲明：</strong>方法審查是確定性的規則檢查，不構成投資建議。PASS 不代表策略可獲利或適合實盤交易。本系統使用示範資料，非即時市場資料。
+              <strong>Disclaimer:</strong> The method review is a deterministic rule check, not investment advice. A
+              PASS does not mean the strategy is profitable or suitable for live trading. This system uses sample
+              data, not live market data.
             </div>
           </div>
         )}
@@ -782,24 +793,24 @@ export default function ExperimentDetailPage() {
 
       {/* Research Notes */}
       <div className="card" style={{ marginBottom: '20px' }}>
-        <h3 style={{ marginBottom: '16px' }}>研究筆記</h3>
+        <h3 style={{ marginBottom: '16px' }}>Research notes</h3>
         <div style={{ display: 'flex', gap: '8px', marginBottom: '16px' }}>
           <input
             type="text"
             className="input"
-            aria-label="研究筆記內容"
-            placeholder="記錄你的研究想法..."
+            aria-label="Research note"
+            placeholder="Write down your research thinking…"
             value={noteText}
             onChange={(e) => setNoteText(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && handleAddNote()}
             style={{ flex: 1 }}
           />
           <button onClick={handleAddNote} className="btn btn-primary" disabled={!noteText.trim()}>
-            新增
+            Add
           </button>
         </div>
         {notes.length === 0 ? (
-          <p style={{ color: 'var(--text-muted)', fontSize: '14px' }}>尚無筆記</p>
+          <p style={{ color: 'var(--text-muted)', fontSize: '14px' }}>No notes yet</p>
         ) : (
           <div style={{ display: 'grid', gap: '8px' }}>
             {notes.map((note) => (
@@ -818,13 +829,13 @@ export default function ExperimentDetailPage() {
       {versions.length > 0 && (
         <div className="card" style={{ marginBottom: '20px' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-            <h3>版本歷史 ({versions.length})</h3>
+            <h3>Version history ({versions.length})</h3>
             <button
               onClick={() => setShowVersions(!showVersions)}
               className="btn"
               style={{ backgroundColor: 'var(--surface-2)', fontSize: '13px' }}
             >
-              {showVersions ? '收合' : '展開'}
+              {showVersions ? 'Collapse' : 'Expand'}
             </button>
           </div>
           {showVersions && (
@@ -843,7 +854,7 @@ export default function ExperimentDetailPage() {
                       <div style={{ fontSize: '14px', fontWeight: '500' }}>
                         v{v.version_number}
                         {v.id === experiment.current_version_id && (
-                          <span style={{ marginLeft: '8px', fontSize: '12px', color: 'var(--primary-text)' }}>(目前)</span>
+                          <span style={{ marginLeft: '8px', fontSize: '12px', color: 'var(--primary-text)' }}>(current)</span>
                         )}
                       </div>
                       <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
@@ -875,25 +886,25 @@ export default function ExperimentDetailPage() {
                       if (a && b && a !== b) handleCompare(a, b);
                     }}
                   >
-                    比較
+                    Compare
                   </button>
                 </div>
               )}
-              {diffLoading && <p style={{ marginTop: '12px', color: 'var(--text-secondary)' }}>比較中...</p>}
+              {diffLoading && <p style={{ marginTop: '12px', color: 'var(--text-secondary)' }}>Comparing…</p>}
               {diffResult && (
                 <div style={{ marginTop: '12px', padding: '12px', backgroundColor: 'var(--surface-2)', borderRadius: '6px' }}>
                   <h4 style={{ marginBottom: '8px', fontSize: '14px' }}>
-                    v{diffResult.version_a_number} → v{diffResult.version_b_number} 差異
+                    v{diffResult.version_a_number} → v{diffResult.version_b_number} differences
                   </h4>
                   {diffResult.diffs.length === 0 ? (
-                    <p style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>無差異</p>
+                    <p style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>No differences</p>
                   ) : (
                     <table style={{ width: '100%', fontSize: '13px', borderCollapse: 'collapse' }}>
                       <thead>
                         <tr style={{ borderBottom: '1px solid var(--border-strong)' }}>
-                          <th style={{ textAlign: 'left', padding: '4px 8px' }}>欄位</th>
-                          <th style={{ textAlign: 'left', padding: '4px 8px' }}>舊值</th>
-                          <th style={{ textAlign: 'left', padding: '4px 8px' }}>新值</th>
+                          <th style={{ textAlign: 'left', padding: '4px 8px' }}>Field</th>
+                          <th style={{ textAlign: 'left', padding: '4px 8px' }}>Old value</th>
+                          <th style={{ textAlign: 'left', padding: '4px 8px' }}>New value</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -917,20 +928,20 @@ export default function ExperimentDetailPage() {
       {/* Research Timeline */}
       <div className="card" style={{ marginBottom: '20px' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-          <h3>研究時間線 ({timeline.length} 事件)</h3>
+          <h3>Research timeline ({timeline.length} events)</h3>
           <button
             onClick={() => setShowTimeline(!showTimeline)}
             className="btn"
             style={{ backgroundColor: 'var(--surface-2)', fontSize: '13px' }}
             data-testid="exp-timeline-toggle"
           >
-            {showTimeline ? '收合' : '展開'}
+            {showTimeline ? 'Collapse' : 'Expand'}
           </button>
         </div>
         {showTimeline && (
           <div>
             {timeline.length === 0 ? (
-              <p style={{ color: 'var(--text-muted)', fontSize: '14px' }}>尚無事件</p>
+              <p style={{ color: 'var(--text-muted)', fontSize: '14px' }}>No events yet</p>
             ) : (
               <div style={{ display: 'grid', gap: '4px' }}>
                 {timeline.map((evt) => (
@@ -969,7 +980,7 @@ export default function ExperimentDetailPage() {
       {/* Saved Comparisons */}
       {savedComparisons.length > 0 && (
         <div className="card">
-          <h3 style={{ marginTop: 0, marginBottom: '16px' }}>已儲存嘅比較</h3>
+          <h3 style={{ marginTop: 0, marginBottom: '16px' }}>Saved comparisons</h3>
           <div style={{ display: 'grid', gap: '8px' }}>
             {savedComparisons.map((saved) => (
               <Link
@@ -991,7 +1002,7 @@ export default function ExperimentDetailPage() {
                   Run A: {saved.run_a_id.slice(0, 8)}... → Run B: {saved.run_b_id.slice(0, 8)}...
                 </div>
                 <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '4px' }}>
-                  更新於 {formatDateTime(saved.updated_at)}
+                  Updated {formatDateTime(saved.updated_at)}
                 </div>
               </Link>
             ))}
@@ -1003,14 +1014,14 @@ export default function ExperimentDetailPage() {
       {runs.length > 0 && (
         <div className="card">
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-            <h3 style={{ margin: 0 }}>執行歷史</h3>
+            <h3 style={{ margin: 0 }}>Run history</h3>
             {selectedRuns.length === 2 && (
               <Link
                 href={`/experiments/${experimentId}/runs/compare?run_a=${selectedRuns[0]}&run_b=${selectedRuns[1]}`}
                 className="btn btn-primary"
                 style={{ fontSize: '13px', textDecoration: 'none' }}
               >
-                比較選取嘅兩個 runs
+                Compare selected runs
               </Link>
             )}
             {selectedRuns.length > 0 && selectedRuns.length !== 2 && (
@@ -1019,7 +1030,7 @@ export default function ExperimentDetailPage() {
                 style={{ backgroundColor: 'var(--surface-2)', fontSize: '13px' }}
                 onClick={() => setSelectedRuns([])}
               >
-                清除選取 ({selectedRuns.length}/2)
+                Clear selection ({selectedRuns.length}/2)
               </button>
             )}
           </div>
@@ -1045,7 +1056,7 @@ export default function ExperimentDetailPage() {
                     <input
                       type="checkbox"
                       data-testid={`run-select-${run.id}`}
-                      aria-label={`選取 run ${run.id.slice(0, 8)} 作比較`}
+                      aria-label={`Select run ${run.id.slice(0, 8)} for comparison`}
                       checked={isSelected}
                       disabled={selectionFull}
                       onChange={() => {
@@ -1066,7 +1077,7 @@ export default function ExperimentDetailPage() {
                       </div>
                       {describeRunStatus(run.status, run.started_at).stale && (
                         <div style={{ fontSize: '12px', color: 'var(--warning)' }}>
-                          已超過 30 分鐘未完成，非目前執行中
+                          Still marked running after 30 minutes — treated as not in progress
                         </div>
                       )}
                     </div>
@@ -1080,7 +1091,7 @@ export default function ExperimentDetailPage() {
                     <Link
                       href={`/experiments/${experimentId}/runs/${run.id}`}
                       data-testid={`run-detail-link-${run.id}`}
-                      aria-label={`查看 run ${run.id.slice(0, 8)} 嘅執行結果`}
+                      aria-label={`View results for run ${run.id.slice(0, 8)}`}
                       className="btn"
                       style={{
                         backgroundColor: 'var(--surface-2)',
@@ -1089,7 +1100,7 @@ export default function ExperimentDetailPage() {
                         textDecoration: 'none',
                       }}
                     >
-                      查看結果
+                      View results
                     </Link>
                   </div>
                 </div>
@@ -1098,7 +1109,7 @@ export default function ExperimentDetailPage() {
           </div>
           {selectedRuns.length === 2 && (
             <p style={{ marginTop: '12px', fontSize: '13px', color: 'var(--primary-text)' }}>
-              已選取 2 個 runs，點擊上方按鈕進行比較
+              Two runs selected. Use the button above to compare them.
             </p>
           )}
         </div>

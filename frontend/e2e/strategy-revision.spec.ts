@@ -63,8 +63,11 @@ const ACCOUNT = {
 };
 const COVERED = 'US:AAPL';
 const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-const TITLE = `E2E 策略修訂（僅供自動化測試）${stamp}`;
+const TITLE = `E2E strategy revision (automated test only) ${stamp}`;
 const MARKER = `rev-${Date.now()}`;
+// CHANGE_REASON / EXPECTATION / PURPOSE / NOTES / OUTCOME are free text the user
+// typed. They are deliberately left in Chinese to prove the UI shows user content
+// verbatim and never translates research notes or rationale.
 const CHANGE_REASON = `自動化驗證 ${MARKER}：長均線窗口 20 → 30，檢驗訊號頻率對報酬的影響`;
 const EXPECTATION = '長均線拉長後，交易次數應減少';
 const PURPOSE = `修訂 vs 來源 A/B 比較 ${MARKER}`;
@@ -142,15 +145,15 @@ test.describe('strategy revision journey', () => {
     await page.getByTestId('exp-asset').selectOption(COVERED);
     await page.getByTestId('sma-short-window').fill('5');
     await page.getByTestId('sma-long-window').fill('20');
-    await page.getByRole('button', { name: '建立實驗', exact: true }).click();
+    await page.getByRole('button', { name: 'Create experiment', exact: true }).click();
     await page.waitForURL(/\/experiments\/[0-9a-f-]{36}$/, { timeout: 30000 });
     journey.experimentId = new URL(page.url()).pathname.split('/').pop() as string;
 
     const resultsCard = page
       .locator('div.card')
-      .filter({ has: page.getByRole('heading', { name: '回測結果', exact: true }) });
-    await resultsCard.getByRole('button', { name: '執行回測', exact: true }).click();
-    await expect(resultsCard.getByText('總報酬', { exact: true })).toBeVisible({ timeout: 120000 });
+      .filter({ has: page.getByRole('heading', { name: 'Backtest results', exact: true }) });
+    await resultsCard.getByRole('button', { name: 'Run Backtest', exact: true }).click();
+    await expect(resultsCard.getByText('Total return', { exact: true })).toBeVisible({ timeout: 120000 });
 
     const before = await versions(page);
     expect(before).toHaveLength(1);
@@ -171,7 +174,7 @@ test.describe('strategy revision journey', () => {
     await page.getByTestId('revision-form').waitFor({ timeout: 15000 });
     // Regression: equal arrays used to compare by reference, so asset_ids
     // showed up as an edit the owner never made.
-    await expect(page.getByTestId('revision-preview').getByText('目前沒有變更')).toBeVisible();
+    await expect(page.getByTestId('revision-preview').getByText('Nothing changed yet')).toBeVisible();
   });
 
   test('a one-rule change is the only difference the preview reports', async () => {
@@ -180,14 +183,14 @@ test.describe('strategy revision journey', () => {
     await page.getByTestId('revision-expectation').fill(EXPECTATION);
 
     const preview = page.getByTestId('revision-preview');
-    await expect(preview).toContainText('策略設定變更');
-    await expect(preview).toContainText('signal_parameters.long_window：20 → 30');
+    await expect(preview).toContainText('Strategy settings changed');
+    await expect(preview).toContainText('signal_parameters.long_window: 20 → 30');
     for (const noise of ['schema_version', 'frequency', 'asset_ids', 'dataset.', 'synthetic']) {
       await expect(preview).not.toContainText(noise);
     }
 
     await page.getByTestId('revision-submit').click();
-    await expect(page.getByTestId('revision-notice')).toContainText('已建立修訂版本');
+    await expect(page.getByTestId('revision-notice')).toContainText('Revision created');
     await expect(revisionRows(page)).toHaveCount(1);
 
     const after = await versions(page);
@@ -228,22 +231,22 @@ test.describe('strategy revision journey', () => {
   test('the revision can be researched and compared against its source', async () => {
     const row = revisionRows(page);
     await row.locator('[data-testid^="revision-run-"]').click();
-    await expect(page.getByTestId('revision-notice')).toContainText('回測完成', {
+    await expect(page.getByTestId('revision-notice')).toContainText('backtest completed', {
       timeout: 120000,
     });
-    await expect(row.getByText('修訂回測：已完成')).toBeVisible({ timeout: 120000 });
+    await expect(row.getByText('Revision backtest: Completed')).toBeVisible({ timeout: 120000 });
 
     const compareLink = row.locator('[data-testid^="revision-compare-"]');
     await expect(compareLink).toBeVisible({ timeout: 60000 });
     await compareLink.click();
     await page.waitForURL((url) => url.pathname.includes('/runs/compare'), { timeout: 30000 });
-    await expect(page.getByRole('heading', { name: '儲存比較', exact: true })).toBeVisible();
-    await expect(page.getByText('選取嘅結果：')).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Save comparison', exact: true })).toBeVisible();
+    await expect(page.getByText('Selected results:')).toBeVisible();
 
-    await page.getByPlaceholder('例如：檢查佣金率對回報嘅影響').fill(PURPOSE);
-    await page.getByPlaceholder('記錄你嘅觀察同結論...').fill(NOTES);
-    await page.getByRole('button', { name: '儲存', exact: true }).click();
-    await expect(page.getByText('比較已儲存')).toBeVisible({ timeout: 30000 });
+    await page.getByPlaceholder('e.g. Check how commission rate affects returns').fill(PURPOSE);
+    await page.getByPlaceholder('Record your observations and conclusions…').fill(NOTES);
+    await page.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(page.getByText('Comparison saved')).toBeVisible({ timeout: 30000 });
 
     const stored = await apiGet<Array<{ purpose: string; notes: string }>>(
       page,
@@ -260,22 +263,22 @@ test.describe('strategy revision journey', () => {
     });
     const row = revisionRows(page);
     await row.waitFor({ timeout: 30000 });
-    await row.locator('[data-testid^="revision-outcome-met-"]').selectOption({ label: '符合預期' });
+    await row.locator('[data-testid^="revision-outcome-met-"]').selectOption({ label: 'Matched expectation' });
     await row.locator('[data-testid^="revision-outcome-text-"]').fill(OUTCOME);
     await row.locator('[data-testid^="revision-outcome-save-"]').click();
-    await expect(page.getByTestId('revision-notice')).toContainText('已記錄');
+    await expect(page.getByTestId('revision-notice')).toContainText('Recorded the result');
     await expect(row.locator('[data-testid^="revision-outcome-value-"]')).toBeVisible();
 
     await page.reload({ waitUntil: 'networkidle' });
     const reloaded = revisionRows(page);
     await reloaded.waitFor({ timeout: 30000 });
     await expect(reloaded.locator('[data-testid^="revision-outcome-value-"]')).toContainText(
-      '符合預期',
+      'Matched expectation',
     );
     await expect(reloaded.locator('[data-testid^="revision-outcome-value-"]')).toContainText(MARKER);
     await expect(reloaded.locator('[data-testid^="revision-compare-"]')).toBeVisible({ timeout: 30000 });
-    await expect(reloaded.getByText('修訂回測：已完成')).toBeVisible();
-    await expect(page.getByText('總報酬', { exact: true })).toBeVisible();
+    await expect(reloaded.getByText('Revision backtest: Completed')).toBeVisible();
+    await expect(page.getByText('Total return', { exact: true })).toBeVisible();
 
     const stored = await versions(page);
     const revision = stored.find((v) => v.id === journey.revisionVersionId);

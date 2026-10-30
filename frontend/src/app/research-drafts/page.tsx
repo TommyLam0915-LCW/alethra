@@ -6,6 +6,7 @@ import Link from 'next/link';
 import { api } from '@/lib/api';
 import { statusPillClass } from '@/lib/status-styles';
 import { formatDate } from '@/lib/format';
+import { DRAFT_STATUS_LABELS, STRATEGY_TEMPLATE_LABELS, label } from '@/lib/copy';
 
 interface ResearchDraft {
   id: string;
@@ -17,18 +18,10 @@ interface ResearchDraft {
   updated_at: string;
 }
 
-const STATUS_LABELS: Record<string, string> = {
-  draft: '草稿',
-  pending_review: '待審閱',
-  accepted: '已接受',
-  rejected: '已退回',
-};
-
-const TEMPLATE_OPTIONS = [
-  { value: 'buy_and_hold', label: 'Buy & Hold（買入持有）' },
-  { value: 'sma_crossover', label: 'SMA Crossover（均線交叉）' },
-  { value: 'price_change_fixed_hold', label: 'Price Change Fixed Hold（價變固定持有）' },
-];
+const TEMPLATE_OPTIONS = Object.entries(STRATEGY_TEMPLATE_LABELS).map(([value, text]) => ({
+  value,
+  label: text,
+}));
 
 export default function ResearchDraftsPage() {
   const router = useRouter();
@@ -57,7 +50,7 @@ export default function ResearchDraftsPage() {
       const data = await api.researchDrafts.list();
       setDrafts(data);
     } catch (err: any) {
-      setError(err.message || '載入失敗');
+      setError(err.message || 'The research drafts could not be loaded');
     } finally {
       setLoading(false);
     }
@@ -76,7 +69,7 @@ export default function ResearchDraftsPage() {
       const draft = await api.researchDrafts.create(payload);
       router.push(`/research-drafts/${draft.id}`);
     } catch (err: any) {
-      setError(err.message || '建立草稿失敗');
+      setError(err.message || 'The draft could not be created');
       setCreating(false);
     }
   };
@@ -85,79 +78,83 @@ export default function ResearchDraftsPage() {
     <div className="container" style={{ paddingTop: '40px', paddingBottom: '40px' }}>
       <div style={{ marginBottom: '20px' }}>
         <Link href="/dashboard" style={{ color: 'var(--primary-text)', textDecoration: 'none' }}>
-          返回我的實驗
+          Back to my experiments
         </Link>
       </div>
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-        <h1>研究草稿</h1>
+        <h1>Research drafts</h1>
         <button
           className="btn btn-primary"
           onClick={() => setShowCreate(!showCreate)}
         >
-          {showCreate ? '取消' : '建立草稿'}
+          {showCreate ? 'Cancel' : 'New draft'}
         </button>
       </div>
 
       <div className="alert alert-warning" style={{ marginBottom: '24px' }}>
-        <strong>模擬研究助手——僅供流程示範。</strong>{' '}
-        本功能使用確定性模擬助手，不會呼叫外部 AI 服務。問題為預先定義，非真實 AI 分析。
-        接受草稿僅記錄研究筆記，不會建立可執行策略、啟動回測、或建立模型版本。
+        <strong>Simulated research assistant — workflow demo only.</strong>{' '}
+        This feature uses a deterministic simulated assistant and does not call an external AI service. The questions are predefined, not real AI analysis.
+        Accepting a draft only records research notes; it does not create an executable strategy, start a backtest, or create a model version.
       </div>
 
       {showCreate && (
         <div className="card" style={{ marginBottom: '24px' }}>
-          <h3 style={{ marginBottom: '8px' }}>建立新研究草稿</h3>
+          <h3 style={{ marginBottom: '8px' }}>Create a new research draft</h3>
           <p style={{ color: 'var(--text-muted)', fontSize: '13px', marginBottom: '16px' }}>
-            先記錄標題與假設即可。其他欄位可在草稿詳情頁補充；接受草稿後，可將欄位套用到新實驗。
+            Start with a title and hypothesis. You can fill in the other fields on the draft page; once a draft is accepted, its fields can be applied to a new experiment.
           </p>
           <form onSubmit={handleCreateDraft}>
             <div className="form-group">
-              <label>草稿標題 *</label>
+              <label htmlFor="draft-title">Draft title *</label>
               <input
+                id="draft-title"
                 type="text"
                 className="input"
                 value={createTitle}
                 onChange={(e) => setCreateTitle(e.target.value)}
-                placeholder="例如：測試 DEMO-ALPHA 的均線交叉策略"
+                placeholder="e.g. Test a moving-average crossover on DEMO-ALPHA"
                 required
               />
             </div>
             <div className="form-group">
-              <label>研究假設</label>
+              <label htmlFor="draft-hypothesis">Research hypothesis</label>
               <textarea
+                id="draft-hypothesis"
                 className="input"
                 value={createHypothesis}
                 onChange={(e) => setCreateHypothesis(e.target.value)}
-                placeholder="描述你想檢驗的投資假設"
+                placeholder="Describe the investment hypothesis you want to test"
                 rows={3}
                 style={{ resize: 'vertical' }}
               />
             </div>
             <div className="form-group">
-              <label>策略模板</label>
+              <label htmlFor="draft-template">Strategy template</label>
               <select
+                id="draft-template"
                 className="input"
                 value={createTemplate}
                 onChange={(e) => setCreateTemplate(e.target.value)}
               >
-                <option value="">未選擇</option>
+                <option value="">Not selected</option>
                 {TEMPLATE_OPTIONS.map((t) => (
                   <option key={t.value} value={t.value}>{t.label}</option>
                 ))}
               </select>
             </div>
             <div className="form-group">
-              <label>研究標的</label>
+              <label htmlFor="draft-asset">Asset</label>
               <input
+                id="draft-asset"
                 type="text"
                 className="input"
                 value={createAsset}
                 onChange={(e) => setCreateAsset(e.target.value)}
-                placeholder="例如 DEMO-ALPHA"
+                placeholder="e.g. DEMO-ALPHA"
               />
               <p style={{ color: 'var(--text-muted)', fontSize: '12px', marginBottom: 0 }}>
-                僅限大寫字母、數字、連字號與點號。
+                Uppercase letters, digits, hyphens and dots only.
               </p>
             </div>
             <div style={{ display: 'flex', gap: '8px' }}>
@@ -166,37 +163,37 @@ export default function ResearchDraftsPage() {
                 className="btn btn-primary"
                 disabled={!createTitle.trim() || creating}
               >
-                {creating ? '建立中...' : '建立草稿'}
+                {creating ? 'Creating…' : 'Create draft'}
               </button>
               <button
                 type="button"
                 className="btn btn-secondary"
                 onClick={() => setShowCreate(false)}
               >
-                取消
+                Cancel
               </button>
             </div>
           </form>
         </div>
       )}
 
-      {error && <div className="alert alert-warning">{error}</div>}
+      {error && <div className="alert alert-warning" role="alert">{error}</div>}
 
       {loading ? (
-        <div className="card" style={{ textAlign: 'center', padding: '40px' }}>
-          載入中...
+        <div className="card" role="status" aria-live="polite" style={{ textAlign: 'center', padding: '40px' }}>
+          Loading…
         </div>
       ) : drafts.length === 0 ? (
         <div className="card" style={{ textAlign: 'center', padding: '60px' }}>
-          <p style={{ color: 'var(--text-secondary)', marginBottom: '20px' }}>尚無研究草稿</p>
+          <p style={{ color: 'var(--text-secondary)', marginBottom: '20px' }}>No research drafts yet</p>
           <p style={{ color: 'var(--text-muted)', fontSize: '14px', marginBottom: '24px' }}>
-            研究草稿用於在正式建立實驗前，結構化地整理你的研究假設與方法論。
+            Research drafts structure your hypothesis and method before you create an experiment.
           </p>
           <button
             className="btn btn-primary"
             onClick={() => setShowCreate(true)}
           >
-            建立第一個草稿
+            Create your first draft
           </button>
         </div>
       ) : (
@@ -213,13 +210,13 @@ export default function ResearchDraftsPage() {
                     <div>
                       <h3 style={{ marginBottom: '8px' }}>{draft.title}</h3>
                       <p style={{ color: 'var(--text-secondary)', fontSize: '14px' }}>
-                        {draft.strategy_template && <span style={{ marginRight: '16px' }}>模板: {draft.strategy_template}</span>}
-                        {draft.asset_symbol && <span style={{ marginRight: '16px' }}>標的: {draft.asset_symbol}</span>}
-                        <span>建立於 {formatDate(draft.created_at)}</span>
+                        {draft.strategy_template && <span style={{ marginRight: '16px' }}>Template: {label(STRATEGY_TEMPLATE_LABELS, draft.strategy_template)}</span>}
+                        {draft.asset_symbol && <span style={{ marginRight: '16px' }}>Asset: {draft.asset_symbol}</span>}
+                        <span>Created {formatDate(draft.created_at)}</span>
                       </p>
                     </div>
                     <span className={statusPillClass(draft.status)}>
-                      {STATUS_LABELS[draft.status] || draft.status}
+                      {label(DRAFT_STATUS_LABELS, draft.status)}
                     </span>
                   </div>
                 </div>

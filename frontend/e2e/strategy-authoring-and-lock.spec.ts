@@ -57,7 +57,7 @@ const runtime = loadRuntime();
 const COVERED = 'US:AAPL';
 const UNCOVERED = 'US:MSFT';
 const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-const TITLE = `E2E 覆蓋預設策略（僅供自動化測試）${stamp}`;
+const TITLE = `E2E default coverage strategy (automated test only) ${stamp}`;
 
 async function fetchCoverage(instrumentId: string): Promise<DataCoverage> {
   const response = await fetch(`${runtime.backendBase}/api/v1/instruments/${instrumentId}`);
@@ -80,7 +80,7 @@ const coverageLine = (page: Page) => page.getByTestId('exp-coverage-line');
 const lockCard = (page: Page) =>
   page.locator('.card').filter({ has: page.getByTestId('exp-lock-confirm') });
 const timelineCard = (page: Page) =>
-  page.locator('.card').filter({ has: page.getByRole('heading', { name: /研究時間線/ }) });
+  page.locator('.card').filter({ has: page.getByRole('heading', { name: /Research timeline/ }) });
 
 async function openForm(page: Page): Promise<void> {
   await page.goto(`${runtime.frontendBase}/experiments/new`);
@@ -147,8 +147,8 @@ test.describe('strategy authoring window and immutable lock', () => {
 
   test('defaults the window on stored bars, not on declared availability', async () => {
     await openForm(page);
-    await expect(coverageLine(page)).toContainText(`伺服器已儲存 K 線 ${journey.covered!.stored_start}`);
-    await expect(coverageLine(page)).toContainText('提供者聲明可供應');
+    await expect(coverageLine(page)).toContainText(`the server stores bars from ${journey.covered!.stored_start}`);
+    await expect(coverageLine(page)).toContainText('the provider declares it can supply');
 
     const today = new Date().toISOString().slice(0, 10);
     const storedStart = journey.covered!.stored_start as string;
@@ -168,12 +168,12 @@ test.describe('strategy authoring window and immutable lock', () => {
     await assetSelect(page).selectOption(UNCOVERED);
     await expect(page.getByTestId('exp-coverage-empty')).toBeVisible();
     await expect(page.getByTestId('exp-coverage-empty')).toContainText(UNCOVERED);
-    await expect(coverageLine(page)).toContainText('（0 根）');
+    await expect(coverageLine(page)).toContainText('(0 bars)');
   });
 
   test('warns when a hand-picked window cannot touch any stored bar', async () => {
     await assetSelect(page).selectOption(COVERED);
-    await expect(coverageLine(page)).toContainText(`伺服器已儲存 K 線`);
+    await expect(coverageLine(page)).toContainText('the server stores bars from');
     await expect(page.getByTestId('exp-coverage-mismatch')).toHaveCount(0);
 
     await startDate(page).fill(journey.outside.start);
@@ -194,7 +194,7 @@ test.describe('strategy authoring window and immutable lock', () => {
     await endDate(page).fill(journey.picked.end);
 
     releaseCoverage();
-    await expect(coverageLine(page)).toContainText(`伺服器已儲存 K 線`);
+    await expect(coverageLine(page)).toContainText('the server stores bars from');
     await expect(startDate(page)).toHaveValue(journey.picked.start);
     await expect(endDate(page)).toHaveValue(journey.picked.end);
     holdCoverage = false;
@@ -210,7 +210,7 @@ test.describe('strategy authoring window and immutable lock', () => {
     const created = page.waitForResponse(
       (res) => res.request().method() === 'POST' && res.url().endsWith('/api/v1/experiments/')
     );
-    await page.getByRole('button', { name: '建立實驗' }).click();
+    await page.getByRole('button', { name: 'Create experiment' }).click();
     const response = await created;
     expect(response.status()).toBe(201);
     // The submitted spec carries the window the form showed, not a naive default.
@@ -229,12 +229,12 @@ test.describe('strategy authoring window and immutable lock', () => {
   test('cancel in the confirmation card freezes nothing', async () => {
     await page.getByTestId('exp-lock-btn').click();
     await expect(lockCard(page)).toContainText(COVERED);
-    await expect(lockCard(page)).toContainText(`${journey.picked.start} 至 ${journey.picked.end}`);
+    await expect(lockCard(page)).toContainText(`${journey.picked.start} to ${journey.picked.end}`);
 
     await page.getByTestId('exp-lock-cancel').click();
     await expect(page.getByTestId('exp-lock-confirm')).toHaveCount(0);
     expect(journey.putCalls, 'cancel must not issue the freeze PUT').toEqual([]);
-    await expect(page.getByText('草稿', { exact: true })).toBeVisible();
+    await expect(page.getByText('Draft', { exact: true })).toBeVisible();
   });
 
   test('confirming the card locks the version and survives a reload', async () => {
@@ -248,18 +248,18 @@ test.describe('strategy authoring window and immutable lock', () => {
     expect(((await response.json()) as { status: string }).status).toBe('locked');
     expect(journey.putCalls, 'exactly one freeze').toHaveLength(1);
 
-    await expect(page.getByText('已鎖定', { exact: true })).toBeVisible();
+    await expect(page.getByText('Locked', { exact: true })).toBeVisible();
     await expect(page.getByTestId('exp-lock-btn')).toHaveCount(0);
     await expect(page.getByTestId('exp-lock-confirm')).toHaveCount(0);
     await expect(page.getByTestId('exp-simulation-link')).toBeVisible();
 
     // Persistence is server-side, not component state.
     await page.reload();
-    await expect(page.getByText('已鎖定', { exact: true })).toBeVisible();
+    await expect(page.getByText('Locked', { exact: true })).toBeVisible();
     await expect(page.getByTestId('exp-lock-btn')).toHaveCount(0);
     await expect(page.getByTestId('exp-simulation-link')).toBeVisible();
 
-    await timelineCard(page).getByRole('button', { name: '展開' }).click();
-    await expect(timelineCard(page)).toContainText('策略鎖定');
+    await timelineCard(page).getByRole('button', { name: 'Expand' }).click();
+    await expect(timelineCard(page)).toContainText('Strategy locked');
   });
 });

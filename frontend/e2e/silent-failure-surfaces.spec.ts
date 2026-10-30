@@ -85,12 +85,12 @@ test.describe('load failures are visible, not empty states', () => {
 
     const notice = page.getByTestId('dashboard-load-error');
     await expect(notice).toBeVisible();
-    await expect(notice).toContainText('無法載入實驗列表');
-    await expect(page.getByRole('heading', { name: '還沒有任何實驗' })).toHaveCount(0);
+    await expect(notice).toContainText('Could not load experiments');
+    await expect(page.getByRole('heading', { name: 'No experiments yet' })).toHaveCount(0);
 
     failing = false;
-    await notice.getByRole('button', { name: '重試' }).click();
-    await expect(page.getByRole('heading', { name: '還沒有任何實驗' })).toBeVisible();
+    await notice.getByRole('button', { name: 'Retry' }).click();
+    await expect(page.getByRole('heading', { name: 'No experiments yet' })).toBeVisible();
     await expect(notice).toHaveCount(0);
   });
 

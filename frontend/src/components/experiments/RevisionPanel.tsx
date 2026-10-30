@@ -4,6 +4,7 @@ import { useMemo, useState, type ReactNode } from 'react';
 import Link from 'next/link';
 import { api, ApiError } from '@/lib/api';
 import { formatDateTime } from '@/lib/format';
+import { RUN_STATUS_LABELS, STRATEGY_TEMPLATE_LABELS, label } from '@/lib/copy';
 
 interface StrategyVersion {
   id: string;
@@ -44,16 +45,15 @@ interface Props {
   onChanged: () => Promise<void> | void;
 }
 
-const TEMPLATES = [
-  { value: 'buy_and_hold', label: '買入並持有' },
-  { value: 'sma_crossover', label: '均線交叉' },
-  { value: 'price_change_fixed_hold', label: '跌幅定持' },
-];
+const TEMPLATES = Object.entries(STRATEGY_TEMPLATE_LABELS).map(([value, text]) => ({
+  value,
+  label: text,
+}));
 
 const CHANGE_KIND_LABEL: Record<string, string> = {
-  strategy_only: '策略設定變更',
-  period_only: '只改研究期間',
-  strategy_and_period: '策略設定與研究期間同時變更',
+  strategy_only: 'Strategy settings changed',
+  period_only: 'Research period only',
+  strategy_and_period: 'Strategy settings and research period changed',
 };
 
 const IGNORED_FIELDS = new Set(['user_approved_at']);
@@ -88,18 +88,18 @@ function canonicalSpec(spec: any): Record<string, any> {
 }
 
 function isUnsupportedSpec(spec: any): { blocked: boolean; reason: string } {
-  if (!spec) return { blocked: true, reason: '來源版本缺少策略設定，無法建立修訂。' };
+  if (!spec) return { blocked: true, reason: 'The source version has no strategy settings, so a revision cannot be created from it.' };
   const frequency = String(spec.frequency ?? '1d');
   if (frequency !== '1d') {
     return {
       blocked: true,
-      reason: `此版本的頻率為 ${frequency}，目前修訂表單只支援日線（1d）。後端亦不接受其他頻率，因此不會自動降級為日線。`,
+      reason: `This version runs at ${frequency}. The revision form supports daily bars (1d) only, and the backend rejects other frequencies, so nothing is downgraded automatically.`,
     };
   }
   if (spec.session || spec.timeframe) {
     return {
       blocked: true,
-      reason: '此版本含盤中（session/timeframe）設定，超出目前修訂表單可授權的範圍。請勿在此修改，以免與執行語義不一致。',
+      reason: 'This version contains intraday (session/timeframe) settings that are outside what this revision form can authorise. Do not change them here — that would diverge from how the strategy executes.',
     };
   }
   return { blocked: false, reason: '' };
@@ -158,7 +158,7 @@ function latestCompletedRun(runs: RunRow[], versionId: string): RunRow | null {
 function describeError(err: unknown, fallback: string): string {
   if (!(err instanceof ApiError)) return fallback;
   if (err.status === 429 && err.message === 'quota_exceeded') {
-    return '本次回測沒有開始，也沒有產生結果：所屬方案的研究執行額度已用完。請於「方案與用量」查看已用與上限，或稍後再試。';
+    return 'No backtest was started and no results were produced: the research run quota for this plan is used up. Check used versus limit on the Subscription plans page, or try again later.';
   }
   return err.message;
 }
@@ -320,19 +320,19 @@ export default function RevisionPanel({
   const submitRevision = async () => {
     setFormError('');
     if (!changeReason.trim()) {
-      setFormError('請填寫變更原因：之後只靠版本號無法還原當時的研究意圖。');
+      setFormError('Add a reason for the change: a version number alone will not explain what you were trying to find out.');
       return;
     }
     if (preview.fields.length === 0) {
-      setFormError('目前沒有任何變更；請修改至少一個欄位。');
+      setFormError('Nothing has changed yet. Change at least one field.');
       return;
     }
     if (!draftSpec.asset_ids.length) {
-      setFormError('請至少輸入一個研究標的。');
+      setFormError('Enter at least one research asset.');
       return;
     }
     if (!draftSpec.start_date || !draftSpec.end_date) {
-      setFormError('請填寫研究期間的開始與結束日期。');
+      setFormError('Enter both a start and an end date for the research period.');
       return;
     }
 
@@ -348,12 +348,12 @@ export default function RevisionPanel({
       setFormOpen(false);
       setActionError('');
       setActionNotice(
-        `已建立修訂版本（來源 v${base.version_number}）。來源版本未被改寫。`
+        `Revision created from v${base.version_number}. The source version was not overwritten.`
       );
       await onChanged();
     } catch (err) {
-      const detail = err instanceof ApiError ? err.message : '建立修訂失敗';
-      setFormError(`${detail}（輸入內容已保留，可直接重試）`);
+      const detail = err instanceof ApiError ? err.message : 'The revision could not be created';
+      setFormError(`${detail} (your input is kept, so you can retry directly)`);
     } finally {
       setSubmitting(false);
     }
@@ -366,14 +366,15 @@ export default function RevisionPanel({
     try {
       const run = await api.runs.create(version.id);
       const ret = run?.metrics?.total_return_pct;
+      const status = run?.status ? label(RUN_STATUS_LABELS, run.status) : 'Unknown';
       setActionNotice(
         run?.status === 'completed'
-          ? `v${version.version_number} 回測完成${ret != null ? `：總報酬 ${Number(ret).toFixed(2)}%` : ''}。`
-          : `v${version.version_number} 回測狀態：${run?.status ?? '未知'}。`
+          ? `v${version.version_number} backtest completed${ret != null ? `: total return ${Number(ret).toFixed(2)}%` : ''}.`
+          : `v${version.version_number} backtest status: ${status}.`
       );
       await onChanged();
     } catch (err) {
-      setActionError(describeError(err, '執行回測失敗'));
+      setActionError(describeError(err, 'The backtest could not be started'));
     } finally {
       setRunningVersionId(null);
     }
@@ -385,7 +386,7 @@ export default function RevisionPanel({
       text: meta.outcome ?? '',
     };
     if (draft.met === '' || !draft.text.trim()) {
-      setActionError('請選擇是否符合預期，並填寫結論。');
+      setActionError('Choose whether the outcome matched your expectation, and write a conclusion.');
       return;
     }
     setSavingOutcomeId(version.id);
@@ -395,10 +396,10 @@ export default function RevisionPanel({
         met_expectation: draft.met === 'true',
         outcome: draft.text.trim(),
       });
-      setActionNotice(`已記錄 v${version.version_number} 的修訂結果。`);
+      setActionNotice(`Recorded the result for v${version.version_number}.`);
       await onChanged();
     } catch (err) {
-      const detail = err instanceof ApiError ? err.message : '記錄結果失敗';
+      const detail = err instanceof ApiError ? err.message : 'The result could not be recorded';
       setActionError(detail);
     } finally {
       setSavingOutcomeId(null);
@@ -408,7 +409,7 @@ export default function RevisionPanel({
   return (
     <div className="card" style={{ marginBottom: '20px' }} data-testid="revision-panel">
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-        <h3 style={{ margin: 0 }}>策略修訂</h3>
+        <h3 style={{ margin: 0 }}>Strategy revisions</h3>
         <button
           type="button"
           className="btn btn-primary"
@@ -417,12 +418,13 @@ export default function RevisionPanel({
           onClick={openForm}
           disabled={unsupported.blocked || submitting}
         >
-          {formOpen ? '重新整理表格' : '建立修訂'}
+          {formOpen ? 'Reset form' : 'Create revision'}
         </button>
       </div>
 
       <p style={{ color: 'var(--text-secondary)', fontSize: '13px', marginTop: 0 }}>
-        修訂會建立新版本，來源版本不會被改寫；來源版本、變更原因與預期結果都會保留在版本紀錄中。
+        A revision creates a new version; the source version is not overwritten. The source
+        version, the reason for the change and the expected outcome stay in the version history.
       </p>
 
       {unsupported.blocked && (
@@ -430,14 +432,14 @@ export default function RevisionPanel({
           style={{ padding: '12px', backgroundColor: 'rgba(245,158,11,0.14)', borderRadius: '6px', fontSize: '13px', color: 'var(--warning)', marginBottom: '12px' }}
           data-testid="revision-unsupported"
         >
-          <strong>此版本暫不支援 UI 修訂：</strong>{unsupported.reason}
+          <strong>Revisions cannot be created in the UI for this version:</strong> {unsupported.reason}
         </div>
       )}
 
       {!formOpen && (
         <div style={{ marginBottom: '12px' }}>
           <label htmlFor="revision-base-select" style={{ display: 'block', fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '4px' }}>
-            修訂來源版本
+            Revision source version
           </label>
           <select
             id="revision-base-select"
@@ -450,8 +452,8 @@ export default function RevisionPanel({
             {versions.map((v) => (
               <option key={v.id} value={v.id}>
                 v{v.version_number}
-                {v.id === currentVersionId ? '（目前）' : ''}
-                {v.locked_at ? ' · 已鎖定' : ''}
+                {v.id === currentVersionId ? ' (current)' : ''}
+                {v.locked_at ? ' · locked' : ''}
               </option>
             ))}
           </select>
@@ -464,14 +466,15 @@ export default function RevisionPanel({
           data-testid="revision-form"
         >
           <div style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '12px' }}>
-            來源：v{base.version_number}
-            {base.locked_at ? '（已鎖定，修訂後仍保留原版本）' : ''}
-            {experimentStatus === 'locked' ? ' · 此實驗已鎖定，修訂不會取代目前版本指標' : ''}
+            Source: v{base.version_number}
+            {base.locked_at ? ' (locked — the original version is kept after the revision)' : ''}
+            {experimentStatus === 'locked' ? ' · This experiment is locked, so the revision will not replace the current version&apos;s metrics' : ''}
           </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '12px' }}>
-            <Field label="策略模板">
+            <Field label="Strategy template" htmlFor="revision-template">
               <select
+                id="revision-template"
                 className="input"
                 value={templateType}
                 onChange={(e) => setTemplateType(e.target.value)}
@@ -483,8 +486,9 @@ export default function RevisionPanel({
                 ))}
               </select>
             </Field>
-            <Field label="研究標的（逗號分隔）">
+            <Field label="Research assets (comma-separated)" htmlFor="revision-assets">
               <input
+                id="revision-assets"
                 className="input"
                 value={assetIds}
                 onChange={(e) => setAssetIds(e.target.value)}
@@ -492,35 +496,35 @@ export default function RevisionPanel({
                 style={{ width: '100%' }}
               />
             </Field>
-            <Field label="開始日期">
-              <input type="date" className="input" value={startDate}
+            <Field label="Start date" htmlFor="revision-start">
+              <input id="revision-start" type="date" className="input" value={startDate}
                 onChange={(e) => setStartDate(e.target.value)} data-testid="revision-start" style={{ width: '100%' }} />
             </Field>
-            <Field label="結束日期">
-              <input type="date" className="input" value={endDate}
+            <Field label="End date" htmlFor="revision-end">
+              <input id="revision-end" type="date" className="input" value={endDate}
                 onChange={(e) => setEndDate(e.target.value)} data-testid="revision-end" style={{ width: '100%' }} />
             </Field>
-            <Field label="初始資金">
-              <input type="number" className="input" value={initialCash}
+            <Field label="Initial cash" htmlFor="revision-cash">
+              <input id="revision-cash" type="number" className="input" value={initialCash}
                 onChange={(e) => setInitialCash(e.target.value)} data-testid="revision-cash" style={{ width: '100%' }} />
             </Field>
-            <Field label="手續費率">
-              <input type="number" step="0.0001" className="input" value={commissionRate}
+            <Field label="Commission rate" htmlFor="revision-commission">
+              <input id="revision-commission" type="number" step="0.0001" className="input" value={commissionRate}
                 onChange={(e) => setCommissionRate(e.target.value)} data-testid="revision-commission" style={{ width: '100%' }} />
             </Field>
-            <Field label="滑價率">
-              <input type="number" step="0.0001" className="input" value={slippageRate}
+            <Field label="Slippage rate" htmlFor="revision-slippage">
+              <input id="revision-slippage" type="number" step="0.0001" className="input" value={slippageRate}
                 onChange={(e) => setSlippageRate(e.target.value)} data-testid="revision-slippage" style={{ width: '100%' }} />
             </Field>
 
             {templateType === 'sma_crossover' && (
               <>
-                <Field label="短均線窗口">
-                  <input type="number" className="input" value={shortWindow}
+                <Field label="Short moving-average window" htmlFor="revision-short-window">
+                  <input id="revision-short-window" type="number" className="input" value={shortWindow}
                     onChange={(e) => setShortWindow(e.target.value)} data-testid="revision-short-window" style={{ width: '100%' }} />
                 </Field>
-                <Field label="長均線窗口">
-                  <input type="number" className="input" value={longWindow}
+                <Field label="Long moving-average window" htmlFor="revision-long-window">
+                  <input id="revision-long-window" type="number" className="input" value={longWindow}
                     onChange={(e) => setLongWindow(e.target.value)} data-testid="revision-long-window" style={{ width: '100%' }} />
                 </Field>
               </>
@@ -528,69 +532,72 @@ export default function RevisionPanel({
 
             {templateType === 'price_change_fixed_hold' && (
               <>
-                <Field label="回看天數">
-                  <input type="number" className="input" value={lookbackDays}
+                <Field label="Lookback (days)" htmlFor="revision-lookback">
+                  <input id="revision-lookback" type="number" className="input" value={lookbackDays}
                     onChange={(e) => setLookbackDays(e.target.value)} data-testid="revision-lookback" style={{ width: '100%' }} />
                 </Field>
-                <Field label="跌幅門檻（比例）">
-                  <input type="number" step="0.001" className="input" value={thresholdPct}
+                <Field label="Drop threshold (fraction)" htmlFor="revision-threshold">
+                  <input id="revision-threshold" type="number" step="0.001" className="input" value={thresholdPct}
                     onChange={(e) => setThresholdPct(e.target.value)} data-testid="revision-threshold" style={{ width: '100%' }} />
                 </Field>
-                <Field label="持有天數">
-                  <input type="number" className="input" value={holdingDays}
+                <Field label="Holding period (days)" htmlFor="revision-holding">
+                  <input id="revision-holding" type="number" className="input" value={holdingDays}
                     onChange={(e) => setHoldingDays(e.target.value)} data-testid="revision-holding" style={{ width: '100%' }} />
                 </Field>
               </>
             )}
 
-            <Field label="停損價（可留空）">
-              <input type="number" step="0.01" className="input" value={stopPrice}
+            <Field label="Stop price (optional)" htmlFor="revision-stop-price">
+              <input id="revision-stop-price" type="number" step="0.01" className="input" value={stopPrice}
                 onChange={(e) => setStopPrice(e.target.value)} data-testid="revision-stop-price" style={{ width: '100%' }} />
             </Field>
-            <Field label="停損比例（可留空）">
-              <input type="number" step="0.001" className="input" value={stopPct}
+            <Field label="Stop fraction (optional)" htmlFor="revision-stop-pct">
+              <input id="revision-stop-pct" type="number" step="0.001" className="input" value={stopPct}
                 onChange={(e) => setStopPct(e.target.value)} data-testid="revision-stop-pct" style={{ width: '100%' }} />
             </Field>
-            <Field label="目標價（可留空）">
-              <input type="number" step="0.01" className="input" value={targetPrice}
+            <Field label="Target price (optional)" htmlFor="revision-target-price">
+              <input id="revision-target-price" type="number" step="0.01" className="input" value={targetPrice}
                 onChange={(e) => setTargetPrice(e.target.value)} data-testid="revision-target-price" style={{ width: '100%' }} />
             </Field>
-            <Field label="目標比例（可留空）">
-              <input type="number" step="0.001" className="input" value={targetPct}
+            <Field label="Target fraction (optional)" htmlFor="revision-target-pct">
+              <input id="revision-target-pct" type="number" step="0.001" className="input" value={targetPct}
                 onChange={(e) => setTargetPct(e.target.value)} data-testid="revision-target-pct" style={{ width: '100%' }} />
             </Field>
           </div>
 
           <div style={{ marginTop: '12px', fontSize: '12px', color: 'var(--text-secondary)' }}>
-            頻率固定為日線（1d）。盤中策略目前不能由此表單建立，後端亦會拒絕非 1d 的設定，不會自動降級。
+            Frequency is fixed at daily bars (1d). Intraday strategies cannot be created from this
+            form, and the backend rejects non-1d settings rather than downgrading them.
           </div>
 
           <div style={{ marginTop: '16px' }}>
-            <label style={{ display: 'block', fontSize: '13px', fontWeight: 500, marginBottom: '4px' }}>
-              變更原因（必填）
+            <label htmlFor="revision-change-reason" style={{ display: 'block', fontSize: '13px', fontWeight: 500, marginBottom: '4px' }}>
+              Reason for change (required)
             </label>
             <textarea
+              id="revision-change-reason"
               className="input"
               rows={2}
               value={changeReason}
               onChange={(e) => setChangeReason(e.target.value)}
               data-testid="revision-change-reason"
-              placeholder="為何要改這個設定？"
+              placeholder="Why change this setting?"
               style={{ width: '100%', resize: 'vertical' }}
             />
           </div>
 
           <div style={{ marginTop: '12px' }}>
-            <label style={{ display: 'block', fontSize: '13px', fontWeight: 500, marginBottom: '4px' }}>
-              預期結果（選填）
+            <label htmlFor="revision-expectation" style={{ display: 'block', fontSize: '13px', fontWeight: 500, marginBottom: '4px' }}>
+              Expected outcome (optional)
             </label>
             <textarea
+              id="revision-expectation"
               className="input"
               rows={2}
               value={expectation}
               onChange={(e) => setExpectation(e.target.value)}
               data-testid="revision-expectation"
-              placeholder="改完之後，你預期會看到什麼？"
+              placeholder="What do you expect to see after the change?"
               style={{ width: '100%', resize: 'vertical' }}
             />
           </div>
@@ -601,20 +608,21 @@ export default function RevisionPanel({
           >
             <strong>
               {preview.fields.length === 0
-                ? '目前沒有變更'
-                : `${CHANGE_KIND_LABEL[preview.kind]} · ${preview.fields.length} 個欄位`}
+                ? 'Nothing changed yet'
+                : `${CHANGE_KIND_LABEL[preview.kind]} · ${preview.fields.length} field${preview.fields.length === 1 ? '' : 's'}`}
             </strong>
             {preview.fields.length > 0 && (
               <div style={{ marginTop: '6px', color: 'var(--text-muted)', lineHeight: 1.6 }}>
                 {preview.fields.map((field) => (
                   <div key={field}>
-                    {field}：{JSON.stringify(baseFlat[field])} → {JSON.stringify(draftFlat[field])}
+                    {field}: {JSON.stringify(baseFlat[field])} → {JSON.stringify(draftFlat[field])}
                   </div>
                 ))}
               </div>
             )}
             <div style={{ marginTop: '6px', color: 'var(--text-muted)', fontSize: '12px' }}>
-              資料期間、供應商與成本的差異會在執行與比較頁中顯示；如果只改期間，會標示為「只改研究期間」。
+              Differences in data period, provider and costs appear on the run and comparison pages.
+              A period-only change is labelled &ldquo;Research period only&rdquo;.
             </div>
           </div>
 
@@ -632,7 +640,7 @@ export default function RevisionPanel({
               onClick={submitRevision}
               disabled={submitting}
             >
-              {submitting ? '建立中...' : '建立修訂'}
+              {submitting ? 'Creating…' : 'Create revision'}
             </button>
             <button
               type="button"
@@ -641,14 +649,14 @@ export default function RevisionPanel({
               onClick={() => { setFormOpen(false); setFormError(''); }}
               disabled={submitting}
             >
-              取消
+              Cancel
             </button>
           </div>
         </div>
       )}
 
       {actionNotice && (
-        <p data-testid="revision-notice" style={{ color: 'var(--positive)', fontSize: '13px', margin: '0 0 12px' }}>
+        <p role="status" data-testid="revision-notice" style={{ color: 'var(--positive)', fontSize: '13px', margin: '0 0 12px' }}>
           {actionNotice}
         </p>
       )}
@@ -660,7 +668,8 @@ export default function RevisionPanel({
 
       {revisionVersions.length === 0 ? (
         <p style={{ color: 'var(--text-muted)', fontSize: '13px', margin: 0 }}>
-          尚未建立任何修訂版本。建立修訂後，可在這裡執行回測、與來源版本比較，並記錄結果是否符合預期。
+          No revisions yet. Once you create one, you can run a backtest, compare it with the
+          source version, and record whether the outcome matched your expectation.
         </p>
       ) : (
         <div style={{ display: 'grid', gap: '12px' }}>
@@ -689,19 +698,19 @@ export default function RevisionPanel({
                   <div>
                     <strong>v{version.version_number}</strong>
                     <span style={{ color: 'var(--text-secondary)', marginLeft: '8px', fontSize: '13px' }}>
-                      修訂自 v{meta.of_version_number}
-                      {version.id === currentVersionId ? ' · 目前版本' : ''}
+                      Revised from v{meta.of_version_number}
+                      {version.id === currentVersionId ? ' · current version' : ''}
                     </span>
                     <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px' }}>
-                      {CHANGE_KIND_LABEL[meta.change_kind] ?? meta.change_kind}：
-                      {meta.changed_fields?.length ? meta.changed_fields.join('、') : '未記錄'}
+                      {CHANGE_KIND_LABEL[meta.change_kind] ?? meta.change_kind}:
+                      {meta.changed_fields?.length ? meta.changed_fields.join(', ') : 'Not recorded'}
                     </div>
                     <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '2px' }}>
-                      變更原因：{version.change_reason ?? '未提供'}
+                      Reason for change: {version.change_reason ?? 'Not provided'}
                     </div>
                     {meta.expectation && (
                       <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '2px' }}>
-                        預期：{meta.expectation}
+                        Expected: {meta.expectation}
                       </div>
                     )}
                   </div>
@@ -714,7 +723,7 @@ export default function RevisionPanel({
                       onClick={() => runVersion({ id: version.id, version_number: version.version_number })}
                       disabled={runningVersionId !== null}
                     >
-                      {runningVersionId === version.id ? '執行中...' : '執行回測'}
+                      {runningVersionId === version.id ? 'Running…' : 'Run backtest'}
                     </button>
                     {compareHref ? (
                       <Link
@@ -723,11 +732,11 @@ export default function RevisionPanel({
                         style={{ fontSize: '12px', textDecoration: 'none' }}
                         data-testid={`revision-compare-${version.id}`}
                       >
-                        與來源版本比較
+                        Compare with source version
                       </Link>
                     ) : (
                       <span style={{ fontSize: '12px', color: 'var(--text-muted)', alignSelf: 'center' }}>
-                        兩邊都有完成回測後才可比較
+                        Both sides need a completed backtest before you can compare
                       </span>
                     )}
                   </div>
@@ -735,14 +744,14 @@ export default function RevisionPanel({
 
                 <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap', fontSize: '12px', color: 'var(--text-muted)', marginTop: '10px' }}>
                   <span>
-                    修訂回測：{revisionRun ? '已完成' : '未完成'}
+                    Revision backtest: {revisionRun ? 'Completed' : 'Not completed'}
                     {revisionRun?.metrics?.total_return_pct != null &&
-                      ` · 總報酬 ${Number(revisionRun.metrics.total_return_pct).toFixed(2)}%`}
+                      ` · Total return ${Number(revisionRun.metrics.total_return_pct).toFixed(2)}%`}
                   </span>
                   <span>
-                    來源回測：{sourceRun ? '已完成' : '未完成'}
+                    Source backtest: {sourceRun ? 'Completed' : 'Not completed'}
                     {sourceRun?.metrics?.total_return_pct != null &&
-                      ` · 總報酬 ${Number(sourceRun.metrics.total_return_pct).toFixed(2)}%`}
+                      ` · Total return ${Number(sourceRun.metrics.total_return_pct).toFixed(2)}%`}
                   </span>
                 </div>
 
@@ -750,7 +759,7 @@ export default function RevisionPanel({
                   {meta.outcome ? (
                     <div data-testid={`revision-outcome-value-${version.id}`} style={{ fontSize: '13px' }}>
                       <strong style={{ color: meta.met_expectation ? 'var(--positive)' : 'var(--warning)' }}>
-                        {meta.met_expectation ? '符合預期' : '未符合預期'}
+                        {meta.met_expectation ? 'Matched expectation' : 'Did not match expectation'}
                       </strong>
                       <span style={{ marginLeft: '8px', color: 'var(--text-muted)' }}>{meta.outcome}</span>
                       {meta.outcome_recorded_at && (
@@ -760,13 +769,14 @@ export default function RevisionPanel({
                       )}
                     </div>
                   ) : (
-                    <div style={{ fontSize: '13px', color: 'var(--text-muted)' }}>尚未記錄修訂結果</div>
+                    <div style={{ fontSize: '13px', color: 'var(--text-muted)' }}>No outcome recorded yet</div>
                   )}
 
                   <div style={{ display: 'flex', gap: '8px', marginTop: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
                     <select
                       className="input"
-                      style={{ width: '140px', fontSize: '12px' }}
+                      style={{ width: '170px', fontSize: '12px' }}
+                      aria-label={`Does the outcome of v${version.version_number} match your expectation?`}
                       data-testid={`revision-outcome-met-${version.id}`}
                       value={draft.met}
                       onChange={(e) =>
@@ -776,14 +786,15 @@ export default function RevisionPanel({
                         }))
                       }
                     >
-                      <option value="">是否符合預期</option>
-                      <option value="true">符合預期</option>
-                      <option value="false">未符合預期</option>
+                      <option value="">Does it match your expectation?</option>
+                      <option value="true">Matched expectation</option>
+                      <option value="false">Did not match expectation</option>
                     </select>
                     <input
                       className="input"
                       style={{ flex: 1, minWidth: '220px', fontSize: '12px' }}
-                      placeholder="記錄結論（例如：成本下降確實改善淨報酬）"
+                      aria-label={`Conclusion for v${version.version_number}`}
+                      placeholder="Record the conclusion (e.g. lower costs did improve net return)"
                       data-testid={`revision-outcome-text-${version.id}`}
                       value={draft.text}
                       onChange={(e) =>
@@ -801,7 +812,7 @@ export default function RevisionPanel({
                       onClick={() => saveOutcome(version, meta)}
                       disabled={savingOutcomeId !== null}
                     >
-                      {savingOutcomeId === version.id ? '儲存中...' : meta.outcome ? '更新結果' : '記錄結果'}
+                      {savingOutcomeId === version.id ? 'Saving…' : meta.outcome ? 'Update result' : 'Record result'}
                     </button>
                   </div>
                 </div>
@@ -814,10 +825,10 @@ export default function RevisionPanel({
   );
 }
 
-function Field({ label, children }: { label: string; children: ReactNode }) {
+function Field({ label, htmlFor, children }: { label: string; htmlFor: string; children: ReactNode }) {
   return (
     <div>
-      <label style={{ display: 'block', fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '4px' }}>{label}</label>
+      <label htmlFor={htmlFor} style={{ display: 'block', fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '4px' }}>{label}</label>
       {children}
     </div>
   );

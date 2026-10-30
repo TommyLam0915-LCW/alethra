@@ -28,6 +28,8 @@ import { test, expect, type Page, type Response } from '@playwright/test';
 const FRONTEND_BASE = process.env.E2E_FRONTEND_BASE ?? 'http://localhost:3099';
 
 const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+// The display name and the experiment titles below are free text the user typed;
+// they stay in Chinese so the spec proves user content renders verbatim.
 const account = {
   email: `e2e-risk-${randomBytes(6).toString('hex')}@alethra.io`,
   password: `E2e${randomBytes(9).toString('base64url')}!7`,
@@ -90,14 +92,60 @@ function metricValue(metrics: Record<string, unknown>, key: string): unknown {
   return raw;
 }
 
-// Mirrors EXIT_REASON_LABELS in the run detail page; the spec asserts the label
-// the user sees, not the raw ledger enum.
+// Mirrors the label maps in the run detail page; the spec asserts the label the
+// user sees, not the raw ledger enum.
 const EXIT_REASON_LABELS: Record<string, string> = {
-  stop: '停損觸發',
-  target: '停利觸發',
-  time: '持有期滿',
-  signal: '策略訊號',
-  end_of_data: '資料結束強制平倉',
+  stop: 'Stop-loss triggered',
+  target: 'Take-profit triggered',
+  time: 'Holding period elapsed',
+  signal: 'Strategy signal',
+  end_of_data: 'Forced close at end of data',
+};
+
+// The run-detail journal renders the stored side and actor through these maps,
+// falling back to the raw code for anything unmapped.
+const SIDE_LABELS: Record<string, string> = { BUY: 'Buy', SELL: 'Sell' };
+
+const ACTOR_LABELS: Record<string, string> = {
+  system: 'System rule',
+  human: 'You',
+  ai_draft: 'AI draft',
+  human_approved_ai_draft: 'You (approved AI draft)',
+  api_key: 'API client',
+  engine: 'Strategy engine',
+  user: 'You',
+};
+
+const PRICE_MODE_LABELS: Record<string, string> = {
+  synthetic_fixture: 'Synthetic',
+  historical_replay: 'Historical replay',
+  latest_bar: 'Latest close',
+  delayed: 'Delayed',
+  live_realtime: 'Live',
+  unknown: 'Unknown',
+};
+
+const MARKET_STATUS_LABELS: Record<string, string> = {
+  open: 'Open',
+  closed: 'Closed',
+  pre_market: 'Pre-market',
+  after_hours: 'After hours',
+  stale: 'Stale',
+  unknown: 'Unknown',
+};
+
+const DATA_NATURE_LABELS: Record<string, string> = {
+  synthetic: 'Synthetic',
+  live: 'Live',
+  delayed: 'Delayed',
+  unknown: 'Unknown',
+};
+
+const ADJUSTMENT_LABELS: Record<string, string> = {
+  adjusted: 'Adjusted',
+  unadjusted: 'Unadjusted',
+  not_applicable: 'Not applicable',
+  unknown: 'Unknown',
 };
 
 async function readJournalRows(table: ReturnType<Page['getByTestId']>): Promise<JournalRow[]> {
@@ -107,7 +155,8 @@ async function readJournalRows(table: ReturnType<Page['getByTestId']>): Promise<
   for (let index = 0; index < count; index += 1) {
     const cells = bodyRows.nth(index).locator('td');
     rows.push({
-      // Column order is fixed by the page: 日期 方向 數量 成交價 手續費 止損 目標 計劃風險 實現盈虧 實現 R 出場原因 來源 Config
+      // Column order is fixed by the page: date, side, quantity, fill price, commission,
+      // stop, target, planned risk, realized P&L, realized R, exit reason, actor, config.
       side: (await cells.nth(1).innerText()).trim(),
       stop: (await cells.nth(5).innerText()).trim(),
       target: (await cells.nth(6).innerText()).trim(),
@@ -154,7 +203,7 @@ async function createExperimentAndRun(
 
   const [createResponse] = await Promise.all([
     page.waitForResponse((response) => response.url().includes('/api/v1/experiments/') && response.request().method() === 'POST'),
-    page.getByRole('button', { name: '建立實驗' }).click(),
+    page.getByRole('button', { name: 'Create experiment' }).click(),
   ]);
   expect(createResponse.status(), 'experiment creation must succeed').toBeLessThan(300);
   const created = (await createResponse.json()) as { id: string };
@@ -166,14 +215,14 @@ async function createExperimentAndRun(
 
   const [runResponse] = await Promise.all([
     page.waitForResponse((response) => /\/api\/v1\/versions\/[^/]+\/runs/.test(response.url()) && response.request().method() === 'POST'),
-    page.getByRole('button', { name: '執行回測' }).click(),
+    page.getByRole('button', { name: 'Run Backtest' }).click(),
   ]);
   expect(runResponse.status(), 'run creation must succeed').toBeLessThan(300);
   const runPayload = (await runResponse.json()) as RunRecord;
   expect(runPayload.status, 'the runtime must finish the run synchronously, otherwise this spec would need polling').toBe('completed');
 
   const detailLink = page.getByTestId(`run-detail-link-${runPayload.id}`);
-  await expect(detailLink, 'the new run must appear in 執行歷史').toHaveCount(1);
+  await expect(detailLink, 'the new run must appear in Run history').toHaveCount(1);
   const [storedResponse] = await Promise.all([
     page.waitForResponse((response) => response.url().includes(`/api/v1/runs/${runPayload.id}`) && response.request().method() === 'GET'),
     detailLink.click(),
@@ -201,7 +250,7 @@ test.describe('risk plan journal and honest price view', () => {
     page = await browser.newPage();
 
     await page.goto(`${FRONTEND_BASE}/login`);
-    await page.getByRole('button', { name: '沒有帳號？註冊' }).click();
+    await page.getByRole('button', { name: 'No account? Create one' }).click();
     await page.locator('input[type="text"]').first().fill(account.displayName);
     await page.locator('input[type="email"]').fill(account.email);
     await page.locator('input[type="password"]').fill(account.password);
@@ -217,8 +266,8 @@ test.describe('risk plan journal and honest price view', () => {
 
   test('a freshly registered account starts isolated, with its own quota and nobody else\'s experiments', async () => {
     await expect(page).toHaveURL(/\/dashboard$/);
-    await expect(page.locator('.dash-empty-state'), 'a new account has no research history yet').toBeVisible();
-    await expect(page.locator('.dash-experiment-item')).toHaveCount(0);
+    await expect(page.getByTestId('dashboard-empty-state'), 'a new account has no research history yet').toBeVisible();
+    await expect(page.getByTestId('dashboard-experiment-row')).toHaveCount(0);
     await expect(
       page.getByText('E2E 合成研究實驗（僅供自動化測試）'),
       'the seeded account\'s experiment must not leak into a new account'
@@ -262,7 +311,7 @@ test.describe('risk plan journal and honest price view', () => {
       rangeButtons.getByRole('button', { name: '6M' }),
       'a stored layout resolving late must not revert the range the user just clicked'
     ).toHaveClass(/ws-range-btn-active/);
-    await expect(page.getByTestId('chart-meta-line')).toContainText(`${warmupPayload.bar_count} 條`);
+    await expect(page.getByTestId('chart-meta-line')).toContainText(`${warmupPayload.bar_count} bars`);
 
     const [barsResponse] = await Promise.all([
       page.waitForResponse(
@@ -271,11 +320,11 @@ test.describe('risk plan journal and honest price view', () => {
           response.request().method() === 'GET' &&
           response.url().includes('start_date=1900-01-01')
       ),
-      rangeButtons.getByRole('button', { name: '全部' }).click(),
+      rangeButtons.getByRole('button', { name: 'All' }).click(),
     ]);
     expect(barsResponse.status(), 'bars request must succeed').toBe(200);
     await expect(
-      rangeButtons.getByRole('button', { name: '全部' }),
+      rangeButtons.getByRole('button', { name: 'All' }),
       'the clicked range must become the active one'
     ).toHaveClass(/ws-range-btn-active/);
     const payload = (await barsResponse.json()) as {
@@ -305,39 +354,49 @@ test.describe('risk plan journal and honest price view', () => {
     expect(payload.is_realtime_capable, 'this runtime has no realtime-capable provider, so the payload must say so').toBe(false);
     expect(payload.feed_mode, 'feed_mode must be an offline/cached mode, not live').not.toBe('live');
     expect(payload.mode, 'mode must not be reported as live_realtime').not.toBe('live_realtime');
-    expect(payload.mode_label_zh, 'a Chinese mode label must be supplied').not.toBe('');
-    expect(payload.market_status_label_zh, 'a Chinese market-status label must be supplied').not.toBe('');
+
+    const natureLabel = DATA_NATURE_LABELS[payload.data_quality.data_nature] ?? null;
+    const modeLabel = PRICE_MODE_LABELS[payload.mode] ?? payload.mode;
+    const statusLabel = MARKET_STATUS_LABELS[payload.market_status] ?? payload.market_status;
 
     const legend = page.getByTestId('chart-legend');
     await expect(legend).toContainText(`${payload.symbol} · ${payload.name}`);
     await expect(legend).toContainText(payload.currency);
-    await expect(page.getByTestId('chart-mode-badge')).toHaveText(payload.mode_label_zh);
-    await expect(page.getByTestId('chart-market-status-badge')).toHaveText(payload.market_status_label_zh);
+    // The header suppresses a mode badge whose label would repeat the nature badge
+    // (e.g. a synthetic fixture is both "Synthetic" nature and "Synthetic" mode).
+    const modeBadge = page.getByTestId('chart-mode-badge');
+    if (modeLabel !== natureLabel) {
+      await expect(modeBadge).toHaveText(modeLabel);
+    } else {
+      await expect(modeBadge).toHaveCount(0);
+    }
+    await expect(page.getByTestId('chart-market-status-badge')).toHaveText(statusLabel);
 
     if (payload.data_quality.data_nature === 'synthetic') {
-      await expect(page.getByTestId('chart-nature-badge'), 'a synthetic series must be labelled synthetic').toHaveText('模擬數據');
+      await expect(page.getByTestId('chart-nature-badge'), 'a synthetic series must be labelled synthetic').toHaveText('Synthetic');
     }
     const staleBadge = page.getByTestId('chart-stale-badge');
     if (payload.data_quality.is_stale) {
-      await expect(staleBadge, 'a stale series must carry the stale badge').toHaveText('陳舊');
+      await expect(staleBadge, 'a stale series must carry the stale badge').toHaveText('Stale');
     } else {
       await expect(staleBadge).toHaveCount(0);
     }
 
     const meta = page.getByTestId('chart-meta-line');
-    await expect(meta).toContainText(`${payload.bar_count} 條`);
+    await expect(meta).toContainText(`${payload.bar_count} bars`);
     await expect(meta).toContainText(payload.timeframe || '1d');
-    await expect(meta).toContainText(`${payload.exchange}（${payload.timezone}）`);
-    await expect(meta).toContainText(`供應商 ${payload.provider}`);
+    await expect(meta).toContainText(`${payload.exchange} (${payload.timezone})`);
+    await expect(meta).toContainText(`Provider ${payload.provider}`);
     if (payload.data_quality.adjustment) {
-      await expect(meta, 'the adjustment status must carry a Chinese label').toContainText('復權');
+      const adjustmentLabel = ADJUSTMENT_LABELS[payload.data_quality.adjustment] ?? payload.data_quality.adjustment;
+      await expect(meta, 'the adjustment status must carry a readable label').toContainText(adjustmentLabel);
       await expect(
         meta,
         'an internal enum token must not be printed to the user as-is'
       ).not.toContainText(payload.data_quality.adjustment);
     }
-    await expect(meta).toContainText(`數據截至 ${payload.data_as_of || payload.bars[payload.bars.length - 1].date}`);
-    await expect(meta).toContainText(`擷取於 ${payload.series_received_at.slice(11, 16)} UTC`);
+    await expect(meta).toContainText(`Data as of ${payload.data_as_of || payload.bars[payload.bars.length - 1].date}`);
+    await expect(meta).toContainText(`Fetched ${payload.series_received_at.slice(11, 16)} UTC`);
     expect(payload.bars.length, 'the rendered bar count must match the series actually returned').toBe(payload.bar_count);
   });
 
@@ -377,7 +436,7 @@ test.describe('risk plan journal and honest price view', () => {
       Math.abs((crossCheck?.equity_net_pnl ?? Number.NaN) - (crossCheck?.realized_net_pnl ?? Number.NaN)),
       'equity P&L and FIFO realised P&L must agree in storage, not only on screen'
     ).toBeLessThan(0.01);
-    await expect(page.getByTestId('pnl-cross-check-result')).toContainText('兩邊吻合');
+    await expect(page.getByTestId('pnl-cross-check-result')).toContainText('Consistent');
 
     const journal = page.getByTestId('journal-table');
     await expect(journal).toBeVisible();
@@ -389,7 +448,9 @@ test.describe('risk plan journal and honest price view', () => {
       const rendered = rows[index];
       const isBuy = String(fill.side).toUpperCase().includes('BUY');
 
-      expect(rendered.side, 'the rendered direction must be the stored one').toBe(String(fill.side));
+      expect(rendered.side, 'the rendered direction must be the label for the stored one').toBe(
+        SIDE_LABELS[String(fill.side)] ?? String(fill.side)
+      );
       expect(rendered.stop, 'the rendered stop must be the stored one').toBe(
         fill.stop_price == null ? '—' : renderNumber(fill.stop_price)
       );
@@ -399,7 +460,10 @@ test.describe('risk plan journal and honest price view', () => {
       expect(rendered.realizedR, 'the rendered realised R must be the stored one').toBe(
         fill.realized_r == null ? '—' : renderNumber(fill.realized_r)
       );
-      await expect(page.getByTestId(`journal-actor-${index}`), 'every fill must name its actor').toHaveText(String(fill.actor));
+      await expect(
+        page.getByTestId(`journal-actor-${index}`),
+        'every fill must name its actor'
+      ).toHaveText(ACTOR_LABELS[String(fill.actor)] ?? String(fill.actor));
 
       if (isBuy) {
         const entry = Number(fill.execution_price_before_costs);
@@ -457,7 +521,7 @@ test.describe('risk plan journal and honest price view', () => {
     expect(storedFills.length, 'the run must still have fills to inspect').toBeGreaterThan(0);
 
     await expect(page.getByTestId('pnl-cross-check-result'), 'cash accounting must reconcile independently of the risk plan').toContainText(
-      '兩邊吻合'
+      'Consistent'
     );
     const crossCheck = metrics.pnl_cross_check as { consistent?: boolean } | undefined;
     expect(crossCheck?.consistent, 'the stored cross-check must still report consistency').toBe(true);
@@ -466,7 +530,7 @@ test.describe('risk plan journal and honest price view', () => {
     const storedAverage = metrics.average_realized_r as { value?: unknown; reason?: string } | number | null | undefined;
     expect(storedAverage, 'average realised R must be recorded').not.toBeUndefined();
     expect(metricValue(metrics, 'average_realized_r'), 'an undefined R must be stored as null, never as 0').toBeNull();
-    await expect(averageCell).toHaveText('未計算');
+    await expect(averageCell).toHaveText('Not computed');
     const reason = (typeof storedAverage === 'object' && storedAverage !== null ? storedAverage.reason : undefined) ?? '';
     expect(reason.length, 'the engine must explain why R is undefined').toBeGreaterThan(0);
     await expect(
@@ -510,13 +574,13 @@ test.describe('risk plan journal and honest price view', () => {
 
     await page.goto(`${FRONTEND_BASE}/experiments/${journey.plannedExperimentId}/runs/${journey.plannedRunId}`);
     await expect(page.getByTestId('run-detail-page')).toContainText(journey.plannedRunId.slice(0, 8));
-    await expect(page.getByTestId('pnl-cross-check-result')).toContainText('兩邊吻合');
+    await expect(page.getByTestId('pnl-cross-check-result')).toContainText('Consistent');
     await expect(page.getByTestId('metric-average_realized_r')).toHaveText(/^-?\d+(\.\d+)?$/);
 
     await page.goto(`${FRONTEND_BASE}/experiments/${journey.unplannedExperimentId}/runs/${journey.unplannedRunId}`);
     await expect(page.getByTestId('run-detail-page')).toContainText(journey.unplannedRunId.slice(0, 8));
-    await expect(page.getByTestId('pnl-cross-check-result')).toContainText('兩邊吻合');
-    await expect(page.getByTestId('metric-average_realized_r')).toHaveText('未計算');
+    await expect(page.getByTestId('pnl-cross-check-result')).toContainText('Consistent');
+    await expect(page.getByTestId('metric-average_realized_r')).toHaveText('Not computed');
   });
 
   test('the run detail discloses the exit policy it actually executed', async () => {

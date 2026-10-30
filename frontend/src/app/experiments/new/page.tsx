@@ -4,14 +4,10 @@ import { useState, useEffect, useRef, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { brand } from '@/lib/brand';
+import { STRATEGY_TEMPLATE_LABELS } from '@/lib/copy';
 import type { DataCoverage } from '@/components/workspace/types';
 
 const DEMO_ASSETS = ['DEMO-ALPHA', 'DEMO-BETA', 'DEMO-BENCHMARK'];
-const TEMPLATES = [
-  { value: 'buy_and_hold', label: 'Buy & Hold', labelZh: '買入並持有' },
-  { value: 'sma_crossover', label: 'SMA Crossover', labelZh: '均線交叉' },
-  { value: 'price_change_fixed_hold', label: 'Price Change', labelZh: '跌幅定持' },
-];
 
 interface InstrumentOption {
   instrument_id: string;
@@ -38,14 +34,14 @@ interface ResearchDraft {
 }
 
 const FIELD_LABELS: Record<string, string> = {
-  title: '標題',
-  hypothesis: '研究假設',
-  strategy_template: '策略模板',
-  asset_symbol: '研究標的',
-  benchmark_symbol: '基準標的',
-  initial_cash: '初始資金',
-  commission_rate: '手續費率',
-  slippage_rate: '滑價率',
+  title: 'Title',
+  hypothesis: 'Research hypothesis',
+  strategy_template: 'Strategy template',
+  asset_symbol: 'Asset',
+  benchmark_symbol: 'Benchmark',
+  initial_cash: 'Initial cash',
+  commission_rate: 'Commission rate',
+  slippage_rate: 'Slippage rate',
 };
 
 const DRAFT_TO_FORM: Record<string, string> = {
@@ -179,7 +175,7 @@ function NewExperimentForm() {
     api.researchDrafts.get(draftId)
       .then((data) => {
         if (data.status !== 'accepted') {
-          setDraftError('只有已接受的草稿才能套用欄位');
+          setDraftError('Only accepted drafts can transfer fields');
           setDraftLoading(false);
           return;
         }
@@ -188,7 +184,7 @@ function NewExperimentForm() {
         setDraftLoading(false);
       })
       .catch((err: any) => {
-        setDraftError(err.message || '載入草稿失敗');
+        setDraftError(err.message || 'The draft could not be loaded');
         setDraftLoading(false);
       });
   }, [draftId, requestedFields.length]);
@@ -290,7 +286,7 @@ function NewExperimentForm() {
 
       router.push(`/experiments/${experiment.id}`);
     } catch (err: any) {
-      setError(err.message || '建立失敗');
+      setError(err.message || 'The experiment could not be created');
     } finally {
       setLoading(false);
     }
@@ -298,15 +294,16 @@ function NewExperimentForm() {
 
   return (
     <div className="container" style={{ maxWidth: '800px', paddingTop: '40px', paddingBottom: '40px' }}>
-      <h1 style={{ marginBottom: '30px' }}>{brand.ui.experiment.createTitleZh}</h1>
+      <h1 style={{ marginBottom: '30px' }}>{brand.ui.experiment.createTitle}</h1>
 
       <div className="disclaimer">
-        <strong>提醒：</strong>本系統使用示範資料進行回測，結果僅供研究參考，不代表真實市場表現。
+        <strong>Heads-up:</strong> this workspace backtests on sample data. Results are for research only and do not
+        represent real market performance.
       </div>
 
       {draftLoading && (
         <div className="alert alert-info" style={{ marginBottom: '20px', fontSize: '13px' }}>
-          載入研究草稿...
+          Loading research draft…
         </div>
       )}
 
@@ -318,9 +315,10 @@ function NewExperimentForm() {
 
       {showPreview && draft && (
         <div className="card" style={{ marginBottom: '20px', backgroundColor: 'var(--surface-2)', border: '2px solid var(--primary)' }}>
-          <h2 style={{ marginBottom: '16px', fontSize: '18px' }}>預覽草稿欄位</h2>
+          <h2 style={{ marginBottom: '16px', fontSize: '18px' }}>Preview draft fields</h2>
           <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '16px' }}>
-            以下欄位將從草稿套用到表單。請確認後點擊「確認套用」，或點擊「取消」返回。
+            These fields will be transferred from the draft into the form. Review them, then choose
+            &ldquo;Apply fields&rdquo;, or cancel to go back.
           </p>
           <div style={{ display: 'grid', gap: '12px', marginBottom: '16px' }}>
             {requestedFields.map((field) => {
@@ -340,10 +338,10 @@ function NewExperimentForm() {
           </div>
           <div style={{ display: 'flex', gap: '8px' }}>
             <button className="btn btn-primary" onClick={handleApplyFields}>
-              確認套用 {requestedFields.length} 個欄位
+              Apply {requestedFields.length} field{requestedFields.length === 1 ? '' : 's'}
             </button>
             <button className="btn btn-secondary" onClick={handleCancelPreview}>
-              取消
+              Cancel
             </button>
           </div>
         </div>
@@ -351,8 +349,9 @@ function NewExperimentForm() {
 
       {appliedFields.length > 0 && (
         <div className="alert alert-info" style={{ marginBottom: '20px', fontSize: '13px' }}>
-          <strong>已從研究草稿套用：</strong>{appliedFields.join('、')}。
-          請確認以下欄位，並補完開始日期、結束日期等執行參數後再建立實驗。
+          <strong>Applied from the research draft:</strong> {appliedFields.join(', ')}.
+          Review these fields and fill in the execution parameters such as start and end date before creating the
+          experiment.
         </div>
       )}
 
@@ -361,60 +360,64 @@ function NewExperimentForm() {
       <div className="card">
         <form onSubmit={handleSubmit}>
           <div className="form-group">
-            <label>實驗標題 *</label>
+            <label htmlFor="exp-title">Experiment title *</label>
             <input
+              id="exp-title"
               type="text"
               className="input"
               data-testid="exp-title"
-              aria-label="實驗標題"
+              aria-label="Experiment title"
               value={title}
               onChange={(e) => setTitle(e.target.value)}
-              placeholder="例如：測試 DEMO-ALPHA 的均線交叉策略"
+              placeholder="For example: Test an SMA crossover on DEMO-ALPHA"
               required
             />
           </div>
 
           <div className="form-group">
-            <label>研究假設</label>
+            <label htmlFor="exp-hypothesis">Research hypothesis</label>
             <textarea
+              id="exp-hypothesis"
               className="input"
-              aria-label="研究假設"
+              aria-label="Research hypothesis"
               value={hypothesis}
               onChange={(e) => setHypothesis(e.target.value)}
-              placeholder="描述你的投資假設"
+              placeholder="Describe your investment hypothesis"
               rows={3}
               style={{ resize: 'vertical' }}
             />
           </div>
 
           <div className="form-group">
-            <label>策略模板 *</label>
+            <label htmlFor="exp-template">Strategy template *</label>
             <select
+              id="exp-template"
               className="input"
-              aria-label="策略模板"
+              aria-label="Strategy template"
               value={templateType}
               onChange={(e) => setTemplateType(e.target.value)}
             >
-              {TEMPLATES.map(t => (
-                <option key={t.value} value={t.value}>{t.labelZh} ({t.label})</option>
+              {Object.entries(STRATEGY_TEMPLATE_LABELS).map(([value, text]) => (
+                <option key={value} value={value}>{text}</option>
               ))}
             </select>
           </div>
 
           <div className="form-group">
-            <label>資產 *</label>
+            <label htmlFor="exp-asset">Asset *</label>
             <div style={{ display: 'flex', gap: '8px', marginBottom: '8px' }}>
               <button type="button" className={assetTab === 'real' ? 'btn btn-primary' : 'btn btn-secondary'} aria-pressed={assetTab === 'real'} style={{ fontSize: '12px', padding: '4px 12px' }} onClick={() => setAssetTab('real')}>
-                真實產品 (US/HK)
+                Real instruments (US/HK)
               </button>
               <button type="button" className={assetTab === 'demo' ? 'btn btn-primary' : 'btn btn-secondary'} aria-pressed={assetTab === 'demo'} style={{ fontSize: '12px', padding: '4px 12px' }} onClick={() => setAssetTab('demo')}>
-                示範產品
+                Sample instruments
               </button>
             </div>
             <select
+              id="exp-asset"
               className="input"
               data-testid="exp-asset"
-              aria-label="資產"
+              aria-label="Asset"
               value={assetId}
               onChange={(e) => {
                 datesEditedRef.current = false;
@@ -453,14 +456,15 @@ function NewExperimentForm() {
           </div>
 
           <div className="form-group">
-            <label>基準 (Benchmark)</label>
+            <label htmlFor="exp-benchmark">Benchmark</label>
             <select
+              id="exp-benchmark"
               className="input"
-              aria-label="基準 (Benchmark)"
+              aria-label="Benchmark"
               value={benchmarkId}
               onChange={(e) => setBenchmarkId(e.target.value)}
             >
-              <option value="">無</option>
+              <option value="">None</option>
               {assetTab === 'real' ? (
                 instruments.filter(i => i.instrument_id !== assetId).map(i => (
                   <option key={i.instrument_id} value={i.instrument_id}>{i.instrument_id} — {i.name}</option>
@@ -475,12 +479,13 @@ function NewExperimentForm() {
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
             <div className="form-group">
-              <label>開始日期 *</label>
+              <label htmlFor="exp-start-date">Start date *</label>
               <input
+                id="exp-start-date"
                 type="date"
                 className="input"
                 data-testid="exp-start-date"
-                aria-label="開始日期"
+                aria-label="Start date"
                 value={startDate}
                 onChange={(e) => {
                   datesEditedRef.current = true;
@@ -490,12 +495,13 @@ function NewExperimentForm() {
               />
             </div>
             <div className="form-group">
-              <label>結束日期 *</label>
+              <label htmlFor="exp-end-date">End date *</label>
               <input
+                id="exp-end-date"
                 type="date"
                 className="input"
                 data-testid="exp-end-date"
-                aria-label="結束日期"
+                aria-label="End date"
                 value={endDate}
                 onChange={(e) => {
                   datesEditedRef.current = true;
@@ -509,34 +515,43 @@ function NewExperimentForm() {
           <p data-testid="exp-coverage-line" style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '-8px', marginBottom: '16px' }}>
             {coverageLoaded ? (
               <>
-                {assetId} 的資料覆蓋：伺服器已儲存 K 線 {coverage?.stored_start ?? 'UNKNOWN'} 至 {coverage?.stored_end ?? 'UNKNOWN'}（{coverage?.stored_bars ?? 0} 根）；
-                提供者聲明可供應 {coverage?.available_start ?? 'UNKNOWN'} 至 {coverage?.available_end ?? 'UNKNOWN'}。回測、回放與成交只會讀取已儲存的 K 線，日期已依該範圍預設。
+                Data coverage for {assetId}: the server stores bars from {coverage?.stored_start ?? 'UNKNOWN'} to{' '}
+                {coverage?.stored_end ?? 'UNKNOWN'} ({coverage?.stored_bars ?? 0} bars); the provider declares it can
+                supply {coverage?.available_start ?? 'UNKNOWN'} to {coverage?.available_end ?? 'UNKNOWN'}. Backtests,
+                replays and fills only read stored bars, so the dates default to that stored range.
               </>
             ) : (
               <>
-                {assetId} 的資料覆蓋：UNKNOWN（未取得覆蓋查詢結果，示範標的不提供覆蓋查詢）。日期為預設期間，建立後請先確認回測確實有數據。
+                Data coverage for {assetId}: UNKNOWN (no coverage result was returned; sample instruments do not offer
+                a coverage query). The dates below are a default window — after creating the experiment, confirm the
+                backtest actually found data.
               </>
             )}
           </p>
 
           {coverageLoaded && (coverage?.stored_bars ?? 0) === 0 && (
             <div className="alert alert-warning" data-testid="exp-coverage-empty" style={{ fontSize: '13px', marginBottom: '16px' }}>
-              {assetId} 在伺服器上沒有任何已儲存的 K 線：回測會得到空結果，回放也無法推進第一步。此頁面只能查詢覆蓋，無法載入數據，需先由數據管道把 K 線寫入儲存。
+              {assetId} has no stored bars on the server: the backtest will return an empty result and a replay cannot
+              take its first step. This page can only query coverage, not load data; bars must be written to storage by
+              the data pipeline first.
             </div>
           )}
 
           {coverageLoaded && (coverage?.stored_bars ?? 0) > 0 && !touchesStoredBars(startDate, endDate, coverage) && (
             <div className="alert alert-warning" data-testid="exp-coverage-mismatch" style={{ fontSize: '13px', marginBottom: '16px' }}>
-              所選期間（{startDate || 'UNKNOWN'} 至 {endDate || 'UNKNOWN'}）與已儲存 K 線（{coverage?.stored_start ?? 'UNKNOWN'} 至 {coverage?.stored_end ?? 'UNKNOWN'}）沒有重疊，回測與回放會找不到數據。
+              The selected period ({startDate || 'UNKNOWN'} to {endDate || 'UNKNOWN'}) does not overlap the stored bars
+              ({coverage?.stored_start ?? 'UNKNOWN'} to {coverage?.stored_end ?? 'UNKNOWN'}), so the backtest and replay
+              will find no data.
             </div>
           )}
 
           <div className="form-group">
-            <label>初始資金 (USD) *</label>
+            <label htmlFor="exp-initial-cash">Initial cash (USD) *</label>
             <input
+              id="exp-initial-cash"
               type="number"
               className="input"
-              aria-label="初始資金 (USD)"
+              aria-label="Initial cash (USD)"
               value={initialCash}
               onChange={(e) => setInitialCash(e.target.value)}
               min="100"
@@ -547,11 +562,12 @@ function NewExperimentForm() {
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
             <div className="form-group">
-              <label>佣金率 (0-0.05)</label>
+              <label htmlFor="exp-commission">Commission rate (0–0.05)</label>
               <input
+                id="exp-commission"
                 type="number"
                 className="input"
-                aria-label="佣金率"
+                aria-label="Commission rate"
                 value={commissionRate}
                 onChange={(e) => setCommissionRate(e.target.value)}
                 min="0"
@@ -560,11 +576,12 @@ function NewExperimentForm() {
               />
             </div>
             <div className="form-group">
-              <label>滑價率 (0-0.05)</label>
+              <label htmlFor="exp-slippage">Slippage rate (0–0.05)</label>
               <input
+                id="exp-slippage"
                 type="number"
                 className="input"
-                aria-label="滑價率"
+                aria-label="Slippage rate"
                 value={slippageRate}
                 onChange={(e) => setSlippageRate(e.target.value)}
                 min="0"
@@ -576,76 +593,85 @@ function NewExperimentForm() {
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
             <div className="form-group">
-              <label>停損價 (USD，可留空)</label>
+              <label htmlFor="risk-stop-price">Stop price (USD, optional)</label>
               <input
+                id="risk-stop-price"
                 type="number"
                 className="input"
                 data-testid="risk-stop-price"
-                aria-label="停損價 (USD)"
+                aria-label="Stop price (USD)"
                 value={stopPrice}
                 onChange={(e) => setStopPrice(e.target.value)}
                 step="0.01"
-                placeholder="例如 190.00"
+                placeholder="e.g. 190.00"
               />
             </div>
             <div className="form-group">
-              <label>停損幅度 (0-1，可留空)</label>
+              <label htmlFor="risk-stop-pct">Stop distance (0–1, optional)</label>
               <input
+                id="risk-stop-pct"
                 type="number"
                 className="input"
                 data-testid="risk-stop-pct"
-                aria-label="停損幅度"
+                aria-label="Stop distance"
                 value={stopPct}
                 onChange={(e) => setStopPct(e.target.value)}
                 min="0"
                 max="1"
                 step="0.01"
-                placeholder="例如 0.05"
+                placeholder="e.g. 0.05"
               />
             </div>
             <div className="form-group">
-              <label>目標價 (USD，可留空)</label>
+              <label htmlFor="risk-target-price">Target price (USD, optional)</label>
               <input
+                id="risk-target-price"
                 type="number"
                 className="input"
                 data-testid="risk-target-price"
-                aria-label="目標價 (USD)"
+                aria-label="Target price (USD)"
                 value={targetPrice}
                 onChange={(e) => setTargetPrice(e.target.value)}
                 step="0.01"
-                placeholder="例如 220.00"
+                placeholder="e.g. 220.00"
               />
             </div>
             <div className="form-group">
-              <label>目標幅度 (0-1，可留空)</label>
+              <label htmlFor="risk-target-pct">Target distance (0–1, optional)</label>
               <input
+                id="risk-target-pct"
                 type="number"
                 className="input"
                 data-testid="risk-target-pct"
-                aria-label="目標幅度"
+                aria-label="Target distance"
                 value={targetPct}
                 onChange={(e) => setTargetPct(e.target.value)}
                 min="0"
                 max="1"
                 step="0.01"
-                placeholder="例如 0.10"
+                placeholder="e.g. 0.10"
               />
             </div>
           </div>
 
           <p style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '-8px', marginBottom: '16px' }}>
-            風險計劃用於成交後的歸因：系統以入場價與停損價計算每筆交易的計劃風險與 R 值，並不會在價格觸及停損或目標時自動平倉。留空即冇宣稱停損，該筆交易嘅計劃風險與實現 R 會標示為「不可計算」，唔會被當成 0。同時填寫價格與幅度時以價格為準；停損價等於或高於入場價時視為冇有效停損。
+            The risk plan drives post-fill attribution: planned risk and R are computed from the entry price and the
+            stop price, and a position is not closed automatically when price touches the stop or target. Leaving a
+            field empty declares no stop, so that trade&apos;s planned risk and realized R show as &ldquo;Not
+            computable&rdquo; rather than 0. When both a price and a distance are given, the price wins; a stop at or
+            above the entry price counts as no valid stop.
           </p>
 
           {templateType === 'sma_crossover' && (
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
               <div className="form-group">
-                <label>短均線天數 *</label>
+                <label htmlFor="sma-short-window">Short moving average (days) *</label>
                 <input
+                  id="sma-short-window"
                   type="number"
                   className="input"
                   data-testid="sma-short-window"
-                  aria-label="短均線天數"
+                  aria-label="Short moving average days"
                   value={shortWindow}
                   onChange={(e) => setShortWindow(e.target.value)}
                   min="2"
@@ -654,12 +680,13 @@ function NewExperimentForm() {
                 />
               </div>
               <div className="form-group">
-                <label>長均線天數 *</label>
+                <label htmlFor="sma-long-window">Long moving average (days) *</label>
                 <input
+                  id="sma-long-window"
                   type="number"
                   className="input"
                   data-testid="sma-long-window"
-                  aria-label="長均線天數"
+                  aria-label="Long moving average days"
                   value={longWindow}
                   onChange={(e) => setLongWindow(e.target.value)}
                   min="3"
@@ -673,11 +700,12 @@ function NewExperimentForm() {
           {templateType === 'price_change_fixed_hold' && (
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '16px' }}>
               <div className="form-group">
-                <label>回望天數 *</label>
+                <label htmlFor="price-lookback">Lookback (days) *</label>
                 <input
+                  id="price-lookback"
                   type="number"
                   className="input"
-                  aria-label="回望天數"
+                  aria-label="Lookback days"
                   value={lookbackDays}
                   onChange={(e) => setLookbackDays(e.target.value)}
                   min="1"
@@ -686,11 +714,12 @@ function NewExperimentForm() {
                 />
               </div>
               <div className="form-group">
-                <label>跌幅門檻 (0.01-0.50) *</label>
+                <label htmlFor="price-threshold">Drop threshold (0.01–0.50) *</label>
                 <input
+                  id="price-threshold"
                   type="number"
                   className="input"
-                  aria-label="跌幅門檻"
+                  aria-label="Drop threshold"
                   value={thresholdPct}
                   onChange={(e) => setThresholdPct(e.target.value)}
                   min="0.01"
@@ -700,11 +729,12 @@ function NewExperimentForm() {
                 />
               </div>
               <div className="form-group">
-                <label>持有天數 *</label>
+                <label htmlFor="price-holding">Holding period (days) *</label>
                 <input
+                  id="price-holding"
                   type="number"
                   className="input"
-                  aria-label="持有天數"
+                  aria-label="Holding period days"
                   value={holdingDays}
                   onChange={(e) => setHoldingDays(e.target.value)}
                   min="1"
@@ -717,10 +747,10 @@ function NewExperimentForm() {
 
           <div style={{ display: 'flex', gap: '12px' }}>
             <button type="submit" className="btn btn-primary" disabled={loading}>
-              {loading ? '建立中...' : '建立實驗'}
+              {loading ? 'Creating…' : 'Create experiment'}
             </button>
             <button type="button" className="btn btn-secondary" onClick={() => router.back()}>
-              取消
+              Cancel
             </button>
           </div>
         </form>
@@ -731,7 +761,7 @@ function NewExperimentForm() {
 
 export default function NewExperimentPage() {
   return (
-    <Suspense fallback={<div className="container" style={{ paddingTop: '40px' }}>載入中...</div>}>
+    <Suspense fallback={<div className="container" style={{ paddingTop: '40px' }}>Loading…</div>}>
       <NewExperimentForm />
     </Suspense>
   );

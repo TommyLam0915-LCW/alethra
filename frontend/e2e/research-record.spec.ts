@@ -71,8 +71,11 @@ const OUTSIDER = {
 };
 const COVERED = 'US:AAPL';
 const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-const TITLE = `E2E 研究紀錄（僅供自動化測試）${stamp}`;
+const TITLE = `E2E research record (automated test only) ${stamp}`;
 const MARKER = `rec-${Date.now()}`;
+// CHANGE_REASON / EXPECTATION / PURPOSE / NOTES / OUTCOME are free text the user
+// typed. They are deliberately left in Chinese to prove the UI shows user
+// content verbatim and never translates research notes or rationale.
 const CHANGE_REASON = `自動化驗證 ${MARKER}：長均線窗口 20 → 30，檢驗訊號頻率對報酬的影響`;
 const EXPECTATION = '長均線拉長後，交易次數應減少';
 const PURPOSE = `修訂 vs 來源比較 ${MARKER}`;
@@ -145,15 +148,17 @@ test.describe('research record journey', () => {
     await page.getByTestId('exp-asset').selectOption(COVERED);
     await page.getByTestId('sma-short-window').fill('5');
     await page.getByTestId('sma-long-window').fill('20');
-    await page.getByRole('button', { name: '建立實驗', exact: true }).click();
+    await page.getByRole('button', { name: 'Create experiment', exact: true }).click();
     await page.waitForURL(/\/experiments\/[0-9a-f-]{36}$/, { timeout: 30000 });
     journey.experimentId = new URL(page.url()).pathname.split('/').pop() as string;
 
     const resultsCard = page
       .locator('div.card')
-      .filter({ has: page.getByRole('heading', { name: '回測結果', exact: true }) });
-    await resultsCard.getByRole('button', { name: '執行回測', exact: true }).click();
-    await expect(resultsCard.getByText('總報酬', { exact: true })).toBeVisible({ timeout: 120000 });
+      .filter({ has: page.getByRole('heading', { name: 'Backtest results', exact: true }) });
+    await resultsCard.getByRole('button', { name: 'Run Backtest', exact: true }).click();
+    await expect(resultsCard.getByText('Total return', { exact: true })).toBeVisible({
+      timeout: 120000,
+    });
 
     const versions = await apiGet<VersionPayload[]>(
       page,
@@ -169,7 +174,7 @@ test.describe('research record journey', () => {
     await page.getByTestId('revision-change-reason').fill(CHANGE_REASON);
     await page.getByTestId('revision-expectation').fill(EXPECTATION);
     await page.getByTestId('revision-submit').click();
-    await expect(page.getByTestId('revision-notice')).toContainText('已建立修訂版本');
+    await expect(page.getByTestId('revision-notice')).toContainText('Revision created');
 
     const after = await apiGet<VersionPayload[]>(
       page,
@@ -184,18 +189,20 @@ test.describe('research record journey', () => {
   test('runs the revision and saves the A/B comparison', async () => {
     const row = revisionRows(page);
     await row.locator('[data-testid^="revision-run-"]').click();
-    await expect(page.getByTestId('revision-notice')).toContainText('回測完成', {
+    await expect(page.getByTestId('revision-notice')).toContainText('backtest completed', {
       timeout: 120000,
     });
-    await expect(row.getByText('修訂回測：已完成')).toBeVisible({ timeout: 120000 });
+    await expect(row.getByText('Revision backtest: Completed')).toBeVisible({ timeout: 120000 });
 
     const compareLink = row.locator('[data-testid^="revision-compare-"]');
     await compareLink.click();
     await page.waitForURL((url) => url.pathname.includes('/runs/compare'), { timeout: 30000 });
-    await page.getByPlaceholder('例如：檢查佣金率對回報嘅影響').fill(PURPOSE);
-    await page.getByPlaceholder('記錄你嘅觀察同結論...').fill(NOTES);
-    await page.getByRole('button', { name: '儲存', exact: true }).click();
-    await expect(page.getByText('比較已儲存')).toBeVisible({ timeout: 30000 });
+    await page
+      .getByPlaceholder('e.g. Check how commission rate affects returns')
+      .fill(PURPOSE);
+    await page.getByPlaceholder('Record your observations and conclusions…').fill(NOTES);
+    await page.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(page.getByText('Comparison saved')).toBeVisible({ timeout: 30000 });
 
     const stored = await apiGet<StoredComparison[]>(
       page,
@@ -215,7 +222,7 @@ test.describe('research record journey', () => {
     await row.locator('[data-testid^="revision-outcome-met-"]').selectOption('false');
     await row.locator('[data-testid^="revision-outcome-text-"]').fill(OUTCOME);
     await row.locator('[data-testid^="revision-outcome-save-"]').click();
-    await expect(page.getByTestId('revision-notice')).toContainText('已記錄');
+    await expect(page.getByTestId('revision-notice')).toContainText('Recorded the result');
 
     await page.reload({ waitUntil: 'networkidle' });
     const panel = page.getByTestId('record-panel');
@@ -234,11 +241,11 @@ test.describe('research record journey', () => {
     const revisionEntry = panel.getByTestId(`record-revision-${journey.revisionVersionId}`);
     await expect(revisionEntry).toContainText('v2');
     await expect(revisionEntry).toContainText('v1');
-    await expect(revisionEntry).toContainText('策略設定變更');
+    await expect(revisionEntry).toContainText('Strategy settings changed');
     await expect(revisionEntry).toContainText('signal_parameters.long_window');
     await expect(revisionEntry).toContainText(CHANGE_REASON);
     await expect(revisionEntry).toContainText(EXPECTATION);
-    await expect(revisionEntry).toContainText('未符預期');
+    await expect(revisionEntry).toContainText('Did not match expectation');
     await expect(revisionEntry).toContainText(OUTCOME);
 
     await expect(panel.getByTestId(`record-comparison-${journey.comparisonId}`)).toContainText(
@@ -250,8 +257,8 @@ test.describe('research record journey', () => {
 
     const scope = panel.getByTestId('record-scope');
     await expect(scope).toContainText('experiment-record-2');
-    await expect(scope).toContainText('逐筆交易明細');
-    await expect(scope).toContainText('不是投資建議');
+    await expect(scope).toContainText('per-trade transactions');
+    await expect(scope).toContainText('not investment advice');
   });
 
   test('the downloaded record carries the conclusion, the comparison and the exclusions', async () => {
@@ -262,7 +269,9 @@ test.describe('research record journey', () => {
     expect(download.suggestedFilename()).toBe(
       `alethra-record-${journey.experimentId.slice(0, 8)}.json`,
     );
-    await expect(page.getByTestId('record-notice')).toContainText('已下載完整研究紀錄');
+    await expect(page.getByTestId('record-notice')).toContainText(
+      'Downloaded the full research record'
+    );
 
     const filePath = await download.path();
     expect(filePath, 'download must have a local file').toBeTruthy();
@@ -303,7 +312,7 @@ test.describe('research record journey', () => {
     await expect(countValue(page, 'record-count-revisions')).toHaveText('1');
     await expect(countValue(page, 'record-count-comparisons')).toHaveText('1');
     const revisionEntry = panel.getByTestId(`record-revision-${journey.revisionVersionId}`);
-    await expect(revisionEntry).toContainText('未符預期');
+    await expect(revisionEntry).toContainText('Did not match expectation');
     await expect(revisionEntry).toContainText(OUTCOME);
   });
 

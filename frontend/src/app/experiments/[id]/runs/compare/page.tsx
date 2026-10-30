@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useRouter, useParams, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { api, ApiError } from '@/lib/api';
+import { RUN_STATUS_LABELS, label } from '@/lib/copy';
 
 interface EvidenceDetail {
   source_category?: string;
@@ -44,11 +45,11 @@ interface ComparisonData {
 }
 
 const PROVENANCE_LABELS: Record<string, string> = {
-  captured: '記錄',
-  current: '當前 metadata',
-  absent: '缺失',
-  unavailable: '無法取得',
-  derived: '衍生',
+  captured: 'Captured',
+  current: 'Current metadata',
+  absent: 'Absent',
+  unavailable: 'Unavailable',
+  derived: 'Derived',
 };
 
 const PROVENANCE_COLORS: Record<string, string> = {
@@ -107,13 +108,13 @@ export default function RunComparisonPage() {
     setSaveSuccess(false);
 
     if (!runA || !runB) {
-      setError('缺少 run_a 或 run_b 參數');
+      setError('The run_a or run_b parameter is missing');
       setErrorStatus(400);
       setLoading(false);
       return;
     }
     if (runA === runB) {
-      setError('不能比較同一個 run');
+      setError('A run cannot be compared with itself');
       setErrorStatus(400);
       setLoading(false);
       return;
@@ -140,9 +141,9 @@ export default function RunComparisonPage() {
       if (activeSavedIdRef.current !== comparisonId) return;
       if (err instanceof ApiError) {
         setErrorStatus(err.status);
-        setError(err.status === 404 ? '找不到已儲存嘅比較或無權限查看' : err.message);
+        setError(err.status === 404 ? 'Saved comparison not found, or you do not have access' : err.message);
       } else {
-        setError('載入已儲存比較失敗');
+        setError('The saved comparison could not be loaded');
       }
     } finally {
       if (activeSavedIdRef.current === comparisonId) setLoading(false);
@@ -160,14 +161,14 @@ export default function RunComparisonPage() {
       if (err instanceof ApiError) {
         setErrorStatus(err.status);
         if (err.status === 404) {
-          setError('找不到 run 或無權限查看');
+          setError('Run not found, or you do not have access');
         } else if (err.status === 400) {
           setError(err.message);
         } else {
           setError(err.message);
         }
       } else {
-        setError('載入比較失敗');
+        setError('The comparison could not be loaded');
       }
     } finally {
       setLoading(false);
@@ -176,13 +177,13 @@ export default function RunComparisonPage() {
 
   const handleSave = async () => {
     if (!purpose.trim()) {
-      setSaveError('請填寫比較目的');
+      setSaveError('Enter a purpose for the comparison');
       return;
     }
     // Creating requires the two runs from the URL; updating a reopened record
     // does not (its run references are already fixed server-side).
     if (!savedComparisonId && (!runA || !runB)) {
-      setSaveError('缺少 run_a 或 run_b，無法建立新比較');
+      setSaveError('run_a or run_b is missing — a new comparison cannot be created');
       return;
     }
 
@@ -216,7 +217,7 @@ export default function RunComparisonPage() {
       }
     } catch (err: any) {
       // Leave purpose/notes state untouched so the user's text survives a failed save.
-      setSaveError(err.message || '儲存失敗');
+      setSaveError(err.message || 'The comparison could not be saved');
     } finally {
       setSaving(false);
     }
@@ -275,7 +276,7 @@ export default function RunComparisonPage() {
       const delta = field.value_b - field.value_a;
       const isPercent = field.field.includes('return') || field.field.includes('drawdown');
       const prefix = delta > 0 ? '+' : '';
-      const suffix = isPercent ? ' 百分點' : '';
+      const suffix = isPercent ? ' pp' : '';
       return (
         <span style={{ color: delta < 0 ? 'var(--negative)' : 'var(--positive)', fontWeight: 600 }}>
           {prefix}{delta.toFixed(2)}{suffix}
@@ -298,31 +299,35 @@ export default function RunComparisonPage() {
   };
 
   if (loading) {
-    return <div className="container" style={{ paddingTop: '40px' }}>載入比較中...</div>;
+    return (
+      <div className="container" role="status" aria-live="polite" style={{ paddingTop: '40px' }}>
+        Loading comparison…
+      </div>
+    );
   }
 
   if (error) {
     const isRetryable = errorStatus !== 400;
     return (
       <div className="container" style={{ paddingTop: '40px' }}>
-        <div style={{
+        <div role="alert" style={{
           background: errorStatus === 404 ? 'rgba(245,158,11,0.14)' : 'rgba(239,68,68,0.12)',
           borderLeft: `4px solid ${errorStatus === 404 ? 'var(--warning)' : 'var(--negative)'}`,
           padding: '16px',
           marginBottom: '16px',
           borderRadius: '4px',
         }}>
-          <strong>{errorStatus === 404 ? '找不到資料' : errorStatus === 400 ? '參數錯誤' : '載入失敗'}</strong>
+          <strong>{errorStatus === 404 ? 'Not found' : errorStatus === 400 ? 'Invalid parameters' : 'Could not load'}</strong>
           <p style={{ margin: '8px 0 0 0' }}>{error}</p>
         </div>
         <div style={{ display: 'flex', gap: '8px' }}>
           {isRetryable && (
             <button onClick={loadComparison} className="btn" style={{ backgroundColor: 'var(--primary-solid)', color: 'var(--text-white)' }}>
-              重試
+              Retry
             </button>
           )}
           <Link href={`/experiments/${experimentId}`} className="btn" style={{ backgroundColor: 'var(--surface-2)', textDecoration: 'none' }}>
-            返回實驗
+            Back to experiment
           </Link>
         </div>
       </div>
@@ -330,20 +335,27 @@ export default function RunComparisonPage() {
   }
 
   if (!comparison) {
-    return <div className="container" style={{ paddingTop: '40px' }}>無比較資料</div>;
+    return (
+      <div className="container" style={{ paddingTop: '40px' }}>
+        <p>No comparison data</p>
+        <Link href={`/experiments/${experimentId}`} style={{ color: 'var(--primary-text)', textDecoration: 'none' }}>
+          ← Back to experiment
+        </Link>
+      </div>
+    );
   }
 
   return (
     <div className="container" style={{ paddingTop: '40px', paddingBottom: '40px' }}>
       <div style={{ marginBottom: '20px' }}>
         <Link href={`/experiments/${experimentId}`} style={{ color: 'var(--primary-text)', textDecoration: 'none' }}>
-          ← 返回實驗
+          ← Back to experiment
         </Link>
       </div>
 
-      <h1 style={{ marginBottom: '8px' }}>回測結果比較</h1>
+      <h1 style={{ marginBottom: '8px' }}>Backtest result comparison</h1>
       <p style={{ color: 'var(--text-secondary)', marginBottom: '24px' }}>
-        實驗 {experimentId.slice(0, 8)}...
+        Experiment {experimentId.slice(0, 8)}…
       </p>
 
       {/* Task Prompt */}
@@ -354,7 +366,7 @@ export default function RunComparisonPage() {
         marginBottom: '24px',
         borderRadius: '4px',
       }}>
-        <strong>任務：</strong>你要決定下一步調查邊個設定。請用呢個畫面檢查兩個結果，講出你目前可以得出甚麼結論，以及下一步會做乜。
+        <strong>Your task:</strong> decide which setting to investigate next. Use this page to inspect both results, state what you can conclude so far, and say what you will do next.
       </div>
 
       {/* Save Comparison Form */}
@@ -365,17 +377,18 @@ export default function RunComparisonPage() {
         marginBottom: '24px',
         borderRadius: '4px',
       }}>
-        <h3 style={{ marginTop: 0, marginBottom: '16px' }}>儲存比較</h3>
+        <h3 style={{ marginTop: 0, marginBottom: '16px' }}>Save comparison</h3>
         
         <div style={{ marginBottom: '12px' }}>
-          <label style={{ display: 'block', marginBottom: '4px', fontWeight: 500 }}>
-            比較目的 <span style={{ color: 'var(--negative)' }}>*</span>
+          <label htmlFor="comparison-purpose" style={{ display: 'block', marginBottom: '4px', fontWeight: 500 }}>
+            Comparison purpose <span style={{ color: 'var(--negative)' }}>*</span>
           </label>
           <input
+            id="comparison-purpose"
             type="text"
             value={purpose}
             onChange={(e) => setPurpose(e.target.value)}
-            placeholder="例如：檢查佣金率對回報嘅影響"
+            placeholder="e.g. Check how commission rate affects returns"
             maxLength={500}
             style={{
               width: '100%',
@@ -389,13 +402,14 @@ export default function RunComparisonPage() {
         </div>
 
         <div style={{ marginBottom: '12px' }}>
-          <label style={{ display: 'block', marginBottom: '4px', fontWeight: 500 }}>
-            筆記
+          <label htmlFor="comparison-notes" style={{ display: 'block', marginBottom: '4px', fontWeight: 500 }}>
+            Notes
           </label>
           <textarea
+            id="comparison-notes"
             value={notes}
             onChange={(e) => setNotes(e.target.value)}
-            placeholder="記錄你嘅觀察同結論..."
+            placeholder="Record your observations and conclusions…"
             maxLength={5000}
             rows={4}
             style={{
@@ -411,7 +425,7 @@ export default function RunComparisonPage() {
         </div>
 
         {saveError && (
-          <div style={{
+          <div role="alert" style={{
             background: 'rgba(239,68,68,0.12)',
             border: '1px solid rgba(239,68,68,0.34)',
             color: 'var(--negative)',
@@ -424,7 +438,7 @@ export default function RunComparisonPage() {
         )}
 
         {saveSuccess && (
-          <div style={{
+          <div role="status" style={{
             background: 'rgba(34,197,94,0.14)',
             border: '1px solid rgba(34,197,94,0.34)',
             color: 'var(--positive)',
@@ -432,7 +446,7 @@ export default function RunComparisonPage() {
             marginBottom: '12px',
             borderRadius: '4px',
           }}>
-            比較已儲存
+            Comparison saved
           </div>
         )}
 
@@ -450,7 +464,7 @@ export default function RunComparisonPage() {
             fontWeight: 500,
           }}
         >
-          {saving ? '儲存中...' : savedComparisonId ? '更新' : '儲存'}
+          {saving ? 'Saving…' : savedComparisonId ? 'Update' : 'Save'}
         </button>
       </div>
 
@@ -461,17 +475,17 @@ export default function RunComparisonPage() {
         padding: '12px',
         marginBottom: '24px',
       }}>
-        <strong>選取嘅結果：</strong>
+        <strong>Selected results:</strong>
         <ul style={{ margin: '8px 0 0 20px', listStyle: 'none', padding: 0 }}>
           <li style={{ marginBottom: '4px' }}>
             Run A: <Link href={`/experiments/${experimentId}/runs/${comparison.run_a_id}`} style={{ color: 'var(--primary-text)', textDecoration: 'none' }}>
-              {comparison.run_a_id.slice(0, 8)}...
-            </Link> (狀態: {comparison.status_a})
+              {comparison.run_a_id.slice(0, 8)}…
+            </Link> (Status: {label(RUN_STATUS_LABELS, comparison.status_a)})
           </li>
           <li>
             Run B: <Link href={`/experiments/${experimentId}/runs/${comparison.run_b_id}`} style={{ color: 'var(--primary-text)', textDecoration: 'none' }}>
-              {comparison.run_b_id.slice(0, 8)}...
-            </Link> (狀態: {comparison.status_b})
+              {comparison.run_b_id.slice(0, 8)}…
+            </Link> (Status: {label(RUN_STATUS_LABELS, comparison.status_b)})
           </li>
         </ul>
       </div>
@@ -484,7 +498,7 @@ export default function RunComparisonPage() {
           padding: '12px',
           marginBottom: '24px',
         }}>
-          <strong>比較限制：</strong>
+          <strong>Comparison limitations:</strong>
           <ul style={{ margin: '8px 0 0 20px' }}>
             {comparison.limitations.map((lim, i) => (
               <li key={i}>{lim}</li>
@@ -502,28 +516,28 @@ export default function RunComparisonPage() {
           marginBottom: '24px',
           borderRadius: '4px',
         }}>
-          <strong>期間重疊：</strong>
+          <strong>Period overlap:</strong>
           <div style={{ marginTop: '8px', fontSize: '13px' }}>
-            <div>Run A: {comparison.period_overlap.run_a_period.start} 至 {comparison.period_overlap.run_a_period.end}</div>
-            <div>Run B: {comparison.period_overlap.run_b_period.start} 至 {comparison.period_overlap.run_b_period.end}</div>
+            <div>Run A: {comparison.period_overlap.run_a_period.start} to {comparison.period_overlap.run_a_period.end}</div>
+            <div>Run B: {comparison.period_overlap.run_b_period.start} to {comparison.period_overlap.run_b_period.end}</div>
             <div style={{ marginTop: '4px', color: 'var(--primary-text)' }}>
-              重疊期間: {comparison.period_overlap.overlap.start} 至 {comparison.period_overlap.overlap.end}
+              Overlapping period: {comparison.period_overlap.overlap.start} to {comparison.period_overlap.overlap.end}
             </div>
           </div>
         </div>
       )}
 
       {/* Metrics Comparison */}
-      <h2 style={{ marginBottom: '16px' }}>結果差異</h2>
+      <h2 style={{ marginBottom: '16px' }}>Metric differences</h2>
       <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: '24px' }}>
         <thead>
           <tr style={{ borderBottom: '2px solid var(--border-strong)' }}>
             <th style={{ padding: '10px', textAlign: 'left', width: '30px' }}></th>
-            <th style={{ padding: '10px', textAlign: 'left' }}>指標</th>
+            <th style={{ padding: '10px', textAlign: 'left' }}>Metric</th>
             <th style={{ padding: '10px', textAlign: 'right' }}>Run A</th>
             <th style={{ padding: '10px', textAlign: 'right' }}>Run B</th>
-            <th style={{ padding: '10px', textAlign: 'right' }}>差異 (B − A)</th>
-            <th style={{ padding: '10px', textAlign: 'left' }}>來源狀態</th>
+            <th style={{ padding: '10px', textAlign: 'right' }}>Difference (B − A)</th>
+            <th style={{ padding: '10px', textAlign: 'left' }}>Source status</th>
           </tr>
         </thead>
         <tbody>
@@ -569,16 +583,16 @@ export default function RunComparisonPage() {
       </table>
 
       {/* Conditions Comparison */}
-      <h2 style={{ marginBottom: '16px' }}>執行條件差異</h2>
+      <h2 style={{ marginBottom: '16px' }}>Execution condition differences</h2>
       <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: '24px' }}>
         <thead>
           <tr style={{ borderBottom: '2px solid var(--border-strong)' }}>
             <th style={{ padding: '10px', textAlign: 'left', width: '30px' }}></th>
-            <th style={{ padding: '10px', textAlign: 'left' }}>欄位</th>
+            <th style={{ padding: '10px', textAlign: 'left' }}>Field</th>
             <th style={{ padding: '10px', textAlign: 'right' }}>Run A</th>
             <th style={{ padding: '10px', textAlign: 'right' }}>Run B</th>
-            <th style={{ padding: '10px', textAlign: 'left' }}>比較狀態</th>
-            <th style={{ padding: '10px', textAlign: 'left' }}>來源狀態</th>
+            <th style={{ padding: '10px', textAlign: 'left' }}>Comparison status</th>
+            <th style={{ padding: '10px', textAlign: 'left' }}>Source status</th>
           </tr>
         </thead>
         <tbody>
@@ -634,7 +648,7 @@ export default function RunComparisonPage() {
         borderRadius: '4px',
         fontSize: '14px',
       }}>
-        <strong>提醒：</strong>以上比較基於已記錄嘅資料。部分欄位可能缺失或僅反映當前 metadata。本系統係研究工具，比較結果唔構成投資建議。
+        <strong>Note:</strong> this comparison is based on recorded data. Some fields may be missing or reflect current metadata only. Alethra is a research tool; comparison results are not investment advice.
       </div>
     </div>
   );

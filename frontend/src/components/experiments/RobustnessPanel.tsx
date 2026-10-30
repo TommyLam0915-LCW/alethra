@@ -3,6 +3,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { api, ApiError } from '@/lib/api';
+import {
+  ATTEMPT_STATUS_LABELS,
+  ROBUSTNESS_KIND_LABELS,
+  ROBUSTNESS_ROLE_LABELS,
+  ROBUSTNESS_STUDY_STATUS_LABELS,
+  label,
+} from '@/lib/copy';
 
 interface StrategyVersion {
   id: string;
@@ -122,41 +129,14 @@ interface Study {
   attempts: Attempt[];
 }
 
-const KINDS = [
-  { value: 'cost_scenarios', label: '成本情境（手續費 × 滑價）' },
-  { value: 'period_slices', label: '期間切分（連續不重疊）' },
-  { value: 'parameter_sensitivity', label: '參數敏感度（單因子 ±20%）' },
-  { value: 'walk_forward', label: 'Walk-forward（訓練選參數、測試期量測）' },
-];
+const KINDS = Object.entries(ROBUSTNESS_KIND_LABELS).map(([value, text]) => ({
+  value,
+  label: text,
+}));
 
-const KIND_LABEL: Record<string, string> = Object.fromEntries(
-  KINDS.map((k) => [k.value, k.label])
-);
-
-const STATUS_LABEL: Record<string, string> = {
-  planned: '已計劃，未執行',
-  running: '執行中',
-  completed: '已完成',
-  partial: '部分完成（有嘗試失敗或被跳過）',
-  failed: '失敗',
-  cancelled: '已取消',
-};
-
-const ATTEMPT_STATUS_LABEL: Record<string, string> = {
-  pending: '未執行',
-  completed: '完成',
-  failed: '失敗',
-  skipped: '跳過',
-};
-
-const ROLE_LABEL: Record<string, string> = {
-  baseline: '基準',
-  cost: '成本情境',
-  slice: '期間',
-  parameter: '參數變動',
-  selection: '訓練期選參數',
-  measurement: '測試期量測',
-};
+const KIND_LABEL = ROBUSTNESS_KIND_LABELS;
+const STATUS_LABEL = ROBUSTNESS_STUDY_STATUS_LABELS;
+const ROLE_LABEL = ROBUSTNESS_ROLE_LABELS;
 
 const th: React.CSSProperties = {
   padding: '6px 10px',
@@ -237,7 +217,7 @@ export default function RobustnessPanel({
   };
 
   useEffect(() => {
-    refreshStudies().catch(() => setActionError('載入穩健性研究失敗'));
+    refreshStudies().catch(() => setActionError('Could not load robustness studies'));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [experimentId]);
 
@@ -261,7 +241,7 @@ export default function RobustnessPanel({
       const result = await api.robustness.plan(experimentId, requestBody());
       setPlan(result);
     } catch (err) {
-      setPlanError(describeError(err, '無法建立計劃'));
+      setPlanError(describeError(err, 'Could not build the plan'));
     } finally {
       setPlanLoading(false);
     }
@@ -280,10 +260,10 @@ export default function RobustnessPanel({
       });
       await refreshStudies(study.id);
       setNotice(
-        `已建立研究（${KIND_LABEL[study.kind] ?? study.kind}），共 ${study.plan.estimated_attempts} 個嘗試；按「執行研究」才會開始回測。`
+        `Study created (${KIND_LABEL[study.kind] ?? study.kind}) with ${study.plan.estimated_attempts} attempts. Backtests only start when you select "Run study".`
       );
     } catch (err) {
-      setPlanError(describeError(err, '無法建立研究'));
+      setPlanError(describeError(err, 'Could not create the study'));
     } finally {
       setBusy(false);
     }
@@ -302,11 +282,11 @@ export default function RobustnessPanel({
       const detail = await api.robustness.run(study.id);
       await afterStudyChange(detail.id);
       setNotice(
-        `研究已執行：${detail.aggregate.counts.completed} 個嘗試完成，` +
-          `${detail.aggregate.counts.failed} 個失敗，${detail.aggregate.counts.skipped} 個跳過。`
+        `Study run: ${detail.aggregate.counts.completed} attempts completed, ` +
+          `${detail.aggregate.counts.failed} failed, ${detail.aggregate.counts.skipped} skipped.`
       );
     } catch (err) {
-      setActionError(describeError(err, '執行研究失敗'));
+      setActionError(describeError(err, 'Running the study failed'));
       await refreshStudies(study.id).catch(() => undefined);
     } finally {
       setBusy(false);
@@ -320,9 +300,9 @@ export default function RobustnessPanel({
     try {
       await api.robustness.cancel(study.id);
       await afterStudyChange(study.id);
-      setNotice('研究已取消；已完成的嘗試與結果仍會保留。');
+      setNotice('Study cancelled; completed attempts and results are kept.');
     } catch (err) {
-      setActionError(describeError(err, '取消研究失敗'));
+      setActionError(describeError(err, 'Cancelling the study failed'));
     } finally {
       setBusy(false);
     }
@@ -344,15 +324,17 @@ export default function RobustnessPanel({
           marginBottom: '12px',
         }}
       >
-        <h3 style={{ margin: 0 }}>進階研究與穩健性</h3>
+        <h3 style={{ margin: 0 }}>Advanced studies and robustness</h3>
         <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
-          每次嘗試都是一次真實回測，會計入研究執行額度
+          Each attempt is a real backtest and counts toward the research run quota
         </span>
       </div>
 
       <p style={{ color: 'var(--text-secondary)', fontSize: '13px', marginTop: 0 }}>
-        先預覽計劃（嘗試數、資料日曆、額度是否足夠），再建立並執行。研究不會修改策略版本；
-        全部嘗試（包括失敗與跳過）都會列出，最佳單一結果不會被當成整體穩健性。
+        Preview the plan first (number of attempts, data calendar, whether quota is
+        sufficient), then create and run it. A study does not modify the strategy
+        version. Every attempt is listed, including failed and skipped ones, and the
+        best single result is not treated as overall robustness.
       </p>
 
       <div
@@ -364,7 +346,7 @@ export default function RobustnessPanel({
         }}
       >
         <label style={{ display: 'block', fontSize: '13px', color: 'var(--text-muted)' }}>
-          策略版本
+          Strategy version
           <select
             className="input"
             style={{ width: '100%', marginTop: '4px' }}
@@ -376,18 +358,18 @@ export default function RobustnessPanel({
             }}
             data-testid="robustness-version"
           >
-            {dailyVersions.length === 0 && <option value="">沒有日線版本</option>}
+            {dailyVersions.length === 0 && <option value="">No daily versions</option>}
             {dailyVersions.map((v) => (
               <option key={v.id} value={v.id}>
                 v{v.version_number}
-                {v.id === currentVersionId ? '（目前）' : ''}
+                {v.id === currentVersionId ? ' (current)' : ''}
               </option>
             ))}
           </select>
         </label>
 
         <label style={{ display: 'block', fontSize: '13px', color: 'var(--text-muted)' }}>
-          研究種類
+          Study kind
           <select
             className="input"
             style={{ width: '100%', marginTop: '4px' }}
@@ -408,7 +390,7 @@ export default function RobustnessPanel({
         </label>
 
         <label style={{ display: 'block', fontSize: '13px', color: 'var(--text-muted)' }}>
-          分段數（2–4）
+          Slices (2–4)
           <input
             type="number"
             min={2}
@@ -422,7 +404,7 @@ export default function RobustnessPanel({
         </label>
 
         <label style={{ display: 'block', fontSize: '13px', color: 'var(--text-muted)' }}>
-          折數（2–3）
+          Folds (2–3)
           <input
             type="number"
             min={2}
@@ -436,7 +418,7 @@ export default function RobustnessPanel({
         </label>
 
         <label style={{ display: 'block', fontSize: '13px', color: 'var(--text-muted)' }}>
-          嘗試上限（1–24）
+          Attempt cap (1–24)
           <input
             type="number"
             min={1}
@@ -459,7 +441,7 @@ export default function RobustnessPanel({
           disabled={planLoading || busy || !versionId}
           data-testid="robustness-plan"
         >
-          {planLoading ? '計算中…' : '預覽計劃'}
+          {planLoading ? 'Calculating…' : 'Preview plan'}
         </button>
         <button
           type="button"
@@ -467,10 +449,10 @@ export default function RobustnessPanel({
           style={{ fontSize: '13px' }}
           onClick={handleStart}
           disabled={busy || !versionId || !plan?.ready}
-          title={plan?.ready ? '' : '請先預覽計劃，並確認額度足夠'}
+          title={plan?.ready ? '' : 'Preview the plan and confirm quota is sufficient first'}
           data-testid="robustness-start"
         >
-          {busy ? '處理中…' : '建立研究'}
+          {busy ? 'Working…' : 'Create study'}
         </button>
       </div>
 
@@ -493,7 +475,11 @@ export default function RobustnessPanel({
       )}
 
       {notice && (
-        <p data-testid="robustness-notice" style={{ color: 'var(--positive)', fontSize: '13px', margin: '0 0 12px' }}>
+        <p
+          role="status"
+          data-testid="robustness-notice"
+          style={{ color: 'var(--positive)', fontSize: '13px', margin: '0 0 12px' }}
+        >
           {notice}
         </p>
       )}
@@ -511,35 +497,43 @@ export default function RobustnessPanel({
         >
           <div style={{ fontSize: '13px', marginBottom: '8px' }} data-testid="robustness-estimated">
             <strong>{KIND_LABEL[plan.kind] ?? plan.kind}</strong> · v{plan.version_number} ·{' '}
-            預計 <strong>{plan.estimated_attempts}</strong> 個嘗試（上限 {plan.max_attempts}） ·{' '}
-            每段至少需要 {plan.required_bars} 個交易日
+            estimated <strong>{plan.estimated_attempts}</strong> attempts (cap{' '}
+            {plan.max_attempts}) · each slice needs at least {plan.required_bars} trading
+            days
           </div>
           <div style={{ fontSize: '13px', color: 'var(--text-muted)', marginBottom: '8px' }}>
-            資料日曆：
-            {plan.calendar.source === 'stored' ? '已儲存市場資料' : '內建合成示範資料（非真實市場價格）'}
+            Data calendar:{' '}
+            {plan.calendar.source === 'stored'
+              ? 'stored market data'
+              : 'built-in synthetic demo data (not real market prices)'}
             {' · '}
-            {plan.calendar.first_date} → {plan.calendar.last_date}（{plan.calendar.bars} 個交易日）
-            {' · 供應商：'}
-            {plan.calendar.providers.join('、') || '—'}
+            {plan.calendar.first_date} → {plan.calendar.last_date} ({plan.calendar.bars}{' '}
+            trading days)
+            {' · Providers: '}
+            {plan.calendar.providers.join(', ') || '—'}
           </div>
           <div style={{ fontSize: '13px', marginBottom: '8px' }} data-testid="robustness-quota">
-            額度：此計劃需要 {plan.quota.required} 次
+            Quota: this plan needs {plan.quota.required} runs
             {plan.quota.unlimited
-              ? '；目前方案不限次數。'
-              : `；已用 ${plan.quota.used ?? '—'}／上限 ${plan.quota.limit ?? '—'}，剩餘 ${
+              ? '; the current plan is unlimited.'
+              : `; used ${plan.quota.used ?? '—'} / limit ${plan.quota.limit ?? '—'}, ${
                   plan.quota.remaining ?? '—'
-                } 次。`}
+                } remaining.`}
             {plan.ready ? (
-              <span style={{ color: 'var(--positive)' }}> 額度足夠，可以建立研究。</span>
+              <span style={{ color: 'var(--positive)' }}>
+                {' '}
+                Quota is sufficient, so you can create the study.
+              </span>
             ) : (
               <span style={{ color: 'var(--negative)' }}>
                 {' '}
-                額度不足，後端會拒絕建立研究，不會執行任何回測。
+                Quota is insufficient; the backend will refuse to create the study and no
+                backtest will run.
               </span>
             )}
           </div>
           <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '6px' }}>
-            選取規則：{plan.selection_rule}
+            Selection rule: {plan.selection_rule}
           </div>
           <ul style={{ margin: '6px 0 0 18px', padding: 0, fontSize: '12px', color: 'var(--text-muted)' }}>
             {plan.disclosures.map((line, i) => (
@@ -553,11 +547,11 @@ export default function RobustnessPanel({
 
       <div style={{ marginBottom: '16px' }} data-testid="robustness-studies">
         <div style={{ fontSize: '13px', color: 'var(--text-muted)', marginBottom: '6px' }}>
-          此實驗的研究紀錄（{studies.length}）
+          Studies for this experiment ({studies.length})
         </div>
         {studies.length === 0 ? (
           <p style={{ fontSize: '13px', color: 'var(--text-muted)', margin: 0 }}>
-            尚未建立穩健性研究。先預覽計劃，再建立研究。
+            No robustness studies yet. Preview the plan first, then create the study.
           </p>
         ) : (
           <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
@@ -582,7 +576,7 @@ export default function RobustnessPanel({
                 {KIND_LABEL[s.kind] ?? s.kind}
                 <br />
                 <span style={{ color: 'var(--text-secondary)' }}>
-                  {STATUS_LABEL[s.status] ?? s.status} · {s.attempts.length}/{s.plan.estimated_attempts} 個嘗試
+                  {STATUS_LABEL[s.status] ?? s.status} · {s.attempts.length}/{s.plan.estimated_attempts} attempts
                 </span>
               </button>
             ))}
@@ -604,7 +598,7 @@ export default function RobustnessPanel({
           >
             <div style={{ fontSize: '14px' }}>
               <strong>{KIND_LABEL[selected.kind] ?? selected.kind}</strong> · v
-              {selected.plan.version_number} · 狀態：{STATUS_LABEL[selected.status] ?? selected.status}
+              {selected.plan.version_number} · Status: {STATUS_LABEL[selected.status] ?? selected.status}
               {selected.error_details && (
                 <span style={{ color: 'var(--negative)' }}> · {selected.error_details}</span>
               )}
@@ -620,10 +614,10 @@ export default function RobustnessPanel({
                   data-testid="robustness-run"
                 >
                   {selected.status === 'running'
-                    ? '繼續執行未完成的嘗試'
+                    ? 'Continue unfinished attempts'
                     : selected.attempts.some((a) => a.status === 'completed')
-                    ? '繼續／重跑未完成嘗試'
-                    : '執行研究'}
+                    ? 'Continue / re-run unfinished attempts'
+                    : 'Run study'}
                 </button>
               )}
               {canCancel && (
@@ -635,7 +629,7 @@ export default function RobustnessPanel({
                   disabled={busy}
                   data-testid="robustness-cancel"
                 >
-                  取消研究
+                  Cancel study
                 </button>
               )}
             </div>
@@ -643,23 +637,24 @@ export default function RobustnessPanel({
 
           {selected.attempts.length === 0 ? (
             <p style={{ fontSize: '13px', color: 'var(--text-muted)', margin: '0 0 12px' }}>
-              尚未執行任何嘗試；按「執行研究」會逐格回測，每個嘗試都使用來源版本的規則。
+              No attempts have run yet. Selecting &ldquo;Run study&rdquo; backtests cell by
+              cell, and every attempt uses the source version&apos;s rules.
             </p>
           ) : (
             <div style={{ overflowX: 'auto' }} data-testid="robustness-attempts">
               <table style={{ borderCollapse: 'collapse', width: '100%' }}>
                 <thead>
                   <tr>
-                    <th style={{ ...th, textAlign: 'left' }}>嘗試</th>
-                    <th style={th}>角色</th>
-                    <th style={th}>期間</th>
-                    <th style={th}>設定差異</th>
-                    <th style={th}>狀態</th>
-                    <th style={th}>總報酬</th>
-                    <th style={th}>最大回撤</th>
-                    <th style={th}>成交筆數</th>
-                    <th style={th}>資料</th>
-                    <th style={th}>回測</th>
+                    <th style={{ ...th, textAlign: 'left' }}>Attempt</th>
+                    <th style={th}>Role</th>
+                    <th style={th}>Period</th>
+                    <th style={th}>Setting differences</th>
+                    <th style={th}>Status</th>
+                    <th style={th}>Total return</th>
+                    <th style={th}>Max drawdown</th>
+                    <th style={th}>Trades</th>
+                    <th style={th}>Data</th>
+                    <th style={th}>Run</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -670,11 +665,11 @@ export default function RobustnessPanel({
                       : '—';
                     const overrides =
                       Object.keys(a.overrides ?? {}).length === 0
-                        ? '原文設定'
+                        ? 'Original settings'
                         : Object.entries(a.overrides)
                             .filter(([k]) => k !== 'start_date' && k !== 'end_date')
                             .map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : v}`)
-                            .join('、') || '只改期間';
+                            .join(', ') || 'Period only';
                     return (
                       <tr key={a.id} data-testid={`robustness-attempt-${a.cell_key}`}>
                         <td style={{ ...td, textAlign: 'left' }}>{a.label}</td>
@@ -686,8 +681,8 @@ export default function RobustnessPanel({
                           {overrides}
                         </td>
                         <td style={td}>
-                          {ATTEMPT_STATUS_LABEL[a.status] ?? a.status}
-                          {a.error_details ? `：${a.error_details}` : ''}
+                          {label(ATTEMPT_STATUS_LABELS, a.status)}
+                          {a.error_details ? `: ${a.error_details}` : ''}
                         </td>
                         <td style={td}>{pct(a.metrics?.total_return_pct)}</td>
                         <td style={td}>{pct(a.metrics?.max_drawdown_pct)}</td>
@@ -695,7 +690,7 @@ export default function RobustnessPanel({
                           {typeof a.metrics?.total_trades === 'number' ? a.metrics.total_trades : '—'}
                         </td>
                         <td style={{ ...td, textAlign: 'left', fontSize: '12px', color: 'var(--text-secondary)' }}>
-                          {identity.data_source_used ?? '—'}／{natures}
+                          {identity.data_source_used ?? '—'} / {natures}
                           {a.dataset_checksum ? (
                             <span title={a.dataset_checksum}>
                               {' '}
@@ -706,7 +701,7 @@ export default function RobustnessPanel({
                         <td style={td}>
                           {a.run_id ? (
                             <Link href={`/experiments/${experimentId}/runs/${a.run_id}`} style={{ fontSize: '12px' }}>
-                              查看
+                              View
                             </Link>
                           ) : (
                             '—'
@@ -725,36 +720,41 @@ export default function RobustnessPanel({
             data-testid="robustness-aggregate"
           >
             <div style={{ fontSize: '13px', fontWeight: 'bold', marginBottom: '6px' }}>
-              匯總（範圍：
-              {selected.aggregate.scope === 'measurement_only' ? '只計測試期量測' : '全部嘗試'}）
+              Aggregate (scope:{' '}
+              {selected.aggregate.scope === 'measurement_only'
+                ? 'test-window measurements only'
+                : 'all attempts'}
+              )
             </div>
             {selected.aggregate.return_stats ? (
               <div style={{ fontSize: '13px', color: 'var(--text-primary)' }}>
-                完成 {selected.aggregate.return_stats.count} 次 · 中位數{' '}
-                {pct(selected.aggregate.return_stats.median)} · 平均{' '}
-                {pct(selected.aggregate.return_stats.mean)} · 最差{' '}
-                {pct(selected.aggregate.return_stats.min)} · 最好{' '}
-                {pct(selected.aggregate.return_stats.max)} · 分散{' '}
-                {pct(selected.aggregate.return_stats.spread)} · 正報酬{' '}
-                {selected.aggregate.return_stats.positive_count}／
-                {selected.aggregate.return_stats.count} · 回撤中位數{' '}
+                {selected.aggregate.return_stats.count} completed · median{' '}
+                {pct(selected.aggregate.return_stats.median)} · mean{' '}
+                {pct(selected.aggregate.return_stats.mean)} · worst{' '}
+                {pct(selected.aggregate.return_stats.min)} · best{' '}
+                {pct(selected.aggregate.return_stats.max)} · spread{' '}
+                {pct(selected.aggregate.return_stats.spread)} · positive{' '}
+                {selected.aggregate.return_stats.positive_count} /{' '}
+                {selected.aggregate.return_stats.count} · median drawdown{' '}
                 {pct(selected.aggregate.drawdown_median)}
               </div>
             ) : (
-              <div style={{ fontSize: '13px', color: 'var(--text-muted)' }}>沒有完成的嘗試，無法匯總。</div>
+              <div style={{ fontSize: '13px', color: 'var(--text-muted)' }}>
+                No completed attempts, so nothing can be aggregated.
+              </div>
             )}
             <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '6px' }}>
-              嘗試狀態：完成 {selected.aggregate.counts.completed ?? 0} · 失敗{' '}
-              {selected.aggregate.counts.failed ?? 0} · 跳過{' '}
-              {selected.aggregate.counts.skipped ?? 0} · 未執行{' '}
+              Attempt status: completed {selected.aggregate.counts.completed ?? 0} · failed{' '}
+              {selected.aggregate.counts.failed ?? 0} · skipped{' '}
+              {selected.aggregate.counts.skipped ?? 0} · not run{' '}
               {selected.aggregate.counts.pending ?? 0}
             </div>
             {selected.aggregate.best_attempt && (
               <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px' }}>
-                最好單一結果：{selected.aggregate.best_attempt.label}（
-                {pct(selected.aggregate.best_attempt.total_return_pct)}）；最差：
-                {selected.aggregate.worst_attempt?.label}（
-                {pct(selected.aggregate.worst_attempt?.total_return_pct)}）
+                Best single result: {selected.aggregate.best_attempt.label} (
+                {pct(selected.aggregate.best_attempt.total_return_pct)}); worst:{' '}
+                {selected.aggregate.worst_attempt?.label} (
+                {pct(selected.aggregate.worst_attempt?.total_return_pct)})
               </div>
             )}
             <div style={{ fontSize: '12px', color: 'var(--warning)', marginTop: '6px' }}>
@@ -762,16 +762,16 @@ export default function RobustnessPanel({
             </div>
             {selected.aggregate.folds && selected.aggregate.folds.length > 0 && (
               <div style={{ marginTop: '8px' }}>
-                <div style={{ fontSize: '12px', fontWeight: 'bold', marginBottom: '4px' }}>各折結果</div>
+                <div style={{ fontSize: '12px', fontWeight: 'bold', marginBottom: '4px' }}>Per-fold results</div>
                 <ul style={{ margin: '0 0 0 18px', padding: 0, fontSize: '12px', color: 'var(--text-muted)' }}>
                   {selected.aggregate.folds.map((fold, i) => (
                     <li key={i}>
-                      第 {fold.fold} 折 測試期 {fold.period.start_date} → {fold.period.end_date}：{' '}
+                      Fold {fold.fold} test period {fold.period.start_date} → {fold.period.end_date}:{' '}
                       {fold.status === 'completed'
-                        ? `報酬 ${pct(fold.total_return_pct)}`
-                        : ATTEMPT_STATUS_LABEL[fold.status] ?? fold.status}
-                      {fold.selected ? ` · 選用參數 ${JSON.stringify(fold.selected)}` : ''}
-                      {fold.selected_from ? `（來自 ${fold.selected_from}）` : ''}
+                        ? `return ${pct(fold.total_return_pct)}`
+                        : label(ATTEMPT_STATUS_LABELS, fold.status)}
+                      {fold.selected ? ` · selected parameters ${JSON.stringify(fold.selected)}` : ''}
+                      {fold.selected_from ? ` (from ${fold.selected_from})` : ''}
                     </li>
                   ))}
                 </ul>

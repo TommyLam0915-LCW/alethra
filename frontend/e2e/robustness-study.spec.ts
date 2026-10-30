@@ -64,7 +64,7 @@ const COVERED = 'US:AAPL';
 const WINDOW_START = '2024-01-02';
 const WINDOW_END = '2024-12-31';
 const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-const TITLE = `E2E 穩健性研究（僅供自動化測試）${stamp}`;
+const TITLE = `E2E robustness study (automated test only) ${stamp}`;
 
 const journey = {
   experimentId: '',
@@ -135,7 +135,7 @@ test.describe('robustness study journey', () => {
     await page.getByTestId('exp-end-date').fill(WINDOW_END);
     await page.getByTestId('sma-short-window').fill('5');
     await page.getByTestId('sma-long-window').fill('20');
-    await page.getByRole('button', { name: '建立實驗', exact: true }).click();
+    await page.getByRole('button', { name: 'Create experiment', exact: true }).click();
     await page.waitForURL(/\/experiments\/[0-9a-f-]{36}$/, { timeout: 30000 });
     journey.experimentId = new URL(page.url()).pathname.split('/').pop() as string;
 
@@ -157,8 +157,8 @@ test.describe('robustness study journey', () => {
     const quota = page.getByTestId('robustness-quota');
     await expect(quota).toBeVisible({ timeout: 30000 });
     // The cost grid is 3 × 3 = 9 cells; the free plan has fewer runs left.
-    await expect(page.getByTestId('robustness-estimated')).toContainText('預計 9 個嘗試');
-    await expect(quota).toContainText('額度不足');
+    await expect(page.getByTestId('robustness-estimated')).toContainText('estimated 9 attempts');
+    await expect(quota).toContainText('Quota is insufficient');
     await expect(page.getByTestId('robustness-start')).toBeDisabled();
 
     const runs = await apiGet<Array<{ id: string }>>(
@@ -175,21 +175,27 @@ test.describe('robustness study journey', () => {
     await page.getByTestId('robustness-plan').click();
 
     const estimated = page.getByTestId('robustness-estimated');
-    await expect(estimated).toContainText('預計 3 個嘗試');
-    await expect(page.getByTestId('robustness-quota')).toContainText('額度足夠');
-    await expect(page.getByTestId('robustness-plan-preview')).toContainText('已儲存市場資料');
+    await expect(estimated).toContainText('estimated 3 attempts');
+    await expect(page.getByTestId('robustness-quota')).toContainText('Quota is sufficient');
+    await expect(page.getByTestId('robustness-plan-preview')).toContainText(
+      'stored market data'
+    );
     // The honest disclosures must be visible, not just stored.
-    await expect(page.getByTestId('robustness-plan-preview')).toContainText('全部嘗試');
-    await expect(page.getByTestId('robustness-plan-preview')).toContainText('分段連續且互不重疊');
+    await expect(page.getByTestId('robustness-plan-preview')).toContainText(
+      'Every attempt, including failed and skipped ones'
+    );
+    await expect(page.getByTestId('robustness-plan-preview')).toContainText(
+      'Slices are contiguous and non-overlapping'
+    );
     await expect(page.getByTestId('robustness-start')).toBeEnabled();
   });
 
   test('creating the study plans three attempts and runs nothing yet', async () => {
     await page.getByTestId('robustness-start').click();
-    await expect(page.getByTestId('robustness-notice')).toContainText('已建立研究', {
+    await expect(page.getByTestId('robustness-notice')).toContainText('Study created', {
       timeout: 30000,
     });
-    await expect(page.getByTestId('robustness-detail')).toContainText('已計劃，未執行');
+    await expect(page.getByTestId('robustness-detail')).toContainText('Planned, not run');
     await expect(page.getByTestId('robustness-attempts')).toHaveCount(0);
 
     const runs = await apiGet<Array<{ id: string }>>(
@@ -201,20 +207,22 @@ test.describe('robustness study journey', () => {
 
   test('executing the study runs every cell and shows all attempts', async () => {
     await page.getByTestId('robustness-run').click();
-    await expect(page.getByTestId('robustness-notice')).toContainText('3 個嘗試完成', {
+    await expect(page.getByTestId('robustness-notice')).toContainText('3 attempts completed', {
       timeout: 180000,
     });
 
     const attempts = page.locator('[data-testid^="robustness-attempt-"]');
     await expect(attempts).toHaveCount(3);
     for (let i = 0; i < 3; i += 1) {
-      await expect(attempts.nth(i)).toContainText('完成');
+      await expect(attempts.nth(i)).toContainText('Completed');
     }
-    await expect(page.getByTestId('robustness-aggregate')).toContainText('完成 3 次');
-    await expect(page.getByTestId('robustness-aggregate')).toContainText('中位數');
-    await expect(page.getByTestId('robustness-aggregate')).toContainText('失敗 0');
+    await expect(page.getByTestId('robustness-aggregate')).toContainText('3 completed');
+    await expect(page.getByTestId('robustness-aggregate')).toContainText('median');
+    await expect(page.getByTestId('robustness-aggregate')).toContainText('failed 0');
     // The warning that the best single result is not evidence must be on screen.
-    await expect(page.getByTestId('robustness-aggregate')).toContainText('不是穩健性證據');
+    await expect(page.getByTestId('robustness-aggregate')).toContainText(
+      'not robustness evidence'
+    );
 
     const studies = await apiGet<Array<{ id: string; status: string; attempts: any[] }>>(
       page,
@@ -243,15 +251,17 @@ test.describe('robustness study journey', () => {
     expect(types).toContain('robustness_study_completed');
 
     await page.getByTestId('exp-timeline-toggle').click();
-    await expect(page.getByText('穩健性研究完成').first()).toBeVisible({ timeout: 15000 });
+    await expect(page.getByText('Robustness study completed').first()).toBeVisible({
+      timeout: 15000,
+    });
   });
 
   test('the study and its attempts survive a reload, and the version is untouched', async () => {
     await page.reload({ waitUntil: 'networkidle' });
     await panel(page).waitFor({ timeout: 30000 });
-    await expect(page.getByTestId('robustness-detail')).toContainText('已完成');
+    await expect(page.getByTestId('robustness-detail')).toContainText('Completed');
     await expect(page.locator('[data-testid^="robustness-attempt-"]')).toHaveCount(3);
-    await expect(page.getByTestId('robustness-aggregate')).toContainText('完成 3 次');
+    await expect(page.getByTestId('robustness-aggregate')).toContainText('3 completed');
 
     const versions = await apiGet<VersionPayload[]>(
       page,
@@ -267,10 +277,10 @@ test.describe('robustness study journey', () => {
     await page.getByTestId('robustness-kind').selectOption('period_slices');
     await page.getByTestId('robustness-slices').fill('2');
     await page.getByTestId('robustness-plan').click();
-    await expect(page.getByTestId('robustness-estimated')).toContainText('預計 2 個嘗試');
+    await expect(page.getByTestId('robustness-estimated')).toContainText('estimated 2 attempts');
     await expect(page.getByTestId('robustness-start')).toBeEnabled({ timeout: 30000 });
     await page.getByTestId('robustness-start').click();
-    await expect(page.getByTestId('robustness-notice')).toContainText('已建立研究', {
+    await expect(page.getByTestId('robustness-notice')).toContainText('Study created', {
       timeout: 30000,
     });
 
@@ -283,7 +293,7 @@ test.describe('robustness study journey', () => {
     journey.cancelStudyId = newest!.id;
 
     await page.getByTestId('robustness-cancel').click();
-    await expect(page.getByTestId('robustness-notice')).toContainText('已取消', {
+    await expect(page.getByTestId('robustness-notice')).toContainText('Study cancelled', {
       timeout: 15000,
     });
     await expect(page.getByTestId('robustness-run')).toHaveCount(0);

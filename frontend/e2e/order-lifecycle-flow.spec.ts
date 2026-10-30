@@ -32,18 +32,18 @@ import { test, expect, type Page } from '@playwright/test';
  *     setup test records them first and then requires them to be unchanged, so the
  *     journey can run repeatedly against one seeded version without the seed being
  *     re-run (which would delete that state).
- *   - ONE DISCLOSED SCAFFOLDING WRITE: the simulation page only renders 建立工作階段
- *     while no resumable session exists, and earlier runs still have one on this
- *     version. Clearing it would destroy another run's state, so this run creates
+ *   - ONE DISCLOSED SCAFFOLDING WRITE: the simulation page only renders “Create
+ *     session” while no resumable session exists, and earlier runs still have one on
+ *     this version. Clearing it would destroy another run's state, so this run creates
  *     its own session by POSTing the same body the form would send, with the UI's
  *     own token, then reloads the page — the newest resumable session is the one
  *     just created, and the account it links is verified to be bound to it.
- *     Everything downstream (連結模擬組合 onward) is a real browser gesture.
- *   - EVERY OTHER product action is a real browser gesture: typing the login,
- *     連結模擬組合, clicking the watchlist symbol, choosing the account in ⑦,
- *     「下一日」, filling 動作／數量／理由, 檢視模擬單, 提交模擬單, 取消掛單,
- *     the ⑧ tabs, 重新載入證據 and the CSV export button. Apart from the one
- *     session POST above, no API call performs a product step.
+ *     Everything downstream (linking the paper portfolio onward) is a real browser gesture.
+ *   - EVERY OTHER product action is a real browser gesture: typing the login, linking the
+ *     paper portfolio, clicking the watchlist symbol, choosing the account in ⑦,
+ *     “Next day”, filling action／quantity／rationale, “Review paper order”, “Submit
+ *     paper order”, “Cancel order”, the ⑧ tabs, “Reload evidence” and the CSV export
+ *     button. Apart from the one session POST above, no API call performs a product step.
  *   - OTHER API calls in this file are READ-ONLY oracles (session row, order list,
  *     fills, portfolio, decisions) plus one CSV parse. They cross-check what the
  *     screen claims against what PostgreSQL persisted; each is labelled where it
@@ -222,7 +222,7 @@ async function pickPortfolio(page: Page, portfolioId: string): Promise<void> {
 }
 
 const cashItem = (page: Page) =>
-  page.locator('.order-account-item', { hasText: '虛擬現金' }).locator('.order-account-value');
+  page.locator('.order-account-item', { hasText: 'Virtual cash' }).locator('.order-account-value');
 
 async function uiCash(page: Page): Promise<number> {
   const raw = (await cashItem(page).innerText()).replace(/,/g, '');
@@ -233,19 +233,19 @@ async function uiCash(page: Page): Promise<number> {
 
 const executionCell = (page: Page) => page.getByTestId('order-manual-execution');
 
-/** 「等待 {date} 開盤 {open} 執行」 — the window the server says the order waits for. */
+/** "Waiting for {date} open at {open} to execute" — the window the server says the order waits for. */
 async function claimedWindow(page: Page): Promise<{ date: string; open: number }> {
   const text = (await executionCell(page).innerText()).replace(/\s+/g, ' ');
-  const m = /等待 (\d{4}-\d{2}-\d{2}) 開盤 ([\d.]+) 執行/.exec(text);
-  if (!m) throw new Error(`掛單未聲稱任何可執行窗口：「${text}」`);
+  const m = /Waiting for the (\d{4}-\d{2}-\d{2}) open at ([\d.]+) to execute/.exec(text);
+  if (!m) throw new Error(`the pending order claims no executable window: "${text}"`);
   return { date: m[1], open: Number(m[2]) };
 }
 
-/** 「已於 {date} 成交；結算日 {settlement}」 — where the order landed, per the server. */
+/** "Filled on {date}; settlement date {settlement}" — where the order landed, per the server. */
 async function claimedExecution(page: Page): Promise<{ date: string; settlement: string }> {
   const text = (await executionCell(page).innerText()).replace(/\s+/g, ' ');
-  const m = /已於 (\d{4}-\d{2}-\d{2}) 成交；結算日 (\S+)/.exec(text);
-  if (!m) throw new Error(`掛單未聲稱成交與結算日：「${text}」`);
+  const m = /Filled on (\d{4}-\d{2}-\d{2}); settlement date (\S+)/.exec(text);
+  if (!m) throw new Error(`the order claims no execution and settlement date: "${text}"`);
   return { date: m[1], settlement: m[2] };
 }
 
@@ -277,7 +277,7 @@ async function waitForClock(page: Page, date: string): Promise<void> {
   await expect(clockValue(page), `回放時鐘必須走到 ${date}`).toHaveText(new RegExp(date));
 }
 
-/** Fill 動作／數量／理由, 檢視模擬單, then 提交模擬單 — the real three clicks. */
+/** Fill action／quantity／rationale, “Review paper order”, then “Submit paper order” — three real clicks. */
 async function submitManual(
   page: Page,
   opts: { action: 'buy' | 'sell' | 'hold'; quantity?: number; rationale: string }
@@ -376,7 +376,7 @@ test.describe('order lifecycle: submit → pending → market clock → fill →
       priorRows.map((r) => [String(r.id), `${r.status}@${r.current_snapshot_date ?? '-'}`])
     );
 
-    // SCAFFOLDING (disclosed): 建立工作階段 is only rendered while no resumable
+    // SCAFFOLDING (disclosed): “Create session” is only rendered while no resumable
     // session exists, and earlier runs left one on this version. Deleting it would
     // destroy another run's state, so this run posts the very body the form sends
     // (with the UI's own token) and then reloads; the page auto-selects the newest
@@ -445,14 +445,14 @@ test.describe('order lifecycle: submit → pending → market clock → fill →
     await page.getByTestId('watchlist-panel').waitFor({ state: 'visible', timeout: 30000 });
     await page
       .getByTestId('watchlist-panel')
-      .getByRole('button', { name: `選取標的 ${ASSET}` })
+      .getByRole('button', { name: `Select ${ASSET}` })
       .click();
     await expect(page.getByTestId('order-symbol')).toContainText(ASSET);
 
     await pickPortfolio(page, journey.portfolioId);
     await expect(page.getByTestId('order-blocked')).toHaveCount(0);
-    await expect(page.getByTestId('order-target')).toContainText('歷史回放工作階段');
-    await expect(clockValue(page)).toContainText('尚未推進');
+    await expect(page.getByTestId('order-target')).toContainText('historical replay session');
+    await expect(clockValue(page)).toContainText('Not advanced yet');
     await expect(cashItem(page)).toContainText(String(SESSION_CASH.toLocaleString()));
   });
 
@@ -489,7 +489,7 @@ test.describe('order lifecycle: submit → pending → market clock → fill →
     expect(decidedMatch![2]).toMatch(/^\d{4}-\d{2}-\d{2}T[\d:.]+/);
 
     // Pending reads as pending, never as a holding.
-    await expect(page.getByTestId('order-manual-order')).toContainText('掛單待執行');
+    await expect(page.getByTestId('order-manual-order')).toContainText('Pending');
     await expect(page.getByTestId('order-manual-quantities')).toContainText(`0 / ${BUY_QTY}`);
 
     // The window is strictly AFTER the observed bar — the order is not crammed into it.
@@ -517,25 +517,28 @@ test.describe('order lifecycle: submit → pending → market clock → fill →
     expect((await storedPortfolio(page, journey.portfolioId)).current_virtual_cash).toBeCloseTo(cashBefore, 6);
 
     // ⑧ shows the intent as an order with no execution time, and no fills at all —
-    // without any 重新載入 click. Recording the decision bumps the session's
+    // without any “Reload evidence” click. Recording the decision bumps the session's
     // state_version, and the dock re-reads the account on that bump, so an order the
     // user just submitted cannot be invisible until they press a refresh button.
     await page.getByTestId('tab-orders-fills').click();
     const mineRow = evidenceOrderRow(page, mine!.id);
     await expect(mineRow, '⑧ must list the submitted intent as an order row').toBeVisible({ timeout: 30000 });
-    // ⑧ uses its own wording for the same stored status (⑦ says 掛單待執行, ⑧ says 待成交;
-    // the divergence is pinned by workspace.spec.ts, so each surface is read in its own terms).
-    await expect(mineRow).toContainText('待成交');
-    await expect(mineRow).toContainText('買入');
-    await expect(mineRow, '本人 ≠ 系統規則：這是你親手提交的一單').toContainText('本人');
-    await expect(page.getByTestId(`evidence-order-exec-time-${mine!.id}`)).toContainText('不適用');
+    // ⑦ and ⑧ both read the stored status through the shared label map, so an admitted
+    // order reads as Pending on both surfaces; the actor and side columns are asserted
+    // on their own cells so a row-level substring cannot satisfy them by accident.
+    await expect(mineRow).toContainText('Pending');
+    await expect(mineRow.locator('td').nth(1), 'actor column').toHaveText('You');
+    await expect(mineRow.locator('td').nth(2), 'side column').toHaveText('Buy');
+    await expect(page.getByTestId(`evidence-order-exec-time-${mine!.id}`)).toContainText('Not applicable');
     await expect(page.getByTestId('evidence-no-fills')).toBeVisible();
 
     // Same without 重新載入: 一筆掛單 must not create a position, and the dock must
     // re-read the account on the submission itself rather than showing a stale
     // table the user has to refresh.
     await page.getByTestId('tab-positions').click();
-    await expect(page.getByTestId('evidence-no-positions')).toContainText('沒有持倉');
+    await expect(page.getByTestId('evidence-no-positions')).toContainText(
+      'No positions recorded for this portfolio yet.'
+    );
     await expect(page.getByTestId('evidence-positions-table'), 'pending 掛單不得產生持倉表').toHaveCount(0);
   });
 
@@ -544,11 +547,11 @@ test.describe('order lifecycle: submit → pending → market clock → fill →
     const shortId = journey.cancelledOrderId.slice(0, 8);
     const row = page.getByTestId(`order-book-row-${shortId}`);
     await expect(row).toBeVisible();
-    await expect(row).toContainText('掛單待執行');
+    await expect(row).toContainText('Pending');
 
     await page.getByTestId('tab-orders-fills').click();
     const dockRow = evidenceOrderRow(page, journey.cancelledOrderId);
-    await expect(dockRow, '⑧ shows the same order as 待成交 before the cancel').toContainText('待成交');
+    await expect(dockRow, '⑧ shows the same order as Pending before the cancel').toContainText('Pending');
 
     await Promise.all([
       page.waitForResponse(
@@ -558,7 +561,7 @@ test.describe('order lifecycle: submit → pending → market clock → fill →
       page.getByTestId(`order-book-cancel-${shortId}`).click(),
     ]);
 
-    await expect(row, 'the book must re-read the cancelled state').toContainText('已取消');
+    await expect(row, 'the book must re-read the cancelled state').toContainText('Cancelled');
     const stored = (await storedOrders(page, journey.portfolioId)).find((o) => o.id === journey.cancelledOrderId);
     expect(stored!.status).toBe('cancelled');
     expect(await storedFills(page, journey.portfolioId, journey.cancelledOrderId), 'a cancelled order never fills').toEqual([]);
@@ -568,11 +571,12 @@ test.describe('order lifecycle: submit → pending → market clock → fill →
     // Cancel is POST /paper-portfolio/{portfolio}/orders/{id}/cancel: it moves neither
     // the replay cursor nor the session's state_version, the two clocks ⑧ otherwise
     // refetches on. The mutation site therefore names its own revision, and the dock
-    // re-reads on that bump — so 待成交 becomes 已取消 with no 重新載入 click. Submit and
-    // advance self-refresh for the same reason; nothing here presses refresh.
-    await expect(dockRow, '⑧ must re-read the cancelled state without a manual reload').toContainText('已取消');
-    await expect(dockRow).not.toContainText('待成交');
-    await expect(page.getByTestId(`evidence-order-exec-time-${journey.cancelledOrderId}`)).toContainText('不適用');
+    // re-reads on that bump — so Pending becomes Cancelled with no “Reload evidence”
+    // click. Submit and advance self-refresh for the same reason; nothing here presses
+    // refresh.
+    await expect(dockRow, '⑧ must re-read the cancelled state without a manual reload').toContainText('Cancelled');
+    await expect(dockRow).not.toContainText('Pending');
+    await expect(page.getByTestId(`evidence-order-exec-time-${journey.cancelledOrderId}`)).toContainText('Not applicable');
     await expect(page.getByTestId('evidence-no-fills')).toBeVisible();
   });
 
@@ -585,7 +589,7 @@ test.describe('order lifecycle: submit → pending → market clock → fill →
     expect(journey.keys.has(sent.idempotencyKey), 'a changed submission must mint a new key').toBe(false);
     journey.keys.add(sent.idempotencyKey);
 
-    await expect(page.getByTestId('order-manual-order')).toContainText('掛單待執行');
+    await expect(page.getByTestId('order-manual-order')).toContainText('Pending');
     const window = await claimedWindow(page);
     expect(window.date, 'the same cursor must name the same execution window').toBe(journey.windowDate);
     expect(window.open).toBeCloseTo(journey.windowOpen, 6);
@@ -598,9 +602,9 @@ test.describe('order lifecycle: submit → pending → market clock → fill →
     expect(cursor, '執行必須發生在掛單自己聲稱的那根 bar，不是別的 bar').toBe(journey.windowDate);
     await waitForClock(page, cursor);
 
-    await expect(page.getByTestId('order-manual-order'), 'the receipt must track live state').toContainText('已成交');
+    await expect(page.getByTestId('order-manual-order'), 'the receipt must track live state').toContainText('Filled');
     await expect(page.getByTestId('order-manual-quantities')).toContainText(`${BUY_QTY} / ${BUY_QTY}`);
-    await expect(page.getByTestId('order-manual-quantities')).toContainText('成交筆數 1');
+    await expect(page.getByTestId('order-manual-quantities')).toContainText('1 fills');
 
     const claimed = await claimedExecution(page);
     expect(claimed.date).toBe(journey.windowDate);
@@ -644,25 +648,27 @@ test.describe('order lifecycle: submit → pending → market clock → fill →
     expect(held[0].status).toBe('open');
 
     // ⑧ now names the bar the fill came from, not the bar the user was watching.
-    // No 重新載入 here: the advance that booked this fill moved the cursor, and the
-    // dock re-reads on that, so the row must already be correct when the tab opens.
+    // No “Reload evidence” here: the advance that booked this fill moved the cursor, and
+    // the dock re-reads on that, so the row must already be correct when the tab opens.
     await page.getByTestId('tab-orders-fills').click();
     const filledRow = evidenceOrderRow(page, journey.filledOrderId);
-    await expect(filledRow).toContainText('已成交');
-    await expect(filledRow, '本人 ≠ 系統規則').toContainText('本人');
+    await expect(filledRow).toContainText('Filled');
+    await expect(filledRow.locator('td').nth(1), 'actor column: you, not the rule engine').toHaveText('You');
     await expect(page.getByTestId('evidence-fills-table')).toBeVisible();
     await expect(page.getByTestId(`evidence-fill-${fill.id}`)).toBeVisible();
-    // A 1d fill has no sub-bar timestamp: the stored row keeps it NULL, so ⑧'s K 線時間
-    // honestly reads 不適用. Only the intraday journey can put a timestamp in that column.
+    // A 1d fill has no sub-bar timestamp: the stored row keeps it NULL, so ⑧'s bar-time
+    // column honestly reads Not applicable. Only the intraday journey can put a timestamp there.
     expect(fill.bar_timestamp, '日線成交不得有 bar 時間戳').toBeNull();
-    await expect(page.getByTestId(`evidence-fill-bar-time-${fill.id}`)).toContainText('不適用');
+    await expect(page.getByTestId(`evidence-fill-bar-time-${fill.id}`)).toContainText('Not applicable');
     const fillRow = page
       .getByTestId('evidence-fills-table')
       .locator('tr', { has: page.getByTestId(`evidence-fill-${fill.id}`) });
     await expect(fillRow, '成交日必須是掛單自己聲稱的那根 bar').toContainText(journey.windowDate);
     await expect(fillRow).toContainText('manual_buy');
     const execTime = await page.getByTestId(`evidence-order-exec-time-${journey.filledOrderId}`).innerText();
-    expect(execTime, '成交後執行時間必須是真實日期，不再是 不適用').not.toContain('不適用');
+    expect(execTime, 'after the fill the execution time is a real date, no longer Not applicable').not.toContain(
+      'Not applicable'
+    );
     expect(execTime).toContain(journey.windowDate);
   });
 
@@ -689,7 +695,7 @@ test.describe('order lifecycle: submit → pending → market clock → fill →
     await page.goto(`${runtime.frontendBase}/workspace`);
     await page
       .getByTestId('watchlist-panel')
-      .getByRole('button', { name: `選取標的 ${ASSET}` })
+      .getByRole('button', { name: `Select ${ASSET}` })
       .click();
     await pickPortfolio(page, journey.portfolioId);
     await expect(page.getByTestId('order-blocked')).toHaveCount(0);
@@ -697,20 +703,20 @@ test.describe('order lifecycle: submit → pending → market clock → fill →
     const shortId = journey.filledOrderId.slice(0, 8);
     const row = page.getByTestId(`order-book-row-${shortId}`);
     await expect(row).toBeVisible({ timeout: 30000 });
-    await expect(row).toContainText('已成交');
+    await expect(row).toContainText('Filled');
     const rowText = (await row.innerText()).replace(/\s+/g, ' ');
     expect(rowText, 'the recovered row must still state the decision basis')
       .toContain(journey.fill!.execution_date);
-    expect(rowText).toContain('已成交');
+    expect(rowText).toContain('Filled');
 
     // 生命週期位置 after a reload comes from the re-read book, not from the submit receipt.
     const bookRowExecution = row.locator('td').nth(4);
-    await expect(bookRowExecution).toContainText(`已於 ${journey.windowDate} 成交`);
+    await expect(bookRowExecution).toContainText(`Filled on ${journey.windowDate}`);
     await expect(cashItem(page)).toContainText(journey.filledCash.toLocaleString(undefined, {
       minimumFractionDigits: 2,
       maximumFractionDigits: 2,
     }));
-    await expect(clockValue(page)).not.toContainText('尚未推進');
+    await expect(clockValue(page)).not.toContainText('Not advanced yet');
   });
 
   test('an order the dataset can no longer reach is closed out as expired, not silently filled or lost', async () => {
@@ -729,10 +735,18 @@ test.describe('order lifecycle: submit → pending → market clock → fill →
     const sent = await submitManual(page, { action: 'sell', rationale: '收盤後才做的決定：數據集在之後沒有可執行的 bar' });
     expect(sent.status).toBe(200);
     journey.expiredOrderId = String(sent.body?.order?.order_id ?? '');
-    await expect(page.getByTestId('order-manual-order')).toContainText('掛單待執行');
+    await expect(page.getByTestId('order-manual-order')).toContainText('Pending');
     const waitingText = (await executionCell(page).innerText()).replace(/\s+/g, ' ');
-    expect(waitingText, '面板必須說出「沒有可執行窗口」，而不是假裝在等一根已經走過的 bar').toMatch(
-      /沒有可用的 bar|沒有可執行報價/
+    expect(waitingText, 'the panel must state that no executable window exists').toContain(
+      'No executable quote in this window'
+    );
+    expect(waitingText, 'and that the order will be settled as expired, not dropped').toContain(
+      'settled as expired'
+    );
+    // The server's prose for this state is not translated; the panel maps the stable
+    // blocker code instead, so no Chinese reaches the lifecycle line.
+    expect(waitingText, 'the lifecycle line must not fall back to untranslated server prose').not.toMatch(
+      /[\u4e00-\u9fff]/
     );
 
     // The clock has nowhere left to go: the replay says so instead of inventing a bar.
@@ -744,7 +758,7 @@ test.describe('order lifecycle: submit → pending → market clock → fill →
     await page.goto(`${runtime.frontendBase}/workspace`);
     await page
       .getByTestId('watchlist-panel')
-      .getByRole('button', { name: `選取標的 ${ASSET}` })
+      .getByRole('button', { name: `Select ${ASSET}` })
       .click();
     await pickPortfolio(page, journey.portfolioId);
     const shortId = journey.expiredOrderId.slice(0, 8);
@@ -754,8 +768,8 @@ test.describe('order lifecycle: submit → pending → market clock → fill →
     await expect(
       page.getByTestId('order-session-book-readonly'),
       '不能提交就改用只讀呈現紀錄，而不是把整本掛單簿收起來',
-    ).toContainText('只讀');
-    await expect(row).toContainText('已取消');
+    ).toContainText('read-only');
+    await expect(row).toContainText('Cancelled');
     expect(await storedFills(page, journey.portfolioId, journey.expiredOrderId), '過期不得成交').toEqual([]);
     expect(await uiCash(page), '過期不得入帳').toBeCloseTo(cashBefore, 2);
 

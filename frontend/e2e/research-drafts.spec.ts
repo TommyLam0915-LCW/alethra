@@ -1,5 +1,19 @@
 import { test, expect, type Page } from '@playwright/test';
 
+/**
+ * Tracked regression for research drafts (creation, questions, answers, review,
+ * selected-field transfer, rejection and deletion).
+ *
+ * Defaults target the Docker acceptance stack (frontend :3001, backend :8001)
+ * that CI brings up in .github/workflows/browser-acceptance.yml. Both origins
+ * are env-overridable, so the same spec runs against the disposable research
+ * stack (frontend :3099, backend :8099) after
+ * `backend/scripts/seed_e2e_accounts.py --confirm-disposable --backend-url
+ * http://127.0.0.1:8099` creates the two fixture accounts below. Password
+ * defaults exist for the CI bootstrap; locally pass ACCEPTANCE_PASSWORD_A/B
+ * (or load .local/e2e-accounts.env) instead of relying on them.
+ */
+
 const API_BASE = process.env.E2E_BACKEND_BASE ?? 'http://localhost:8001';
 const FRONTEND_BASE = process.env.E2E_FRONTEND_BASE ?? 'http://localhost:3001';
 
@@ -115,13 +129,13 @@ test.describe('PR #3 Browser Acceptance - Local Playwright', () => {
       await page.goto(`${FRONTEND_BASE}/research-drafts`);
 
       // Look for disclosure text
-      const disclosureText = page.locator('text=/模擬研究助手|僅供流程示範|demo|mock/i');
+      const disclosureText = page.locator('text=/Simulated research assistant|workflow demo only|demo|mock/i');
       const hasDisclosure = await disclosureText.count() > 0;
 
       // If no explicit disclosure, check for any demo/mock indicators
       if (!hasDisclosure) {
         const pageContent = await page.content();
-        const hasMockIndicator = pageContent.includes('模擬') ||
+        const hasMockIndicator = pageContent.includes('Simulated') ||
                                   pageContent.includes('demo') ||
                                   pageContent.includes('mock') ||
                                   pageContent.includes('DEMO-');
@@ -159,11 +173,11 @@ test.describe('PR #3 Browser Acceptance - Local Playwright', () => {
 
       // Unconditional assertions: the draft-status detail page renders fields as
       // a read-only grid (label div followed by value div). Zeros must show as "0".
-      const commissionLabel = page.getByText('手續費率', { exact: true });
+      const commissionLabel = page.getByText('Commission rate', { exact: true });
       await expect(commissionLabel).toBeVisible();
       await expect(commissionLabel.locator('xpath=following-sibling::div[1]')).toHaveText('0');
 
-      const slippageLabel = page.getByText('滑價率', { exact: true });
+      const slippageLabel = page.getByText('Slippage rate', { exact: true });
       await expect(slippageLabel).toBeVisible();
       await expect(slippageLabel.locator('xpath=following-sibling::div[1]')).toHaveText('0');
     });
@@ -191,26 +205,26 @@ test.describe('PR #3 Browser Acceptance - Local Playwright', () => {
       await page.goto(`${FRONTEND_BASE}/research-drafts/${draft.id}`);
 
       // Pre-acceptance: draft badge, review controls, and edit availability.
-      await expect(page.locator('span').filter({ hasText: /^草稿$/ })).toBeVisible();
-      await expect(page.getByRole('heading', { name: '審閱決定' })).toBeVisible();
-      await expect(page.getByRole('button', { name: '編輯' })).toBeVisible();
+      await expect(page.locator('span').filter({ hasText: /^Draft$/ })).toBeVisible();
+      await expect(page.getByRole('heading', { name: 'Review decision' })).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Edit' })).toBeVisible();
 
       // Perform acceptance through the UI with the disclosure and notes visible.
-      await page.getByRole('button', { name: '接受草稿' }).click();
-      await expect(page.getByText('這不會建立可執行的策略。', { exact: true })).toBeVisible();
-      await page.getByPlaceholder('備註（選填）...').fill('UI acceptance notes');
-      await page.getByRole('button', { name: '確認接受' }).click();
+      await page.getByRole('button', { name: 'Accept draft' }).click();
+      await expect(page.getByText('It does not create an executable strategy.', { exact: true })).toBeVisible();
+      await page.getByPlaceholder('Note (optional)…').fill('UI acceptance notes');
+      await page.getByRole('button', { name: 'Confirm accept' }).click();
 
       // Post-acceptance: success message and finalized badge.
-      await expect(page.getByText(/草稿已接受/)).toBeVisible();
-      await expect(page.locator('span').filter({ hasText: /^已接受$/ })).toBeVisible();
+      await expect(page.getByText(/Draft accepted/)).toBeVisible();
+      await expect(page.locator('span').filter({ hasText: /^Accepted$/ })).toBeVisible();
 
       // Finalized draft is read-only: no edit controls, no review/questions cards.
-      await expect(page.getByRole('button', { name: '編輯' })).toHaveCount(0);
-      await expect(page.getByRole('button', { name: '儲存' })).toHaveCount(0);
-      await expect(page.getByRole('heading', { name: '研究助手問題' })).toHaveCount(0);
-      await expect(page.getByRole('heading', { name: '審閱決定' })).toHaveCount(0);
-      await expect(page.getByRole('heading', { name: '套用草稿欄位' })).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Edit' })).toHaveCount(0);
+      await expect(page.getByRole('button', { name: 'Save' })).toHaveCount(0);
+      await expect(page.getByRole('heading', { name: 'Assistant questions' })).toHaveCount(0);
+      await expect(page.getByRole('heading', { name: 'Review decision' })).toHaveCount(0);
+      await expect(page.getByRole('heading', { name: 'Apply draft fields' })).toBeVisible();
     });
   });
 
@@ -270,32 +284,32 @@ test.describe('PR #3 Browser Acceptance - Local Playwright', () => {
       await page.goto(`${FRONTEND_BASE}/research-drafts/${draft.id}`);
 
       const deleteCard = page.locator('.card').filter({
-        has: page.getByRole('heading', { name: '刪除草稿' }),
+        has: page.getByRole('heading', { name: 'Delete draft' }),
       });
-      await expect(deleteCard.getByText('刪除草稿會一併移除所有修訂記錄與稽核事件。此操作無法復原。')).toBeVisible();
+      await expect(deleteCard.getByText('Deleting a draft also removes all of its revisions and audit events. This cannot be undone.')).toBeVisible();
 
       // Open confirmation: warning must be shown before any destructive action.
-      await deleteCard.getByRole('button', { name: '刪除此草稿' }).click();
-      await expect(deleteCard.getByText('確定要刪除此草稿嗎？所有修訂與稽核事件將一併刪除。')).toBeVisible();
+      await deleteCard.getByRole('button', { name: 'Delete this draft' }).click();
+      await expect(deleteCard.getByText('Delete this draft? All revisions and audit events will be deleted with it.')).toBeVisible();
 
       // Cancel: draft must remain accessible and listed unchanged.
-      await deleteCard.getByRole('button', { name: '取消' }).click();
-      await expect(deleteCard.getByText('確定要刪除此草稿嗎？所有修訂與稽核事件將一併刪除。')).not.toBeVisible();
-      await expect(deleteCard.getByRole('button', { name: '刪除此草稿' })).toBeVisible();
+      await deleteCard.getByRole('button', { name: 'Cancel' }).click();
+      await expect(deleteCard.getByText('Delete this draft? All revisions and audit events will be deleted with it.')).not.toBeVisible();
+      await expect(deleteCard.getByRole('button', { name: 'Delete this draft' })).toBeVisible();
       await expect(page.getByRole('heading', { name: title })).toBeVisible();
       expect(page.url()).toContain(draft.id);
 
       // Confirm deletion: redirect to the list, draft gone from list and API.
-      await deleteCard.getByRole('button', { name: '刪除此草稿' }).click();
-      await expect(deleteCard.getByText('確定要刪除此草稿嗎？所有修訂與稽核事件將一併刪除。')).toBeVisible();
-      await deleteCard.getByRole('button', { name: '確認刪除' }).click();
+      await deleteCard.getByRole('button', { name: 'Delete this draft' }).click();
+      await expect(deleteCard.getByText('Delete this draft? All revisions and audit events will be deleted with it.')).toBeVisible();
+      await deleteCard.getByRole('button', { name: 'Confirm delete' }).click();
 
       await page.waitForURL(/\/research-drafts$/);
-      await expect(page.getByRole('heading', { name: '研究草稿' })).toBeVisible();
+      await expect(page.getByRole('heading', { name: 'Research drafts' })).toBeVisible();
       await expect(page.locator(`a:has-text("${title}")`)).toHaveCount(0);
 
       await page.goto(`${FRONTEND_BASE}/research-drafts/${draft.id}`);
-      await expect(page.getByText('草稿不存在', { exact: true })).toBeVisible();
+      await expect(page.getByText('This draft does not exist.', { exact: true })).toBeVisible();
     });
   });
 
@@ -333,23 +347,23 @@ test.describe('PR #3 Browser Acceptance - Local Playwright', () => {
       await page.waitForLoadState('networkidle');
 
       // Wait for accepted status badge to appear
-      const statusBadge = page.locator('span:has-text("已接受")');
+      const statusBadge = page.locator('span:has-text("Accepted")');
       await expect(statusBadge).toBeVisible({ timeout: 5000 });
 
-      // Click "選擇要套用的欄位" button
-      const applyFieldsButton = page.locator('button:has-text("選擇要套用的欄位")');
+      // Click the "Choose fields to apply" button
+      const applyFieldsButton = page.locator('button:has-text("Choose fields to apply")');
       await expect(applyFieldsButton).toBeVisible();
       await applyFieldsButton.click();
 
       // Select only title and hypothesis (NOT strategy_template, asset_symbol, etc.)
-      const titleCheckbox = page.locator('label:has-text("標題") input[type="checkbox"]');
-      const hypothesisCheckbox = page.locator('label:has-text("研究假設") input[type="checkbox"]');
+      const titleCheckbox = page.locator('label:has-text("Title") input[type="checkbox"]');
+      const hypothesisCheckbox = page.locator('label:has-text("Research hypothesis") input[type="checkbox"]');
 
       await titleCheckbox.check();
       await hypothesisCheckbox.check();
 
       // Verify only 2 fields selected
-      const confirmButton = page.locator('button:has-text("確認套用 2 個欄位")');
+      const confirmButton = page.locator('button:has-text("Apply 2 fields")');
       await expect(confirmButton).toBeVisible();
 
       // Click confirm to navigate to experiments/new
@@ -372,21 +386,21 @@ test.describe('PR #3 Browser Acceptance - Local Playwright', () => {
       await page.waitForLoadState('networkidle');
 
       // Verify preview shows only selected fields
-      const previewSection = page.locator('.card:has-text("預覽草稿欄位")');
+      const previewSection = page.locator('.card:has-text("Preview draft fields")');
       await expect(previewSection).toBeVisible();
 
       // Preview should show title and hypothesis
-      await expect(previewSection.locator('text=標題')).toBeVisible();
+      await expect(previewSection.locator('text=Title')).toBeVisible();
       await expect(previewSection.locator('text=Field Transfer Test Draft')).toBeVisible();
-      await expect(previewSection.locator('text=研究假設')).toBeVisible();
+      await expect(previewSection.locator('text=Research hypothesis')).toBeVisible();
       await expect(previewSection.locator('text=This hypothesis should be transferred')).toBeVisible();
 
       // Preview should NOT show falsification_criteria or strategy_template
-      await expect(previewSection.locator('text=推翻條件')).not.toBeVisible();
-      await expect(previewSection.locator('text=策略模板')).not.toBeVisible();
+      await expect(previewSection.locator('text=Falsification criteria')).not.toBeVisible();
+      await expect(previewSection.locator('text=Strategy template')).not.toBeVisible();
 
-      // Click "確認套用" to apply fields
-      const applyConfirmButton = page.locator('button:has-text("確認套用 2 個欄位")').last();
+      // Click the confirmed "Apply N fields" button to apply the chosen fields
+      const applyConfirmButton = page.locator('button:has-text("Apply 2 fields")').last();
       await applyConfirmButton.click();
 
       // Wait for form to update
@@ -440,25 +454,25 @@ test.describe('PR #3 Browser Acceptance - Local Playwright', () => {
       await page.waitForLoadState('networkidle');
 
       // Wait for accepted status badge to appear
-      const statusBadge = page.locator('span:has-text("已接受")');
+      const statusBadge = page.locator('span:has-text("Accepted")');
       await expect(statusBadge).toBeVisible({ timeout: 5000 });
 
       // Initiate field transfer
-      const applyFieldsButton = page.locator('button:has-text("選擇要套用的欄位")');
+      const applyFieldsButton = page.locator('button:has-text("Choose fields to apply")');
       await applyFieldsButton.click();
 
       // Select title field
-      const titleCheckbox = page.locator('label:has-text("標題") input[type="checkbox"]');
+      const titleCheckbox = page.locator('label:has-text("Title") input[type="checkbox"]');
       await titleCheckbox.check();
 
       // Navigate to experiments/new
-      const confirmButton = page.locator('button:has-text("確認套用 1 個欄位")');
+      const confirmButton = page.locator('button:has-text("Apply 1 field")');
       await confirmButton.click();
       await page.waitForURL(/.*experiments\/new.*/);
       await page.waitForLoadState('networkidle');
 
       // Verify preview is shown
-      const previewSection = page.locator('.card:has-text("預覽草稿欄位")');
+      const previewSection = page.locator('.card:has-text("Preview draft fields")');
       await expect(previewSection).toBeVisible();
 
       // Verify form still has default values (not yet applied)
@@ -466,8 +480,8 @@ test.describe('PR #3 Browser Acceptance - Local Playwright', () => {
       const titleValue = await titleInput.inputValue();
       expect(titleValue).toBe(''); // Default empty, NOT "Cancellation Test Draft"
 
-      // Click "取消" button
-      const cancelButton = page.locator('button:has-text("取消")').last();
+      // Click the "Cancel" button
+      const cancelButton = page.locator('button:has-text("Cancel")').last();
       await cancelButton.click();
 
       // Verify redirect to /research-drafts
@@ -479,7 +493,7 @@ test.describe('PR #3 Browser Acceptance - Local Playwright', () => {
       await page.waitForLoadState('networkidle');
 
       // Verify no preview is shown
-      const noPreview = page.locator('.card:has-text("預覽草稿欄位")');
+      const noPreview = page.locator('.card:has-text("Preview draft fields")');
       await expect(noPreview).not.toBeVisible();
 
       // Verify form has default values (not draft values)
@@ -522,7 +536,7 @@ test.describe('PR #3 Browser Acceptance - Local Playwright', () => {
       await baselinePage.goto(`${FRONTEND_BASE}/experiments/new`);
       await baselinePage.waitForLoadState('networkidle');
       const defaultAsset = await baselinePage
-        .locator('.form-group:has-text("資產") select')
+        .locator('.form-group:has-text("Asset") select')
         .inputValue();
       await baselinePage.close();
 
@@ -540,18 +554,18 @@ test.describe('PR #3 Browser Acceptance - Local Playwright', () => {
       await page.waitForLoadState('networkidle');
 
       // Wait for accepted status badge to appear
-      const statusBadge = page.locator('span:has-text("已接受")');
+      const statusBadge = page.locator('span:has-text("Accepted")');
       await expect(statusBadge).toBeVisible({ timeout: 5000 });
 
       // Initiate field transfer
-      const applyFieldsButton = page.locator('button:has-text("選擇要套用的欄位")');
+      const applyFieldsButton = page.locator('button:has-text("Choose fields to apply")');
       await applyFieldsButton.click();
 
       // Select title, hypothesis, commission_rate, slippage_rate (NOT strategy_template, asset_symbol, initial_cash)
-      const titleCheckbox = page.locator('label:has-text("標題") input[type="checkbox"]');
-      const hypothesisCheckbox = page.locator('label:has-text("研究假設") input[type="checkbox"]');
-      const commissionCheckbox = page.locator('label:has-text("手續費率") input[type="checkbox"]');
-      const slippageCheckbox = page.locator('label:has-text("滑價率") input[type="checkbox"]');
+      const titleCheckbox = page.locator('label:has-text("Title") input[type="checkbox"]');
+      const hypothesisCheckbox = page.locator('label:has-text("Research hypothesis") input[type="checkbox"]');
+      const commissionCheckbox = page.locator('label:has-text("Commission rate") input[type="checkbox"]');
+      const slippageCheckbox = page.locator('label:has-text("Slippage rate") input[type="checkbox"]');
 
       await titleCheckbox.check();
       await hypothesisCheckbox.check();
@@ -559,7 +573,7 @@ test.describe('PR #3 Browser Acceptance - Local Playwright', () => {
       await slippageCheckbox.check();
 
       // Verify 4 fields selected
-      const confirmButton = page.locator('button:has-text("確認套用 4 個欄位")');
+      const confirmButton = page.locator('button:has-text("Apply 4 fields")');
       await expect(confirmButton).toBeVisible();
 
       // Navigate to experiments/new
@@ -568,7 +582,7 @@ test.describe('PR #3 Browser Acceptance - Local Playwright', () => {
       await page.waitForLoadState('networkidle');
 
       // Apply fields
-      const applyConfirmButton = page.locator('button:has-text("確認套用 4 個欄位")').last();
+      const applyConfirmButton = page.locator('button:has-text("Apply 4 fields")').last();
       await applyConfirmButton.click();
       await page.waitForTimeout(500);
 
@@ -585,8 +599,8 @@ test.describe('PR #3 Browser Acceptance - Local Playwright', () => {
       const slippageInput = numberInputs.nth(1); // Second is commission_rate
 
       // Actually, let's be more precise - find by label
-      const commissionField = page.locator('.form-group:has-text("佣金率") input');
-      const slippageField = page.locator('.form-group:has-text("滑價率") input');
+      const commissionField = page.locator('.form-group:has-text("Commission rate") input');
+      const slippageField = page.locator('.form-group:has-text("Slippage rate") input');
 
       // Verify zero values are preserved from draft
       expect(await commissionField.inputValue()).toBe('0');
@@ -596,14 +610,14 @@ test.describe('PR #3 Browser Acceptance - Local Playwright', () => {
       const templateSelect = page.locator('select').first();
       expect(await templateSelect.inputValue()).toBe('buy_and_hold'); // Default, NOT sma_crossover
 
-      const assetSelect = page.locator('.form-group:has-text("資產") select');
+      const assetSelect = page.locator('.form-group:has-text("Asset") select');
       expect(await assetSelect.inputValue()).toBe(defaultAsset); // Form default, NOT the draft's DEMO-BETA
 
-      const initialCashInput = page.locator('.form-group:has-text("初始資金") input');
+      const initialCashInput = page.locator('.form-group:has-text("Initial cash") input');
       expect(await initialCashInput.inputValue()).toBe('10000'); // Default, NOT 50000
 
       // Verify success message mentions applied fields
-      const successMessage = page.locator('.alert-info:has-text("已從研究草稿套用")');
+      const successMessage = page.locator('.alert-info:has-text("Applied from the research draft")');
       await expect(successMessage).toBeVisible();
 
       // Verify no experiment was created (still on /experiments/new, not redirected)
@@ -681,8 +695,8 @@ test.describe('PR #3 Browser Acceptance - Local Playwright', () => {
       await page.goto(`${FRONTEND_BASE}/research-drafts/${draft.id}`);
       await page.waitForLoadState('networkidle');
 
-      // Click "產生問題" button
-      const generateButton = page.locator('button:has-text("產生問題")');
+      // Click the "Generate questions" button
+      const generateButton = page.locator('button:has-text("Generate questions")');
       await expect(generateButton).toBeVisible();
       await generateButton.click();
 
@@ -690,18 +704,18 @@ test.describe('PR #3 Browser Acceptance - Local Playwright', () => {
       await page.waitForTimeout(1000);
 
       // Verify questions are shown for missing fields
-      const questionsSection = page.locator('text=/研究假設|策略模板|推翻條件/').first();
+      const questionsSection = page.locator('text=/Research hypothesis|Strategy template|Falsification criteria/').first();
       await expect(questionsSection).toBeVisible({ timeout: 5000 });
 
       // Fill in answers to questions
       const strategySelect = page.locator('select').first();
       await strategySelect.selectOption('sma_crossover');
 
-      const falsificationInput = page.locator('input[placeholder="輸入你的回答..."]').first();
+      const falsificationInput = page.locator('input[placeholder="Type your answer…"]').first();
       await falsificationInput.fill('If backtest shows Sharpe ratio < 0.5');
 
-      // Click "提交答案" button
-      const submitButton = page.locator('button:has-text("提交答案")');
+      // Click the "Submit answers" button
+      const submitButton = page.locator('button:has-text("Submit answers")');
       await expect(submitButton).toBeVisible();
       await submitButton.click();
 
@@ -709,7 +723,7 @@ test.describe('PR #3 Browser Acceptance - Local Playwright', () => {
       await page.waitForTimeout(1000);
 
       // Verify success message
-      const successMessage = page.locator('text=/答案已提交|草稿已更新/');
+      const successMessage = page.locator('text=/Answers submitted|Draft updated/');
       await expect(successMessage).toBeVisible({ timeout: 5000 });
 
       // Reload the page
@@ -717,12 +731,12 @@ test.describe('PR #3 Browser Acceptance - Local Playwright', () => {
       await page.waitForLoadState('networkidle');
 
       // Verify answers are persisted - check that strategy_template is now set
-      const strategyField = page.locator('text=策略模板').locator('..').locator('div').nth(1);
+      const strategyField = page.locator('text=Strategy template').locator('..').locator('div').nth(1);
       const strategyValue = await strategyField.textContent();
       expect(strategyValue).toContain('SMA Crossover');
 
       // Verify falsification_criteria is now set
-      const falsificationField = page.locator('text=推翻條件').locator('..').locator('div').nth(1);
+      const falsificationField = page.locator('text=Falsification criteria').locator('..').locator('div').nth(1);
       const falsificationValue = await falsificationField.textContent();
       expect(falsificationValue).toContain('Sharpe ratio');
     });
@@ -743,25 +757,25 @@ test.describe('PR #3 Browser Acceptance - Local Playwright', () => {
       await page.waitForLoadState('networkidle');
 
       // Generate questions
-      const generateButton = page.locator('button:has-text("產生問題")');
+      const generateButton = page.locator('button:has-text("Generate questions")');
       await generateButton.click();
       await page.waitForTimeout(1000);
 
       // Try to submit without filling any answers
-      const submitButton = page.locator('button:has-text("提交答案")');
+      const submitButton = page.locator('button:has-text("Submit answers")');
       await submitButton.click();
 
       // Wait for error message
       await page.waitForTimeout(500);
 
       // Verify error message is shown
-      const errorMessage = page.locator('text=/請至少回答一個問題/');
+      const errorMessage = page.locator('text=/Answer at least one question/');
       await expect(errorMessage).toBeVisible({ timeout: 5000 });
 
       // Verify draft was not updated (still has no strategy_template)
-      const strategyField = page.locator('text=策略模板').locator('..').locator('div').nth(1);
+      const strategyField = page.locator('text=Strategy template').locator('..').locator('div').nth(1);
       const strategyValue = await strategyField.textContent();
-      expect(strategyValue).toContain('未填寫');
+      expect(strategyValue).toContain('(Not filled in)');
     });
   });
 
@@ -781,8 +795,8 @@ test.describe('PR #3 Browser Acceptance - Local Playwright', () => {
       await page.goto(`${FRONTEND_BASE}/research-drafts/${draft.id}`);
       await page.waitForLoadState('networkidle');
 
-      // Click "編輯" button
-      const editButton = page.locator('button:has-text("編輯")');
+      // Click the "Edit" button
+      const editButton = page.locator('button:has-text("Edit")');
       await expect(editButton).toBeVisible();
       await editButton.click();
 
@@ -791,34 +805,34 @@ test.describe('PR #3 Browser Acceptance - Local Playwright', () => {
       await hypothesisTextarea.clear();
       await hypothesisTextarea.fill('Updated hypothesis after edit');
 
-      // Click "儲存" button
-      const saveButton = page.locator('button:has-text("儲存")');
+      // Click the "Save" button
+      const saveButton = page.locator('button:has-text("Save")');
       await saveButton.click();
 
       // Wait for save
       await page.waitForTimeout(1000);
 
       // Verify success message
-      const successMessage = page.locator('text=/草稿已更新/');
+      const successMessage = page.locator('text=/Draft updated/');
       await expect(successMessage).toBeVisible({ timeout: 5000 });
 
-      // Click "修訂記錄" tab
-      const revisionsTab = page.locator('button:has-text("修訂記錄")');
+      // Click the "Revision history" tab
+      const revisionsTab = page.locator('button:has-text("Revision history")');
       await revisionsTab.click();
       await page.waitForTimeout(1000);
 
       // Verify revision history shows 2 revisions (original + edit)
-      const revisionsHeading = page.locator('text=/修訂記錄 \\(2\\)/');
+      const revisionsHeading = page.locator('text=/Revision history \\(2\\)/');
       await expect(revisionsHeading).toBeVisible({ timeout: 5000 });
 
-      // Click "稽核事件" tab
-      const auditTab = page.locator('button:has-text("稽核事件")');
+      // Click the "Audit events" tab
+      const auditTab = page.locator('button:has-text("Audit events")');
       await auditTab.click();
       await page.waitForTimeout(1000);
 
-      // Verify audit events show the update (Chinese label for "draft updated")
+      // Verify the audit event log records the draft update
       const auditContent = await page.content();
-      expect(auditContent).toContain('草稿更新');
+      expect(auditContent).toContain('Draft updated');
     });
   });
 
@@ -851,11 +865,11 @@ test.describe('PR #3 Browser Acceptance - Local Playwright', () => {
       await page.waitForLoadState('networkidle');
 
       // Wait for rejected status badge
-      const statusBadge = page.locator('span:has-text("已退回")');
+      const statusBadge = page.locator('span:has-text("Returned")');
       await expect(statusBadge).toBeVisible({ timeout: 5000 });
 
-      // Verify "選擇要套用的欄位" button is NOT visible
-      const applyFieldsButton = page.locator('button:has-text("選擇要套用的欄位")');
+      // Verify the "Choose fields to apply" button is NOT visible
+      const applyFieldsButton = page.locator('button:has-text("Choose fields to apply")');
       await expect(applyFieldsButton).not.toBeVisible({ timeout: 5000 });
 
       // Try to navigate directly to experiments/new with draft_id
@@ -863,7 +877,7 @@ test.describe('PR #3 Browser Acceptance - Local Playwright', () => {
       await page.waitForLoadState('networkidle');
 
       // Verify no preview is shown (draft is rejected, should not be applied)
-      const previewSection = page.locator('.card:has-text("預覽草稿欄位")');
+      const previewSection = page.locator('.card:has-text("Preview draft fields")');
       await expect(previewSection).not.toBeVisible({ timeout: 5000 });
 
       // Verify form has default values, not draft values

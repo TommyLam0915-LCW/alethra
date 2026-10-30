@@ -48,9 +48,13 @@ function loadRuntime(): Runtime {
 }
 
 const runtime = loadRuntime();
+// The seed script owns this title; it is the owner's own research content, so it
+// stays exactly as seeded and the UI must render it untranslated.
 const EXPERIMENT_TITLE = 'E2E 合成研究實驗（僅供自動化測試）';
 const stamp = new Date().toISOString().replace(/[:.]/g, '-');
 
+// purpose / notesV1 / notesV2 are free text the user typed. They stay in Chinese
+// to prove the UI shows user content verbatim and never translates research notes.
 const journey = {
   experimentPath: '',
   experimentId: '',
@@ -88,11 +92,11 @@ function recordCall(response: Response): void {
 }
 
 function historyCard(page: Page) {
-  return page.locator('.card').filter({ has: page.getByRole('heading', { name: '執行歷史' }) });
+  return page.locator('.card').filter({ has: page.getByRole('heading', { name: 'Run history' }) });
 }
 
 function savedComparisonsCard(page: Page) {
-  return page.locator('.card').filter({ has: page.getByRole('heading', { name: '已儲存嘅比較' }) });
+  return page.locator('.card').filter({ has: page.getByRole('heading', { name: 'Saved comparisons' }) });
 }
 
 function ownedSavedLinks(page: Page) {
@@ -121,12 +125,12 @@ test.describe('unified research flow', () => {
     await page.click('button[type="submit"]');
     await page.waitForURL('**/dashboard');
 
-    const experimentCard = page.locator('.dash-experiment-item', { hasText: EXPERIMENT_TITLE });
+    const experimentCard = page.getByRole('link', { name: EXPERIMENT_TITLE, exact: true });
     await expect(experimentCard, 'E2E experiment must be listed on the dashboard').toHaveCount(1);
-    const href = (await experimentCard.first().getAttribute('href')) ?? '';
+    const href = (await experimentCard.getAttribute('href')) ?? '';
     journey.experimentPath = new URL(href, runtime.frontendBase).pathname;
     journey.experimentId = journey.experimentPath.split('/').pop() ?? '';
-    await experimentCard.first().click();
+    await experimentCard.click();
     await page.waitForURL(`**${journey.experimentPath}`);
 
     const detailLinks = historyCard(page).locator('[data-testid^="run-detail-link-"]');
@@ -140,7 +144,7 @@ test.describe('unified research flow', () => {
     // The list is ordered newest-first, so pick eligible (completed) runs by status.
     const completedRows = historyCard(page)
       .locator('[data-testid^="run-row-"]')
-      .filter({ hasText: '已完成' });
+      .filter({ hasText: 'Completed' });
     await expect(completedRows, 'seed must provide comparable completed runs').toHaveCount(3);
     const comparable: string[] = [];
     for (let index = 0; index < (await completedRows.count()); index += 1) {
@@ -194,7 +198,7 @@ test.describe('unified research flow', () => {
 
     await boxA.click();
     await expect(boxA).toBeChecked();
-    const clearButton = page.getByRole('button', { name: /清除選取/ });
+    const clearButton = page.getByRole('button', { name: /Clear selection/ });
     await expect(clearButton, 'one of two selected offers a clear action').toBeVisible();
 
     // Keyboard selection works on the real control, not on the row.
@@ -209,7 +213,7 @@ test.describe('unified research flow', () => {
     await expect(boxB).toBeChecked();
     await expect(boxC, 'a third run must not be selectable').toBeDisabled();
 
-    const compareLink = page.getByRole('link', { name: '比較選取嘅兩個 runs' });
+    const compareLink = page.getByRole('link', { name: 'Compare selected runs' });
     await expect(compareLink).toHaveAttribute(
       'href',
       `${journey.experimentPath}/runs/compare?run_a=${runA}&run_b=${runB}`
@@ -225,7 +229,7 @@ test.describe('unified research flow', () => {
     expect([runA, runB], 'comparison carries the two runs selected in history').toEqual(
       journey.completedRunIds.slice(0, 2)
     );
-    await expect(page.getByText('選取嘅結果：')).toBeVisible();
+    await expect(page.getByText('Selected results:')).toBeVisible();
 
     const runARow = page.locator('li', { hasText: 'Run A:' });
     await expect(runARow).toHaveCount(1);
@@ -239,25 +243,25 @@ test.describe('unified research flow', () => {
 
     await page.goBack();
     await page.waitForURL('**/runs/compare**');
-    await expect(page.getByText('選取嘅結果：')).toBeVisible();
+    await expect(page.getByText('Selected results:')).toBeVisible();
   });
 
   test('saves the comparison purpose and notes', async () => {
-    await page.getByPlaceholder('例如：檢查佣金率對回報嘅影響').fill(journey.purpose);
-    await page.getByPlaceholder('記錄你嘅觀察同結論...').fill(journey.notesV1);
+    await page.getByPlaceholder('e.g. Check how commission rate affects returns').fill(journey.purpose);
+    await page.getByPlaceholder('Record your observations and conclusions…').fill(journey.notesV1);
 
     const responsePromise = page.waitForResponse(
       (res) => res.request().method() === 'POST' && res.url().includes('/api/v1/saved-comparisons')
     );
-    await page.getByRole('button', { name: '儲存' }).click();
+    await page.getByRole('button', { name: 'Save' }).click();
     const created = await responsePromise;
     expect(created.status()).toBe(201);
     const body = (await created.json()) as { id: string; notes: string };
     journey.savedId = body.id;
     expect(body.notes).toBe(journey.notesV1);
 
-    await expect(page.getByText('比較已儲存')).toBeVisible();
-    await expect(page.getByRole('button', { name: '更新' })).toBeVisible();
+    await expect(page.getByText('Comparison saved')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Update' })).toBeVisible();
   });
 
   test('reopens the saved comparison after leaving the page', async () => {
@@ -268,27 +272,27 @@ test.describe('unified research flow', () => {
     await ownedSavedLinks(page).first().click();
     await page.waitForURL(`**saved_comparison_id=${journey.savedId}`);
 
-    await expect(page.getByPlaceholder('例如：檢查佣金率對回報嘅影響')).toHaveValue(journey.purpose);
-    await expect(page.getByPlaceholder('記錄你嘅觀察同結論...')).toHaveValue(journey.notesV1);
+    await expect(page.getByPlaceholder('e.g. Check how commission rate affects returns')).toHaveValue(journey.purpose);
+    await expect(page.getByPlaceholder('Record your observations and conclusions…')).toHaveValue(journey.notesV1);
   });
 
   test('updates the same saved record through PATCH, then survives a reload', async () => {
-    await page.getByPlaceholder('記錄你嘅觀察同結論...').fill(journey.notesV2);
+    await page.getByPlaceholder('Record your observations and conclusions…').fill(journey.notesV2);
 
     const responsePromise = page.waitForResponse(
       (res) =>
         res.request().method() === 'PATCH' &&
         res.url().endsWith(`/api/v1/saved-comparisons/${journey.savedId}`)
     );
-    await page.getByRole('button', { name: '更新' }).click();
+    await page.getByRole('button', { name: 'Update' }).click();
     const updated = await responsePromise;
     expect(updated.status()).toBe(200);
     expect(((await updated.json()) as { id: string; notes: string }).id).toBe(journey.savedId);
 
     await page.reload();
     await page.waitForURL(`**saved_comparison_id=${journey.savedId}`);
-    await expect(page.getByPlaceholder('記錄你嘅觀察同結論...')).toHaveValue(journey.notesV2);
-    await expect(page.getByPlaceholder('例如：檢查佣金率對回報嘅影響')).toHaveValue(journey.purpose);
+    await expect(page.getByPlaceholder('Record your observations and conclusions…')).toHaveValue(journey.notesV2);
+    await expect(page.getByPlaceholder('e.g. Check how commission rate affects returns')).toHaveValue(journey.purpose);
 
     // Persistence is server-side, not component state: the list page shows one owned row.
     await page.goto(`${runtime.frontendBase}${journey.experimentPath}`);

@@ -199,7 +199,7 @@ test.describe('paper order safety matrix', () => {
     context = await browser.newContext();
     page = await context.newPage();
     await page.goto(`${FRONTEND_BASE}/login`);
-    await page.getByRole('button', { name: '沒有帳號？註冊' }).click();
+    await page.getByRole('button', { name: 'No account? Create one' }).click();
     await page.locator('input[type="text"]').first().fill(account.displayName);
     await page.locator('input[type="email"]').fill(account.email);
     await page.locator('input[type="password"]').fill(account.password);
@@ -262,17 +262,17 @@ test.describe('paper order safety matrix', () => {
     // The valuation must disclose that it is a synthetic fixture, not a live quote.
     await expect(page.getByTestId('pp-valuation-basis')).toBeVisible();
     await expect(page.getByTestId('pp-valuation-provider')).toHaveText('Demo (Synthetic)');
-    await expect(page.getByTestId('pp-valuation-mode')).toHaveText('合成數據');
+    await expect(page.getByTestId('pp-valuation-mode')).toHaveText('Synthetic');
     await expect(page.getByTestId('pp-valuation-as-of')).toHaveText(/^\d{4}-\d{2}-\d{2}$/);
-    await expect(page.getByTestId('pp-valuation-basis')).toContainText('非即時行情');
-    await expect(page.getByText('免責聲明：').first()).toBeVisible();
+    await expect(page.getByTestId('pp-valuation-basis')).toContainText('not a live feed');
+    await expect(page.getByText('Disclaimer:').first()).toBeVisible();
 
     // The order and its decision record must both exist: order -> fill -> decision -> cash.
     await page.getByTestId('pp-tab-orders').click();
     await expect(page.getByTestId(`pp-order-${ASSET}-filled`)).toHaveCount(1);
-    await expect(page.getByTestId(`pp-order-${ASSET}-filled`).getByTestId('pp-order-side')).toHaveText('買入');
+    await expect(page.getByTestId(`pp-order-${ASSET}-filled`).getByTestId('pp-order-side')).toHaveText('Buy');
     await expect(page.getByTestId(`pp-order-${ASSET}-filled`).getByTestId('pp-order-qty')).toHaveText('10');
-    await expect(page.getByTestId(`pp-order-${ASSET}-filled`).getByTestId('pp-order-status')).toHaveText('已成交');
+    await expect(page.getByTestId(`pp-order-${ASSET}-filled`).getByTestId('pp-order-status')).toHaveText('Filled');
 
     const decisions = await api(page, 'GET', `/api/v1/paper-portfolio/${portfolioId}/decisions`);
     expect(decisions.status).toBe(200);
@@ -330,8 +330,8 @@ test.describe('paper order safety matrix', () => {
     await expect(sideOptions).toHaveCount(2);
     expect(await sideOptions.nth(0).getAttribute('value')).toBe('BUY');
     expect(await sideOptions.nth(1).getAttribute('value')).toBe('SELL');
-    await expect(page.getByTestId('pp-side')).toContainText('買入');
-    await expect(page.getByTestId('pp-side')).not.toContainText(/借券|放空|做空|SHORT/i);
+    await expect(page.getByTestId('pp-side')).toContainText('Buy');
+    await expect(page.getByTestId('pp-side')).not.toContainText(/short|sell to open/i);
 
     const buy = await submitOrder(page, portfolioId, { side: 'BUY', quantity: 5, note: '建立部位' });
     expect(buy.status).toBe(201);
@@ -342,7 +342,7 @@ test.describe('paper order safety matrix', () => {
     const oversell = await submitOrder(page, portfolioId, { side: 'SELL', quantity: 6, note: '超額賣出' });
     expect(oversell.status, 'selling more than held must be refused').toBe(400);
     expect(String(oversell.body.detail)).toMatch(
-      /Risk check failed \[quantity_exceeds_position\]: 帳戶僅持有 5 股，不能賣出 6 股。/
+      /Risk check failed \[quantity_exceeds_position\]: The portfolio holds 5 shares; it cannot sell 6\./
     );
     await expect(page.getByTestId('pp-error')).toContainText('quantity_exceeds_position');
 
@@ -364,7 +364,7 @@ test.describe('paper order safety matrix', () => {
 
     await page.getByTestId('pp-tab-orders').click();
     await expect(page.getByTestId(`pp-order-${ASSET}-rejected`)).toHaveCount(1);
-    await expect(page.getByTestId(`pp-order-${ASSET}-rejected`).getByTestId('pp-order-status')).toHaveText('已拒絕');
+    await expect(page.getByTestId(`pp-order-${ASSET}-rejected`).getByTestId('pp-order-status')).toHaveText('Rejected');
     await expect(page.getByTestId(`pp-order-${ASSET}-filled`)).toHaveCount(1);
   });
 
@@ -513,10 +513,10 @@ test.describe('paper order safety matrix', () => {
       page.waitForResponse(
         (r) => r.url().includes(`/api/v1/paper-portfolio/${portfolioId}/pause`) && r.request().method() === 'POST'
       ),
-      page.getByRole('button', { name: '暫停' }).click(),
+      page.getByRole('button', { name: 'Pause' }).click(),
     ]);
     expect(pauseResponse.status()).toBe(200);
-    await expect(page.getByText('已暫停').first()).toBeVisible();
+    await expect(page.getByText('Paused').first()).toBeVisible();
 
     const paused = await submitOrder(page, portfolioId, { side: 'BUY', quantity: 2, note: '暫停期間下單' });
     expect(paused.status, 'a paused portfolio must not accept orders').toBe(400);
@@ -531,10 +531,10 @@ test.describe('paper order safety matrix', () => {
       page.waitForResponse(
         (r) => r.url().includes(`/api/v1/paper-portfolio/${portfolioId}/resume`) && r.request().method() === 'POST'
       ),
-      page.getByRole('button', { name: '恢復' }).click(),
+      page.getByRole('button', { name: 'Resume' }).click(),
     ]);
     expect(resumeResponse.status()).toBe(200);
-    await expect(page.getByText('進行中').first()).toBeVisible();
+    await expect(page.getByText('Active').first()).toBeVisible();
 
     const resumed = await submitOrder(page, portfolioId, { side: 'BUY', quantity: 2, note: '恢復後下單' });
     expect(resumed.status, 'resuming must restore trading').toBe(201);
@@ -544,10 +544,10 @@ test.describe('paper order safety matrix', () => {
       page.waitForResponse(
         (r) => r.url().includes(`/api/v1/paper-portfolio/${portfolioId}/retire`) && r.request().method() === 'POST'
       ),
-      page.getByRole('button', { name: '退休' }).click(),
+      page.getByRole('button', { name: 'Retire' }).click(),
     ]);
     expect(retireResponse.status()).toBe(200);
-    await expect(page.getByText('已退休').first()).toBeVisible();
+    await expect(page.getByText('Retired').first()).toBeVisible();
     await expect(page.getByTestId('pp-submit-order'), 'a retired portfolio offers no order form').toHaveCount(0);
 
     // API supplement: the retired guard is enforced server-side too, not only hidden in the UI.
@@ -598,10 +598,10 @@ test.describe('paper order safety matrix', () => {
     const refused = await submitOrder(page, portfolioId, { side: 'BUY', quantity: 1, note: '超出每日額度' });
     expect(refused.status, 'an entry over the daily budget must be refused').toBe(400);
     expect(String(refused.body.detail)).toMatch(
-      /^Risk check failed \[daily_entry_limit\]: .*進場次數已達上限 10 次/
+      /^Risk check failed \[daily_entry_limit\]: The entry limit of 10 for .* has been reached/
     );
     await expect(page.getByTestId('pp-error')).toContainText('daily_entry_limit');
-    await expect(page.getByTestId('pp-error')).toContainText('進場次數已達上限 10 次');
+    await expect(page.getByTestId('pp-error')).toContainText('The entry limit of 10');
 
     // No executable intent: nothing is pending, nothing fills, cash and holdings do not move.
     const orders = await storedOrders(page, portfolioId);
@@ -628,7 +628,7 @@ test.describe('paper order safety matrix', () => {
     await page.getByTestId('pp-tab-orders').click();
     await expect(page.getByTestId(`pp-order-${ASSET}-filled`)).toHaveCount(DAILY_ENTRY_BUDGET);
     await expect(page.getByTestId(`pp-order-${ASSET}-rejected`)).toHaveCount(1);
-    await expect(page.getByTestId(`pp-order-${ASSET}-rejected`).getByTestId('pp-order-status')).toHaveText('已拒絕');
+    await expect(page.getByTestId(`pp-order-${ASSET}-rejected`).getByTestId('pp-order-status')).toHaveText('Rejected');
 
     // The screen's refusal is the server's decision: this id is the row the audit query follows.
     console.log(
@@ -679,7 +679,7 @@ test.describe('paper order safety matrix', () => {
     );
 
     await expect(page.getByTestId('pp-open-position-count'), 'the position is gone from the open list').toHaveText('0');
-    await expect(page.getByText('尚無持有部位')).toBeVisible();
+    await expect(page.getByText('No open positions yet.')).toBeVisible();
 
     const closed = await storedPositions(page, portfolioId);
     expect(closed[0].status).toBe('closed');

@@ -6,6 +6,7 @@ import Link from 'next/link';
 import { api } from '@/lib/api';
 import { statusPillClass } from '@/lib/status-styles';
 import { formatDateTime } from '@/lib/format';
+import { DRAFT_STATUS_LABELS, STRATEGY_TEMPLATE_LABELS, label } from '@/lib/copy';
 
 interface ResearchDraft {
   id: string;
@@ -52,25 +53,25 @@ interface AuditEvent {
 }
 
 const FIELD_LABELS: Record<string, string> = {
-  title: '標題',
-  hypothesis: '研究假設',
-  falsification_criteria: '推翻條件',
-  strategy_template: '策略模板',
-  asset_symbol: '研究標的',
-  benchmark_symbol: '基準標的',
-  initial_cash: '初始資金',
-  commission_rate: '手續費率',
-  slippage_rate: '滑價率',
-  research_rules: '研究規則',
+  title: 'Title',
+  hypothesis: 'Research hypothesis',
+  falsification_criteria: 'Falsification criteria',
+  strategy_template: 'Strategy template',
+  asset_symbol: 'Asset',
+  benchmark_symbol: 'Benchmark',
+  initial_cash: 'Initial cash',
+  commission_rate: 'Commission rate',
+  slippage_rate: 'Slippage rate',
+  research_rules: 'Research rules',
 };
 
 const EVENT_LABELS: Record<string, string> = {
-  research_draft_created: '草稿建立',
-  research_draft_updated: '草稿更新',
-  research_draft_questions_generated: '問題產生',
-  research_draft_answers_submitted: '答案提交',
-  research_draft_accepted: '草稿接受',
-  research_draft_rejected: '草稿退回',
+  research_draft_created: 'Draft created',
+  research_draft_updated: 'Draft updated',
+  research_draft_questions_generated: 'Questions generated',
+  research_draft_answers_submitted: 'Answers submitted',
+  research_draft_accepted: 'Draft accepted',
+  research_draft_rejected: 'Draft returned',
 };
 
 const EDITABLE_FIELDS = [
@@ -79,11 +80,10 @@ const EDITABLE_FIELDS = [
   'slippage_rate',
 ] as const;
 
-const TEMPLATE_OPTIONS = [
-  { value: 'buy_and_hold', label: 'Buy & Hold（買入持有）' },
-  { value: 'sma_crossover', label: 'SMA Crossover（均線交叉）' },
-  { value: 'price_change_fixed_hold', label: 'Price Change Fixed Hold（價變固定持有）' },
-];
+const TEMPLATE_OPTIONS = Object.entries(STRATEGY_TEMPLATE_LABELS).map(([value, text]) => ({
+  value,
+  label: text,
+}));
 
 export default function ResearchDraftDetailPage() {
   const router = useRouter();
@@ -114,7 +114,7 @@ export default function ResearchDraftDetailPage() {
       const data = await api.researchDrafts.get(draftId);
       setDraft(data);
     } catch (err: any) {
-      setError(err.message || '載入失敗');
+      setError(err.message || 'The draft could not be loaded');
     } finally {
       setLoading(false);
     }
@@ -134,7 +134,7 @@ export default function ResearchDraftDetailPage() {
       const data = await api.researchDrafts.revisions(draftId);
       setRevisions(data);
     } catch (err: any) {
-      setError(err.message || '載入修訂記錄失敗');
+      setError(err.message || 'The revision history could not be loaded');
     }
   };
 
@@ -143,7 +143,7 @@ export default function ResearchDraftDetailPage() {
       const data = await api.researchDrafts.auditEvents(draftId);
       setAuditEvents(data);
     } catch (err: any) {
-      setError(err.message || '載入稽核事件失敗');
+      setError(err.message || 'The audit events could not be loaded');
     }
   };
 
@@ -152,11 +152,11 @@ export default function ResearchDraftDetailPage() {
     setSuccess('');
     try {
       await api.researchDrafts.generateQuestions(draftId);
-      setSuccess('問題已產生');
+      setSuccess('Questions generated');
       setShowQuestions(true);
       await loadDraft();
     } catch (err: any) {
-      setError(err.message || '產生問題失敗');
+      setError(err.message || 'The questions could not be generated');
     }
   };
 
@@ -167,17 +167,17 @@ export default function ResearchDraftDetailPage() {
       Object.entries(answers).filter(([, v]) => v.trim() !== '')
     );
     if (Object.keys(filtered).length === 0) {
-      setError('請至少回答一個問題');
+      setError('Answer at least one question');
       return;
     }
     try {
       const updated = await api.researchDrafts.submitAnswers(draftId, filtered);
       setDraft(updated);
       setAnswers({});
-      setSuccess('答案已提交，草稿已更新');
+      setSuccess('Answers submitted and the draft updated');
       setShowQuestions(false);
     } catch (err: any) {
-      setError(err.message || '提交答案失敗');
+      setError(err.message || 'The answers could not be submitted');
     }
   };
 
@@ -188,16 +188,16 @@ export default function ResearchDraftDetailPage() {
       Object.entries(editForm).filter(([, v]) => v.trim() !== '')
     );
     if (Object.keys(filtered).length === 0) {
-      setError('請至少修改一個欄位');
+      setError('Change at least one field');
       return;
     }
     try {
       const updated = await api.researchDrafts.update(draftId, filtered);
       setDraft(updated);
       setEditing(false);
-      setSuccess('草稿已更新');
+      setSuccess('Draft updated');
     } catch (err: any) {
-      setError(err.message || '更新失敗');
+      setError(err.message || 'The draft could not be updated');
     }
   };
 
@@ -209,9 +209,9 @@ export default function ResearchDraftDetailPage() {
       setDraft(updated);
       setShowApproveDialog(false);
       setApproveNotes('');
-      setSuccess('草稿已接受——此為研究筆記記錄，非已驗證策略');
+      setSuccess('Draft accepted — this is a research note, not a verified strategy');
     } catch (err: any) {
-      setError(err.message || '接受失敗');
+      setError(err.message || 'The draft could not be accepted');
     }
   };
 
@@ -224,9 +224,9 @@ export default function ResearchDraftDetailPage() {
       setShowRejectDialog(false);
       setShowApproveDialog(false);
       setApproveNotes('');
-      setSuccess('草稿已退回');
+      setSuccess('Draft returned');
     } catch (err: any) {
-      setError(err.message || '退回失敗');
+      setError(err.message || 'The draft could not be returned');
     }
   };
 
@@ -236,14 +236,14 @@ export default function ResearchDraftDetailPage() {
       await api.researchDrafts.delete(draftId);
       router.push('/research-drafts');
     } catch (err: any) {
-      setError(err.message || '刪除失敗');
+      setError(err.message || 'The draft could not be deleted');
     }
   };
 
   const handleApplySelectedFields = () => {
     if (!draft) return;
     if (draft.status !== 'accepted') {
-      setError('只有已接受的草稿才能套用欄位');
+      setError('Only accepted drafts can transfer fields');
       return;
     }
     const params = new URLSearchParams();
@@ -267,52 +267,56 @@ export default function ResearchDraftDetailPage() {
   const isFinalized = draft?.status === 'accepted' || draft?.status === 'rejected';
 
   if (loading) {
-    return <div className="container" style={{ paddingTop: '40px' }}>載入中...</div>;
+    return (
+      <div className="container" role="status" aria-live="polite" style={{ paddingTop: '40px' }}>
+        Loading…
+      </div>
+    );
   }
 
   if (!draft) {
-    return <div className="container" style={{ paddingTop: '40px' }}>草稿不存在</div>;
+    return (
+      <div className="container" style={{ paddingTop: '40px' }}>
+        <p>This draft does not exist.</p>
+        <Link href="/research-drafts" style={{ color: 'var(--primary-text)', textDecoration: 'none' }}>
+          ← Back to research drafts
+        </Link>
+      </div>
+    );
   }
-
-  const statusLabel: Record<string, string> = {
-    draft: '草稿',
-    pending_review: '待審閱',
-    accepted: '已接受',
-    rejected: '已退回',
-  };
 
   return (
     <div className="container" style={{ paddingTop: '40px', paddingBottom: '40px' }}>
       <div style={{ marginBottom: '20px' }}>
         <Link href="/research-drafts" style={{ color: 'var(--primary-text)', textDecoration: 'none' }}>
-          &larr; 返回研究草稿
+          &larr; Back to research drafts
         </Link>
       </div>
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start', marginBottom: '20px' }}>
         <div>
-          <h1 style={{ marginBottom: '8px' }}>{draft.title || '（未命名草稿）'}</h1>
+          <h1 style={{ marginBottom: '8px' }}>{draft.title || '(Untitled draft)'}</h1>
           <p style={{ color: 'var(--text-secondary)', fontSize: '14px' }}>
-            建立於 {formatDateTime(draft.created_at)}
+            Created {formatDateTime(draft.created_at)}
             {' | '}
-            更新於 {formatDateTime(draft.updated_at)}
+            Updated {formatDateTime(draft.updated_at)}
           </p>
         </div>
         <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
           <span className={statusPillClass(draft.status)} style={{ padding: '6px 16px', fontSize: '14px' }}>
-            {statusLabel[draft.status] || draft.status}
+            {label(DRAFT_STATUS_LABELS, draft.status)}
           </span>
         </div>
       </div>
 
       <div className="alert alert-info" style={{ marginBottom: '20px', fontSize: '13px' }}>
-        <strong>模擬研究助手——僅供流程示範。</strong>{' '}
-        本功能使用確定性模擬助手（非真實 AI），問題為預先定義。
-        接受草稿僅記錄研究筆記，不會建立可執行策略、啟動回測、鎖定策略、建立紙上訂單、或建立模型版本。
+        <strong>Simulated research assistant — workflow demo only.</strong>{' '}
+        This feature uses a deterministic simulated assistant (not real AI) and the questions are predefined.
+        Accepting a draft only records research notes; it does not create an executable strategy, start a backtest, lock a strategy, create paper orders, or create a model version.
       </div>
 
-      {error && <div className="alert alert-warning">{error}</div>}
-      {success && <div className="alert alert-info">{success}</div>}
+      {error && <div className="alert alert-warning" role="alert">{error}</div>}
+      {success && <div className="alert alert-info" role="status">{success}</div>}
 
       {/* Tab navigation */}
       <div style={{ display: 'flex', gap: '8px', marginBottom: '20px' }}>
@@ -330,7 +334,7 @@ export default function ResearchDraftDetailPage() {
               if (tab === 'audit') loadAuditEvents();
             }}
           >
-            {tab === 'detail' ? '草稿內容' : tab === 'revisions' ? '修訂記錄' : '稽核事件'}
+            {tab === 'detail' ? 'Draft content' : tab === 'revisions' ? 'Revision history' : 'Audit events'}
           </button>
         ))}
       </div>
@@ -341,10 +345,10 @@ export default function ResearchDraftDetailPage() {
           {/* Draft fields */}
           <div className="card" style={{ marginBottom: '20px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-              <h2>草稿欄位</h2>
+              <h2>Draft fields</h2>
               {!isFinalized && !editing && (
                 <button className="btn btn-secondary" style={{ fontSize: '13px' }} onClick={startEdit}>
-                  編輯
+                  Edit
                 </button>
               )}
             </div>
@@ -353,20 +357,22 @@ export default function ResearchDraftDetailPage() {
               <div>
                 {EDITABLE_FIELDS.map((field) => (
                   <div className="form-group" key={field}>
-                    <label>{FIELD_LABELS[field]}</label>
+                    <label htmlFor={`draft-field-${field}`}>{FIELD_LABELS[field]}</label>
                     {field === 'strategy_template' ? (
                       <select
+                        id={`draft-field-${field}`}
                         className="input"
                         value={editForm[field] || ''}
                         onChange={(e) => setEditForm({ ...editForm, [field]: e.target.value })}
                       >
-                        <option value="">（未選擇）</option>
+                        <option value="">(Not selected)</option>
                         {TEMPLATE_OPTIONS.map((opt) => (
                           <option key={opt.value} value={opt.value}>{opt.label}</option>
                         ))}
                       </select>
                     ) : field === 'hypothesis' || field === 'falsification_criteria' ? (
                       <textarea
+                        id={`draft-field-${field}`}
                         className="input"
                         rows={3}
                         value={editForm[field] || ''}
@@ -374,17 +380,18 @@ export default function ResearchDraftDetailPage() {
                       />
                     ) : (
                       <input
+                        id={`draft-field-${field}`}
                         className="input"
                         value={editForm[field] || ''}
                         onChange={(e) => setEditForm({ ...editForm, [field]: e.target.value })}
-                        placeholder={field === 'asset_symbol' ? '例如 DEMO-ALPHA' : field === 'benchmark_symbol' ? '例如 DEMO-BENCHMARK' : ''}
+                        placeholder={field === 'asset_symbol' ? 'e.g. DEMO-ALPHA' : field === 'benchmark_symbol' ? 'e.g. DEMO-BENCHMARK' : ''}
                       />
                     )}
                   </div>
                 ))}
                 <div style={{ display: 'flex', gap: '8px' }}>
-                  <button className="btn btn-primary" onClick={handleSaveEdit}>儲存</button>
-                  <button className="btn btn-secondary" onClick={() => setEditing(false)}>取消</button>
+                  <button className="btn btn-primary" onClick={handleSaveEdit}>Save</button>
+                  <button className="btn btn-secondary" onClick={() => setEditing(false)}>Cancel</button>
                 </div>
               </div>
             ) : (
@@ -398,8 +405,8 @@ export default function ResearchDraftDetailPage() {
                       </div>
                       <div style={{ fontSize: '14px', color: value ? 'var(--text-primary)' : 'var(--text-muted)' }}>
                         {field === 'strategy_template' && value
-                          ? TEMPLATE_OPTIONS.find((o) => o.value === value)?.label || value
-                          : value || '（未填寫）'}
+                          ? label(STRATEGY_TEMPLATE_LABELS, value)
+                          : value || '(Not filled in)'}
                       </div>
                     </div>
                   );
@@ -412,14 +419,14 @@ export default function ResearchDraftDetailPage() {
           {!isFinalized && (
             <div className="card" style={{ marginBottom: '20px' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-                <h2>研究助手問題</h2>
+                <h2>Assistant questions</h2>
                 <button className="btn btn-primary" style={{ fontSize: '13px' }} onClick={handleGenerateQuestions}>
-                  {draft.assistant_questions ? '重新產生問題' : '產生問題'}
+                  {draft.assistant_questions ? 'Regenerate questions' : 'Generate questions'}
                 </button>
               </div>
 
               <div style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '12px', padding: '8px 12px', backgroundColor: 'var(--surface-2)', borderRadius: '6px' }}>
-                模擬助手會針對尚未填寫的欄位產生問題。問題為確定性預先定義，非 AI 動態產生。
+                The simulated assistant asks about fields you have not filled in yet. Questions are deterministic and predefined, not generated dynamically by AI.
               </div>
 
               {showQuestions && draft.assistant_questions && draft.assistant_questions.length > 0 ? (
@@ -434,16 +441,17 @@ export default function ResearchDraftDetailPage() {
                       </div>
                       {q.context && (
                         <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '8px' }}>
-                          提示: {q.context}
+                          Hint: {q.context}
                         </div>
                       )}
                       {q.field === 'strategy_template' ? (
                         <select
                           className="input"
+                          aria-label={FIELD_LABELS[q.field] || q.field}
                           value={answers[q.field] || ''}
                           onChange={(e) => setAnswers({ ...answers, [q.field]: e.target.value })}
                         >
-                          <option value="">（選擇模板）</option>
+                          <option value="">(Select a template)</option>
                           {TEMPLATE_OPTIONS.map((opt) => (
                             <option key={opt.value} value={opt.value}>{opt.label}</option>
                           ))}
@@ -451,7 +459,8 @@ export default function ResearchDraftDetailPage() {
                       ) : (
                         <input
                           className="input"
-                          placeholder="輸入你的回答..."
+                          aria-label={FIELD_LABELS[q.field] || q.field}
+                          placeholder="Type your answer…"
                           value={answers[q.field] || ''}
                           onChange={(e) => setAnswers({ ...answers, [q.field]: e.target.value })}
                         />
@@ -459,22 +468,22 @@ export default function ResearchDraftDetailPage() {
                     </div>
                   ))}
                   <div style={{ display: 'flex', gap: '8px' }}>
-                    <button className="btn btn-primary" onClick={handleSubmitAnswers}>提交答案</button>
-                    <button className="btn btn-secondary" onClick={() => setShowQuestions(false)}>取消</button>
+                    <button className="btn btn-primary" onClick={handleSubmitAnswers}>Submit answers</button>
+                    <button className="btn btn-secondary" onClick={() => setShowQuestions(false)}>Cancel</button>
                   </div>
                 </div>
               ) : draft.assistant_questions && draft.assistant_questions.length > 0 ? (
                 <div>
                   <p style={{ fontSize: '14px', color: 'var(--text-secondary)', marginBottom: '12px' }}>
-                    已產生 {draft.assistant_questions.length} 個問題。
+                    {draft.assistant_questions.length} question{draft.assistant_questions.length === 1 ? '' : 's'} generated.
                   </p>
                   <button className="btn btn-secondary" style={{ fontSize: '13px' }} onClick={() => setShowQuestions(true)}>
-                    回答問題
+                    Answer questions
                   </button>
                 </div>
               ) : (
                 <p style={{ color: 'var(--text-muted)', fontSize: '14px' }}>
-                  尚未產生問題。點擊「產生問題」讓模擬助手檢查尚未填寫的欄位。
+                  No questions yet. Select &ldquo;Generate questions&rdquo; to have the simulated assistant check the fields you have not filled in.
                 </p>
               )}
             </div>
@@ -484,7 +493,7 @@ export default function ResearchDraftDetailPage() {
           {draft.status === 'accepted' && (
             <div className="card" style={{ marginBottom: '20px' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-                <h2>套用草稿欄位</h2>
+                <h2>Apply draft fields</h2>
                 <button
                   className="btn btn-primary"
                   style={{ fontSize: '13px' }}
@@ -493,19 +502,19 @@ export default function ResearchDraftDetailPage() {
                     setSelectedFields(new Set());
                   }}
                 >
-                  {showApplyFields ? '取消' : '選擇要套用的欄位'}
+                  {showApplyFields ? 'Cancel' : 'Choose fields to apply'}
                 </button>
               </div>
 
               <div className="alert alert-warning" style={{ fontSize: '13px', marginBottom: '16px' }}>
-                接受草稿僅表示研究筆記已審閱。以下欄位值不會自動套用到任何實驗——
-                你需要手動選擇要複製的欄位，並在下一步確認後才會記錄。
+                Accepting a draft only means the research notes have been reviewed. The field values below are not applied to any experiment automatically —
+                you choose which fields to copy, and they are recorded only after you confirm in the next step.
               </div>
 
               {showApplyFields && (
                 <div>
                   <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '12px' }}>
-                    勾選你要套用的欄位。你會看到目前值與草稿建議值的比較。
+                    Tick the fields you want to apply. You will see the draft values before anything is written.
                   </p>
                   {EDITABLE_FIELDS.map((field) => {
                     const proposedValue = (draft as any)[field];
@@ -538,7 +547,11 @@ export default function ResearchDraftDetailPage() {
                         <div>
                           <div style={{ fontWeight: '500', fontSize: '14px' }}>{FIELD_LABELS[field]}</div>
                           <div style={{ fontSize: '13px', color: 'var(--text-muted)', marginTop: '4px' }}>
-                            草稿值: <strong>{proposedValue}</strong>
+                            Draft value: <strong>
+                              {field === 'strategy_template'
+                                ? label(STRATEGY_TEMPLATE_LABELS, String(proposedValue))
+                                : String(proposedValue)}
+                            </strong>
                           </div>
                         </div>
                       </label>
@@ -547,7 +560,7 @@ export default function ResearchDraftDetailPage() {
                   {selectedFields.size > 0 && (
                     <div style={{ marginTop: '12px' }}>
                       <button className="btn btn-primary" onClick={handleApplySelectedFields}>
-                        確認套用 {selectedFields.size} 個欄位
+                        Apply {selectedFields.size} field{selectedFields.size === 1 ? '' : 's'}
                       </button>
                     </div>
                   )}
@@ -559,51 +572,53 @@ export default function ResearchDraftDetailPage() {
           {/* Approve / Reject */}
           {!isFinalized && (
             <div className="card" style={{ marginBottom: '20px' }}>
-              <h2 style={{ marginBottom: '16px' }}>審閱決定</h2>
+              <h2 style={{ marginBottom: '16px' }}>Review decision</h2>
               <div style={{ display: 'flex', gap: '8px' }}>
                 <button className="btn" style={{ backgroundColor: 'var(--positive)', color: 'var(--text-on-bright)', fontSize: '13px' }} onClick={() => { setShowApproveDialog(true); setError(''); }}>
-                  接受草稿
+                  Accept draft
                 </button>
                 <button className="btn" style={{ backgroundColor: 'var(--negative)', color: 'var(--text-on-bright)', fontSize: '13px' }} onClick={() => { setShowRejectDialog(true); setError(''); }}>
-                  退回草稿
+                  Return draft
                 </button>
               </div>
 
               {showApproveDialog && (
                 <div style={{ marginTop: '16px', padding: '16px', backgroundColor: 'var(--surface-2)', borderRadius: '6px' }}>
                   <p style={{ fontSize: '14px', marginBottom: '12px' }}>
-                    接受此草稿表示你已審閱研究假設與方法論。
-                    <strong>這不會建立可執行的策略。</strong>
+                    Accepting this draft records that you reviewed the research hypothesis and method.
+                    <strong> It does not create an executable strategy.</strong>
                   </p>
                   <textarea
                     className="input"
+                    aria-label="Acceptance note"
                     rows={2}
-                    placeholder="備註（選填）..."
+                    placeholder="Note (optional)…"
                     value={approveNotes}
                     onChange={(e) => setApproveNotes(e.target.value)}
                     style={{ marginBottom: '12px' }}
                   />
                   <div style={{ display: 'flex', gap: '8px' }}>
-                    <button className="btn" style={{ backgroundColor: 'var(--positive)', color: 'var(--text-on-bright)' }} onClick={handleApprove}>確認接受</button>
-                    <button className="btn btn-secondary" onClick={() => { setShowApproveDialog(false); setApproveNotes(''); }}>取消</button>
+                    <button className="btn" style={{ backgroundColor: 'var(--positive)', color: 'var(--text-on-bright)' }} onClick={handleApprove}>Confirm accept</button>
+                    <button className="btn btn-secondary" onClick={() => { setShowApproveDialog(false); setApproveNotes(''); }}>Cancel</button>
                   </div>
                 </div>
               )}
 
               {showRejectDialog && (
                 <div style={{ marginTop: '16px', padding: '16px', backgroundColor: 'var(--surface-2)', borderRadius: '6px' }}>
-                  <p style={{ fontSize: '14px', marginBottom: '12px' }}>退回此草稿，記錄退回原因。</p>
+                  <p style={{ fontSize: '14px', marginBottom: '12px' }}>Return this draft and record why.</p>
                   <textarea
                     className="input"
+                    aria-label="Return reason"
                     rows={2}
-                    placeholder="退回原因（選填）..."
+                    placeholder="Reason for returning (optional)…"
                     value={approveNotes}
                     onChange={(e) => setApproveNotes(e.target.value)}
                     style={{ marginBottom: '12px' }}
                   />
                   <div style={{ display: 'flex', gap: '8px' }}>
-                    <button className="btn" style={{ backgroundColor: 'var(--negative)', color: 'var(--text-on-bright)' }} onClick={handleReject}>確認退回</button>
-                    <button className="btn btn-secondary" onClick={() => { setShowRejectDialog(false); setApproveNotes(''); }}>取消</button>
+                    <button className="btn" style={{ backgroundColor: 'var(--negative)', color: 'var(--text-on-bright)' }} onClick={handleReject}>Confirm return</button>
+                    <button className="btn btn-secondary" onClick={() => { setShowRejectDialog(false); setApproveNotes(''); }}>Cancel</button>
                   </div>
                 </div>
               )}
@@ -612,23 +627,23 @@ export default function ResearchDraftDetailPage() {
 
           {/* Delete */}
           <div className="card" style={{ marginBottom: '20px' }}>
-            <h2 style={{ marginBottom: '12px' }}>刪除草稿</h2>
+            <h2 style={{ marginBottom: '12px' }}>Delete draft</h2>
             <p style={{ fontSize: '14px', color: 'var(--text-secondary)', marginBottom: '12px' }}>
-              刪除草稿會一併移除所有修訂記錄與稽核事件。此操作無法復原。
+              Deleting a draft also removes all of its revisions and audit events. This cannot be undone.
             </p>
             {showDeleteConfirm ? (
               <div style={{ padding: '12px', backgroundColor: 'rgba(239,68,68,0.12)', borderRadius: '6px' }}>
                 <p style={{ fontSize: '14px', color: 'var(--negative)', marginBottom: '12px' }}>
-                  確定要刪除此草稿嗎？所有修訂與稽核事件將一併刪除。
+                  Delete this draft? All revisions and audit events will be deleted with it.
                 </p>
                 <div style={{ display: 'flex', gap: '8px' }}>
-                  <button className="btn" style={{ backgroundColor: 'var(--negative)', color: 'var(--text-on-bright)' }} onClick={handleDelete}>確認刪除</button>
-                  <button className="btn btn-secondary" onClick={() => setShowDeleteConfirm(false)}>取消</button>
+                  <button className="btn" style={{ backgroundColor: 'var(--negative)', color: 'var(--text-on-bright)' }} onClick={handleDelete}>Confirm delete</button>
+                  <button className="btn btn-secondary" onClick={() => setShowDeleteConfirm(false)}>Cancel</button>
                 </div>
               </div>
             ) : (
               <button className="btn" style={{ backgroundColor: 'var(--surface-2)', color: 'var(--negative)', fontSize: '13px' }} onClick={() => setShowDeleteConfirm(true)}>
-                刪除此草稿
+                Delete this draft
               </button>
             )}
           </div>
@@ -638,22 +653,22 @@ export default function ResearchDraftDetailPage() {
       {/* Revisions view */}
       {view === 'revisions' && (
         <div className="card">
-          <h2 style={{ marginBottom: '16px' }}>修訂記錄 ({revisions.length})</h2>
+          <h2 style={{ marginBottom: '16px' }}>Revision history ({revisions.length})</h2>
           {revisions.length === 0 ? (
-            <p style={{ color: 'var(--text-muted)', fontSize: '14px' }}>尚無修訂記錄</p>
+            <p style={{ color: 'var(--text-muted)', fontSize: '14px' }}>No revisions yet</p>
           ) : (
             <div style={{ display: 'grid', gap: '8px' }}>
               {[...revisions].reverse().map((rev) => (
                 <div key={rev.id} style={{ padding: '12px', backgroundColor: 'var(--surface-2)', borderRadius: '6px', borderLeft: '3px solid var(--primary)' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-                    <span style={{ fontWeight: '500', fontSize: '14px' }}>修訂 #{rev.revision_number}</span>
+                    <span style={{ fontWeight: '500', fontSize: '14px' }}>Revision #{rev.revision_number}</span>
                     <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
                       {formatDateTime(rev.created_at)}
                     </span>
                   </div>
                   <div style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
-                    <span style={{ marginRight: '12px' }}>狀態: {statusLabel[rev.status] || rev.status}</span>
-                    {rev.title && <span>標題: {rev.title}</span>}
+                    <span style={{ marginRight: '12px' }}>Status: {label(DRAFT_STATUS_LABELS, rev.status)}</span>
+                    {rev.title && <span>Title: {rev.title}</span>}
                   </div>
                 </div>
               ))}
@@ -665,9 +680,9 @@ export default function ResearchDraftDetailPage() {
       {/* Audit events view */}
       {view === 'audit' && (
         <div className="card">
-          <h2 style={{ marginBottom: '16px' }}>稽核事件 ({auditEvents.length})</h2>
+          <h2 style={{ marginBottom: '16px' }}>Audit events ({auditEvents.length})</h2>
           {auditEvents.length === 0 ? (
-            <p style={{ color: 'var(--text-muted)', fontSize: '14px' }}>尚無稽核事件</p>
+            <p style={{ color: 'var(--text-muted)', fontSize: '14px' }}>No audit events yet</p>
           ) : (
             <div style={{ display: 'grid', gap: '4px' }}>
               {[...auditEvents].reverse().map((evt) => (

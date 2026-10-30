@@ -6,6 +6,7 @@ import Link from 'next/link';
 import { api, ApiError } from '@/lib/api';
 import { describeRunStatus } from '@/lib/runStatus';
 import { formatDateTime } from '@/lib/format';
+import { ACTOR_LABELS, EXIT_REASON_LABELS, SIDE_LABELS, label } from '@/lib/copy';
 
 interface RunDetail {
   id: string;
@@ -34,16 +35,16 @@ type LoadState =
   | { phase: 'ready'; run: RunDetail };
 
 const METRIC_KEYS: [string, string][] = [
-  ['total_return_pct', '總報酬 (%)'],
-  ['net_pnl', '淨盈虧'],
-  ['max_drawdown_pct', '最大回撤 (%)'],
-  ['total_trades', '成交筆數'],
-  ['closed_trade_count', '已平倉交易數'],
-  ['win_rate_pct', '勝率 (%)'],
-  ['profit_factor', '盈虧比（毛利／毛虧）'],
-  ['average_realized_r', '平均實現 R'],
-  ['sharpe_ratio', 'Sharpe 比率'],
-  ['annualized_return_pct', '年化報酬 (%)'],
+  ['total_return_pct', 'Total return (%)'],
+  ['net_pnl', 'Net P&L'],
+  ['max_drawdown_pct', 'Max drawdown (%)'],
+  ['total_trades', 'Trades'],
+  ['closed_trade_count', 'Closed trades'],
+  ['win_rate_pct', 'Win rate (%)'],
+  ['profit_factor', 'Profit factor (gross profit / gross loss)'],
+  ['average_realized_r', 'Average realized R'],
+  ['sharpe_ratio', 'Sharpe ratio'],
+  ['annualized_return_pct', 'Annualized return (%)'],
 ];
 
 interface UnavailableMetric {
@@ -81,37 +82,29 @@ interface WeekdayBreakdown extends UnavailableMetric {
 const PANEL_METRIC_KEYS = ['pnl_cross_check', 'day_of_week_breakdown', 'time_of_day_breakdown', 'round_trip_summary'];
 
 const EXIT_POLICY_LABELS: Record<string, string> = {
-  source: '政策來源',
-  stop: '停損',
-  target: '停利',
-  same_bar_stop_and_target: '同一日同時觸及',
-  level_evaluation_start: '檢查起點',
-  time_exit: '持有期間出場',
-  end_of_data: '資料結束',
-  undeclared_plan: '未宣告風險計劃',
+  source: 'Policy source',
+  stop: 'Stop loss',
+  target: 'Take profit',
+  same_bar_stop_and_target: 'Stop and target hit in the same bar',
+  level_evaluation_start: 'Level evaluation starts',
+  time_exit: 'Time-based exit',
+  end_of_data: 'End of data',
+  undeclared_plan: 'No risk plan declared',
 };
 
 // Labels for methodology_json.journal_field_semantics: the per-trade definitions the
 // engine stores. Rendering them keeps the R / planned-risk semantics (including that
 // realised R is never floored at -1R) visible to the user instead of payload-only.
 const JOURNAL_FIELD_LABELS: Record<string, string> = {
-  actor: '來源身分',
-  strategy_config_hash: '策略設定雜湊',
-  stop_price: '停損價',
-  target_price: '停利價',
-  planned_risk: '計劃風險',
-  planned_r: '計劃 R',
-  realized_pnl: '實現盈虧',
-  realized_r: '實現 R',
-  exit_reason: '出場原因',
-};
-
-const EXIT_REASON_LABELS: Record<string, string> = {
-  stop: '停損觸發',
-  target: '停利觸發',
-  time: '持有期滿',
-  signal: '策略訊號',
-  end_of_data: '資料結束強制平倉',
+  actor: 'Source actor',
+  strategy_config_hash: 'Strategy config hash',
+  stop_price: 'Stop price',
+  target_price: 'Target price',
+  planned_risk: 'Planned risk',
+  planned_r: 'Planned R',
+  realized_pnl: 'Realized P&L',
+  realized_r: 'Realized R',
+  exit_reason: 'Exit reason',
 };
 
 interface JournalRow {
@@ -150,10 +143,10 @@ interface RoundTripRow {
 }
 
 const PROVENANCE_KEYS: [string, string][] = [
-  ['data_provider', '資料來源'],
-  ['dataset_checksum', '資料集 checksum'],
-  ['start_date', '期間開始'],
-  ['end_date', '期間結束'],
+  ['data_provider', 'Data source'],
+  ['dataset_checksum', 'Dataset checksum'],
+  ['start_date', 'Period start'],
+  ['end_date', 'Period end'],
 ];
 
 const fmt = (v: unknown): string => {
@@ -170,8 +163,8 @@ function isMetricStruct(v: unknown): v is UnavailableMetric {
 function fmtMetric(v: unknown): { text: string; reason?: string } {
   if (isMetricStruct(v)) {
     const reason = typeof v.reason === 'string' ? v.reason : undefined;
-    if (v.available === false) return { text: '無數據', reason };
-    if (v.value === null || v.value === undefined) return { text: '未計算', reason };
+    if (v.available === false) return { text: 'No data', reason };
+    if (v.value === null || v.value === undefined) return { text: 'Not computed', reason };
     return { text: fmt(v.value), reason };
   }
   return { text: fmt(v) };
@@ -179,12 +172,12 @@ function fmtMetric(v: unknown): { text: string; reason?: string } {
 
 function describeError(e: unknown, fallbackHeading: string): { heading: string; detail: string } {
   if (e instanceof ApiError) {
-    if (e.status === 404) return { heading: '搵唔到對應記錄', detail: e.message };
-    if (e.status === 403) return { heading: '冇權限檢視此記錄', detail: e.message };
-    if (e.status === 401) return { heading: '登入狀態已失效', detail: e.message };
+    if (e.status === 404) return { heading: 'Record not found', detail: e.message };
+    if (e.status === 403) return { heading: 'You do not have access to this record', detail: e.message };
+    if (e.status === 401) return { heading: 'Your session has expired', detail: e.message };
     return { heading: fallbackHeading, detail: `${e.status} — ${e.message}` };
   }
-  return { heading: fallbackHeading, detail: e instanceof Error ? e.message : '未知錯誤' };
+  return { heading: fallbackHeading, detail: e instanceof Error ? e.message : 'Unknown error' };
 }
 
 export default function RunDetailPage() {
@@ -195,7 +188,7 @@ export default function RunDetailPage() {
 
   useEffect(() => {
     if (!runId || !experimentId) {
-      setState({ phase: 'error', heading: '網址唔完整', detail: '缺少實驗 ID 或 run ID。', backTo: 'dashboard' });
+      setState({ phase: 'error', heading: 'Incomplete address', detail: 'The experiment ID or run ID is missing.', backTo: 'dashboard' });
       return;
     }
     let cancelled = false;
@@ -207,12 +200,12 @@ export default function RunDetailPage() {
       if (cancelled) return;
 
       if (runRes.status === 'rejected') {
-        const { heading, detail } = describeError(runRes.reason, '載入執行記錄失敗');
+        const { heading, detail } = describeError(runRes.reason, 'The run record could not be loaded');
         setState({ phase: 'error', heading, detail, backTo: 'dashboard' });
         return;
       }
       if (listRes.status === 'rejected') {
-        const { heading, detail } = describeError(listRes.reason, '無法確認此 run 所屬嘅實驗');
+        const { heading, detail } = describeError(listRes.reason, 'Could not confirm which experiment this run belongs to');
         setState({ phase: 'error', heading, detail, backTo: 'dashboard' });
         return;
       }
@@ -222,8 +215,8 @@ export default function RunDetailPage() {
       if (!ownedRuns.some((r) => r.id === run.id)) {
         setState({
           phase: 'error',
-          heading: '呢個 run 唔屬於網址所指嘅實驗',
-          detail: '為避免展示唔對應嘅結果，本頁已停止渲染該 run 嘅指標。',
+          heading: 'This run does not belong to the experiment in the address',
+          detail: 'The run metrics are not rendered, so results from a different experiment cannot be shown here.',
           backTo: 'dashboard',
         });
         return;
@@ -238,25 +231,25 @@ export default function RunDetailPage() {
   if (state.phase === 'loading') {
     return (
       <div className="dash-root" style={{ padding: '32px' }}>
-        <p style={{ fontSize: '14px', color: 'var(--text-secondary)' }}>載入中…</p>
+        <p style={{ fontSize: '14px', color: 'var(--text-secondary)' }}>Loading…</p>
       </div>
     );
   }
 
   if (state.phase === 'error') {
     const href = state.backTo === 'experiment' ? `/experiments/${experimentId}` : '/dashboard';
-    const label = state.backTo === 'experiment' ? '← 返回實驗' : '← 返回控制台';
+    const label = state.backTo === 'experiment' ? '← Back to experiment' : '← Back to dashboard';
     return (
       <div className="dash-root" style={{ padding: '32px' }}>
         <Link href={href} style={{ color: 'var(--accent-blue)', textDecoration: 'none', fontSize: '13px' }}>
           {label}
         </Link>
         <div className="dash-disclaimer" data-testid="run-detail-error" style={{ marginTop: '16px' }}>
-          <strong>{state.heading}：</strong>
+          <strong>{state.heading}:</strong>
           {state.detail}
         </div>
         <div style={{ marginTop: '12px', fontSize: '12px', color: 'var(--text-muted)', fontFamily: 'monospace' }}>
-          Run ID：{runId || '—'}
+          Run ID: {runId || '—'}
         </div>
       </div>
     );
@@ -290,38 +283,38 @@ export default function RunDetailPage() {
           data-testid="run-detail-back"
           style={{ color: 'var(--accent-blue)', textDecoration: 'none', fontSize: '13px' }}
         >
-          ← 返回實驗
+          ← Back to experiment
         </Link>
         <span style={{ fontSize: '12px', color: 'var(--text-muted)' }} data-testid="run-detail-status">
-          狀態：{describeRunStatus(run.status, run.started_at).label}
+          Status: {describeRunStatus(run.status, run.started_at).label}
         </span>
       </div>
       {describeRunStatus(run.status, run.started_at).stale && (
         <p style={{ margin: '0 0 16px', fontSize: '12px', color: 'var(--text-muted)' }}>
-          已超過 30 分鐘沒有完成記錄，也沒有 completed_at；這不是完成，也不是目前仍在執行。
+          No completion record after 30 minutes and no completed_at. This is not a completion, and it is not still running.
         </p>
       )}
 
-      <h1 style={{ margin: '0 0 8px', fontSize: '24px', color: 'var(--text-white)' }}>執行結果</h1>
+      <h1 style={{ margin: '0 0 8px', fontSize: '24px', color: 'var(--text-white)' }}>Run results</h1>
 
       <div className="dash-panel" style={{ marginBottom: '16px' }}>
         <div className="dash-panel-body" style={{ padding: '20px' }}>
-          <h3 style={{ margin: '0 0 12px', fontSize: '15px' }}>執行身分</h3>
+          <h3 style={{ margin: '0 0 12px', fontSize: '15px' }}>Run identity</h3>
           <div style={{ display: 'grid', gridTemplateColumns: '180px 1fr', gap: '8px 16px', fontSize: '13px', color: 'var(--text-secondary)' }}>
             <div>Run ID</div><div style={{ fontFamily: 'monospace' }}>{run.id}</div>
-            <div>實驗 ID</div><div style={{ fontFamily: 'monospace' }}>{experimentId}</div>
+            <div>Experiment ID</div><div style={{ fontFamily: 'monospace' }}>{experimentId}</div>
             <div>Version ID</div><div style={{ fontFamily: 'monospace' }}>{run.experiment_version_id}</div>
             <div>Config hash</div><div style={{ fontFamily: 'monospace' }}>{run.config_hash}</div>
             <div>Engine version</div><div style={{ fontFamily: 'monospace' }}>{run.engine_version}</div>
-            <div>開始時間</div><div>{run.started_at ? formatDateTime(run.started_at) : '—'}</div>
-            <div>完成時間</div><div>{run.completed_at ? formatDateTime(run.completed_at) : '—'}</div>
+            <div>Started</div><div>{run.started_at ? formatDateTime(run.started_at) : '—'}</div>
+            <div>Completed</div><div>{run.completed_at ? formatDateTime(run.completed_at) : '—'}</div>
           </div>
         </div>
       </div>
 
       <div className="dash-panel" style={{ marginBottom: '16px' }}>
         <div className="dash-panel-body" style={{ padding: '20px' }}>
-          <h3 style={{ margin: '0 0 12px', fontSize: '15px' }}>已記錄指標</h3>
+          <h3 style={{ margin: '0 0 12px', fontSize: '15px' }}>Recorded metrics</h3>
           <div style={{ display: 'grid', gridTemplateColumns: '200px 1fr', gap: '8px 16px', fontSize: '13px', color: 'var(--text-secondary)' }}>
             {METRIC_KEYS.map(([k, label]) => {
               const { text, reason } = fmtMetric(recorded[k]);
@@ -346,7 +339,7 @@ export default function RunDetailPage() {
           </div>
           {flatExtraCount > 0 && (
             <>
-              <h4 style={{ margin: '16px 0 8px', fontSize: '13px', color: 'var(--text-muted)' }}>其他指標</h4>
+              <h4 style={{ margin: '16px 0 8px', fontSize: '13px', color: 'var(--text-muted)' }}>Other metrics</h4>
               <div style={{ display: 'grid', gridTemplateColumns: '200px 1fr', gap: '6px 16px', fontSize: '12px', color: 'var(--text-secondary)' }}>
                 {Object.entries(recorded)
                   .filter(([k]) => !METRIC_KEYS.some(([m]) => m === k) && !PANEL_METRIC_KEYS.includes(k))
@@ -368,19 +361,19 @@ export default function RunDetailPage() {
       {crossCheck && (
         <div className="dash-panel" style={{ marginBottom: '16px' }}>
           <div className="dash-panel-body" style={{ padding: '20px' }}>
-            <h3 style={{ margin: '0 0 12px', fontSize: '15px' }}>盈虧交叉核對</h3>
+            <h3 style={{ margin: '0 0 12px', fontSize: '15px' }}>P&amp;L cross-check</h3>
             <div style={{ display: 'grid', gridTemplateColumns: '220px 1fr', gap: '8px 16px', fontSize: '13px', color: 'var(--text-secondary)' }}>
-              <div>權益法淨盈虧</div>
+              <div>Equity-method net P&amp;L</div>
               <div>{fmt(crossCheck.equity_net_pnl as number)}</div>
-              <div>FIFO 實現淨盈虧</div>
+              <div>FIFO realized net P&amp;L</div>
               <div>{fmt(crossCheck.realized_net_pnl as number)}</div>
-              <div>差異</div>
+              <div>Difference</div>
               <div>{fmt(crossCheck.difference as number)}</div>
-              <div>結果</div>
+              <div>Result</div>
               <div data-testid="pnl-cross-check-result" style={{ fontWeight: 600 }}>
-                {crossCheck.consistent === true ? '兩邊吻合'
-                  : crossCheck.consistent === false ? '唔吻合 — 指標未對帳'
-                  : '無法比較'}
+                {crossCheck.consistent === true ? 'Consistent'
+                  : crossCheck.consistent === false ? 'Not consistent — metrics not reconciled'
+                  : 'Cannot compare'}
               </div>
             </div>
             {typeof crossCheck.reason === 'string' && (
@@ -393,19 +386,19 @@ export default function RunDetailPage() {
       {weekday && Array.isArray(weekday.rows) && (
         <div className="dash-panel" style={{ marginBottom: '16px' }}>
           <div className="dash-panel-body" style={{ padding: '20px' }}>
-            <h3 style={{ margin: '0 0 12px', fontSize: '15px' }}>按交易日分佈</h3>
+            <h3 style={{ margin: '0 0 12px', fontSize: '15px' }}>Breakdown by weekday</h3>
             <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '8px' }}>
-              日期語義：{fmt(weekday.date_semantics)} · 歸屬基礎：{fmt(weekday.attribution_rule)}
+              Date semantics: {fmt(weekday.date_semantics)} · Attribution basis: {fmt(weekday.attribution_rule)}
             </div>
             <table data-testid="weekday-breakdown" style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
               <thead>
                 <tr style={{ textAlign: 'left', color: 'var(--text-muted)' }}>
-                  <th style={{ padding: '4px 8px' }}>日</th>
-                  <th style={{ padding: '4px 8px' }}>交易日數</th>
-                  <th style={{ padding: '4px 8px' }}>已平倉</th>
-                  <th style={{ padding: '4px 8px' }}>勝/負</th>
-                  <th style={{ padding: '4px 8px' }}>實現盈虧</th>
-                  <th style={{ padding: '4px 8px' }}>平均</th>
+                  <th style={{ padding: '4px 8px' }}>Day</th>
+                  <th style={{ padding: '4px 8px' }}>Sessions</th>
+                  <th style={{ padding: '4px 8px' }}>Closed</th>
+                  <th style={{ padding: '4px 8px' }}>Win / loss</th>
+                  <th style={{ padding: '4px 8px' }}>Realized P&amp;L</th>
+                  <th style={{ padding: '4px 8px' }}>Mean</th>
                 </tr>
               </thead>
               <tbody>
@@ -423,7 +416,7 @@ export default function RunDetailPage() {
             </table>
             {(weekday.unattributed_trades as number) > 0 && (
               <div style={{ marginTop: '8px', fontSize: '12px', color: 'var(--text-muted)' }}>
-                {fmt(weekday.unattributed_trades)} 筆平倉無法拉回原買入成本，已排除喺分佈之外。
+                {fmt(weekday.unattributed_trades)} closed trade(s) could not be matched back to their original purchase cost and are excluded from this breakdown.
               </div>
             )}
             {typeof weekday.caveat === 'string' && (
@@ -436,9 +429,9 @@ export default function RunDetailPage() {
       {timeOfDay && (
         <div className="dash-panel" style={{ marginBottom: '16px' }}>
           <div className="dash-panel-body" style={{ padding: '20px' }}>
-            <h3 style={{ margin: '0 0 12px', fontSize: '15px' }}>按日內時段分佈</h3>
+            <h3 style={{ margin: '0 0 12px', fontSize: '15px' }}>Breakdown by time of day</h3>
             <div style={{ fontSize: '13px', color: 'var(--text-muted)' }} data-testid="time-of-day-unavailable">
-              {fmtMetric(timeOfDay).text}：{fmt(timeOfDay.reason)}
+              {fmtMetric(timeOfDay).text}: {fmt(timeOfDay.reason)}
             </div>
           </div>
         </div>
@@ -446,17 +439,17 @@ export default function RunDetailPage() {
 
       <div className="dash-panel" style={{ marginBottom: '16px' }}>
         <div className="dash-panel-body" style={{ padding: '20px' }}>
-          <h3 style={{ margin: '0 0 12px', fontSize: '15px' }}>成交日記（系統記錄）</h3>
+          <h3 style={{ margin: '0 0 12px', fontSize: '15px' }}>Trade journal (system record)</h3>
           {fills.length === 0 ? (
             <div style={{ fontSize: '13px', color: 'var(--text-muted)' }} data-testid="journal-empty">
-              呢個 run 冇成交記錄。
+              This run has no recorded fills.
             </div>
           ) : (
             <div style={{ overflowX: 'auto' }}>
               <table data-testid="journal-table" style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
                 <thead>
                   <tr style={{ textAlign: 'left', color: 'var(--text-muted)' }}>
-                    {['日期', '方向', '數量', '成交價', '手續費', '止損', '目標', '計劃風險', '實現盈虧', '實現 R', '出場原因', '來源', 'Config'].map((h) => (
+                    {['Date', 'Side', 'Quantity', 'Execution price', 'Commission', 'Stop', 'Target', 'Planned risk', 'Realized P&L', 'Realized R', 'Exit reason', 'Source', 'Config'].map((h) => (
                       <th key={h} style={{ padding: '4px 8px', whiteSpace: 'nowrap' }}>{h}</th>
                     ))}
                   </tr>
@@ -465,7 +458,7 @@ export default function RunDetailPage() {
                   {fills.map((t, i) => (
                     <tr key={`${t.execution_date}-${i}`} style={{ borderTop: '1px solid var(--border-color)' }}>
                       <td style={{ padding: '4px 8px', whiteSpace: 'nowrap' }}>{fmt(t.execution_date ?? t.trade_date)}</td>
-                      <td style={{ padding: '4px 8px' }}>{fmt(t.side)}</td>
+                      <td style={{ padding: '4px 8px' }}>{t.side ? label(SIDE_LABELS, String(t.side)) : '—'}</td>
                       <td style={{ padding: '4px 8px' }}>{fmt(t.quantity)}</td>
                       <td style={{ padding: '4px 8px' }}>{fmt(t.execution_price_before_costs)}</td>
                       <td style={{ padding: '4px 8px' }}>{fmt(t.commission_amount)}</td>
@@ -476,9 +469,12 @@ export default function RunDetailPage() {
                       <td style={{ padding: '4px 8px' }}>{fmt(t.realized_r)}</td>
                       <td style={{ padding: '4px 8px', whiteSpace: 'nowrap' }} data-testid={`journal-exit-reason-${i}`}
                           title={t.exit_reason ? String(t.exit_reason) : undefined}>
-                        {t.exit_reason ? (EXIT_REASON_LABELS[t.exit_reason] ?? t.exit_reason) : '—'}
+                        {t.exit_reason ? label(EXIT_REASON_LABELS, t.exit_reason) : '—'}
                       </td>
-                      <td style={{ padding: '4px 8px' }} data-testid={`journal-actor-${i}`}>{fmt(t.actor)}</td>
+                      <td style={{ padding: '4px 8px' }} data-testid={`journal-actor-${i}`}
+                          title={t.actor ? String(t.actor) : undefined}>
+                        {t.actor ? label(ACTOR_LABELS, String(t.actor)) : '—'}
+                      </td>
                       <td style={{ padding: '4px 8px', fontFamily: 'monospace' }}>{t.strategy_config_hash ? t.strategy_config_hash.slice(0, 8) : '—'}</td>
                     </tr>
                   ))}
@@ -488,12 +484,12 @@ export default function RunDetailPage() {
           )}
           {roundTrips.length > 0 && (
             <>
-              <h4 style={{ margin: '16px 0 8px', fontSize: '13px', color: 'var(--text-muted)' }}>FIFO 平倉配對</h4>
+              <h4 style={{ margin: '16px 0 8px', fontSize: '13px', color: 'var(--text-muted)' }}>FIFO round-trip matching</h4>
               <div style={{ overflowX: 'auto' }}>
                 <table data-testid="round-trip-table" style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
                   <thead>
                     <tr style={{ textAlign: 'left', color: 'var(--text-muted)' }}>
-                      {['買入日', '賣出日', '股數', '成本/股', '收入/股', '實現盈虧', '計劃風險', '實現 R'].map((h) => (
+                      {['Buy date', 'Sell date', 'Shares', 'Cost / share', 'Proceeds / share', 'Realized P&L', 'Planned risk', 'Realized R'].map((h) => (
                         <th key={h} style={{ padding: '4px 8px', whiteSpace: 'nowrap' }}>{h}</th>
                       ))}
                     </tr>
@@ -518,25 +514,26 @@ export default function RunDetailPage() {
             </>
           )}
           <div style={{ marginTop: '10px', fontSize: '12px', color: 'var(--text-muted)' }}>
-            止損、目標、計劃風險屬策略規範聲明嘅欄位；模板冇聲明止損時顯示「—」，而唔係當作零風險交易。
-            「來源」記錄成交由邊個層面產生（引擎成交為 strategy；human 同 api_key 出現喺紙上交易訂單）。
+            Stop, target and planned risk are fields the strategy declares. When a template declares no stop, the
+            table shows "—" rather than treating the trade as zero risk. "Source" records which layer produced the
+            fill: engine fills are the strategy engine, while human and API client entries come from paper orders.
           </div>
         </div>
       </div>
 
       <div className="dash-panel" style={{ marginBottom: '16px' }}>
         <div className="dash-panel-body" style={{ padding: '20px' }}>
-          <h3 style={{ margin: '0 0 12px', fontSize: '15px' }}>資料來源與快照</h3>
+          <h3 style={{ margin: '0 0 12px', fontSize: '15px' }}>Data source and snapshot</h3>
           <div style={{ display: 'grid', gridTemplateColumns: '200px 1fr', gap: '8px 16px', fontSize: '13px', color: 'var(--text-secondary)' }}>
-            {PROVENANCE_KEYS.map(([k, label]) => (
+            {PROVENANCE_KEYS.map(([k, heading]) => (
               <div key={k} style={{ display: 'contents' }}>
-                <div>{label}</div>
+                <div>{heading}</div>
                 <div style={{ fontFamily: 'monospace' }}>{fmt(resultMeta[k])}</div>
               </div>
             ))}
             <div>Dataset snapshot</div>
             <div style={{ fontFamily: 'monospace' }}>{fmt(run.dataset_snapshot_id)}</div>
-            <div>Dataset checksum (欄位)</div>
+            <div>Dataset checksum (field)</div>
             <div style={{ fontFamily: 'monospace' }}>{fmt(run.dataset_checksum)}</div>
           </div>
         </div>
@@ -544,12 +541,12 @@ export default function RunDetailPage() {
 
       <div className="dash-panel" data-testid="methodology-panel" style={{ marginBottom: '16px' }}>
         <div className="dash-panel-body" style={{ padding: '20px' }}>
-          <h3 style={{ margin: '0 0 12px', fontSize: '15px' }}>方法與限制</h3>
+          <h3 style={{ margin: '0 0 12px', fontSize: '15px' }}>Methodology and limitations</h3>
           {methodology ? (
             <div style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
               {convention && (
                 <div style={{ marginBottom: '12px' }}>
-                  <div style={{ fontWeight: 600, marginBottom: '4px' }}>成交假設</div>
+                  <div style={{ fontWeight: 600, marginBottom: '4px' }}>Execution assumptions</div>
                   <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr', gap: '4px 16px' }}>
                     {Object.entries(convention).map(([k, v]) => (
                       <div key={k} style={{ display: 'contents' }}>
@@ -562,7 +559,7 @@ export default function RunDetailPage() {
               )}
               {exitPolicy && (
                 <div style={{ marginBottom: '12px' }} data-testid="exit-policy-block">
-                  <div style={{ fontWeight: 600, marginBottom: '4px' }}>出場政策（停損／停利）</div>
+                  <div style={{ fontWeight: 600, marginBottom: '4px' }}>Exit policy (stop / target)</div>
                   <div style={{ display: 'grid', gridTemplateColumns: '140px 1fr', gap: '4px 16px' }}>
                     {Object.entries(exitPolicy).map(([k, v]) => (
                       <div key={k} style={{ display: 'contents' }}>
@@ -575,7 +572,7 @@ export default function RunDetailPage() {
               )}
               {journalFields && (
                 <div style={{ marginBottom: '12px' }} data-testid="journal-field-semantics-block">
-                  <div style={{ fontWeight: 600, marginBottom: '4px' }}>交易日誌欄位定義</div>
+                  <div style={{ fontWeight: 600, marginBottom: '4px' }}>Journal field definitions</div>
                   <div style={{ display: 'grid', gridTemplateColumns: '140px 1fr', gap: '4px 16px' }}>
                     {Object.entries(journalFields).map(([k, v]) => (
                       <div key={k} style={{ display: 'contents' }}>
@@ -588,26 +585,27 @@ export default function RunDetailPage() {
               )}
               {Array.isArray(strategyRules) && strategyRules.length > 0 && (
                 <div style={{ marginBottom: '12px' }}>
-                  <div style={{ fontWeight: 600, marginBottom: '4px' }}>策略規則</div>
+                  <div style={{ fontWeight: 600, marginBottom: '4px' }}>Strategy rules</div>
                   <ul style={{ margin: 0, paddingLeft: '20px' }}>
                     {strategyRules.map((r, i) => <li key={i}>{String(r)}</li>)}
                   </ul>
                 </div>
               )}
               <div>
-                <div style={{ fontWeight: 600, marginBottom: '4px' }}>已知限制</div>
+                <div style={{ fontWeight: 600, marginBottom: '4px' }}>Known limitations</div>
                 {Array.isArray(constraints) && constraints.length > 0 ? (
                   <ul style={{ margin: 0, paddingLeft: '20px' }}>
                     {constraints.map((c, i) => <li key={i}>{String(c)}</li>)}
                   </ul>
                 ) : (
-                  <div>此 run 未記錄限制清單。</div>
+                  <div>This run has no recorded limitation list.</div>
                 )}
               </div>
             </div>
           ) : (
             <div style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
-              此 run 未記錄方法摘要（早於此欄位存在），因此無法在此顯示其成交假設與限制。
+              This run has no recorded methodology summary (it predates this field), so its execution
+              assumptions and limitations cannot be shown here.
             </div>
           )}
         </div>
@@ -616,7 +614,7 @@ export default function RunDetailPage() {
       {run.error_details && (
         <div className="dash-panel" style={{ marginBottom: '16px' }}>
           <div className="dash-panel-body" style={{ padding: '20px' }}>
-            <h3 style={{ margin: '0 0 12px', fontSize: '15px' }}>錯誤詳情</h3>
+            <h3 style={{ margin: '0 0 12px', fontSize: '15px' }}>Error details</h3>
             <div style={{ fontSize: '13px', color: 'var(--text-secondary)', whiteSpace: 'pre-wrap' }}>
               {fmt(run.error_details)}
             </div>
@@ -627,7 +625,7 @@ export default function RunDetailPage() {
       {Array.isArray(run.warnings) && run.warnings.length > 0 && (
         <div className="dash-panel" style={{ marginBottom: '16px' }}>
           <div className="dash-panel-body" style={{ padding: '20px' }}>
-            <h3 style={{ margin: '0 0 12px', fontSize: '15px' }}>警告</h3>
+            <h3 style={{ margin: '0 0 12px', fontSize: '15px' }}>Warnings</h3>
             <ul style={{ margin: 0, paddingLeft: '20px', fontSize: '13px', color: 'var(--text-secondary)' }}>
               {run.warnings.map((w, i) => <li key={i}>{w}</li>)}
             </ul>
@@ -636,7 +634,8 @@ export default function RunDetailPage() {
       )}
 
       <div className="dash-disclaimer" style={{ marginTop: '24px', fontSize: '12px' }}>
-        提醒：以上內容來自已記錄嘅 run，並已核實該 run 屬於此實驗嘅執行歷史。部分欄位可能缺失。本系統係研究工具，結果唔構成投資建議。
+        Note: this content comes from a recorded run verified to belong to this experiment&apos;s run history. Some
+        fields may be missing. Alethra is a research tool; results are not investment advice.
       </div>
     </div>
   );

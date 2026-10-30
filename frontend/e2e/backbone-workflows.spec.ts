@@ -545,8 +545,8 @@ test.describe('Backbone Workflow Acceptance', () => {
       await page.goto(`${FRONTEND_URL}/dashboard`);
       await expect(page).toHaveURL(/\/dashboard/);
       
-      // Verify dashboard loads (post-redesign title is "策略與實驗")
-      await expect(page.locator('h1').filter({ hasText: /策略與實驗|My Experiments/i })).toBeVisible();
+      // Verify dashboard loads (post-redesign title is "Experiments")
+      await expect(page.locator('h1').filter({ hasText: 'Experiments' })).toBeVisible();
     });
   });
 
@@ -559,7 +559,7 @@ test.describe('Backbone Workflow Acceptance', () => {
       await expect(page.getByTestId('app-brand')).toBeVisible();
 
       // Research-first layout: list title + primary research action
-      await expect(page.locator('h1').filter({ hasText: '策略與實驗' })).toBeVisible();
+      await expect(page.locator('h1').filter({ hasText: 'Experiments' })).toBeVisible();
       await expect(page.locator('a[href="/experiments/new"]').first()).toBeVisible();
 
       // Infrastructure lives in secondary shell menus, not the primary page
@@ -572,15 +572,15 @@ test.describe('Backbone Workflow Acceptance', () => {
       await page.goto(`${FRONTEND_URL}/dashboard`);
 
       // Disclaimer is always visible
-      await expect(page.locator('text=本系統是研究工具')).toBeVisible({ timeout: 10000 });
+      await expect(page.locator('text=This is a research tool')).toBeVisible({ timeout: 10000 });
 
       // Check if empty state is shown (no experiments)
-      const emptyStateVisible = await page.locator('text=還沒有任何實驗').isVisible().catch(() => false);
+      const emptyStateVisible = await page.locator('text=No experiments yet').isVisible().catch(() => false);
       
       if (emptyStateVisible) {
         // Empty state should show honest guidance
         const bodyText = await page.locator('body').textContent();
-        expect(bodyText).toMatch(/證據不足|不需要修改|暫停|修改|停止/);
+        expect(bodyText).toMatch(/Create your first experiment|record an investment hypothesis|track test results|keep the research evidence/);
       }
     });
 

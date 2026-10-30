@@ -6,6 +6,7 @@ import { api } from '@/lib/api';
 import { describeRunStatus } from '@/lib/runStatus';
 import AppShell from '@/components/shell/AppShell';
 import { formatDate } from '@/lib/format';
+import { EXPERIMENT_STATUS_LABELS, label } from '@/lib/copy';
 
 interface LatestRun {
   id: string;
@@ -31,7 +32,7 @@ type StatusFilter = 'all' | 'draft' | 'exploring' | 'locked' | 'archived';
 
 function LatestRunCell({ run }: { run: LatestRun | null }) {
   if (!run) {
-    return <span className="research-table-result none">未測試</span>;
+    return <span className="research-table-result none">Not tested</span>;
   }
 
   if (run.status !== 'completed' || run.total_return_pct == null) {
@@ -52,7 +53,7 @@ function LatestRunCell({ run }: { run: LatestRun | null }) {
         )}
         {view.stale && (
           <div className="research-table-meta">
-            已超過 30 分鐘未完成，非目前執行中
+            Over 30 minutes without completing — not currently running
           </div>
         )}
       </div>
@@ -68,7 +69,9 @@ function LatestRunCell({ run }: { run: LatestRun | null }) {
       </span>
       <div className="research-table-meta">
         {run.completed_at ? `${formatDate(run.completed_at)} · ` : ''}
-        {run.trading_days != null ? `${run.trading_days} 個交易日` : `${run.total_trades ?? 0} 筆交易`}
+        {run.trading_days != null
+          ? `${run.trading_days} trading day${run.trading_days === 1 ? '' : 's'}`
+          : `${run.total_trades ?? 0} trade${(run.total_trades ?? 0) === 1 ? '' : 's'}`}
       </div>
     </div>
   );
@@ -94,27 +97,19 @@ export default function DashboardPage() {
       // A failed load previously rendered as "no experiments yet", which read
       // as an empty account instead of a failure.
       console.error('Failed to load experiments:', err);
-      setLoadError('無法載入實驗列表。請檢查連線後重試。');
+      setLoadError('Could not load experiments. Check your connection and try again.');
     } finally {
       setLoading(false);
     }
   };
 
-  const getStatusLabel = (status: string) => {
-    const labels: Record<string, string> = {
-      draft: '草稿',
-      exploring: '探索中',
-      locked: '已鎖定',
-      archived: '已封存',
-    };
-    return labels[status] || status;
-  };
+  const getStatusLabel = (status: string) => label(EXPERIMENT_STATUS_LABELS, status);
 
   const getNextAction = (exp: Experiment) => {
-    if (exp.status === 'draft') return { label: '繼續研究', href: `/experiments/${exp.id}` };
-    if (exp.status === 'exploring') return { label: '查看結果', href: `/experiments/${exp.id}` };
-    if (exp.status === 'locked') return { label: '查看報告', href: `/experiments/${exp.id}` };
-    return { label: '查看詳情', href: `/experiments/${exp.id}` };
+    if (exp.status === 'draft') return { label: 'Continue research', href: `/experiments/${exp.id}` };
+    if (exp.status === 'exploring') return { label: 'View results', href: `/experiments/${exp.id}` };
+    if (exp.status === 'locked') return { label: 'View report', href: `/experiments/${exp.id}` };
+    return { label: 'View details', href: `/experiments/${exp.id}` };
   };
 
   const getFilteredExperiments = () => {
@@ -130,7 +125,7 @@ export default function DashboardPage() {
   if (loading) {
     return (
       <AppShell active="strategies">
-        <div className="research-loading">載入中...</div>
+        <div className="research-loading" role="status">Loading…</div>
       </AppShell>
     );
   }
@@ -140,9 +135,9 @@ export default function DashboardPage() {
       <div className="research-root">
         {/* Page header: concise title + one primary action */}
         <div className="research-header">
-          <h1 className="research-title">策略與實驗</h1>
+          <h1 className="research-title">Experiments</h1>
           <Link href="/experiments/new" className="research-primary-action">
-            建立新實驗
+            New experiment
           </Link>
         </div>
 
@@ -151,27 +146,31 @@ export default function DashboardPage() {
           <div className="research-filter-group">
             <button
               className={`research-filter-btn${statusFilter === 'all' ? ' active' : ''}`}
+              aria-pressed={statusFilter === 'all'}
               onClick={() => setStatusFilter('all')}
             >
-              全部 ({experiments.length})
+              All ({experiments.length})
             </button>
             <button
               className={`research-filter-btn${statusFilter === 'draft' ? ' active' : ''}`}
+              aria-pressed={statusFilter === 'draft'}
               onClick={() => setStatusFilter('draft')}
             >
-              草稿 ({experiments.filter(e => e.status === 'draft').length})
+              Draft ({experiments.filter(e => e.status === 'draft').length})
             </button>
             <button
               className={`research-filter-btn${statusFilter === 'exploring' ? ' active' : ''}`}
+              aria-pressed={statusFilter === 'exploring'}
               onClick={() => setStatusFilter('exploring')}
             >
-              探索中 ({experiments.filter(e => e.status === 'exploring').length})
+              Exploring ({experiments.filter(e => e.status === 'exploring').length})
             </button>
             <button
               className={`research-filter-btn${statusFilter === 'locked' ? ' active' : ''}`}
+              aria-pressed={statusFilter === 'locked'}
               onClick={() => setStatusFilter('locked')}
             >
-              已鎖定 ({experiments.filter(e => e.status === 'locked').length})
+              Locked ({experiments.filter(e => e.status === 'locked').length})
             </button>
           </div>
         </div>
@@ -187,40 +186,43 @@ export default function DashboardPage() {
             >
               <span>{loadError}</span>
               <button type="button" className="research-filter-btn" onClick={loadExperiments}>
-                重試
+                Retry
               </button>
             </div>
           )}
           {!loadError && (getSortedExperiments().length === 0 ? (
-            <div className="research-empty">
-              <h3>還沒有任何實驗</h3>
-              <p>建立第一個實驗，記錄你的投資假設，追蹤測試結果，保存研究證據。</p>
+            <div className="research-empty" data-testid="dashboard-empty-state">
+              <h3>No experiments yet</h3>
+              <p>
+                Create your first experiment to record an investment hypothesis, track test
+                results, and keep the research evidence.
+              </p>
               <Link href="/experiments/new" className="research-empty-action">
-                建立第一個實驗
+                Create your first experiment
               </Link>
             </div>
           ) : (
             <table className="research-table-grid">
               <thead>
                 <tr>
-                  <th>名稱</th>
-                  <th>最近測試</th>
-                  <th>狀態</th>
-                  <th>更新</th>
-                  <th></th>
+                  <th scope="col">Name</th>
+                  <th scope="col">Latest run</th>
+                  <th scope="col">Status</th>
+                  <th scope="col">Updated</th>
+                  <th scope="col" aria-label="Actions"></th>
                 </tr>
               </thead>
               <tbody>
                 {getSortedExperiments().map((exp) => {
                   const nextAction = getNextAction(exp);
                   return (
-                    <tr key={exp.id}>
+                    <tr key={exp.id} data-testid="dashboard-experiment-row">
                       <td>
                         <Link href={nextAction.href} className="research-table-name">
                           {exp.title}
                         </Link>
                         <div className="research-table-meta">
-                          建於 {formatDate(exp.created_at)}
+                          Created {formatDate(exp.created_at)}
                         </div>
                       </td>
                       <td>
@@ -250,7 +252,8 @@ export default function DashboardPage() {
         {/* The redesign dropped the always-visible disclaimer this page had;
             every other result surface still carries one, so keep it here too. */}
         <div className="dash-disclaimer" style={{ marginTop: '24px', marginBottom: 0 }}>
-          <strong>提醒：</strong>本系統是研究工具，所有結果僅供研究參考，不代表未來績效，不構成投資建議。
+          <strong>Note:</strong> This is a research tool. Results are for research only; they do
+          not predict future performance and are not investment advice.
         </div>
       </div>
     </AppShell>

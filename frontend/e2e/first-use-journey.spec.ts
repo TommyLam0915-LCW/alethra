@@ -125,8 +125,8 @@ test('empty account: concrete entries, no fake progress', async ({ page }) => {
   await login(page, EMPTY.email, EMPTY.password);
 
   await page.goto('/dashboard', { waitUntil: 'domcontentloaded' });
-  await expect(page.getByText('還沒有任何實驗')).toBeVisible();
-  await expect(page.getByRole('link', { name: '建立第一個實驗' })).toHaveAttribute(
+  await expect(page.getByText('No experiments yet')).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Create your first experiment' })).toHaveAttribute(
     'href',
     '/experiments/new',
   );

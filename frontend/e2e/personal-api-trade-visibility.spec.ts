@@ -255,13 +255,13 @@ test.describe('a program trading through the personal API is visible to its owne
     await expect(actors).toHaveCount(3);
     for (let i = 0; i < 3; i += 1) {
       const text = (await actors.nth(i).textContent()) ?? '';
-      expect(text, 'the row must be labelled as an API program').toContain('API 程式');
+      expect(text, 'the row must be labelled as an API program').toContain('API client');
       expect(text, 'the raw enum value must not be shown to a user').not.toContain('api_key');
     }
 
     const cutoffs = page.locator('[data-testid="pp-order-cutoff"]');
     await expect(cutoffs, 'every API-key order states the bar it was priced from').toHaveCount(3);
-    await expect(cutoffs.first()).toContainText(`定價日期 ${trade.cutoff}`);
+    await expect(cutoffs.first()).toContainText(`Pricing date ${trade.cutoff}`);
 
     const quantities = (await page.locator('[data-testid="pp-order-qty"]').allTextContents())
       .map((q) => Number(q));
@@ -269,8 +269,8 @@ test.describe('a program trading through the personal API is visible to its owne
       .toEqual(expect.arrayContaining([trade.entryQuantity, trade.partialQuantity, trade.finalQuantity]));
 
     const sides = await page.locator('[data-testid="pp-order-side"]').allTextContents();
-    expect(sides.filter((s) => s.includes('買入')).length, 'one entry').toBe(1);
-    expect(sides.filter((s) => s.includes('賣出')).length, 'two exits').toBe(2);
+    expect(sides.filter((s) => s.includes('Buy')).length, 'one entry').toBe(1);
+    expect(sides.filter((s) => s.includes('Sell')).length, 'two exits').toBe(2);
   });
 
   test('the journal records the entry and both exits for this account only', async () => {
@@ -280,9 +280,9 @@ test.describe('a program trading through the personal API is visible to its owne
     const actors = page.locator('[data-testid="pp-decision-actor"]');
     await expect(actors, 'one journal decision per order').toHaveCount(3);
 
-    const body = await page.locator('h2:has-text("決策記錄") + div').innerText();
-    expect(body, 'the entry must be recorded as an entry').toContain('進場');
-    expect(body, 'the exits must be recorded as exits, not as notes').toContain('出場');
+    const body = await page.locator('h2:has-text("Decisions") + div').innerText();
+    expect(body, 'the entry must be recorded as an entry').toContain('Entry');
+    expect(body, 'the exits must be recorded as exits, not as notes').toContain('Exit');
   });
 
   test('the program’s trade is still there after a reload', async () => {
@@ -295,7 +295,7 @@ test.describe('a program trading through the personal API is visible to its owne
 
     const rows = page.locator(`[data-testid^="pp-order-${ASSET}"]`);
     await expect(rows, 'a reload must not drop the program’s orders').toHaveCount(3);
-    await expect(page.locator('[data-testid="pp-order-actor"]').first()).toContainText('API 程式');
+    await expect(page.locator('[data-testid="pp-order-actor"]').first()).toContainText('API client');
     await expect.poll(cashOnScreen, 'a reload must not change the stored cash')
       .toBeCloseTo(trade.cashFinal, 2);
   });
