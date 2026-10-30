@@ -524,6 +524,63 @@ function describeFailure(err: unknown, fallback: string): string {
   return err instanceof Error ? err.message : fallback;
 }
 
+// Every request this panel makes is bounded. A hung backend used to leave the
+// card on "載入…" forever with no way back; the deadline ends the wait and
+// surfaces a retry instead. Requests are never auto-repeated on failure.
+const LOAD_TIMEOUT_MS = 12000;
+
+class PanelLoadTimeout extends Error {
+  constructor(stage: string) {
+    super(
+      `${stage}在 ${Math.round(LOAD_TIMEOUT_MS / 1000)} 秒內未有回應；已停止等待，畫面其餘部分仍可使用。`,
+    );
+    this.name = 'PanelLoadTimeout';
+  }
+}
+
+function boundedWait<T>(work: Promise<T>, stage: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new PanelLoadTimeout(stage)), LOAD_TIMEOUT_MS);
+  });
+  return Promise.race([work, deadline]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+async function stageLoad<T>(label: string, work: Promise<T>): Promise<T> {
+  try {
+    return await work;
+  } catch (err) {
+    throw new Error(`${label}：${describeFailure(err, '請求失敗')}`);
+  }
+}
+
+function readOwnedVersions(experiments: unknown): OwnedVersion[] {
+  return (Array.isArray(experiments) ? experiments : [])
+    .filter((exp: { current_version_id?: string | null }) => exp.current_version_id)
+    .map((exp: { id: string; title: string; current_version_id: string }) => ({
+      id: exp.current_version_id,
+      title: exp.title,
+    }));
+}
+
+interface StrategyLoadResult {
+  review: ReviewResponse;
+  preview: SnapshotBody;
+  journey: JourneyResponse;
+  snapshots: SnapshotBody[];
+  models: PersonalModel[];
+  comparisons: ComparisonSummaryEntry[];
+  selections: SelectionEntry[];
+  activeVersionId: string | null;
+}
+
+interface LoadFailure {
+  message: string;
+  retry: 'versions' | 'strategy';
+}
+
 export default function PersonalStrategyLearningPanel() {
   const [versions, setVersions] = useState<OwnedVersion[]>([]);
   const [versionId, setVersionId] = useState('');
@@ -536,6 +593,16 @@ export default function PersonalStrategyLearningPanel() {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [loadFailure, setLoadFailure] = useState<LoadFailure | null>(null);
+  const [strategyLoading, setStrategyLoading] = useState(false);
+  const [pollPaused, setPollPaused] = useState(false);
+
+  // A response is only applied while it is still the newest request for the
+  // current selection. Without this, a slow reply for version A could land
+  // after the user switched to B and overwrite B's rows.
+  const versionsSeq = useRef(0);
+  const strategySeq = useRef(0);
+  const pollFailures = useRef(0);
 
   const [editorFor, setEditorFor] = useState<string | null>(null);
   const [editorMode, setEditorMode] = useState<EditorMode>(null);
@@ -569,93 +636,153 @@ export default function PersonalStrategyLearningPanel() {
   const [activeVersionId, setActiveVersionId] = useState<string | null>(null);
   const [comparisons, setComparisons] = useState<ComparisonSummaryEntry[]>([]);
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const experiments = await api.experiments.list();
-        if (cancelled) return;
-        const owned: OwnedVersion[] = (Array.isArray(experiments) ? experiments : [])
-          .filter((exp: { current_version_id?: string | null }) => exp.current_version_id)
-          .map((exp: { id: string; title: string; current_version_id: string }) => ({
-            id: exp.current_version_id,
-            title: exp.title,
-          }));
-        setVersions(owned);
-        if (owned.length > 0) setVersionId((current) => current || owned[0].id);
-      } catch (err) {
-        if (!cancelled) {
-          setError(describeFailure(err, '無法載入可用的策略版本'));
-        }
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
+  const loadVersions = useCallback(async () => {
+    const ticket = ++versionsSeq.current;
+    setLoading(true);
+    setLoadFailure((current) => (current?.retry === 'versions' ? null : current));
+    try {
+      const experiments = await boundedWait(api.experiments.list(), '載入可用的策略版本');
+      if (versionsSeq.current !== ticket) return;
+      const owned = readOwnedVersions(experiments);
+      setVersions(owned);
+      if (owned.length > 0) setVersionId((current) => current || owned[0].id);
+    } catch (err) {
+      if (versionsSeq.current !== ticket) return;
+      setLoadFailure({
+        message: describeFailure(err, '無法載入可用的策略版本'),
+        retry: 'versions',
+      });
+    } finally {
+      if (versionsSeq.current === ticket) setLoading(false);
+    }
   }, []);
 
-  const loadStrategy = useCallback(async (id: string) => {
-    if (loadedVersionRef.current !== id) {
-      loadedVersionRef.current = id;
-      setRevisionHistory({});
-      setHistoryFor(null);
-    }
+  useEffect(() => {
+    loadVersions().catch(() => undefined);
+    return () => {
+      versionsSeq.current += 1;
+    };
+  }, [loadVersions]);
+
+  const fetchStrategy = useCallback(async (id: string): Promise<StrategyLoadResult> => {
     const [reviewBody, previewBody, snapshotsBody, modelsBody, journeyBody] = await Promise.all([
-      api.ml.reviewDecisions(id),
-      api.ml.previewPersonalSnapshot(id),
-      api.ml.listPersonalSnapshots(id),
-      api.ml.listPersonalModels(id),
-      api.ml.personalJourney(id),
+      stageLoad('決策覆核', api.ml.reviewDecisions(id)),
+      stageLoad('快照預覽', api.ml.previewPersonalSnapshot(id)),
+      stageLoad('快照清單', api.ml.listPersonalSnapshots(id)),
+      stageLoad('模型版本', api.ml.listPersonalModels(id)),
+      stageLoad('整體進度', api.ml.personalJourney(id)),
     ]);
-    setReview(reviewBody as ReviewResponse);
-    setPreview(previewBody as SnapshotBody);
-    setJourney(journeyBody as JourneyResponse);
-    const snapshotRows: SnapshotBody[] = (snapshotsBody as { snapshots: SnapshotBody[] })
-      .snapshots;
-    setSnapshots(snapshotRows);
-    setSelectedSnapshot((current) =>
-      snapshotRows.some((row) => row.snapshot_id === current)
-        ? current
-        : snapshotRows[0]?.snapshot_id ?? '',
-    );
-    const modelRows = (modelsBody as { models: PersonalModel[] }).models;
-    setModels(modelRows);
+    const modelRows = (modelsBody as { models: PersonalModel[] }).models ?? [];
+    let comparisons: ComparisonSummaryEntry[] = [];
+    let selections: SelectionEntry[] = [];
+    let activeVersionId: string | null = null;
     const recordId = modelRows[0]?.record_id;
     if (recordId) {
       const [comparisonsBody, selectionsBody] = await Promise.all([
-        api.ml.listPersonalComparisons(id),
-        api.ml.listPersonalSelections(recordId),
+        stageLoad('比較記錄', api.ml.listPersonalComparisons(id)),
+        stageLoad('選用記錄', api.ml.listPersonalSelections(recordId)),
       ]);
-      setComparisons(
-        (comparisonsBody as { comparisons: ComparisonSummaryEntry[] }).comparisons ?? [],
-      );
+      comparisons =
+        (comparisonsBody as { comparisons: ComparisonSummaryEntry[] }).comparisons ?? [];
       const history = selectionsBody as SelectionHistoryResponse;
-      setSelections(history.selections ?? []);
-      setActiveVersionId(history.active_version_id ?? null);
-    } else {
-      setComparisons([]);
-      setSelections([]);
-      setActiveVersionId(null);
+      selections = history.selections ?? [];
+      activeVersionId = history.active_version_id ?? null;
     }
+    return {
+      review: reviewBody as ReviewResponse,
+      preview: previewBody as SnapshotBody,
+      journey: journeyBody as JourneyResponse,
+      snapshots: (snapshotsBody as { snapshots: SnapshotBody[] }).snapshots ?? [],
+      models: modelRows,
+      comparisons,
+      selections,
+      activeVersionId,
+    };
   }, []);
+
+  // Applies a payload only after the caller confirmed it still belongs to the
+  // newest request, so the cleared/selected state below cannot be overwritten
+  // by a superseded reply.
+  const applyStrategyResult = useCallback((result: StrategyLoadResult) => {
+    setReview(result.review);
+    setPreview(result.preview);
+    setJourney(result.journey);
+    setSnapshots(result.snapshots);
+    setSelectedSnapshot((current) =>
+      result.snapshots.some((row) => row.snapshot_id === current)
+        ? current
+        : result.snapshots[0]?.snapshot_id ?? '',
+    );
+    setModels(result.models);
+    setComparisons(result.comparisons);
+    setSelections(result.selections);
+    setActiveVersionId(result.activeVersionId);
+  }, []);
+
+  const runStrategyLoad = useCallback(
+    async (id: string, options: { background?: boolean } = {}) => {
+      const ticket = ++strategySeq.current;
+      if (loadedVersionRef.current !== id) {
+        loadedVersionRef.current = id;
+        setRevisionHistory({});
+        setHistoryFor(null);
+      }
+      if (!options.background) {
+        setStrategyLoading(true);
+        setLoadFailure((current) => (current?.retry === 'strategy' ? null : current));
+      }
+      try {
+        const result = await boundedWait(fetchStrategy(id), '載入個人策略學習資料');
+        if (strategySeq.current !== ticket) return null;
+        applyStrategyResult(result);
+        setLoadFailure(null);
+        setPollPaused(false);
+        pollFailures.current = 0;
+        return result;
+      } catch (err) {
+        if (strategySeq.current !== ticket) return null;
+        setLoadFailure({
+          message: describeFailure(err, '無法載入個人策略學習資料'),
+          retry: 'strategy',
+        });
+        throw err;
+      } finally {
+        if (strategySeq.current === ticket) setStrategyLoading(false);
+      }
+    },
+    [applyStrategyResult, fetchStrategy],
+  );
 
   useEffect(() => {
     if (!versionId) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        await loadStrategy(versionId);
-        if (!cancelled) setError(null);
-      } catch (err) {
-        if (!cancelled) setError(describeFailure(err, '無法載入個人策略學習資料'));
-      }
-    })();
+    // Another strategy is another dataset: drop the previous version's rows so
+    // they are never shown under the new selection. Selections, the prediction
+    // form and every unsubmitted input stay untouched.
+    setReview(null);
+    setPreview(null);
+    setJourney(null);
+    setSnapshots([]);
+    setModels([]);
+    setComparisons([]);
+    setSelections([]);
+    setActiveVersionId(null);
+    setPollPaused(false);
+    pollFailures.current = 0;
+    runStrategyLoad(versionId).catch(() => undefined);
     return () => {
-      cancelled = true;
+      strategySeq.current += 1;
     };
-  }, [versionId, loadStrategy]);
+  }, [versionId, runStrategyLoad]);
+
+  const retryLoad = () => {
+    setPollPaused(false);
+    pollFailures.current = 0;
+    if (loadFailure?.retry === 'versions' || !versionId) {
+      loadVersions().catch(() => undefined);
+      return;
+    }
+    runStrategyLoad(versionId).catch(() => undefined);
+  };
 
   // A reload during a queued/running job drops the per-job poller, so the
   // page would keep showing "waiting" until a manual refresh. Keep following
@@ -665,22 +792,27 @@ export default function PersonalStrategyLearningPanel() {
     (journey?.worker.pending_jobs ?? 0) + (journey?.worker.running_jobs ?? 0) > 0;
 
   useEffect(() => {
-    if (!versionId || !waitingForWorker) return;
+    if (!versionId || !waitingForWorker || pollPaused) return;
     const timer = setInterval(() => {
-      loadStrategy(versionId).catch(() => undefined);
+      // Background refresh: no spinner, but a failure still stops the loop
+      // after three consecutive attempts instead of retrying forever.
+      runStrategyLoad(versionId, { background: true }).catch(() => {
+        pollFailures.current += 1;
+        if (pollFailures.current >= 3) setPollPaused(true);
+      });
     }, 4000);
     return () => clearInterval(timer);
-  }, [versionId, waitingForWorker, loadStrategy]);
+  }, [versionId, waitingForWorker, pollPaused, runStrategyLoad]);
 
   // Consent lives in the panel above; granting or revoking it changes the
   // journey's next action, so refresh rather than leaving a stale instruction.
   useEffect(() => {
     const handle = () => {
-      if (versionId) loadStrategy(versionId).catch(() => undefined);
+      if (versionId) runStrategyLoad(versionId, { background: true }).catch(() => undefined);
     };
     window.addEventListener('alethra:consent-changed', handle);
     return () => window.removeEventListener('alethra:consent-changed', handle);
-  }, [versionId, loadStrategy]);
+  }, [versionId, runStrategyLoad]);
 
   useEffect(() => {
     return () => {
@@ -709,7 +841,13 @@ export default function PersonalStrategyLearningPanel() {
   const pollJob = useCallback(
     async (jobId: string) => {
       try {
-        const body = (await api.training.getJob(jobId)) as PersonalJob;
+        const body = (await boundedWait(
+          api.training.getJob(jobId),
+          '讀取訓練工作狀態',
+        )) as PersonalJob;
+        // The user may have switched strategy while this poll was in flight;
+        // a late job row must not replace the new version's panel state.
+        if (versionId !== loadedVersionRef.current) return;
         setJob(body);
         if (body.status === 'pending' || body.status === 'running') {
           jobTimer.current = setTimeout(() => pollJob(jobId), 3000);
@@ -721,13 +859,13 @@ export default function PersonalStrategyLearningPanel() {
                 ? '訓練失敗；詳情見下方狀態，原有決策與快照未有改動。'
                 : '訓練工作已取消；已預約的 AI 額度會釋放。',
           );
-          if (versionId) await loadStrategy(versionId);
+          if (versionId) await runStrategyLoad(versionId, { background: true });
         }
       } catch (err) {
         setError(describeFailure(err, '無法讀取訓練工作狀態'));
       }
     },
-    [loadStrategy, versionId],
+    [runStrategyLoad, versionId],
   );
 
   // Training jobs are not part of the strategy payload, so a reload dropped the
@@ -739,8 +877,12 @@ export default function PersonalStrategyLearningPanel() {
     let cancelled = false;
     (async () => {
       try {
-        const rows = (await api.training.listJobs()) as PersonalJob[];
+        const rows = (await boundedWait(
+          api.training.listJobs(),
+          '讀取訓練工作',
+        )) as PersonalJob[];
         if (cancelled || !Array.isArray(rows)) return;
+        if (versionId !== loadedVersionRef.current) return;
         const latest = rows.find(
           (row) => row.strategy_spec_snapshot?.strategy_version_id === versionId,
         );
@@ -763,7 +905,7 @@ export default function PersonalStrategyLearningPanel() {
   }, [versionId, pollJob]);
 
   const refresh = async (id: string) => {
-    await loadStrategy(id);
+    await runStrategyLoad(id);
   };
 
   const toggleHistory = async (eventId: string) => {
@@ -910,7 +1052,7 @@ export default function PersonalStrategyLearningPanel() {
       const body = (await api.training.cancel(job.id)) as PersonalJob;
       setJob(body);
       setNotice('已取消訓練工作；已預約的 AI 額度會釋放。');
-      if (versionId) await loadStrategy(versionId);
+      if (versionId) await runStrategyLoad(versionId).catch(() => undefined);
     } catch (err) {
       setError(describeFailure(err, '無法取消訓練工作'));
     } finally {
@@ -924,7 +1066,7 @@ export default function PersonalStrategyLearningPanel() {
     setNotice(null);
     try {
       await api.ml.activatePersonalModel(model.model_version_id);
-      if (versionId) await loadStrategy(versionId);
+      if (versionId) await runStrategyLoad(versionId).catch(() => undefined);
       setNotice(`已將版本 ${model.version_number} 設為使用中版本。`);
     } catch (err) {
       setError(describeFailure(err, '無法啟用此模型版本'));
@@ -987,7 +1129,7 @@ export default function PersonalStrategyLearningPanel() {
           ? '已回傳先前保存的比較結果，沒有再扣額度。'
           : '比較完成；結果與評估記錄已保存，耗用 1 個 AI 使用額度。',
       );
-      if (versionId) await loadStrategy(versionId);
+      if (versionId) await runStrategyLoad(versionId).catch(() => undefined);
     } catch (err) {
       setError(describeFailure(err, '版本比較未完成'));
     } finally {
@@ -1024,13 +1166,13 @@ export default function PersonalStrategyLearningPanel() {
       })) as SelectionResponse;
       setNotice(body.message_zh ?? `已選用版本 ${target.version_number}。`);
       setRationale('');
-      if (versionId) await loadStrategy(versionId);
+      if (versionId) await runStrategyLoad(versionId).catch(() => undefined);
     } catch (err) {
       setError(describeFailure(err, '無法切換使用中版本'));
       // A stale or refused switch means our view of the active version is out
       // of date; reload instead of letting the user retry against old state.
       if (err instanceof ApiError && err.status === 409 && versionId) {
-        await loadStrategy(versionId).catch(() => undefined);
+        await runStrategyLoad(versionId).catch(() => undefined);
       }
     } finally {
       setBusy(null);
@@ -1053,11 +1195,11 @@ export default function PersonalStrategyLearningPanel() {
       })) as { selection: SelectionEntry; active_version: PersonalModel; message_zh?: string };
       setNotice(body.message_zh ?? '已回退到上一個版本。');
       setRationale('');
-      if (versionId) await loadStrategy(versionId);
+      if (versionId) await runStrategyLoad(versionId).catch(() => undefined);
     } catch (err) {
       setError(describeFailure(err, '無法回退版本'));
       if (err instanceof ApiError && err.status === 409 && versionId) {
-        await loadStrategy(versionId).catch(() => undefined);
+        await runStrategyLoad(versionId).catch(() => undefined);
       }
     } finally {
       setBusy(null);
@@ -1116,8 +1258,11 @@ export default function PersonalStrategyLearningPanel() {
   if (loading) {
     return (
       <section className="card" data-testid="personal-learning-panel" style={{ marginBottom: '32px' }}>
-        <p style={{ margin: 0, fontSize: '13px', color: 'var(--text-secondary)' }}>
-          載入個人策略學習資料…
+        <p
+          data-testid="pl-loading"
+          style={{ margin: 0, fontSize: '13px', color: 'var(--text-secondary)' }}
+        >
+          載入個人策略學習資料…（若 12 秒內沒有回應，會顯示錯誤與重試）
         </p>
       </section>
     );
@@ -1149,6 +1294,9 @@ export default function PersonalStrategyLearningPanel() {
                 setVersionId(event.target.value);
                 setNotice(null);
                 setError(null);
+                setLoadFailure(null);
+                setPollPaused(false);
+                pollFailures.current = 0;
                 setPrediction(null);
                 setJob(null);
               }}
@@ -1164,9 +1312,48 @@ export default function PersonalStrategyLearningPanel() {
         )}
       </div>
 
-      {error && (
-        <div className="ws-message-error" data-testid="pl-error" style={{ marginTop: '12px' }}>
-          {error}
+      {(loadFailure || error) && (
+        <div
+          className="ws-message-error"
+          data-testid="pl-error"
+          role="alert"
+          style={{ marginTop: '12px', display: 'grid', gap: '8px', justifyItems: 'start' }}
+        >
+          <span>{loadFailure?.message ?? error}</span>
+          {loadFailure && (
+            <button
+              type="button"
+              data-testid="pl-retry"
+              onClick={retryLoad}
+              style={{
+                padding: '4px 12px',
+                fontSize: '12px',
+                border: '1px solid var(--border)',
+                borderRadius: '6px',
+                background: 'transparent',
+                color: 'var(--text-white)',
+                cursor: 'pointer',
+              }}
+            >
+              重試載入
+            </button>
+          )}
+        </div>
+      )}
+      {strategyLoading && versionId && (
+        <div
+          data-testid="pl-strategy-loading"
+          style={{ marginTop: '12px', fontSize: '12px', color: 'var(--text-muted)' }}
+        >
+          正在載入策略資料…
+        </div>
+      )}
+      {pollPaused && (
+        <div
+          data-testid="pl-poll-paused"
+          style={{ marginTop: '12px', fontSize: '12px', color: 'var(--warning)' }}
+        >
+          自動更新已暫停：連續 3 次未能取得最新狀態。畫面其餘部分仍可使用，請按上方「重試載入」手動更新。
         </div>
       )}
       {notice && (
@@ -1319,7 +1506,7 @@ export default function PersonalStrategyLearningPanel() {
         </div>
       )}
 
-      {versions.length === 0 && (
+      {versions.length === 0 && !loadFailure && !strategyLoading && (
         <div data-testid="pl-no-strategy" style={{ marginTop: '16px' }}>
           <p style={{ margin: 0, fontSize: '13px', color: 'var(--text-secondary)' }}>
             此帳號尚無已保存的策略版本。先建立策略並保存版本，才會有可覆核的決策與可訓練的資料。
