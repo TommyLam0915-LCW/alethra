@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, date
 from sqlalchemy import (
-    Column, String, DateTime, Date, Float, Integer, BigInteger,
+    Column, String, DateTime, Date, Float, Integer, BigInteger, Numeric,
     ForeignKey, UniqueConstraint, Index
 )
 from sqlalchemy.dialects.postgresql import UUID
@@ -31,7 +31,11 @@ class MarketDataBar(Base):
     high = Column(Float, nullable=False)
     low = Column(Float, nullable=False)
     close = Column(Float, nullable=False)
-    volume = Column(BigInteger, nullable=False)
+    # Equity bars carry whole shares in ``volume``. Crypto trades fractions of a
+    # coin, so those rows leave ``volume`` NULL and put the exact amount in
+    # ``volume_decimal``; the two are never mixed in one row.
+    volume = Column(BigInteger, nullable=True)
+    volume_decimal = Column(Numeric(30, 12), nullable=True)
 
     adjustment_factor = Column(Float, nullable=True)
     is_adjusted = Column(String(20), nullable=True)

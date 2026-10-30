@@ -6,13 +6,14 @@ Persists OHLCV bars and metadata to the database, enabling:
 - Data quality tracking and provenance
 """
 import logging
-from datetime import datetime, date, timedelta
-from typing import List, Optional, Dict, Any
+from datetime import datetime, date, timedelta, timezone as dt_timezone
+from typing import List, Optional, Dict, Any, Sequence
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_
 
 from app.models.market_data import MarketDataBar, MarketDataMetadata
 from app.providers.data_provider import OHLCVBar
+from app.services.crypto_series import Candle
 from app.lib.timeutil import utcnow
 
 logger = logging.getLogger(__name__)
@@ -163,6 +164,107 @@ class MarketDataStorage:
                 )
             ).count()
             metadata.total_bars = bar_count
+
+    def store_candles(
+        self,
+        *,
+        instrument_id: str,
+        provider_id: str,
+        candles: Sequence[Candle],
+        timezone: str,
+        currency: Optional[str],
+        data_nature: str = "live",
+        adjustment_status: Optional[str] = "not_applicable",
+        provider_note: Optional[str] = None,
+        provider_note_zh: Optional[str] = None,
+    ) -> Dict[str, int]:
+        """Persist completed candles keyed by their own open time.
+
+        ``store_bars`` collapses a bar to midnight because daily equity bars are
+        day-granularity; an intraday candle must keep its timestamp or every
+        minute of a session would overwrite one row. Forming candles are
+        refused here — storage only holds bars that can no longer change.
+        """
+        stored = 0
+        updated = 0
+        skipped_forming = 0
+        bar_dates: List[date] = []
+
+        for candle in candles:
+            if not candle.is_final:
+                skipped_forming += 1
+                continue
+
+            open_time = candle.open_time
+            if open_time.tzinfo is not None:
+                open_time = open_time.astimezone(dt_timezone.utc).replace(tzinfo=None)
+            bar_date_obj = open_time.date()
+
+            existing = self.db.query(MarketDataBar).filter(
+                and_(
+                    MarketDataBar.instrument_id == instrument_id,
+                    MarketDataBar.bar_timestamp == open_time,
+                    MarketDataBar.provider_id == provider_id,
+                )
+            ).first()
+
+            if existing:
+                existing.bar_date = bar_date_obj
+                existing.open = float(candle.open)
+                existing.high = float(candle.high)
+                existing.low = float(candle.low)
+                existing.close = float(candle.close)
+                existing.volume = None
+                existing.volume_decimal = candle.volume
+                existing.fetched_at = utcnow()
+                updated += 1
+            else:
+                self.db.add(
+                    MarketDataBar(
+                        instrument_id=instrument_id,
+                        provider_id=provider_id,
+                        bar_date=bar_date_obj,
+                        bar_timestamp=open_time,
+                        open=float(candle.open),
+                        high=float(candle.high),
+                        low=float(candle.low),
+                        close=float(candle.close),
+                        volume=None,
+                        volume_decimal=candle.volume,
+                    )
+                )
+                stored += 1
+
+            bar_dates.append(bar_date_obj)
+
+        self.db.flush()
+        if bar_dates:
+            self._update_metadata(
+                instrument_id=instrument_id,
+                provider_id=provider_id,
+                data_nature=data_nature,
+                adjustment_status=adjustment_status,
+                timezone=timezone,
+                currency=currency,
+                provider_note=provider_note,
+                provider_note_zh=provider_note_zh,
+                bar_dates=bar_dates,
+            )
+        self.db.commit()
+
+        logger.info(
+            "Stored %s new / %s updated candles for %s from %s (skipped forming=%s)",
+            stored,
+            updated,
+            instrument_id,
+            provider_id,
+            skipped_forming,
+        )
+        return {
+            "stored": stored,
+            "updated": updated,
+            "skipped_forming": skipped_forming,
+        }
 
     def get_bars(
         self,

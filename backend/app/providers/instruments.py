@@ -18,6 +18,7 @@ Design principles:
 import enum
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
+from decimal import Decimal
 from typing import Dict, List, Optional, Set
 import zoneinfo
 
@@ -26,6 +27,7 @@ class Market(str, enum.Enum):
     """Supported markets."""
     US = "US"
     HK = "HK"
+    CRYPTO = "CRYPTO"
 
 
 class Exchange(str, enum.Enum):
@@ -39,6 +41,10 @@ class Exchange(str, enum.Enum):
     # HK exchanges
     HKEX = "HKEX"  # Hong Kong Exchanges and Clearing
 
+    # Crypto spot venues (one at a time: a price without its venue is not an
+    # instrument, so every crypto instrument_id carries the exchange)
+    KRAKEN = "KRAKEN"
+
 
 class Currency(str, enum.Enum):
     """Supported currencies."""
@@ -50,6 +56,7 @@ class AssetType(str, enum.Enum):
     """Supported asset types."""
     STOCK = "STOCK"
     ETF = "ETF"
+    CRYPTO_PAIR = "CRYPTO_PAIR"
     # Future: WARRANT, RIGHT, BOND, etc.
 
 
@@ -89,9 +96,12 @@ class MarketStructure:
     sessions: List[TradingSession]
     holidays: Set[date] = field(default_factory=set)
     lot_size: int = 1
+    always_open: bool = False
     
     def is_trading_day(self, d: date) -> bool:
         """Check if a date is a trading day."""
+        if self.always_open:
+            return True
         # Weekend check
         if d.weekday() >= 5:  # Saturday=5, Sunday=6
             return False
@@ -172,6 +182,26 @@ HK_MARKET_STRUCTURE = MarketStructure(
     lot_size=100,  # HK stocks typically trade in board lots of 100 shares
 )
 
+# Crypto spot venues quote continuously; there is no session close and no
+# weekend, so staleness is measured against the bar interval, never a calendar.
+CRYPTO_MARKET_STRUCTURE = MarketStructure(
+    market=Market.CRYPTO,
+    exchange=Exchange.KRAKEN,
+    currency=Currency.USD,
+    timezone="UTC",
+    sessions=[
+        TradingSession(
+            name="Continuous",
+            start=time(0, 0),
+            end=time.max,
+            is_regular=True,
+        ),
+    ],
+    holidays=set(),
+    lot_size=1,
+    always_open=True,
+)
+
 
 @dataclass(frozen=True)
 class Instrument:
@@ -198,11 +228,30 @@ class Instrument:
     currency: Currency
     timezone: str
     lot_size: Optional[int] = None
+    # Crypto spot identity: which asset is priced, how many decimals the venue
+    # publishes, and the smallest order it accepts. None means "not declared".
+    base_asset: Optional[str] = None
+    price_precision: Optional[int] = None
+    quantity_precision: Optional[int] = None
+    min_quantity: Optional[Decimal] = None
+    min_notional: Optional[Decimal] = None
+    venue: Optional[str] = None
 
     @property
     def instrument_id(self) -> str:
-        """Stable internal identifier: MARKET:SYMBOL."""
+        """Stable internal identifier.
+
+        Equities: MARKET:SYMBOL. Crypto: MARKET:VENUE:SYMBOL, because the same
+        pair quoted on two venues is two instruments and must never share an id.
+        """
+        if self.venue:
+            return f"{self.market.value}:{self.venue}:{self.symbol}"
         return f"{self.market.value}:{self.symbol}"
+
+    @property
+    def quote_asset(self) -> str:
+        """Asset the price is denominated in (the pair's second leg)."""
+        return self.currency.value
 
     @property
     def lot_size_verified(self) -> bool:
@@ -221,6 +270,68 @@ class Instrument:
             currency=Currency.USD,
             timezone=US_MARKET_STRUCTURE.timezone,
             lot_size=1,
+        )
+
+    @classmethod
+    def create_crypto_pair(
+        cls,
+        *,
+        symbol: str,
+        name: str,
+        base_asset: str,
+        quote: Currency,
+        exchange: Exchange,
+        price_precision: Optional[int] = None,
+        quantity_precision: Optional[int] = None,
+        min_quantity: Optional[Decimal] = None,
+        min_notional: Optional[Decimal] = None,
+    ) -> "Instrument":
+        """Create a spot pair on one venue.
+
+        The symbol must spell the pair as BASE-QUOTE with the declared quote
+        currency. That check is what stops a USDT pair from being handed a USD
+        label: USDT is not a Currency here, so "BTC-USDT" cannot be built until
+        someone adds it deliberately.
+        """
+        base = (base_asset or "").strip().upper()
+        if not base or not base.isalnum():
+            raise ValueError(f"base_asset must be an alphanumeric asset code, got {base_asset!r}")
+
+        expected = f"{base}-{quote.value}"
+        if symbol.strip().upper() != expected:
+            raise ValueError(
+                f"Crypto symbol {symbol!r} does not match BASE-QUOTE for the declared "
+                f"currency; expected {expected!r}. A different quote asset needs its own "
+                "Currency entry, not a relabel."
+            )
+
+        if exchange not in (Exchange.KRAKEN,):
+            raise ValueError(f"{exchange.value} is not a declared crypto spot venue")
+
+        for field_name, value in (
+            ("price_precision", price_precision),
+            ("quantity_precision", quantity_precision),
+        ):
+            if value is not None and (
+                not isinstance(value, int) or isinstance(value, bool) or value < 0
+            ):
+                raise ValueError(f"{field_name} must be a non-negative int, got {value!r}")
+
+        return cls(
+            market=Market.CRYPTO,
+            symbol=expected,
+            name=name,
+            asset_type=AssetType.CRYPTO_PAIR,
+            exchange=exchange,
+            currency=quote,
+            timezone=CRYPTO_MARKET_STRUCTURE.timezone,
+            lot_size=None,
+            base_asset=base,
+            price_precision=price_precision,
+            quantity_precision=quantity_precision,
+            min_quantity=min_quantity,
+            min_notional=min_notional,
+            venue=exchange.value,
         )
 
     @classmethod
@@ -270,6 +381,8 @@ def get_market_structure(market: Market) -> MarketStructure:
         return US_MARKET_STRUCTURE
     elif market == Market.HK:
         return HK_MARKET_STRUCTURE
+    elif market == Market.CRYPTO:
+        return CRYPTO_MARKET_STRUCTURE
     else:
         raise ValueError(f"Unknown market: {market}")
 
@@ -290,3 +403,28 @@ def parse_instrument_id(instrument_id: str) -> tuple[Market, str]:
         raise ValueError(f"Unknown market: {market_str}")
     
     return market, symbol
+
+
+def parse_crypto_instrument_id(instrument_id: str) -> tuple[Exchange, str, str]:
+    """Parse CRYPTO:VENUE:BASE-QUOTE into (exchange, base_asset, quote_asset).
+
+    parse_instrument_id keeps its two-part contract for equities. Crypto ids
+    carry the venue as a third part, so reading them with that function would
+    return "KRAKEN:BTC-USD" as the symbol and silently drop the venue.
+    """
+    parts = instrument_id.split(":")
+    if len(parts) != 3 or parts[0] != Market.CRYPTO.value:
+        raise ValueError(
+            f"Not a crypto instrument id (expected CRYPTO:VENUE:BASE-QUOTE): {instrument_id!r}"
+        )
+
+    try:
+        exchange = Exchange(parts[1])
+    except ValueError:
+        raise ValueError(f"Unknown crypto venue: {parts[1]!r}")
+
+    base, separator, quote = parts[2].partition("-")
+    if not separator or not base or not quote:
+        raise ValueError(f"Crypto instrument id must spell BASE-QUOTE: {instrument_id!r}")
+
+    return exchange, base, quote
