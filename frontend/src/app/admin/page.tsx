@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { api } from '@/lib/api';
+import { api, ApiError } from '@/lib/api';
 
 interface DashboardData {
   funnel: {
@@ -69,6 +69,7 @@ export default function AdminDashboardPage() {
   const [hypotheses, setHypotheses] = useState<HypothesesData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [errorStatus, setErrorStatus] = useState<number | null>(null);
   const [activeTab, setActiveTab] = useState<'funnel' | 'hypotheses'>('funnel');
 
   useEffect(() => {
@@ -89,7 +90,8 @@ export default function AdminDashboardPage() {
       setDashboard(dashData);
       setHypotheses(hypData);
     } catch (err: any) {
-      setError(err.message || 'Failed to load dashboard');
+      setError(err?.message || 'Failed to load dashboard');
+      setErrorStatus(err instanceof ApiError ? err.status : null);
     } finally {
       setLoading(false);
     }
@@ -110,8 +112,11 @@ export default function AdminDashboardPage() {
           <h1>管理員儀表板</h1>
           <Link href="/dashboard" className="btn btn-secondary">返回我的實驗</Link>
         </div>
-        <div style={{ padding: '20px', backgroundColor: '#f8d7da', color: '#721c24', borderRadius: '8px' }}>
-          {error.includes('403') || error.includes('Admin')
+        <div
+          data-testid="admin-access-error"
+          style={{ padding: '20px', backgroundColor: '#f8d7da', color: '#721c24', borderRadius: '8px' }}
+        >
+          {errorStatus === 403 || errorStatus === 401 || error.includes('403') || error.includes('Admin')
             ? '需要管理員權限才能訪問此頁面。'
             : `載入失敗：${error}`}
         </div>

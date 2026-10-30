@@ -93,6 +93,9 @@ export default function ModelResearchListPage() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
         <h1>模型研究記錄</h1>
         <div style={{ display: 'flex', gap: '12px' }}>
+          <Link href="/inference" className="btn btn-secondary" data-testid="model-records-inference-link">
+            推論紀錄
+          </Link>
           <button onClick={() => setShowCreate(!showCreate)} className="btn btn-primary">
             {showCreate ? '取消' : '建立模型'}
           </button>
