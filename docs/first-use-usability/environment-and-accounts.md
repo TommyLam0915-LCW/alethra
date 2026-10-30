@@ -12,7 +12,9 @@
 | Schema head | `r2s3t4u5v6w7` |
 | 背景 worker | `python -m app.workers.training_worker`，pid 檔 `.local/candidate/worker.pid` |
 | Worker 心跳 | `.local/candidate/worker-heartbeat.json`（`state`、`beat_at`、`poll_interval_seconds`） |
-| 啟動腳本 | `./start_candidate_stack.sh`（建立／沿用 disposable DB 與示範帳號；種子只補缺失，不清空進度） |
+| 啟動腳本 | `./start_candidate_stack.sh`（resume：只用已保存的候選 profile；不遷移、不 seed、不改憑證；見下節） |
+| 候選 profile | `.local/candidate/candidate-profile.env`（mode 600；持久候選身份：candidate id、DB identity、origin、artifact 路徑） |
+| 每次執行身份 | `.local/candidate/runtime-identity.env`（mode 600；只含 PID、啟動時間、heartbeat，不含 DB identity） |
 | 憑證檔 | `.local/candidate-credentials.env`（mode 600；只由主持人當面使用，不貼進任何文件或對話） |
 
 憑證檔內的鍵名（只列名稱，不含值）：
@@ -38,6 +40,20 @@
 - 所有資料為合成示範資料；沒有任何真實市場價格、真實金錢或外部券商連線。
 - 時間有兩個不同來源，不要混淆。已核實：候選資料庫的時鐘比主機 UTC 慢約 4 小時 35 分（2026-10-30 00:02 HKT 時，PG 顯示 11:27Z、主機為 16:02Z）；在新連線、短查詢、autocommit 下，`now()`、`transaction_timestamp()`、`statement_timestamp()`、`clock_timestamp()` 彼此相差不到 30 毫秒，但全部都比主機 UTC 慢 16,506 秒，session 時區為 UTC，因此這是資料庫環境時鐘偏移，而不是長交易累積或時區轉換。此鏈路沒有以資料庫時鐘做先後判斷（訓練工作的建立時間用主機時鐘，worker 領取／回收比較也是主機對主機），所以不影響功能結論。介面顯示方面：後端現在以帶 `+00:00` 的 UTC 時間輸出心跳與工作時間，瀏覽器不會再把 UTC 當成本地時間讀。不要為了對齊而調整主機時間或重啟 Docker。
 
+## 啟動、resume 與新候選
+
+| 操作 | 指令 | 行為 |
+| --- | --- | --- |
+| 沿用候選 | `./start_candidate_stack.sh` | 只讀核對 profile 指定的 DB 存在、schema head 相符、三個 fixture 帳號存在；不遷移、不 seed、不產生憑證、不建立替代庫。process 逐一核對 cmdline 與 `DATABASE_URL` 後才重用；backend／worker 指向不同 DB 時不會宣稱 ready。 |
+| 唯讀預檢 | `./start_candidate_stack.sh --plan` | 印出將沿用的 DB 與 `SEED=no`，不啟動 process、不寫入 repo。 |
+| 明確重設 | `./start_candidate_stack.sh --reset` | 先停本候選的已核實 process，只 drop profile 指定的 DB，重建並重新 seed。checkout schema head 與 profile 不符時拒絕。 |
+| 明確新候選 | `./start_candidate_stack.sh --new-candidate --candidate-id <id>` | 新 identity；拒絕覆寫既有 profile、憑證、log 目錄，亦拒絕共用非空 artifact 目錄（需另一個 checkout）。不因 restart 觸發。 |
+| 停止 | `./stop_candidate_stack.sh` | 先核對每個 pid 的身份才送訊號；不合的 process 只報告、不殺。DB 保留。 |
+
+候選身份只存在 profile；`runtime-identity.env` 的舊 PID 不會被當成目前程序身份。要切換 DB 必須用 `--new-candidate` 或 `--reset`，不會因跨日自動切換。
+
+非候選資源（只記錄，本輪未刪除、未搬移）：`alethra_personal_e2e_candidate_20261030` 是啟動腳本舊預設在 2026-10-30 產生的空 seed 測試庫（3 個使用者、1 個同意、210 筆決策、0 模型／工作），不是候選，也不應用於真人測試。
+
 ## 任務與帳號對應
 
 | 任務 | 帳號 | 備註 |
@@ -52,7 +68,7 @@
 
 1. 若在資料不足帳號按了「記錄同意」，到訓練頁按「撤銷同意」，確認同意狀態文字消失。
 2. B 產生的修訂版本**保留**；不要刪除、不要重設資料庫。
-3. 不要執行任何「重設示範資料」的操作；`start_candidate_stack.sh` 的種子是 create-if-missing，重跑不會清空進度。
+3. 不要執行任何「重設示範資料」的操作；`start_candidate_stack.sh` 的 resume 不會 seed、不會清空進度，亦不會因跨日改用另一個 DB。
 4. 不重置 owner 資料、不改共享 8099 schema／權益、不把候選 DB 當成共享 runtime。
 5. 確認 worker 心跳在更新；若離線，重新啟動 worker 並確認心跳恢復、介面回到可用狀態。
 

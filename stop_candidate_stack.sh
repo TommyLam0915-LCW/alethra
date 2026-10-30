@@ -1,7 +1,11 @@
 #!/bin/bash
-# Stop the candidate stack started by start_candidate_stack.sh.
+# Stop the candidate stack recorded by start_candidate_stack.sh.
 #
-# Stops only processes this stack recorded (pid files under .local/candidate).
+# A recorded pid is not proof of identity: each process is checked against the
+# persistent candidate profile (role command line, and for backend/worker the
+# DATABASE_URL it was started with) before anything is signalled. A pid that no
+# longer matches is reported and left alone.
+#
 # The candidate database is left intact so a later start can resume progress.
 # Never touches the shared review/runtime containers.
 set -euo pipefail
@@ -9,15 +13,33 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
-LOG_DIR="${CANDIDATE_LOG_DIR:-.local/candidate}"
-IDENTITY_FILE="$LOG_DIR/runtime-identity.env"
+STATE_DIR="${CANDIDATE_STATE_DIR:-$ROOT/.local/candidate}"
+PROFILE="${CANDIDATE_PROFILE:-$STATE_DIR/candidate-profile.env}"
+HELPER="$ROOT/backend/scripts/candidate_identity.py"
 
-value_of() { [ -f "$IDENTITY_FILE" ] && sed -n "s/^$1=//p" "$IDENTITY_FILE" | head -1 || true; }
+fail() { echo "CANDIDATE STOP ABORTED: $*" >&2; exit 1; }
 
-BACKEND_PORT="${CANDIDATE_BACKEND_PORT:-$(value_of BACKEND_PORT)}"
-FRONTEND_PORT="${CANDIDATE_FRONTEND_PORT:-$(value_of FRONTEND_PORT)}"
-BACKEND_PORT="${BACKEND_PORT:-8100}"
-FRONTEND_PORT="${FRONTEND_PORT:-3100}"
+find_python() {
+  if [ -n "${CANDIDATE_PYTHON:-}" ]; then echo "$CANDIDATE_PYTHON"; return; fi
+  for candidate in \
+    "$ROOT/backend/venv/bin/python" \
+    "/Users/tommylam0915/Documents/Qoder/2026-10-08/alethra-integration-auto/backend/venv/bin/python" \
+    "$(command -v python3 || true)"; do
+    [ -n "$candidate" ] && [ -x "$candidate" ] && echo "$candidate" && return
+  done
+  fail "no python interpreter found; set CANDIDATE_PYTHON"
+}
+PYTHON="$(find_python)"
+
+[ -f "$PROFILE" ] || fail "no persistent candidate profile at $PROFILE; refusing to stop processes by pid file alone"
+profile_get() { sed -n "s/^$1=//p" "$PROFILE" | head -1; }
+CHECKOUT_DIR="$(profile_get CHECKOUT_DIR)"
+[ "$CHECKOUT_DIR" = "$ROOT" ] || fail "candidate profile $PROFILE belongs to $CHECKOUT_DIR, not $ROOT"
+LOG_DIR="$(profile_get LOG_DIR)"
+FRONTEND_PORT="$(profile_get FRONTEND_PORT)"
+[ -n "$LOG_DIR" ] && [ -n "$FRONTEND_PORT" ] || fail "candidate profile $PROFILE is missing LOG_DIR or FRONTEND_PORT"
+
+pid_of() { [ -f "$LOG_DIR/$1.pid" ] && tr -d '[:space:]' <"$LOG_DIR/$1.pid" || true; }
 
 stop_pid() {
   local name="$1" pid="$2"
@@ -36,6 +58,38 @@ stop_pid() {
   kill -9 "$pid" 2>/dev/null || true
 }
 
+stop_role() {
+  local role="$1" pid out
+  pid="$(pid_of "$role")"
+  [ -n "$pid" ] || return 0
+  if ! kill -0 "$pid" 2>/dev/null; then
+    echo "$role pid $pid already stopped"
+    rm -f "$LOG_DIR/$role.pid"
+    return 0
+  fi
+  out="$("$PYTHON" "$HELPER" check-process --profile "$PROFILE" --role "$role" --pid "$pid" 2>&1)" || {
+    echo "$role pid $pid could not be checked; left alone: $out"
+    return 0
+  }
+  case "$out" in
+    *"VERIFIED=yes"*)
+      stop_pid "$role" "$pid"
+      rm -f "$LOG_DIR/$role.pid"
+      ;;
+    *"REASON=not-running"*)
+      echo "$role pid $pid already stopped"
+      rm -f "$LOG_DIR/$role.pid"
+      ;;
+    *"REASON=not-this-role"*)
+      echo "$role pid $pid is not this candidate's process (stale pid file); left alone"
+      rm -f "$LOG_DIR/$role.pid"
+      ;;
+    *)
+      echo "$role pid $pid does not match the saved candidate identity; left alone: $out"
+      ;;
+  esac
+}
+
 # next dev records the wrapper pid; the listener can be its child. Only adopt a
 # listener whose cwd is THIS checkout's frontend directory.
 free_frontend_listener() {
@@ -52,12 +106,9 @@ free_frontend_listener() {
   stop_pid "frontend listener" "$pid"
 }
 
-pid_of() { [ -f "$LOG_DIR/$1.pid" ] && tr -d '[:space:]' <"$LOG_DIR/$1.pid" || true; }
-
-stop_pid "backend" "$(pid_of backend)"
-stop_pid "worker" "$(pid_of worker)"
-stop_pid "frontend" "$(pid_of frontend)"
+stop_role backend
+stop_role worker
+stop_role frontend
 free_frontend_listener
 
-rm -f "$LOG_DIR/backend.pid" "$LOG_DIR/worker.pid" "$LOG_DIR/frontend.pid"
 echo "candidate stack stopped; database and its progress were NOT removed"
