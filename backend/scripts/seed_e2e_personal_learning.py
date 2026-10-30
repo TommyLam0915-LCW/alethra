@@ -71,6 +71,7 @@ from app.models.simulation import SimulationSession, SimulationStatus
 from app.models.training import TrainingJob
 from app.models.user import User, UserType
 from app.services.decision_labels import record_label
+from app.services.fixture_identity import fixture_uuid
 from app.services.personalization import grant_consent
 
 EMAIL = os.environ.get("E2E_EMAIL")
@@ -87,7 +88,9 @@ DECISIONS_PER_DAY = 5
 
 
 def sid(name: str) -> uuid.UUID:
-    return uuid.uuid5(uuid.NAMESPACE_URL, f"{E2E_MARKER}:{name}")
+    # Scoped by email: a stamped test account must never reuse the id of the
+    # candidate's owner account and replace its rows.
+    return fixture_uuid(E2E_MARKER, EMAIL, name)
 
 
 def business_days(start: date, count: int):
