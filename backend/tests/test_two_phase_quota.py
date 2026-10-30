@@ -5,6 +5,7 @@ from uuid import uuid4
 from fastapi import HTTPException
 from app.models.pilot import PilotEntitlement
 from app.models.quota import QuotaCounter, QuotaReservation
+from app.models.user import User
 from app.auth.entitlements import (
     FREE_PLAN_ENTITLEMENT,
     reserve_quota,
@@ -27,9 +28,28 @@ def db():
         session.close()
 
 
+def _user(db, tag: str = "quota") -> User:
+    """Reserve/settle rows must reference a user that exists.
+
+    PostgreSQL enforces the quota foreign keys, so a random uuid with no User
+    row is not legal data there (SQLite here runs with foreign_keys=OFF and
+    cannot catch it). Adding and flushing the parent keeps the fixture inside
+    the test transaction on both engines.
+    """
+    user = User(
+        id=uuid4(),
+        email=f"{tag}-{uuid4()}@example.com",
+        display_name="Test",
+        password_hash="x",
+    )
+    db.add(user)
+    db.flush()
+    return user
+
+
 class TestReserveQuota:
     def test_reserve_creates_reservation(self, db):
-        user_id = uuid4()
+        user_id = _user(db).id
         reservation = reserve_quota(db, user_id, "research_run")
         assert reservation.status == "reserved"
         assert reservation.amount == 1
@@ -37,7 +57,7 @@ class TestReserveQuota:
         assert reservation.user_id == user_id
 
     def test_reserve_reduces_available_quota(self, db):
-        user_id = uuid4()
+        user_id = _user(db).id
         ent = PilotEntitlement(user_id=user_id, research_run_limit=3)
         db.add(ent)
         db.flush()
@@ -49,7 +69,7 @@ class TestReserveQuota:
         assert check_quota_available(db, user_id, "research_run") is False
 
     def test_reserve_exceeds_limit_raises_429(self, db):
-        user_id = uuid4()
+        user_id = _user(db).id
         ent = PilotEntitlement(user_id=user_id, research_run_limit=2)
         db.add(ent)
         db.flush()
@@ -66,14 +86,14 @@ class TestReserveQuota:
         assert detail["reserved"] == 2
 
     def test_reserve_free_plan_within_limit(self, db):
-        user_id = uuid4()
+        user_id = _user(db).id
         free_limit = FREE_PLAN_ENTITLEMENT["research_run_limit"]
         for _ in range(free_limit):
             reserve_quota(db, user_id, "research_run")
         assert check_quota_available(db, user_id, "research_run") is False
 
     def test_reserve_free_plan_exceeds_raises_429(self, db):
-        user_id = uuid4()
+        user_id = _user(db).id
         free_limit = FREE_PLAN_ENTITLEMENT["research_run_limit"]
         for _ in range(free_limit):
             reserve_quota(db, user_id, "research_run")
@@ -96,14 +116,14 @@ class TestReserveQuota:
 
 class TestSettleReservation:
     def test_settle_increments_used(self, db):
-        user_id = uuid4()
+        user_id = _user(db).id
         reservation = reserve_quota(db, user_id, "research_run")
         new_used = settle_reservation(db, reservation.id)
         assert new_used == 1
         assert get_quota_used(db, user_id, "research_run") == 1
 
     def test_settle_marks_reservation_settled(self, db):
-        user_id = uuid4()
+        user_id = _user(db).id
         reservation = reserve_quota(db, user_id, "research_run")
         settle_reservation(db, reservation.id)
 
@@ -112,7 +132,7 @@ class TestSettleReservation:
         assert reservation.settled_at is not None
 
     def test_settle_multiple_reservations(self, db):
-        user_id = uuid4()
+        user_id = _user(db).id
         r1 = reserve_quota(db, user_id, "research_run")
         r2 = reserve_quota(db, user_id, "research_run")
         r3 = reserve_quota(db, user_id, "research_run")
@@ -124,7 +144,7 @@ class TestSettleReservation:
         assert get_quota_used(db, user_id, "research_run") == 3
 
     def test_settle_already_settled_raises(self, db):
-        user_id = uuid4()
+        user_id = _user(db).id
         reservation = reserve_quota(db, user_id, "research_run")
         settle_reservation(db, reservation.id)
 
@@ -132,7 +152,7 @@ class TestSettleReservation:
             settle_reservation(db, reservation.id)
 
     def test_settle_released_raises(self, db):
-        user_id = uuid4()
+        user_id = _user(db).id
         reservation = reserve_quota(db, user_id, "research_run")
         release_reservation(db, reservation.id)
 
@@ -145,7 +165,7 @@ class TestSettleReservation:
             settle_reservation(db, fake_id)
 
     def test_settle_creates_counter_if_missing(self, db):
-        user_id = uuid4()
+        user_id = _user(db).id
         assert get_quota_used(db, user_id, "research_run") == 0
 
         reservation = reserve_quota(db, user_id, "research_run")
@@ -161,7 +181,7 @@ class TestSettleReservation:
 
 class TestReleaseReservation:
     def test_release_marks_released(self, db):
-        user_id = uuid4()
+        user_id = _user(db).id
         reservation = reserve_quota(db, user_id, "research_run")
         release_reservation(db, reservation.id)
 
@@ -170,7 +190,7 @@ class TestReleaseReservation:
         assert reservation.settled_at is not None
 
     def test_release_restores_available_quota(self, db):
-        user_id = uuid4()
+        user_id = _user(db).id
         ent = PilotEntitlement(user_id=user_id, research_run_limit=2)
         db.add(ent)
         db.flush()
@@ -183,13 +203,13 @@ class TestReleaseReservation:
         assert check_quota_available(db, user_id, "research_run") is True
 
     def test_release_does_not_increment_used(self, db):
-        user_id = uuid4()
+        user_id = _user(db).id
         reservation = reserve_quota(db, user_id, "research_run")
         release_reservation(db, reservation.id)
         assert get_quota_used(db, user_id, "research_run") == 0
 
     def test_release_already_released_raises(self, db):
-        user_id = uuid4()
+        user_id = _user(db).id
         reservation = reserve_quota(db, user_id, "research_run")
         release_reservation(db, reservation.id)
 
@@ -197,7 +217,7 @@ class TestReleaseReservation:
             release_reservation(db, reservation.id)
 
     def test_release_settled_raises(self, db):
-        user_id = uuid4()
+        user_id = _user(db).id
         reservation = reserve_quota(db, user_id, "research_run")
         settle_reservation(db, reservation.id)
 
@@ -265,27 +285,27 @@ class TestReserveChecksEntitlementAtUse:
 
 class TestReservedTracking:
     def test_get_reserved_sum(self, db):
-        user_id = uuid4()
+        user_id = _user(db).id
         reserve_quota(db, user_id, "research_run")
         reserve_quota(db, user_id, "research_run")
         assert _get_reserved(db, user_id, "research_run") == 2
 
     def test_reserved_excludes_settled(self, db):
-        user_id = uuid4()
+        user_id = _user(db).id
         r1 = reserve_quota(db, user_id, "research_run")
         reserve_quota(db, user_id, "research_run")
         settle_reservation(db, r1.id)
         assert _get_reserved(db, user_id, "research_run") == 1
 
     def test_reserved_excludes_released(self, db):
-        user_id = uuid4()
+        user_id = _user(db).id
         r1 = reserve_quota(db, user_id, "research_run")
         reserve_quota(db, user_id, "research_run")
         release_reservation(db, r1.id)
         assert _get_reserved(db, user_id, "research_run") == 1
 
     def test_check_quota_accounts_for_reservations(self, db):
-        user_id = uuid4()
+        user_id = _user(db).id
         ent = PilotEntitlement(user_id=user_id, research_run_limit=3)
         db.add(ent)
         db.flush()
@@ -302,7 +322,7 @@ class TestReservedTracking:
 
 class TestTwoPhaseFlowIntegration:
     def test_successful_operation_settles(self, db):
-        user_id = uuid4()
+        user_id = _user(db).id
         ent = PilotEntitlement(user_id=user_id, research_run_limit=5)
         db.add(ent)
         db.flush()
@@ -316,7 +336,7 @@ class TestTwoPhaseFlowIntegration:
         assert get_quota_used(db, user_id, "research_run") == 1
 
     def test_failed_operation_releases(self, db):
-        user_id = uuid4()
+        user_id = _user(db).id
         ent = PilotEntitlement(user_id=user_id, research_run_limit=5)
         db.add(ent)
         db.flush()
@@ -330,7 +350,7 @@ class TestTwoPhaseFlowIntegration:
         assert check_quota_available(db, user_id, "research_run") is True
 
     def test_mixed_settle_and_release(self, db):
-        user_id = uuid4()
+        user_id = _user(db).id
         ent = PilotEntitlement(user_id=user_id, research_run_limit=5)
         db.add(ent)
         db.flush()
@@ -348,8 +368,8 @@ class TestTwoPhaseFlowIntegration:
         assert check_quota_available(db, user_id, "research_run") is True
 
     def test_reservation_isolation_between_users(self, db):
-        user_a = uuid4()
-        user_b = uuid4()
+        user_a = _user(db, "iso-a").id
+        user_b = _user(db, "iso-b").id
 
         reserve_quota(db, user_a, "research_run")
         reserve_quota(db, user_a, "research_run")

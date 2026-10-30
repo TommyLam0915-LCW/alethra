@@ -5,6 +5,7 @@ from uuid import uuid4
 from fastapi import HTTPException
 from app.models.quota import QuotaCounter
 from app.models.pilot import PilotEntitlement
+from app.models.user import User
 from app.auth.entitlements import (
     FREE_PLAN_ENTITLEMENT,
     get_entitlement,
@@ -27,6 +28,24 @@ def db():
         session.close()
 
 
+def _user(db, tag: str = "quota") -> User:
+    """Rows that reference a user need a real user to reference.
+
+    PostgreSQL enforces the quota/entitlement foreign keys; a random uuid that
+    belongs to no row is not legal data. Flushing the parent first keeps the
+    check satisfied inside the fixture transaction on both engines.
+    """
+    user = User(
+        id=uuid4(),
+        email=f"{tag}-{uuid4()}@example.com",
+        display_name="Test",
+        password_hash="x",
+    )
+    db.add(user)
+    db.flush()
+    return user
+
+
 class TestEntitlementChecks:
     def test_no_entitlement_falls_back_to_free_plan(self, db):
         """Users without an entitlement row get FREE_PLAN_ENTITLEMENT limits."""
@@ -36,7 +55,7 @@ class TestEntitlementChecks:
         assert check_quota_available(db, user_id, "research_run") is True
 
     def test_active_entitlement(self, db):
-        user_id = uuid4()
+        user_id = _user(db).id
         ent = PilotEntitlement(
             user_id=user_id,
             pilot_access=True,
@@ -48,7 +67,7 @@ class TestEntitlementChecks:
         assert check_entitlement_active(ent) is True
 
     def test_expired_entitlement(self, db):
-        user_id = uuid4()
+        user_id = _user(db).id
         ent = PilotEntitlement(
             user_id=user_id,
             pilot_access=True,
@@ -59,7 +78,7 @@ class TestEntitlementChecks:
         assert check_entitlement_active(ent) is False
 
     def test_disabled_entitlement(self, db):
-        user_id = uuid4()
+        user_id = _user(db).id
         ent = PilotEntitlement(
             user_id=user_id,
             pilot_access=False,
@@ -71,12 +90,12 @@ class TestEntitlementChecks:
 
 class TestQuotaConsumption:
     def test_consume_quota_creates_counter(self, db):
-        user_id = uuid4()
+        user_id = _user(db).id
         used = consume_quota(db, user_id, "research_run")
         assert used == 1
 
     def test_consume_quota_increments(self, db):
-        user_id = uuid4()
+        user_id = _user(db).id
         consume_quota(db, user_id, "research_run")
         used = consume_quota(db, user_id, "research_run")
         assert used == 2
@@ -86,14 +105,14 @@ class TestQuotaConsumption:
         assert get_quota_used(db, user_id, "research_run") == 0
 
     def test_check_quota_available_within_limit(self, db):
-        user_id = uuid4()
+        user_id = _user(db).id
         ent = PilotEntitlement(user_id=user_id, research_run_limit=5)
         db.add(ent)
         db.flush()
         assert check_quota_available(db, user_id, "research_run")
 
     def test_check_quota_exceeded(self, db):
-        user_id = uuid4()
+        user_id = _user(db).id
         ent = PilotEntitlement(user_id=user_id, research_run_limit=2)
         db.add(ent)
         db.flush()
@@ -103,7 +122,7 @@ class TestQuotaConsumption:
 
     def test_zero_limit_means_no_allowance(self, db):
         """limit == 0 means 'no allowance' — should reject."""
-        user_id = uuid4()
+        user_id = _user(db).id
         ent = PilotEntitlement(user_id=user_id, research_run_limit=0)
         db.add(ent)
         db.flush()
@@ -126,8 +145,8 @@ class TestQuotaConsumption:
             get_quota_used(db, user_id, "bogus_type")
 
     def test_quota_isolation_between_users(self, db):
-        user_a = uuid4()
-        user_b = uuid4()
+        user_a = _user(db, "iso-a").id
+        user_b = _user(db, "iso-b").id
         consume_quota(db, user_a, "research_run")
         consume_quota(db, user_a, "research_run")
         assert get_quota_used(db, user_a, "research_run") == 2
@@ -141,7 +160,7 @@ class TestFreePlanEntitlement:
         assert check_quota_available(db, user_id, "research_run") is True
 
     def test_no_entitlement_exceeds_free_limit_rejected(self, db):
-        user_id = uuid4()
+        user_id = _user(db).id
         free_limit = FREE_PLAN_ENTITLEMENT["research_run_limit"]
         # Exhaust free-plan quota
         for _ in range(free_limit):
@@ -150,7 +169,7 @@ class TestFreePlanEntitlement:
         assert check_quota_available(db, user_id, "research_run") is False
 
     def test_free_plan_export_limit(self, db):
-        user_id = uuid4()
+        user_id = _user(db).id
         free_export = FREE_PLAN_ENTITLEMENT["export_limit"]
         for _ in range(free_export):
             consume_quota(db, user_id, "export")
@@ -302,7 +321,7 @@ class TestUsageQuotaMatchesEnforcement:
 
 class TestAtomicConsume:
     def test_consume_multiple_times(self, db):
-        user_id = uuid4()
+        user_id = _user(db).id
         for i in range(1, 11):
             used = consume_quota(db, user_id, "research_run")
             assert used == i
