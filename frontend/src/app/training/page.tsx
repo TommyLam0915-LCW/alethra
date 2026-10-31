@@ -10,7 +10,7 @@ import AppShell from '@/components/shell/AppShell';
 import PersonalizationPanel from '@/components/training/PersonalizationPanel';
 import PersonalStrategyLearningPanel from '@/components/training/PersonalStrategyLearningPanel';
 import { formatDate, formatDateTime } from '@/lib/format';
-import { explainMlFailure } from '@/lib/mlFailureMessages';
+import { explainMlFailure, describeStoredJobFailure } from '@/lib/mlFailureMessages';
 
 interface TrainingJob {
   id: string;
@@ -835,26 +835,39 @@ export default function TrainingPage() {
 
                 {expandedJobId === job.id && (
                   <div style={{ marginTop: '16px', borderTop: '1px solid var(--border-strong)', paddingTop: '16px' }}>
-                    {job.error_details && (
-                      <div style={{
-                        backgroundColor: 'rgba(239,68,68,0.12)',
-                        border: '1px solid var(--negative)',
-                        color: 'var(--text-primary)',
-                        padding: '12px',
-                        borderRadius: '4px',
-                        marginBottom: '16px',
-                      }}>
-                        <h4 style={{ margin: '0 0 8px', fontSize: '14px', color: 'var(--negative)' }}>失敗原因</h4>
-                        <pre style={{ margin: 0, fontSize: '13px', whiteSpace: 'pre-wrap' }}>
-                          {job.error_details}
-                        </pre>
-                        {explainMlFailure(job.error_details) && (
-                          <p data-testid="job-failure-hint" style={{ margin: '8px 0 0', fontSize: '13px', color: 'var(--text-primary)' }}>
-                            這代表什麼：{explainMlFailure(job.error_details)}
-                          </p>
-                        )}
-                      </div>
-                    )}
+                    {job.error_details && (() => {
+                      const stored = describeStoredJobFailure(job.error_details);
+                      return (
+                        <div style={{
+                          backgroundColor: 'rgba(239,68,68,0.12)',
+                          border: '1px solid var(--negative)',
+                          color: 'var(--text-primary)',
+                          padding: '12px',
+                          borderRadius: '4px',
+                          marginBottom: '16px',
+                        }}>
+                          <h4 style={{ margin: '0 0 8px', fontSize: '14px', color: 'var(--negative)' }}>
+                            {job.status === 'cancelled' ? '任務已取消' : '失敗原因'}
+                          </h4>
+                          {stored ? (
+                            <>
+                              <pre style={{ margin: 0, fontSize: '13px', whiteSpace: 'pre-wrap' }}>
+                                {stored.detail}
+                              </pre>
+                              {stored.explanation && (
+                                <p data-testid="job-failure-hint" style={{ margin: '8px 0 0', fontSize: '13px', color: 'var(--text-primary)' }}>
+                                  這代表什麼：{stored.explanation}
+                                </p>
+                              )}
+                            </>
+                          ) : (
+                            <p data-testid="job-failure-safe-prompt" style={{ margin: 0, fontSize: '13px', lineHeight: 1.7 }}>
+                              此任務未能完成。平台已記錄失敗，但這不是已核對的資料不足訊息，因此不顯示原始錯誤內容。請重新整理頁面確認任務狀態，再決定是否重新執行。
+                            </p>
+                          )}
+                        </div>
+                      );
+                    })()}
                     <h4 style={{ marginBottom: '8px', fontSize: '14px', color: 'var(--text-secondary)' }}>參數網格</h4>
                     <pre style={{
                       backgroundColor: 'var(--surface-2)',

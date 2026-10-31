@@ -336,10 +336,10 @@ export default function ExperimentDetailPage() {
         </h1>
         <p role="alert" data-testid="experiment-load-error" style={{ color: 'var(--text-secondary)', lineHeight: 1.7 }}>
           {isMissing
-            ? 'This experiment does not exist, or it belongs to another account. Nothing was changed — check the link or go back to your experiment list.'
+            ? 'This experiment does not exist, or it belongs to another account. This failed load did not change your research content — check the link or go back to your experiment list.'
             : isForbidden
-              ? 'This account cannot open this experiment. Nothing was changed. If you expected access, contact the account owner.'
-              : `Alethra could not reach the research service${loadFailure.status ? ` (server response ${loadFailure.status})` : ' (no response from the server)'}. This is a loading failure, not an empty experiment: your versions, runs and notes have not been changed. Check your connection and try again.`}
+              ? 'This account cannot open this experiment. This failed load did not change your research content. If you expected access, contact the account owner.'
+              : `Alethra could not reach the research service${loadFailure.status ? ` (server response ${loadFailure.status})` : ' (no response from the server)'}. This is a loading failure, not an empty experiment, and this failed load did not change your research content. Check your connection and try again.`}
         </p>
         <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginTop: '20px' }}>
           {!isMissing && !isForbidden && (

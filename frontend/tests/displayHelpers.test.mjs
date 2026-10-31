@@ -7,7 +7,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { formatRatePercent } from '../src/lib/format.ts';
-import { explainMlFailure } from '../src/lib/mlFailureMessages.ts';
+import { explainMlFailure, describeStoredJobFailure } from '../src/lib/mlFailureMessages.ts';
 
 test('rate: a stored fraction is shown as a percentage of trade value', () => {
   assert.equal(formatRatePercent(0.001), '0.10%');
@@ -69,4 +69,35 @@ test('ml failure: prediction needs 30 bars and reports the current count', () =>
 test('ml failure: unrelated backend errors are left to the caller unchanged', () => {
   assert.equal(explainMlFailure('experiment not found'), null);
   assert.equal(explainMlFailure(''), null);
+});
+
+test('stored job failure: a verified data-insufficiency message keeps its explanation', () => {
+  const stored = describeStoredJobFailure(
+    'Insufficient data for AAPL: got 12 bars, need at least 60 for ML training.',
+  );
+  assert.ok(stored);
+  assert.match(stored.detail, /12 bars/);
+  assert.match(stored.explanation ?? '', /至少需要 60 根/);
+});
+
+test('stored job failure: backend-authored sweep and cancellation messages are shown verbatim', () => {
+  const sweep = describeStoredJobFailure(
+    'No valid backtest results: all parameter combinations failed or produced errors',
+  );
+  assert.deepEqual(sweep, {
+    detail: 'No valid backtest results: all parameter combinations failed or produced errors',
+    explanation: null,
+  });
+  const cancelled = describeStoredJobFailure('Job cancelled by user');
+  assert.deepEqual(cancelled, { detail: 'Job cancelled by user', explanation: null });
+});
+
+test('stored job failure: arbitrary exception text is withheld from the customer', () => {
+  assert.equal(
+    describeStoredJobFailure('Traceback: relation "training_jobs" does not exist'),
+    null,
+  );
+  assert.equal(describeStoredJobFailure('simulated training crash'), null);
+  assert.equal(describeStoredJobFailure(''), null);
+  assert.equal(describeStoredJobFailure(null), null);
 });

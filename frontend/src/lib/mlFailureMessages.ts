@@ -27,3 +27,31 @@ export function explainMlFailure(message: string): string | null {
   }
   return null;
 }
+
+// A stored job's error_details is usually `safe_error_message(exc)`: scrubbed of
+// paths and secrets, but still whatever text an exception carried. Only strings
+// the backend writes itself are safe to repeat to a customer verbatim.
+const CONTROLLED_JOB_MESSAGES = [
+  'No valid backtest results: all parameter combinations failed or produced errors',
+  'Job cancelled by user',
+];
+
+export interface StoredJobFailure {
+  detail: string;
+  explanation: string | null;
+}
+
+// Returns null for unrecognised text so the caller keeps its safe prompt
+// instead of echoing an arbitrary exception message.
+export function describeStoredJobFailure(
+  raw: string | null | undefined,
+): StoredJobFailure | null {
+  if (!raw) return null;
+  const explanation = explainMlFailure(raw);
+  if (explanation) return { detail: raw, explanation };
+  const trimmed = raw.trim();
+  if (CONTROLLED_JOB_MESSAGES.includes(trimmed)) {
+    return { detail: trimmed, explanation: null };
+  }
+  return null;
+}
