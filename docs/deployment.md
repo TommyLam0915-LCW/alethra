@@ -127,8 +127,9 @@ git pull origin main
 ### Database Backup & Restore
 
 ```bash
-# Backup
+# Backup (database/user default to POSTGRES_DB / POSTGRES_USER from .env)
 ./deploy/backup.sh
+BACKUP_DB_NAME=alethra BACKUP_DB_USER=alethra ./deploy/backup.sh   # explicit target
 
 # Restore (replace FILE with the backup path)
 gunzip -c backups/alethra_db_XXXXXXXX_XXXXXX.sql.gz \
@@ -136,7 +137,18 @@ gunzip -c backups/alethra_db_XXXXXXXX_XXXXXX.sql.gz \
     psql -U alethra alethra
 ```
 
-Backups are retained for 7 rotations (oldest pruned automatically).
+The backup script refuses to guess: `BACKUP_DB_NAME` / `BACKUP_DB_USER` (or
+`POSTGRES_DB` / `POSTGRES_USER`) must be set, the `db` service must be running,
+and the server must report the same database name before anything is dumped.
+The archive is written to a temporary name, checked for the `pg_dump` completion
+line and a valid gzip stream, and only then published; a failed or timed-out
+dump publishes nothing. Exit codes: 0 ok, 1 configuration, 2 target unavailable
+or mismatched, 3 dump failed/timed out, 4 integrity check failed. Other knobs:
+`BACKUP_DIR`, `BACKUP_SERVICE`, `BACKUP_TIMEOUT_SECONDS` (default 900),
+`BACKUP_KEEP` (default 7 rotations, oldest pruned automatically).
+
+These checks are exercised offline with a stub `docker`; no real backup or
+restore has been run on the candidate database.
 
 ---
 
