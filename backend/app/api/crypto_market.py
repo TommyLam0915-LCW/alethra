@@ -34,6 +34,7 @@ from app.providers.crypto_registry import get_crypto_provider
 from app.providers.kraken_provider import (
     KRAKEN_INTERVALS,
     KrakenApiError,
+    KrakenBudgetExceededError,
     KrakenError,
     KrakenRateLimitError,
     KrakenUnavailableError,
@@ -133,6 +134,16 @@ def _crypto_failure(exc: Exception) -> HTTPException:
         "detail": safe_error_message(exc),
         "no_fallback": "Synthetic or demo bars are never substituted for a live venue feed.",
     }
+    if isinstance(exc, KrakenBudgetExceededError):
+        # Our own cap refused the call, so the venue was never contacted. This
+        # is not an outage: retrying cannot help until the window rolls over or
+        # an operator starts a new run. Stored bars stay readable.
+        detail["reason"] = "budget_exhausted"
+        detail["denied_layer"] = exc.denied_layer
+        detail["budget"] = exc.reservation.as_dict()
+        detail["stored_available"] = "/market/crypto/stored"
+        detail["retry_safe"] = False
+        return HTTPException(status_code=503, detail=detail)
     if isinstance(exc, KrakenRateLimitError):
         detail["reason"] = "venue_rate_limited"
         return HTTPException(status_code=429, detail=detail)

@@ -33,6 +33,11 @@ from app.data.crypto_instruments import (
 from app.providers.data_provider import AssetInfo, DataProvider, OHLCVBar
 from app.providers.instruments import Instrument, Market, parse_crypto_instrument_id
 from app.services.crypto_series import CandleSeries, RawCandle, build_series
+from app.services.upstream_budget import (
+    AllowAllBudgetGate,
+    BudgetSnapshot,
+    Reservation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +48,10 @@ KRAKEN_API_BASE = "https://api.kraken.com"
 KRAKEN_INTERVALS: Tuple[int, ...] = (1, 5, 15, 30, 60, 240, 1440)
 MAX_OHLC_ROWS = 720
 CACHE_TTL_SECONDS = 2.0
+# Pair metadata changes only when Kraken re-lists a pair, so refetching it on
+# every page load would spend budget on a value that has not moved. Prices keep
+# the short TTL; identity metadata does not.
+METADATA_CACHE_TTL_SECONDS = 3600.0
 MIN_REQUEST_INTERVAL_SECONDS = 1.05
 
 
@@ -60,6 +69,26 @@ class KrakenApiError(KrakenError):
 
 class KrakenRateLimitError(KrakenError):
     """Kraken refused the request because we exceeded its public call budget."""
+
+
+class KrakenBudgetExceededError(KrakenError):
+    """Our own budget gate refused the call before a socket was opened.
+
+    Distinct from :class:`KrakenRateLimitError`: the venue never saw the call.
+    The caller should stop issuing requests in this run and read stored data
+    instead; retrying cannot help until the window or run id changes.
+    """
+
+    def __init__(self, reservation: Reservation):
+        super().__init__(reservation.reason)
+        self.reservation = reservation
+
+    @property
+    def denied_layer(self) -> Optional[str]:
+        return self.reservation.denied_layer
+
+
+_METADATA_PATHS = frozenset({"/0/public/AssetPairs", "/0/public/Time"})
 
 
 class KrakenTransport(Protocol):
@@ -115,15 +144,26 @@ class KrakenProvider(DataProvider):
         transport: Optional[KrakenTransport] = None,
         clock: Optional[Any] = None,
         min_request_interval: float = MIN_REQUEST_INTERVAL_SECONDS,
+        budget_gate: Optional[Any] = None,
+        metadata_cache_ttl: float = METADATA_CACHE_TTL_SECONDS,
     ):
         self._transport: KrakenTransport = transport or HttpxKrakenTransport()
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._min_request_interval = min_request_interval
+        # Default to allow-all so a bare adapter (offline tests) never needs a
+        # database. The application path injects the shared database gate in
+        # ``crypto_registry.get_crypto_provider``; that injection is what makes
+        # the cap real, so this default must not be relied on there.
+        self._budget_gate = budget_gate if budget_gate is not None else AllowAllBudgetGate()
+        self._metadata_cache_ttl = metadata_cache_ttl
         self._monotonic = time.monotonic
         self._sleep = time.sleep
         self._last_request_at: float = 0.0
         self._cache: Dict[Tuple[str, Tuple[Tuple[str, str], ...]], Tuple[float, Any]] = {}
         self._request_count = 0
+        self._budget_denials = 0
+        self._last_budget: Optional[dict] = None
+        self._last_reservation: Optional[Reservation] = None
         self._consecutive_failures = 0
         self._last_error: Optional[str] = None
         self._last_error_at: Optional[str] = None
@@ -165,12 +205,31 @@ class KrakenProvider(DataProvider):
         if self._last_request_at and remaining > 0:
             self._sleep(remaining)
 
+    def _cache_ttl(self, path: str) -> float:
+        return self._metadata_cache_ttl if path in _METADATA_PATHS else CACHE_TTL_SECONDS
+
     def _request(self, path: str, params: Dict[str, str]) -> Any:
         cache_key = (path, tuple(sorted(params.items())))
         now = self._monotonic()
         cached = self._cache.get(cache_key)
-        if cached and now - cached[0] < CACHE_TTL_SECONDS:
+        if cached and now - cached[0] < self._cache_ttl(path):
             return cached[1]
+
+        # Budget is reserved *before* the throttle and the socket. A refusal
+        # here means the venue is never contacted and the call consumes nothing;
+        # retries and UI-triggered reads reach this same gate.
+        reservation = self._budget_gate.reserve()
+        self._last_reservation = reservation
+        self._last_budget = reservation.as_dict()
+        if not reservation.allowed:
+            self._budget_denials += 1
+            logger.warning(
+                "Upstream budget refused %s: %s (%s)",
+                path,
+                reservation.reason,
+                reservation.denied_layer,
+            )
+            raise KrakenBudgetExceededError(reservation)
 
         self._throttle()
         self._last_request_at = self._monotonic()
@@ -493,6 +552,10 @@ class KrakenProvider(DataProvider):
             "fetched_at": self._now().isoformat(),
         }
 
+    def budget_snapshot(self) -> BudgetSnapshot:
+        """Current shared budget usage, read-only (never consumes)."""
+        return self._budget_gate.snapshot()
+
     def get_status(self) -> Dict[str, Any]:
         status: Dict[str, Any] = {
             "provider_id": self.provider_id,
@@ -502,13 +565,22 @@ class KrakenProvider(DataProvider):
             "connected": self.is_available(),
             "read_only": True,
             "orders_supported": False,
+            # Process-local count for this adapter instance; the shared budget
+            # is in ``budget`` and is the number that gates calls.
             "request_count": self._request_count,
+            "budget_denials": self._budget_denials,
             "consecutive_failures": self._consecutive_failures,
             "last_success_at": self._last_success_at,
             "last_error_at": self._last_error_at,
             "declared_pairs": [i.instrument_id for i in CRYPTO_INSTRUMENTS],
             "redistribution": "NOT_CLEARED",
         }
+        if self._last_budget is not None:
+            status["last_reservation"] = self._last_budget
+        try:
+            status["budget"] = self.budget_snapshot().as_dict()
+        except Exception as exc:  # a status probe must not 500 the lane
+            status["budget"] = {"error": type(exc).__name__, "scope": "unavailable"}
         if self._last_error:
             status["last_error"] = self._last_error
         return status

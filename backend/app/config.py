@@ -61,6 +61,15 @@ class Settings(BaseSettings):
     intraday_max_requests_per_day: int = 400
     intraday_backoff_base_seconds: int = 30
     intraday_backoff_max_seconds: int = 300
+    # Kraken crypto lane upstream budget. Every public REST call (OHLC, Ticker,
+    # Time, AssetPairs, retries, UI-triggered reads) reserves against these
+    # counters before the socket opens. The verification-run cap is a named hard
+    # budget for one bounded evidence run; it does not reset on restart — the run
+    # id must be changed deliberately to start a new allowance.
+    crypto_max_requests_per_hour: int = 60
+    crypto_max_requests_per_day: int = 400
+    crypto_verify_run_id: str = ""
+    crypto_verify_max_requests: int = 0
 
     @property
     def intraday_instrument_list(self) -> list[str]:
@@ -90,6 +99,7 @@ class Settings(BaseSettings):
     def _validate_production_safety(self) -> "Settings":
         self._validate_candidate_passwordless()
         self._validate_intraday_bounds()
+        self._validate_crypto_budget_bounds()
 
         if not self.is_production_like:
             return self
@@ -142,6 +152,22 @@ class Settings(BaseSettings):
             )
 
         return self
+
+    def _validate_crypto_budget_bounds(self) -> None:
+        if self.crypto_max_requests_per_hour < 1:
+            raise ValueError("CRYPTO_MAX_REQUESTS_PER_HOUR must be positive.")
+        if self.crypto_max_requests_per_day < 1:
+            raise ValueError("CRYPTO_MAX_REQUESTS_PER_DAY must be positive.")
+        if self.crypto_max_requests_per_day < self.crypto_max_requests_per_hour:
+            raise ValueError(
+                "CRYPTO_MAX_REQUESTS_PER_DAY must be >= CRYPTO_MAX_REQUESTS_PER_HOUR."
+            )
+        if self.crypto_verify_max_requests < 0:
+            raise ValueError("CRYPTO_VERIFY_MAX_REQUESTS must be zero or positive.")
+        if self.crypto_verify_max_requests > 0 and not self.crypto_verify_run_id.strip():
+            raise ValueError(
+                "CRYPTO_VERIFY_RUN_ID is required when CRYPTO_VERIFY_MAX_REQUESTS > 0."
+            )
 
     def _validate_intraday_bounds(self) -> None:
         if not 1 <= self.intraday_outputsize <= 5000:

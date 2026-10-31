@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 from app.models.rate_limit import RateLimitCounter
 from app.lib.timeutil import utcnow
+from app.services.upstream_budget import VERIFY_CATEGORY as _UPSTREAM_VERIFY_CATEGORY
 
 
 # Rate limit configuration (requests per window)
@@ -106,12 +107,17 @@ def cleanup_old_counters(db: Session, max_age_hours: int = 24) -> int:
     This should be run periodically (e.g., daily) to prevent unbounded growth.
     Only deletes counters outside the active window, so it does not affect
     current rate limiting or audit evidence.
+
+    The verification-run counter is deliberately exempt: its window is a fixed
+    sentinel, so expiry would mint a fresh upstream allowance without the
+    operator changing the run id.
     """
     cutoff = utcnow() - timedelta(hours=max_age_hours)
     
     deleted = db.query(RateLimitCounter).filter(
-        RateLimitCounter.window_start < cutoff
-    ).delete()
+        RateLimitCounter.window_start < cutoff,
+        RateLimitCounter.route_category != _UPSTREAM_VERIFY_CATEGORY,
+    ).delete(synchronize_session=False)
     
     db.commit()
     return deleted

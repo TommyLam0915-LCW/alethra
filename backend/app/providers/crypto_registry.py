@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Optional
 
 from app.providers.kraken_provider import KrakenProvider
+from app.services.upstream_budget import get_upstream_budget_gate
 
 _provider: Optional[KrakenProvider] = None
 
@@ -18,7 +19,10 @@ _provider: Optional[KrakenProvider] = None
 def get_crypto_provider() -> KrakenProvider:
     global _provider
     if _provider is None:
-        _provider = KrakenProvider()
+        # The shared database gate is injected here, not defaulted inside the
+        # adapter, so every application request is counted in one budget while
+        # a bare adapter in a unit test needs no database.
+        _provider = KrakenProvider(budget_gate=get_upstream_budget_gate())
     return _provider
 
 
