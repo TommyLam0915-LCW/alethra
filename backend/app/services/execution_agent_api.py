@@ -17,6 +17,7 @@ from app.models.execution import (
     FillSource,
     FillRecord,
 )
+from app.lib.error_safety import scrub_text
 from app.lib.timeutil import utcnow
 
 
@@ -240,7 +241,9 @@ def agent_report_uncertain(
         )
 
     intent.status = IntentStatus.uncertain
-    intent.rejection_reason = reason
+    # The agent forwards whatever its broker client raised; that text is
+    # rendered back to the owner, so scrub it at the storage boundary.
+    intent.rejection_reason = scrub_text(reason)
     intent.updated_at = utcnow()
     db.commit()
     db.refresh(intent)
@@ -273,7 +276,7 @@ def agent_report_rejected(
         )
 
     intent.status = IntentStatus.rejected
-    intent.rejection_reason = reason
+    intent.rejection_reason = scrub_text(reason)
     intent.updated_at = utcnow()
     db.commit()
     db.refresh(intent)
@@ -306,7 +309,7 @@ def agent_report_cancelled(
         )
 
     intent.status = IntentStatus.cancelled
-    intent.rejection_reason = reason
+    intent.rejection_reason = scrub_text(reason)
     intent.updated_at = utcnow()
     db.commit()
     db.refresh(intent)

@@ -174,3 +174,62 @@ class TestBacktestFailureResponse:
         assert detail.startswith("Backtest execution failed:")
         assert "<path>" in detail
         assert "<redacted-url>" in detail
+
+
+class TestExecutionAgentRejectionReason:
+    """The agent forwards whatever its broker client raised. That text is
+    persisted as ``rejection_reason`` and rendered back to the owner, so the
+    storage boundary must scrub it like any other user-facing error."""
+
+    def _authorized_intent(self, client, auth_headers):
+        resp = client.post("/api/v1/paper-portfolio", headers=auth_headers, json={
+            "initial_virtual_cash": 100000.0,
+            "currency": "USD",
+        })
+        assert resp.status_code == 201, resp.text
+        portfolio_id = resp.json()["id"]
+
+        resp = client.post("/api/v1/execution/intents", headers=auth_headers, json={
+            "portfolio_id": portfolio_id,
+            "symbol": "US:AAPL",
+            "side": "BUY",
+            "quantity": 10,
+            "order_type": "MARKET",
+        })
+        assert resp.status_code == 201, resp.text
+        intent = resp.json()
+
+        resp = client.post(
+            f"/api/v1/execution/intents/{intent['intent_id']}/authorize",
+            headers=auth_headers,
+            json={"authorization_token": intent["authorization_token"]},
+        )
+        assert resp.status_code == 200, resp.text
+        return intent["intent_id"]
+
+    def test_broker_error_text_is_scrubbed_before_the_owner_sees_it(self, client, auth_headers):
+        intent_id = self._authorized_intent(client, auth_headers)
+        raw = (
+            "connect failed at /Users/owner/ibgateway/conf.yaml "
+            "api_key=abc123 "
+            "postgresql+psycopg2://postgres:hunter2@db:5432/alethra"
+        )
+
+        resp = client.post(
+            f"/api/v1/execution-agent/order-intents/{intent_id}/rejected",
+            headers=auth_headers,
+            json={"reason": raw},
+        )
+        assert resp.status_code == 200, resp.text
+        for secret in ("/Users/", "conf.yaml", "abc123", "hunter2"):
+            assert secret not in resp.text
+
+        owner_view = client.get(
+            f"/api/v1/execution/intents/{intent_id}", headers=auth_headers
+        )
+        assert owner_view.status_code == 200, owner_view.text
+        detail = owner_view.json()["rejection_reason"]
+        assert "<path>" in detail
+        assert "<redacted-url>" in detail
+        assert "abc123" not in detail
+        assert "hunter2" not in detail
