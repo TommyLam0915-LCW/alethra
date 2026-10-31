@@ -3,14 +3,14 @@
 import { useEffect, useState } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import Link from 'next/link';
-import { api } from '@/lib/api';
+import { api, ApiError } from '@/lib/api';
 import { describeRunStatus } from '@/lib/runStatus';
 import { brand } from '@/lib/brand';
 import { statusPillClass } from '@/lib/status-styles';
 import RevisionPanel from '@/components/experiments/RevisionPanel';
 import RobustnessPanel from '@/components/experiments/RobustnessPanel';
 import ResearchRecordPanel from '@/components/experiments/ResearchRecordPanel';
-import { formatDate, formatDateTime } from '@/lib/format';
+import { formatDate, formatDateTime, formatRatePercent } from '@/lib/format';
 import { DATA_NATURE_LABELS, label } from '@/lib/copy';
 
 interface Experiment {
@@ -145,6 +145,10 @@ export default function ExperimentDetailPage() {
   const [selectedRuns, setSelectedRuns] = useState<string[]>([]);
   const [savedComparisons, setSavedComparisons] = useState<any[]>([]);
   const [dataVersion, setDataVersion] = useState(0);
+  // A failed initial load is not an empty experiment. Keep the reason so the page
+  // can tell "you do not have this research" apart from "the service is down",
+  // and offer a retry instead of silently rendering a not-found screen.
+  const [loadFailure, setLoadFailure] = useState<{ kind: 'not_found' | 'forbidden' | 'unavailable'; status: number | null } | null>(null);
 
   useEffect(() => {
     const token = localStorage.getItem('token');
@@ -176,11 +180,32 @@ export default function ExperimentDetailPage() {
       setDataVersion((v) => v + 1);
       // A reload that succeeded must not keep showing an earlier load failure.
       setError('');
+      setLoadFailure(null);
     } catch (err) {
-      setError('Could not load the experiment.');
+      const status = err instanceof ApiError ? err.status : null;
+      if (experiment) {
+        // The research is already on screen. A failed refresh keeps the visible
+        // data and says so, instead of replacing the page with an error screen.
+        setError('Could not refresh this experiment. The data shown may be out of date.');
+        return;
+      }
+      if (status === 404) {
+        setLoadFailure({ kind: 'not_found', status });
+      } else if (status === 403) {
+        setLoadFailure({ kind: 'forbidden', status });
+      } else {
+        setLoadFailure({ kind: 'unavailable', status });
+      }
+      setError('');
     } finally {
       setLoading(false);
     }
+  };
+
+  const retryLoad = () => {
+    setLoading(true);
+    setLoadFailure(null);
+    loadData();
   };
 
   const handleRunBacktest = async () => {
@@ -294,7 +319,49 @@ export default function ExperimentDetailPage() {
   };
 
   if (loading) {
-    return <div className="container" style={{ paddingTop: '40px' }}>Loading…</div>;
+    return <div className="container" style={{ paddingTop: '40px' }} role="status" aria-live="polite">Loading…</div>;
+  }
+
+  if (loadFailure) {
+    const isMissing = loadFailure.kind === 'not_found';
+    const isForbidden = loadFailure.kind === 'forbidden';
+    return (
+      <div className="container" style={{ paddingTop: '40px', paddingBottom: '40px', maxWidth: '640px' }}>
+        <h1 style={{ marginBottom: '12px' }} data-testid="experiment-load-error-title">
+          {isMissing
+            ? 'Experiment not found'
+            : isForbidden
+              ? 'You do not have access to this experiment'
+              : 'This experiment could not be loaded'}
+        </h1>
+        <p role="alert" data-testid="experiment-load-error" style={{ color: 'var(--text-secondary)', lineHeight: 1.7 }}>
+          {isMissing
+            ? 'This experiment does not exist, or it belongs to another account. Nothing was changed — check the link or go back to your experiment list.'
+            : isForbidden
+              ? 'This account cannot open this experiment. Nothing was changed. If you expected access, contact the account owner.'
+              : `Alethra could not reach the research service${loadFailure.status ? ` (server response ${loadFailure.status})` : ' (no response from the server)'}. This is a loading failure, not an empty experiment: your versions, runs and notes have not been changed. Check your connection and try again.`}
+        </p>
+        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginTop: '20px' }}>
+          {!isMissing && !isForbidden && (
+            <button
+              type="button"
+              className="btn btn-primary"
+              data-testid="experiment-load-retry"
+              onClick={retryLoad}
+            >
+              Try again
+            </button>
+          )}
+          <Link
+            href="/dashboard"
+            className="btn"
+            style={{ backgroundColor: 'var(--surface-2)', textDecoration: 'none' }}
+          >
+            Back to my experiments
+          </Link>
+        </div>
+      </div>
+    );
   }
 
   if (!experiment) {
@@ -411,10 +478,14 @@ export default function ExperimentDetailPage() {
                 </strong>
               </div>
               <div>
-                <div style={{ color: 'var(--text-muted)' }}>Commission / slippage</div>
+                <div style={{ color: 'var(--text-muted)' }}>Commission / slippage (per fill)</div>
                 <strong>
-                  {currentVersion.strategy_spec?.commission_rate ?? 0} / {currentVersion.strategy_spec?.slippage_rate ?? 0}
+                  {formatRatePercent(currentVersion.strategy_spec?.commission_rate)} /{' '}
+                  {formatRatePercent(currentVersion.strategy_spec?.slippage_rate)}
                 </strong>
+                <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>
+                  Share of trade value; 0.10% means 0.001 in the raw setting
+                </div>
               </div>
             </div>
           ) : (

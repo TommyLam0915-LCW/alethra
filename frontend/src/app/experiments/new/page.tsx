@@ -562,7 +562,7 @@ function NewExperimentForm() {
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
             <div className="form-group">
-              <label htmlFor="exp-commission">Commission rate (0–0.05)</label>
+              <label htmlFor="exp-commission">Commission rate (fraction, 0–0.05)</label>
               <input
                 id="exp-commission"
                 type="number"
@@ -574,9 +574,12 @@ function NewExperimentForm() {
                 max="0.05"
                 step="0.001"
               />
+              <p data-testid="exp-commission-hint" style={{ fontSize: '12px', color: 'var(--text-muted)', margin: '4px 0 0' }}>
+                Share of each trade&apos;s value charged per fill, not a percentage. 0.001 = 0.1%.
+              </p>
             </div>
             <div className="form-group">
-              <label htmlFor="exp-slippage">Slippage rate (0–0.05)</label>
+              <label htmlFor="exp-slippage">Slippage rate (fraction, 0–0.05)</label>
               <input
                 id="exp-slippage"
                 type="number"
@@ -588,6 +591,9 @@ function NewExperimentForm() {
                 max="0.05"
                 step="0.001"
               />
+              <p data-testid="exp-slippage-hint" style={{ fontSize: '12px', color: 'var(--text-muted)', margin: '4px 0 0' }}>
+                Price move against you on each fill, not a percentage of return. 0.001 = 0.1%.
+              </p>
             </div>
           </div>
 

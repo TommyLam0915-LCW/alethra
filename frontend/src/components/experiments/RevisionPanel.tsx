@@ -508,11 +508,11 @@ export default function RevisionPanel({
               <input id="revision-cash" type="number" className="input" value={initialCash}
                 onChange={(e) => setInitialCash(e.target.value)} data-testid="revision-cash" style={{ width: '100%' }} />
             </Field>
-            <Field label="Commission rate" htmlFor="revision-commission">
+            <Field label="Commission rate (fraction per fill; 0.001 = 0.1%)" htmlFor="revision-commission">
               <input id="revision-commission" type="number" step="0.0001" className="input" value={commissionRate}
                 onChange={(e) => setCommissionRate(e.target.value)} data-testid="revision-commission" style={{ width: '100%' }} />
             </Field>
-            <Field label="Slippage rate" htmlFor="revision-slippage">
+            <Field label="Slippage rate (fraction per fill; 0.001 = 0.1%)" htmlFor="revision-slippage">
               <input id="revision-slippage" type="number" step="0.0001" className="input" value={slippageRate}
                 onChange={(e) => setSlippageRate(e.target.value)} data-testid="revision-slippage" style={{ width: '100%' }} />
             </Field>

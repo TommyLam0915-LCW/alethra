@@ -36,3 +36,19 @@ export function formatDateTime(value: string | Date | null | undefined): string 
   const minutes = String(date.getMinutes()).padStart(2, '0');
   return `${formatDate(date)} ${hours}:${minutes}`;
 }
+
+/**
+ * Renders a cost rate stored as a fraction of trade value (0.001 → `0.10%`).
+ *
+ * The engine stores commission and slippage as fractions, so a raw `0.001` is
+ * easy to read as "0.001%" — a hundred-fold mistake. Sub-0.01% rates keep three
+ * decimals so a real difference is never rounded away to `0.00%`.
+ */
+export function formatRatePercent(value: number | string | null | undefined): string {
+  if (value === null || value === undefined || value === '') return '—';
+  const rate = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(rate)) return String(value);
+  const percent = rate * 100;
+  const decimals = percent !== 0 && Math.abs(percent) < 0.1 ? 3 : 2;
+  return `${percent.toFixed(decimals)}%`;
+}

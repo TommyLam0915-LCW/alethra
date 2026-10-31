@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useRouter, useParams, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { api, ApiError } from '@/lib/api';
+import { formatRatePercent } from '@/lib/format';
 import { RUN_STATUS_LABELS, label } from '@/lib/copy';
 
 interface EvidenceDetail {
@@ -60,6 +61,51 @@ const PROVENANCE_COLORS: Record<string, string> = {
   derived: 'rgba(59,130,246,0.16)',
 };
 
+type FieldKind = 'rate' | 'percent' | 'currency' | 'count' | 'ratio' | 'text' | 'list';
+
+// Human labels carry the unit, because the backend compares raw field names.
+// `commission_rate` is a fraction of trade value: 0.001 is 0.1%, not 0.001%.
+const FIELD_META: Record<string, { label: string; kind: FieldKind }> = {
+  total_return_pct: { label: 'Total return', kind: 'percent' },
+  final_equity: { label: 'Final equity', kind: 'currency' },
+  max_drawdown_pct: { label: 'Max drawdown', kind: 'percent' },
+  total_trades: { label: 'Number of trades', kind: 'count' },
+  sharpe_ratio: { label: 'Sharpe ratio', kind: 'ratio' },
+  template_type: { label: 'Strategy template', kind: 'text' },
+  asset_ids: { label: 'Instruments', kind: 'list' },
+  start_date: { label: 'Start date', kind: 'text' },
+  end_date: { label: 'End date', kind: 'text' },
+  initial_cash: { label: 'Starting cash', kind: 'currency' },
+  commission_rate: { label: 'Commission rate (share of trade value, per fill)', kind: 'rate' },
+  slippage_rate: { label: 'Slippage rate (share of price, per fill)', kind: 'rate' },
+  benchmark_id: { label: 'Benchmark', kind: 'text' },
+  engine_version: { label: 'Engine version', kind: 'text' },
+};
+
+const COST_FIELDS = ['commission_rate', 'slippage_rate', 'initial_cash'] as const;
+
+function describeValue(field: string, value: unknown): string {
+  if (value === null || value === undefined || value === '') return 'not recorded';
+  const kind = FIELD_META[field]?.kind;
+  if (typeof value !== 'number') {
+    return Array.isArray(value) ? value.join(', ') : String(value);
+  }
+  switch (kind) {
+    case 'rate':
+      return `${formatRatePercent(value)} (${value})`;
+    case 'percent':
+      return `${value.toFixed(2)}%`;
+    case 'currency':
+      return `$${value.toLocaleString('en-US', { maximumFractionDigits: 2 })}`;
+    case 'count':
+      return value.toLocaleString('en-US');
+    case 'ratio':
+      return value.toFixed(3);
+    default:
+      return String(value);
+  }
+}
+
 export default function RunComparisonPage() {
   const router = useRouter();
   const params = useParams();
@@ -74,6 +120,12 @@ export default function RunComparisonPage() {
   const [error, setError] = useState('');
   const [errorStatus, setErrorStatus] = useState<number | null>(null);
   const [expandedFields, setExpandedFields] = useState<Set<string>>(new Set());
+  // Short IDs alone do not tell a reader which version produced a run, so the
+  // page resolves the experiment title and version numbers with the same
+  // endpoints the experiment page already uses. Failure is silent: the page
+  // then falls back to the short IDs it already had.
+  const [experimentTitle, setExperimentTitle] = useState<string | null>(null);
+  const [versionNumbers, setVersionNumbers] = useState<Record<string, number>>({});
   
   // Save comparison state
   const [purpose, setPurpose] = useState('');
@@ -121,6 +173,24 @@ export default function RunComparisonPage() {
     }
     loadComparison();
   }, [experimentId, runA, runB, savedComparisonIdParam, router]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !localStorage.getItem('token')) return;
+    let cancelled = false;
+    Promise.all([
+      api.experiments.get(experimentId).catch(() => null),
+      api.experiments.versions(experimentId).catch(() => [] as Array<{ id: string; version_number: number }>),
+    ]).then(([experiment, versions]) => {
+      if (cancelled) return;
+      if (experiment?.title) setExperimentTitle(experiment.title);
+      const map: Record<string, number> = {};
+      for (const version of versions ?? []) map[version.id] = version.version_number;
+      setVersionNumbers(map);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [experimentId]);
 
   const loadSavedComparison = async (comparisonId: string) => {
     setLoading(true);
@@ -260,31 +330,96 @@ export default function RunComparisonPage() {
     );
   };
 
-  const formatValue = (value: any) => {
-    if (value === null || value === undefined) return '—';
-    if (typeof value === 'number') {
-      if (value % 1 === 0) return value.toLocaleString('en-US');
-      return value.toFixed(4);
-    }
-    if (Array.isArray(value)) return value.join(', ');
-    return String(value);
-  };
+  const formatValue = (field: string, value: any) => describeValue(field, value);
 
   const formatDelta = (field: ComparisonField) => {
     if (field.comparison_status !== 'differ') return null;
-    if (typeof field.value_a === 'number' && typeof field.value_b === 'number') {
-      const delta = field.value_b - field.value_a;
-      const isPercent = field.field.includes('return') || field.field.includes('drawdown');
-      const prefix = delta > 0 ? '+' : '';
-      const suffix = isPercent ? ' pp' : '';
+    if (typeof field.value_a !== 'number' || typeof field.value_b !== 'number') {
+      return <span style={{ color: 'var(--negative)' }}>Values differ</span>;
+    }
+    const delta = field.value_b - field.value_a;
+    const kind = FIELD_META[field.field]?.kind;
+    const trendColor = delta < 0 ? 'var(--negative)' : 'var(--positive)';
+    if (kind === 'rate') {
+      // Fractions are compared in percentage points, and a real sub-0.01%
+      // difference keeps three decimals instead of collapsing to "0.00".
+      const percentDelta = delta * 100;
+      const decimals = percentDelta !== 0 && Math.abs(percentDelta) < 0.1 ? 3 : 2;
       return (
-        <span style={{ color: delta < 0 ? 'var(--negative)' : 'var(--positive)', fontWeight: 600 }}>
-          {prefix}{delta.toFixed(2)}{suffix}
+        <span style={{ color: trendColor, fontWeight: 600 }}>
+          {delta > 0 ? '+' : ''}{percentDelta.toFixed(decimals)} pp
         </span>
       );
     }
-    return <span style={{ color: 'var(--negative)' }}>Values differ</span>;
+    if (kind === 'percent') {
+      return (
+        <span style={{ color: trendColor, fontWeight: 600 }}>
+          {delta > 0 ? '+' : ''}{delta.toFixed(2)} pp
+        </span>
+      );
+    }
+    if (kind === 'currency') {
+      return (
+        <span style={{ color: trendColor, fontWeight: 600 }}>
+          {delta > 0 ? '+' : delta < 0 ? '-' : ''}${Math.abs(delta).toLocaleString('en-US', { maximumFractionDigits: 2 })}
+        </span>
+      );
+    }
+    if (kind === 'count') {
+      return (
+        <span style={{ color: trendColor, fontWeight: 600 }}>
+          {delta > 0 ? '+' : ''}{delta.toLocaleString('en-US')}
+        </span>
+      );
+    }
+    return (
+      <span style={{ color: trendColor, fontWeight: 600 }}>
+        {delta > 0 ? '+' : ''}{delta.toFixed(3)}
+      </span>
+    );
   };
+
+  // The backend only reports period and dataset limitations. Settings that were
+  // captured on one side but read from current metadata on the other quietly
+  // weaken the comparison, so the page states that limit itself. Nothing here
+  // writes, rewrites or "approves" either run.
+  const derivedLimitations = (() => {
+    if (!comparison) return [] as string[];
+    const notes: string[] = [];
+    const conditions = new Map(comparison.conditions_comparison.map((field) => [field.field, field]));
+
+    for (const name of COST_FIELDS) {
+      const field = conditions.get(name);
+      if (!field) continue;
+      const labelText = FIELD_META[name]?.label ?? name;
+      if (field.comparison_status === 'differ') {
+        notes.push(
+          `${labelText} differs — A ${describeValue(name, field.value_a)}, B ${describeValue(name, field.value_b)}. The two outcomes were produced under different settings, so the metric gap mixes this setting with every other change; it does not isolate the effect of any one setting.`,
+        );
+      }
+      const sourcedFromMetadata =
+        field.provenance_a === 'current' ||
+        field.provenance_b === 'current' ||
+        field.provenance_a === 'absent' ||
+        field.provenance_b === 'absent';
+      if (sourcedFromMetadata) {
+        notes.push(
+          `${labelText}: at least one side is not run-captured (source status "${PROVENANCE_LABELS[field.provenance_a] ?? field.provenance_a}" / "${PROVENANCE_LABELS[field.provenance_b] ?? field.provenance_b}"). The setting shown may not be the setting the run actually used, so treat any difference or match as unverified.`,
+        );
+      }
+    }
+
+    const provenanceMismatch = comparison.conditions_comparison.some(
+      (field) => field.provenance_a !== field.provenance_b,
+    );
+    if (provenanceMismatch) {
+      notes.push(
+        'Some fields come from different sources on each side (captured at run time versus current version metadata). A "Values match" only means the displayed values agree, not that both were recorded when the runs executed.',
+      );
+    }
+
+    return notes;
+  })();
 
   const renderEvidenceDetail = (evidence: EvidenceDetail | undefined, label: string) => {
     if (!evidence) return <span style={{ color: 'var(--text-muted)' }}>—</span>;
@@ -354,8 +489,8 @@ export default function RunComparisonPage() {
       </div>
 
       <h1 style={{ marginBottom: '8px' }}>Backtest result comparison</h1>
-      <p style={{ color: 'var(--text-secondary)', marginBottom: '24px' }}>
-        Experiment {experimentId.slice(0, 8)}…
+      <p style={{ color: 'var(--text-secondary)', marginBottom: '24px' }} data-testid="comparison-experiment">
+        {experimentTitle ?? `Experiment ${experimentId.slice(0, 8)}…`}
       </p>
 
       {/* Task Prompt */}
@@ -477,17 +612,38 @@ export default function RunComparisonPage() {
       }}>
         <strong>Selected results:</strong>
         <ul style={{ margin: '8px 0 0 20px', listStyle: 'none', padding: 0 }}>
-          <li style={{ marginBottom: '4px' }}>
-            Run A: <Link href={`/experiments/${experimentId}/runs/${comparison.run_a_id}`} style={{ color: 'var(--primary-text)', textDecoration: 'none' }}>
-              {comparison.run_a_id.slice(0, 8)}…
-            </Link> (Status: {label(RUN_STATUS_LABELS, comparison.status_a)})
+          <li style={{ marginBottom: '4px' }} data-testid="comparison-run-a">
+            Run A
+            {versionNumbers[comparison.experiment_version_a_id] != null && (
+              <> · version v{versionNumbers[comparison.experiment_version_a_id]}</>
+            )}
+            {' — '}status: {label(RUN_STATUS_LABELS, comparison.status_a)} ·{' '}
+            <Link href={`/experiments/${experimentId}/runs/${comparison.run_a_id}`} style={{ color: 'var(--primary-text)', textDecoration: 'none' }}>
+              open result
+            </Link>
+            <span style={{ color: 'var(--text-muted)', fontSize: '11px' }}> ({comparison.run_a_id.slice(0, 8)}…)</span>
           </li>
-          <li>
-            Run B: <Link href={`/experiments/${experimentId}/runs/${comparison.run_b_id}`} style={{ color: 'var(--primary-text)', textDecoration: 'none' }}>
-              {comparison.run_b_id.slice(0, 8)}…
-            </Link> (Status: {label(RUN_STATUS_LABELS, comparison.status_b)})
+          <li data-testid="comparison-run-b">
+            Run B
+            {versionNumbers[comparison.experiment_version_b_id] != null && (
+              <> · version v{versionNumbers[comparison.experiment_version_b_id]}</>
+            )}
+            {' — '}status: {label(RUN_STATUS_LABELS, comparison.status_b)} ·{' '}
+            <Link href={`/experiments/${experimentId}/runs/${comparison.run_b_id}`} style={{ color: 'var(--primary-text)', textDecoration: 'none' }}>
+              open result
+            </Link>
+            <span style={{ color: 'var(--text-muted)', fontSize: '11px' }}> ({comparison.run_b_id.slice(0, 8)}…)</span>
           </li>
         </ul>
+        <details style={{ marginTop: '10px', fontSize: '12px', color: 'var(--text-secondary)' }}>
+          <summary style={{ cursor: 'pointer' }}>How to read the source status</summary>
+          <ul style={{ margin: '8px 0 0 20px', lineHeight: 1.7 }}>
+            <li><strong>Captured</strong> — recorded in the run itself when it executed.</li>
+            <li><strong>Current metadata</strong> — read from the strategy version&apos;s settings today; it may have changed since the run.</li>
+            <li><strong>Derived</strong> — computed from the run&apos;s recorded trades and equity.</li>
+            <li><strong>Absent / Unavailable</strong> — nothing was recorded for that side.</li>
+          </ul>
+        </details>
       </div>
 
       {/* Limitations */}
@@ -502,6 +658,26 @@ export default function RunComparisonPage() {
           <ul style={{ margin: '8px 0 0 20px' }}>
             {comparison.limitations.map((lim, i) => (
               <li key={i}>{lim}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Setting differences this page can see but the server does not report */}
+      {derivedLimitations.length > 0 && (
+        <div
+          data-testid="comparison-setting-limitations"
+          style={{
+            background: 'var(--surface-2)',
+            borderLeft: '4px solid var(--primary)',
+            padding: '12px',
+            marginBottom: '24px',
+          }}
+        >
+          <strong>What this comparison cannot tell you:</strong>
+          <ul style={{ margin: '8px 0 0 20px' }}>
+            {derivedLimitations.map((lim, i) => (
+              <li key={i} style={{ marginBottom: '6px' }}>{lim}</li>
             ))}
           </ul>
         </div>
@@ -560,9 +736,11 @@ export default function RunComparisonPage() {
                     <div style={{ padding: '10px', fontSize: '12px', color: 'var(--text-secondary)' }}>
                       {hasEvidence ? (isExpanded ? '▼' : '▶') : ''}
                     </div>
-                    <div style={{ padding: '10px', fontWeight: 500 }}>{field.field}</div>
-                    <div style={{ padding: '10px', textAlign: 'right' }}>{formatValue(field.value_a)}</div>
-                    <div style={{ padding: '10px', textAlign: 'right' }}>{formatValue(field.value_b)}</div>
+                    <div style={{ padding: '10px', fontWeight: 500 }} data-testid={`field-label-${fieldKey}`}>
+                      {FIELD_META[field.field]?.label ?? field.field}
+                    </div>
+                    <div style={{ padding: '10px', textAlign: 'right' }}>{formatValue(field.field, field.value_a)}</div>
+                    <div style={{ padding: '10px', textAlign: 'right' }}>{formatValue(field.field, field.value_b)}</div>
                     <div style={{ padding: '10px', textAlign: 'right' }}>{formatDelta(field)}</div>
                     <div style={{ padding: '10px' }}>
                       {getProvenanceBadge(field.provenance_a)}
@@ -615,9 +793,11 @@ export default function RunComparisonPage() {
                     <div style={{ padding: '10px', fontSize: '12px', color: 'var(--text-secondary)' }}>
                       {hasEvidence ? (isExpanded ? '▼' : '▶') : ''}
                     </div>
-                    <div style={{ padding: '10px', fontWeight: 500 }}>{field.field}</div>
-                    <div style={{ padding: '10px', textAlign: 'right' }}>{formatValue(field.value_a)}</div>
-                    <div style={{ padding: '10px', textAlign: 'right' }}>{formatValue(field.value_b)}</div>
+                    <div style={{ padding: '10px', fontWeight: 500 }} data-testid={`field-label-${fieldKey}`}>
+                      {FIELD_META[field.field]?.label ?? field.field}
+                    </div>
+                    <div style={{ padding: '10px', textAlign: 'right' }}>{formatValue(field.field, field.value_a)}</div>
+                    <div style={{ padding: '10px', textAlign: 'right' }}>{formatValue(field.field, field.value_b)}</div>
                     <div style={{ padding: '10px' }}>
                       {field.comparison_status === 'match' && 'Values match'}
                       {field.comparison_status === 'differ' && 'Values differ'}

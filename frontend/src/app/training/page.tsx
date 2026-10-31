@@ -10,6 +10,7 @@ import AppShell from '@/components/shell/AppShell';
 import PersonalizationPanel from '@/components/training/PersonalizationPanel';
 import PersonalStrategyLearningPanel from '@/components/training/PersonalStrategyLearningPanel';
 import { formatDate, formatDateTime } from '@/lib/format';
+import { explainMlFailure } from '@/lib/mlFailureMessages';
 
 interface TrainingJob {
   id: string;
@@ -151,6 +152,10 @@ function describeMlRefusal(err: unknown, fallback: string): string {
     }
     if (err.status === 403) {
       return 'Pilot 授權已過期或停用，無法執行 AI 訓練與預測。請於「Pilot 計劃」查看授權狀態。';
+    }
+    if (err.status === 400) {
+      const hint = explainMlFailure(err.message);
+      if (hint) return `${hint} 本次請求已被拒絕，沒有建立訓練任務或執行預測。`;
     }
   }
   return (err as any)?.message || fallback;
@@ -479,10 +484,10 @@ export default function TrainingPage() {
     <AppShell active="training">
       <div className="container" style={{ paddingTop: '40px', paddingBottom: '40px' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '30px', gap: '16px', flexWrap: 'wrap' }}>
-          <h1 style={{ margin: 0 }}>訓練 / 最佳化任務</h1>
+          <h1 style={{ margin: 0 }}>研究任務：參數搜尋與 ML 訓練</h1>
           <div style={{ display: 'flex', gap: '12px' }}>
             <button onClick={() => setShowForm(!showForm)} className="btn btn-primary">
-              {showForm ? '隱藏表單' : '建立訓練任務'}
+              {showForm ? '隱藏表單' : '新增參數搜尋'}
             </button>
           </div>
         </div>
@@ -538,6 +543,10 @@ export default function TrainingPage() {
           </div>
         )}
 
+        <h2 style={{ margin: '0 0 8px' }} data-testid="grid-search-heading">參數搜尋（網格回測）</h2>
+        <p style={{ color: 'var(--text-secondary)', margin: '0 0 12px', fontSize: '13px' }}>
+          對一個研究實驗的多組參數分別回測，再按指標排名。這是回測比較，不會訓練 ML 模型；ML 模型訓練在頁面下方，條件另計。
+        </p>
         <div className="disclaimer" style={{ marginBottom: '24px' }}>
           <strong>提醒：</strong>參數搜尋採用網格搜尋法 — 非機器學習訓練。結果為演示資料的回測指標。
         </div>
@@ -547,7 +556,7 @@ export default function TrainingPage() {
 
         {showForm && (
           <div className="card" style={{ marginBottom: '24px' }}>
-            <h3 style={{ marginBottom: '16px' }}>建立新訓練任務</h3>
+            <h3 style={{ marginBottom: '16px' }}>建立參數搜尋任務</h3>
             <form onSubmit={handleCreateJob}>
               <div style={{ marginBottom: '16px' }}>
                 <label
@@ -692,7 +701,7 @@ export default function TrainingPage() {
                 </p>
               )}
               <button type="submit" className="btn btn-primary" disabled={creating}>
-                {creating ? '建立中...' : '建立任務'}
+                {creating ? '建立中...' : '建立參數搜尋'}
               </button>
             </form>
           </div>
@@ -738,7 +747,7 @@ export default function TrainingPage() {
         ) : jobs.length === 0 ? (
           error ? null : (
             <div className="card" style={{ textAlign: 'center', padding: '60px' }}>
-              <p style={{ color: 'var(--text-secondary)', margin: 0 }}>尚無訓練任務</p>
+              <p style={{ color: 'var(--text-secondary)', margin: 0 }}>尚無參數搜尋任務</p>
             </div>
           )
         ) : (
@@ -839,6 +848,11 @@ export default function TrainingPage() {
                         <pre style={{ margin: 0, fontSize: '13px', whiteSpace: 'pre-wrap' }}>
                           {job.error_details}
                         </pre>
+                        {explainMlFailure(job.error_details) && (
+                          <p data-testid="job-failure-hint" style={{ margin: '8px 0 0', fontSize: '13px', color: 'var(--text-primary)' }}>
+                            這代表什麼：{explainMlFailure(job.error_details)}
+                          </p>
+                        )}
                       </div>
                     )}
                     <h4 style={{ marginBottom: '8px', fontSize: '14px', color: 'var(--text-secondary)' }}>參數網格</h4>
@@ -942,6 +956,24 @@ export default function TrainingPage() {
 
           <div className="disclaimer" style={{ marginBottom: '24px' }}>
             <strong>提醒：</strong>目前資料來源為模擬數據（演示模式），即使標的代碼是真實股票，價格仍是合成資料。模型結果僅供研究流程驗證，不代表真實市場績效。
+          </div>
+
+          <div
+            data-testid="ml-prerequisites"
+            className="card"
+            style={{ marginBottom: '24px', padding: '16px' }}
+          >
+            <h3 style={{ margin: '0 0 8px', fontSize: '15px' }}>開始訓練前，系統會檢查這些條件</h3>
+            <p style={{ margin: '0 0 10px', color: 'var(--text-secondary)', fontSize: '13px' }}>
+              以下為目前後端在送出訓練或最新預測時實際檢查的條件；不足時請求會被拒絕，不會建立訓練任務或執行預測。
+            </p>
+            <ul style={{ margin: 0, paddingLeft: '20px', fontSize: '13px', color: 'var(--text-primary)', lineHeight: 1.7 }}>
+              <li>該標的至少要有 <strong>60 根日線</strong>，且能整理出至少 <strong>30 筆有效特徵</strong>。</li>
+              <li>資料要能按時間切分為訓練 / 驗證 / 測試，且至少各 <strong>10 / 5 / 5</strong> 筆。</li>
+              <li>資料需有已知的日期範圍；沒有日期就無法依時間順序切分。</li>
+              <li>每次訓練消耗 <strong>1 個 ai_usage 額度</strong>；每次「預測最新」再消耗 1 個，額度不足會被拒絕。</li>
+              <li>訓練由背景 worker 執行，不是在你開啟頁面時即時完成；若長時間停在排隊，表示 worker 未運行。</li>
+            </ul>
           </div>
 
           {mlLoadError && (
