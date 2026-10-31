@@ -22,6 +22,7 @@ from app.api.training import router as training_router
 from app.api.kill_switches import router as kill_switches_router
 from app.api.instruments import router as instruments_router
 from app.api.crypto_market import router as crypto_market_router
+from app.api.crypto_paper import router as crypto_paper_router
 from app.api.intraday_market import router as intraday_market_router
 from app.api.ml_training import router as ml_training_router
 from app.api.execution_agent import router as execution_agent_router
@@ -40,6 +41,7 @@ v1_router.include_router(brand_router)
 v1_router.include_router(demo_assets_router)
 v1_router.include_router(instruments_router)
 v1_router.include_router(crypto_market_router)
+v1_router.include_router(crypto_paper_router)
 v1_router.include_router(intraday_market_router)
 v1_router.include_router(ml_training_router)
 v1_router.include_router(experiments_router)
