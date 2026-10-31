@@ -201,12 +201,27 @@ class TestProviderRegistry:
         provider = get_data_provider()
         assert provider.provider_id == "demo"
 
-    def test_get_data_provider_unknown_raises(self, monkeypatch):
+    def test_get_data_provider_unknown_is_fail_closed_stub(self, monkeypatch):
+        # An unknown/unconfigured provider name is a deployment state, not a
+        # boot error: the registry returns a stub that refuses new data rather
+        # than raising or silently substituting demo bars.
         monkeypatch.setenv("DATA_PROVIDER", "nonexistent")
         from app.config import get_settings
+        from app.providers.data_provider import ProviderNotConfiguredError
+        from app.providers.provider_registry import (
+            UnconfiguredDataProvider,
+            is_provider_configured,
+        )
+
         get_settings.cache_clear()
-        with pytest.raises(ValueError, match="Unknown data provider"):
-            get_data_provider()
+        provider = get_data_provider()
+        assert isinstance(provider, UnconfiguredDataProvider)
+        assert provider.provider_id == "nonexistent"
+        assert provider.is_available() is False
+        assert provider.feed_mode == "unavailable"
+        assert is_provider_configured(provider) is False
+        with pytest.raises(ProviderNotConfiguredError, match="not configured"):
+            provider.get_bars("US:AAPL", "2025-01-02", "2025-01-03")
         monkeypatch.setenv("DATA_PROVIDER", "demo")
         get_settings.cache_clear()
 
