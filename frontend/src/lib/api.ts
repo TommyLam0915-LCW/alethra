@@ -12,10 +12,33 @@ export const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost
 const API_URL = API_BASE_URL;
 
 export class ApiError extends Error {
-  constructor(message: string, public status: number, public detail?: unknown) {
+  status: number;
+  detail?: unknown;
+  /**
+   * Server-generated correlation id for 5xx responses. Absent means this
+   * response did not supply one, not that the server has no record.
+   */
+  requestId?: string;
+
+  constructor(message: string, status: number, detail?: unknown, requestId?: string) {
     super(message);
     this.name = 'ApiError';
+    this.status = status;
+    this.detail = detail;
+    this.requestId = requestId;
   }
+}
+
+// Server errors carry the id both in the body and in X-Request-ID. Read the
+// body first (works even behind a proxy that strips unknown headers), then
+// fall back to the header. This is a display value only; it is never sent back.
+function requestIdOf(payload: unknown, response: Response): string | undefined {
+  if (payload && typeof payload === 'object') {
+    const value = (payload as { request_id?: unknown }).request_id;
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  const header = response.headers.get('X-Request-ID');
+  return header && header.trim() ? header.trim() : undefined;
 }
 
 // FastAPI's `detail` is a string for HTTPException but an object or a list for
@@ -52,11 +75,17 @@ export function formatErrorDetail(detail: unknown): string {
 // page (and any unsaved input) alive. The credential endpoints are excluded, a
 // failed renewal is rate-limited so queued requests cannot spray attempts, and
 // the caller retries at most once, so nothing can loop.
-const NO_CANDIDATE_RENEWAL = [
+// Credential endpoints answer 401 for a normal "wrong password / mode off";
+// that is not an expired session, so they neither renew nor clear the session.
+const CREDENTIAL_ENDPOINTS = [
   '/api/auth/login',
   '/api/auth/register',
   '/api/auth/candidate-session',
 ];
+
+function isCredentialEndpoint(endpoint: string): boolean {
+  return CREDENTIAL_ENDPOINTS.some((path) => endpoint.startsWith(path));
+}
 
 let candidateRenewal: Promise<string | null> | null = null;
 let candidateRenewalBlockedUntil = 0;
@@ -116,16 +145,19 @@ async function authorizedFetch(
     return fetch(`${API_URL}${endpoint}`, { ...options, headers });
   };
 
+  const credentialEndpoint = isCredentialEndpoint(endpoint);
   let response = await send(token);
-  if (
-    response.status === 401 &&
-    !NO_CANDIDATE_RENEWAL.some((path) => endpoint.startsWith(path))
-  ) {
+  if (response.status === 401 && !credentialEndpoint) {
     const renewed = await renewCandidateSession();
     if (renewed) response = await send(renewed);
   }
 
   if (response.status === 401) {
+    if (credentialEndpoint) {
+      // Return it so the caller can say "wrong password" instead of clearing
+      // the session and reloading the page over a normal sign-in rejection.
+      return response;
+    }
     if (typeof window !== 'undefined') {
       // The session is over and could not be renewed: drop the dead token and
       // its display marker, then fall back to sign-in (the login page offers
@@ -145,7 +177,12 @@ export async function apiFetch(endpoint: string, options: RequestInit = {}) {
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({ detail: 'Request failed' }));
-    throw new ApiError(formatErrorDetail(error.detail), response.status, error.detail);
+    throw new ApiError(
+      formatErrorDetail(error.detail),
+      response.status,
+      error.detail,
+      requestIdOf(error, response),
+    );
   }
 
   // 204 No Content carries no body; response.json() would throw on it.
@@ -163,7 +200,12 @@ export async function apiFetchText(endpoint: string, options: RequestInit = {}):
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({ detail: 'Request failed' }));
-    throw new ApiError(formatErrorDetail(error.detail), response.status, error.detail);
+    throw new ApiError(
+      formatErrorDetail(error.detail),
+      response.status,
+      error.detail,
+      requestIdOf(error, response),
+    );
   }
 
   return response.text();

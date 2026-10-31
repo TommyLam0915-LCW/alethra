@@ -13,10 +13,11 @@ import {
   parseParameterGridJson,
 } from '../src/lib/userErrors.ts';
 
-function apiError(status, message = 'request failed') {
+function apiError(status, message = 'request failed', requestId) {
   const err = new Error(message);
   err.name = 'ApiError';
   err.status = status;
+  if (requestId !== undefined) err.requestId = requestId;
   return err;
 }
 
@@ -38,6 +39,23 @@ test('login: 5xx is reported as service unavailable, not wrong credentials', () 
   assert.match(result.message, /503/);
   assert.match(result.message, /不是你的帳密問題/);
   assert.doesNotMatch(result.message, /upstream down/);
+});
+
+test('login: a server reference number is exposed for quoting, not for retrying', () => {
+  const result = classifyLoginError(apiError(503, 'upstream down', 'body-id-123'));
+  assert.equal(result.kind, 'service_unavailable');
+  assert.equal(result.reference, 'body-id-123');
+  assert.match(result.message, /不是你的帳密問題/);
+});
+
+test('login: a whitespace-only id is not displayed as a reference', () => {
+  const result = classifyLoginError(apiError(500, 'boom', '   '));
+  assert.equal(result.reference, undefined);
+});
+
+test('login: credential and network failures carry no reference', () => {
+  assert.equal(classifyLoginError(apiError(401)).reference, undefined);
+  assert.equal(classifyLoginError(networkError()).reference, undefined);
 });
 
 test('login: a fetch TypeError is a connection failure', () => {

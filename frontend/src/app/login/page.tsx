@@ -203,6 +203,31 @@ export default function LoginPage() {
                 {error.kind === 'invalid_credentials' ? '登入失敗：' : '無法登入：'}
               </strong>{' '}
               {error.message}
+              {error.reference && (
+                <div
+                  data-testid="login-error-reference"
+                  style={{
+                    marginTop: '8px',
+                    fontSize: '12px',
+                    lineHeight: 1.6,
+                    color: 'var(--text-secondary)',
+                  }}
+                >
+                  錯誤參考編號{' '}
+                  <code
+                    style={{
+                      userSelect: 'all',
+                      fontFamily:
+                        'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+                      color: 'var(--text-white)',
+                    }}
+                  >
+                    {error.reference}
+                  </code>
+                  <br />
+                  回報時請附上此編號，讓工程人員對應到這次請求的伺服器紀錄。系統不會自動重試登入。
+                </div>
+              )}
             </div>
           )}
 

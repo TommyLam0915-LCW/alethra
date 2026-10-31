@@ -25,6 +25,12 @@ export interface ClassifiedFailure {
    * back. Callers must tell the user to reload the list instead of resubmitting.
    */
   unconfirmed: boolean;
+  /**
+   * Server-generated id identifying this exact failed request in the server
+   * log. Present only when the response supplied one (server errors). This is a
+   * value to quote back to an operator; it is never used to retry anything.
+   */
+  reference?: string;
 }
 
 function statusOf(err: unknown): number | null {
@@ -45,6 +51,14 @@ function messageOf(err: unknown): string {
   }
   if (typeof err === 'string' && err.trim()) return err.trim();
   return '';
+}
+
+function referenceOf(err: unknown): string | undefined {
+  if (err !== null && typeof err === 'object') {
+    const value = (err as { requestId?: unknown }).requestId;
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return undefined;
 }
 
 function errorNameOf(err: unknown): string {
@@ -93,6 +107,7 @@ export function classifyLoginError(err: unknown): ClassifiedFailure {
       kind: 'service_unavailable',
       message: `登入服務暫時無法使用（伺服器回應 ${status}）。這不是你的帳密問題，請稍後再試；輸入內容已保留。`,
       unconfirmed: false,
+      reference: referenceOf(err),
     };
   }
   if (isNetworkError(err)) {
