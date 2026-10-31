@@ -569,6 +569,48 @@ export const api = {
       return apiFetch(`/api/v1/market/crypto/stored?${qs}`);
     },
   },
+  cryptoPaper: {
+    instruments: () => apiFetch('/api/v1/crypto-paper/instruments'),
+    quote: (params: {
+      instrument_id: string;
+      side: string;
+      quantity: string;
+      interval_minutes: number;
+    }) => {
+      const qs = new URLSearchParams({
+        instrument_id: params.instrument_id,
+        side: params.side,
+        quantity: params.quantity,
+        interval_minutes: String(params.interval_minutes),
+      });
+      return apiFetch(`/api/v1/crypto-paper/quote?${qs}`);
+    },
+    submitOrder: (
+      portfolioId: string,
+      data: {
+        instrument_id: string;
+        interval_minutes: number;
+        side: string;
+        quantity: string;
+        idempotency_key?: string;
+        rationale?: string;
+        expected_outcome?: string;
+      },
+    ) =>
+      apiFetch(`/api/v1/crypto-paper/portfolios/${portfolioId}/orders`, {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    executions: (portfolioId: string) =>
+      apiFetch(`/api/v1/crypto-paper/portfolios/${portfolioId}/executions`),
+    executionsCsv: (portfolioId: string) =>
+      apiFetchText(`/api/v1/crypto-paper/portfolios/${portfolioId}/executions?format=csv`),
+    seedFixture: (intervalMinutes = 1) =>
+      apiFetch('/api/v1/crypto-paper/admin/fixture', {
+        method: 'POST',
+        body: JSON.stringify({ interval_minutes: intervalMinutes }),
+      }),
+  },
   instruments: {
     list: (market?: string, assetType?: string, q?: string, limit?: number) => {
       const qs = new URLSearchParams();

@@ -189,6 +189,7 @@ export type CryptoConnectionState =
   | 'reconnecting'
   | 'stale'
   | 'paused'
+  | 'budget_limited'
   | 'unavailable';
 
 export interface ConnectionView {
@@ -227,6 +228,12 @@ const CONNECTION_VIEWS: Record<CryptoConnectionState, ConnectionView> = {
     tone: 'warn',
     label: 'Paused',
     detail: 'Updates are paused by you. The chart stays exactly as it was.',
+  },
+  budget_limited: {
+    tone: 'warn',
+    label: 'Updates paused (local budget)',
+    detail:
+      'The local upstream request budget is spent. No further venue reads are sent until the budget window resets or an operator raises it; stored candles stay readable, and "Check now" issues one bounded read.',
   },
   unavailable: {
     tone: 'bad',
@@ -308,6 +315,9 @@ export function describeVenueRefusal(status: number | null, reason?: string | nu
   }
   if (reason === 'venue_rejected_request') {
     return 'The venue rejected the request. No substitute prices are shown.';
+  }
+  if (reason === 'budget_exhausted') {
+    return 'The local upstream request budget is spent, so no new venue read was sent. This is a local guard, not a venue limit; stored candles stay readable and automatic polling is paused.';
   }
   return 'The market-data request failed. No substitute prices are shown.';
 }

@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import AppShell from '@/components/shell/AppShell';
 import CandleChart, { type CandleChartRow } from '@/components/market/CandleChart';
+import CryptoPaperPanel from '@/components/market/CryptoPaperPanel';
 import { ApiError, api } from '@/lib/api';
 import { formatDateTime } from '@/lib/format';
 import {
@@ -108,6 +109,7 @@ export default function CryptoMarketPage() {
   const [paused, setPaused] = useState(false);
   const [hidden, setHidden] = useState(false);
   const [barEvent, setBarEvent] = useState<BarEvent | null>(null);
+  const [budgetFrozen, setBudgetFrozen] = useState(false);
 
   const requestRef = useRef(0);
   const activeKeyRef = useRef('');
@@ -159,6 +161,7 @@ export default function CryptoMarketPage() {
       setPayload(null);
       setError(null);
       setBarEvent(null);
+      setBudgetFrozen(false);
       setLoading(false);
       previousCompletedRef.current = null;
       failureRef.current = 0;
@@ -185,6 +188,7 @@ export default function CryptoMarketPage() {
         previousCompletedRef.current = data.completed.map((candle) => candle.open_time);
         setPayload(data);
         setError(null);
+        setBudgetFrozen(false);
         failureRef.current = 0;
         setBarEvent({
           baseline,
@@ -207,7 +211,15 @@ export default function CryptoMarketPage() {
         if (cancelled || requestRef.current !== requestId) return;
         failureRef.current += 1;
         const status = err instanceof ApiError ? err.status : null;
-        setError(describeVenueRefusal(status, refusalReason(err)));
+        const reason = refusalReason(err);
+        setError(describeVenueRefusal(status, reason));
+        // An exhausted local budget is not a transient venue failure: retrying
+        // in a loop would only log more refusals. Freeze until the user asks
+        // for one bounded read with "Check now".
+        if (reason === 'budget_exhausted') {
+          setBudgetFrozen(true);
+          return;
+        }
         const delay = nextPollDelayMs({
           hidden,
           paused,
@@ -262,19 +274,21 @@ export default function CryptoMarketPage() {
   const connectionState: CryptoConnectionState =
     hidden || paused
       ? 'paused'
-      : error
-        ? payload
-          ? 'reconnecting'
-          : 'unavailable'
-        : loading && !payload
-          ? 'connecting'
-          : payload
-            ? payload.mode === 'disconnected'
-              ? 'unavailable'
-              : payload.mode === 'stale' || payload.integrity.is_stale
-                ? 'stale'
-                : 'connected'
-            : 'idle';
+      : budgetFrozen
+        ? 'budget_limited'
+        : error
+          ? payload
+            ? 'reconnecting'
+            : 'unavailable'
+          : loading && !payload
+            ? 'connecting'
+            : payload
+              ? payload.mode === 'disconnected'
+                ? 'unavailable'
+                : payload.mode === 'stale' || payload.integrity.is_stale
+                  ? 'stale'
+                  : 'connected'
+              : 'idle';
   const connectionView = describeConnection(connectionState);
   const connectionDetail = hidden
     ? 'Tab hidden. The timer is cleared and no read is scheduled until this tab is visible again.'
@@ -315,7 +329,8 @@ export default function CryptoMarketPage() {
           <h1 style={{ margin: 0, fontSize: 24, fontWeight: 600 }}>Crypto · Kraken spot</h1>
           <p style={{ margin: '6px 0 0', fontSize: 13, color: 'var(--text-secondary)' }}>
             Read-only public candles for one spot pair, refreshed by the backend. Updates are reads,
-            not trades, and orders are never sent from this page.
+            not trades. The paper panel below can book a simulated fill against a completed candle;
+            no order is sent to Kraken and no trading key is read.
           </p>
           <div
             style={{
@@ -384,7 +399,9 @@ export default function CryptoMarketPage() {
                 {payload?.provenance.feed_mode ?? 'public_market_data_only'} · read only
               </Field>
               <Field label="Orders">
-                {overview.orders_supported ? 'Supported' : 'Not supported from this lane'}
+                {overview.orders_supported
+                  ? 'Venue orders supported'
+                  : 'Simulated paper orders only — no venue order is sent'}
               </Field>
               <Field label="Data as of (UTC)">
                 <span data-testid="crypto-data-as-of" className="num">
@@ -688,6 +705,16 @@ export default function CryptoMarketPage() {
             </div>
           )}
         </section>
+
+        {instrumentId && (
+          <CryptoPaperPanel
+            instrumentId={instrumentId}
+            instrumentLabel={instrument?.pair ?? 'BTC/USD'}
+            pricePrecision={payload?.instrument.price_precision}
+            intervalLabel={interval}
+            intervals={intervalOptions}
+          />
+        )}
       </div>
     </AppShell>
   );
