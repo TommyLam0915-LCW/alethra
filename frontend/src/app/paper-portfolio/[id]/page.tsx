@@ -230,7 +230,13 @@ export default function PaperPortfolioDetailPage() {
   };
 
   const handleRetire = async () => {
-    if (!confirm('Retire this portfolio? A retired portfolio can no longer be changed.')) return;
+    if (
+      !confirm(
+        'Retire this portfolio? This cannot be undone and the portfolio can no longer be changed. ' +
+          'Retiring only changes status: no position is sold, no order is placed, and holdings and cash stay as they are.',
+      )
+    )
+      return;
     try {
       const p = await api.paperPortfolio.retire(portfolioId);
       setPortfolio(p);

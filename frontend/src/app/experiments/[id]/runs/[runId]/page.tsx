@@ -553,7 +553,7 @@ export default function RunDetailPage() {
           <h3 style={{ margin: '0 0 12px', fontSize: '15px' }}>Methodology and limitations</h3>
           {methodology ? (
             <div style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
-              {capturedParameters && (
+              {capturedParameters ? (
                 <div style={{ marginBottom: '12px' }} data-testid="run-captured-parameters">
                   <div style={{ fontWeight: 600, marginBottom: '4px' }}>Parameters this run recorded</div>
                   <div style={{ display: 'grid', gridTemplateColumns: '160px 1fr', gap: '4px 16px' }}>
@@ -581,6 +581,11 @@ export default function RunDetailPage() {
                     experiment&apos;s current version. Two runs with different values here really did use different
                     settings.
                   </p>
+                </div>
+              ) : (
+                <div style={{ marginBottom: '12px' }} data-testid="run-captured-parameters-missing">
+                  <div style={{ fontWeight: 600, marginBottom: '4px' }}>Parameters this run recorded</div>
+                  <div>Not recorded for this run.</div>
                 </div>
               )}
               {convention && (

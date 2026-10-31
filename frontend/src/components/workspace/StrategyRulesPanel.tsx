@@ -3,6 +3,7 @@
 import type { ReplaySession } from './ReplayController';
 import { NOT_PROVIDED, type RulesState } from './strategyRules';
 import { label, SESSION_STATUS_LABELS } from '@/lib/copy';
+import { formatRatePercent } from '@/lib/format';
 
 function formatScalar(value: unknown): string {
   if (value === null || value === undefined || value === '') return NOT_PROVIDED;
@@ -10,6 +11,14 @@ function formatScalar(value: unknown): string {
   if (typeof value === 'number') return String(value);
   if (typeof value === 'string') return value;
   return formatValue(value);
+}
+
+/** Rates are stored as fractions; show the percent used elsewhere plus the raw stored value. */
+function formatRate(value: unknown): string {
+  if (value === null || value === undefined || value === '') return NOT_PROVIDED;
+  const rate = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(rate)) return formatScalar(value);
+  return `${formatRatePercent(rate)} (${String(value)})`;
 }
 
 /** Parameters arrive as nested objects/arrays; they are printed as-is, never expanded. */
@@ -143,8 +152,8 @@ export default function StrategyRulesPanel({
               />
               <Row label="Timeframe (rules)" value={formatScalar(spec?.timeframe)} testId="rules-spec-timeframe" />
               <Row label="Starting virtual cash" value={formatScalar(spec?.initial_cash)} testId="rules-initial-cash" />
-              <Row label="Commission rate" value={formatScalar(spec?.commission_rate)} testId="rules-commission-rate" />
-              <Row label="Slippage rate" value={formatScalar(spec?.slippage_rate)} testId="rules-slippage-rate" />
+              <Row label="Commission rate" value={formatRate(spec?.commission_rate)} testId="rules-commission-rate" />
+              <Row label="Slippage rate" value={formatRate(spec?.slippage_rate)} testId="rules-slippage-rate" />
               <Row label="Risk parameters" value={formatValue(spec?.risk_parameters)} testId="rules-risk-parameters" />
               <Row label="Signal parameters" value={formatValue(spec?.signal_parameters)} testId="rules-signal-parameters" />
               {remaining.map(([key, value]) => (

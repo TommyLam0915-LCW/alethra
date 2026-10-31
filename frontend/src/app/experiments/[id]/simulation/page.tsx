@@ -312,7 +312,13 @@ export default function SimulationPage() {
 
   const handleRetire = async () => {
     if (!session?.id) return;
-    if (!confirm('Retire this replay session? A retired session cannot be advanced further.')) return;
+    if (
+      !confirm(
+        'Retire this replay session? This cannot be undone and the session cannot be advanced further. ' +
+          'Retiring only changes status: no position is sold, no order is placed, and paper holdings stay as they are.',
+      )
+    )
+      return;
     try {
       const s = await api.simulations.retire(session.id);
       setSession(s);
