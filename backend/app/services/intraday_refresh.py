@@ -5,7 +5,7 @@ thing that spends a provider quota. Every upstream call happens here, behind
 
 * a per-series lock so concurrent readers coalesce into one request,
 * a minimum refresh interval, so N tabs and N users collapse to one fetch,
-* rolling hourly/daily request budgets kept by this process, and
+* rolling hourly/daily request budgets kept in the shared database, and
 * failure backoff that honours the provider's Retry-After.
 
 The service only ever returns data it actually has. A missing key, an
@@ -20,7 +20,10 @@ import threading
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
+from sqlalchemy import text
+
 from app.config import get_settings
+from app.models.rate_limit import RateLimitCounter
 from app.data.real_instruments import get_instrument_by_id, get_provider_mapping
 from app.lib.error_safety import safe_error_message, safe_provider_status
 from app.providers.data_provider import (
@@ -47,10 +50,12 @@ _MIN_REFRESH_SECONDS = 60
 _STATE_LOCK = threading.Lock()
 _SERIES_LOCKS: Dict[Tuple[str, str, str], threading.Lock] = {}
 _STATES: Dict[Tuple[str, str, str], "_SeriesState"] = {}
-# Every logical upstream attempt made by this process, newest last. A process
-# restart forgets it, so it is a local guard, not a statement about the
-# provider's real quota (reported as such in the API).
-_ATTEMPTS: List[datetime] = []
+
+# Upstream attempts are counted in the shared ``rate_limit_counters`` table so
+# that N processes (web workers, a second stack against the same database)
+# consume one budget. A per-process list cannot see its siblings' spend.
+_BUDGET_IDENTITY = "upstream:intraday_rest"
+_BUDGET_CATEGORY = "intraday_upstream_attempt"
 
 
 class _SeriesState:
@@ -67,11 +72,10 @@ class _SeriesState:
 
 
 def reset_intraday_state() -> None:
-    """Clear process-local budget and series state (used by tests)."""
+    """Clear process-local series state (used by tests)."""
     with _STATE_LOCK:
         _SERIES_LOCKS.clear()
         _STATES.clear()
-        _ATTEMPTS.clear()
 
 
 def _now() -> datetime:
@@ -100,17 +104,12 @@ def _state(key: Tuple[str, str, str]) -> _SeriesState:
         return state
 
 
-def _budget_snapshot(now: datetime) -> Dict[str, int]:
-    with _STATE_LOCK:
-        cutoff = now - timedelta(hours=24)
-        _ATTEMPTS[:] = [t for t in _ATTEMPTS if t >= cutoff]
-        hour_used = sum(1 for t in _ATTEMPTS if t >= now - timedelta(hours=1))
-        return {"hour_used": hour_used, "day_used": len(_ATTEMPTS)}
-
-
-def _record_attempt(now: datetime) -> None:
-    with _STATE_LOCK:
-        _ATTEMPTS.append(now)
+def _hour_bucket(now: datetime) -> datetime:
+    """Naive UTC hour boundary, matching how ``rate_limit_counters`` stores time."""
+    aware = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+    return aware.astimezone(timezone.utc).replace(
+        tzinfo=None, minute=0, second=0, microsecond=0
+    )
 
 
 class IntradayRefreshService:
@@ -118,6 +117,61 @@ class IntradayRefreshService:
         self.db = db
         self.storage = MarketDataStorage(db)
         self.settings = get_settings()
+
+    # ---- shared upstream budget -----------------------------------------
+
+    def _budget_snapshot(self, now: datetime) -> Dict[str, int]:
+        """Hour/day attempts recorded by *any* process against this database."""
+        if self.db is None:
+            raise RuntimeError("intraday budget requires a database session")
+        cutoff = _hour_bucket(now) - timedelta(hours=23)
+        current_hour = _hour_bucket(now)
+        rows = (
+            self.db.query(RateLimitCounter.window_start, RateLimitCounter.request_count)
+            .filter(
+                RateLimitCounter.identity_key == _BUDGET_IDENTITY,
+                RateLimitCounter.route_category == _BUDGET_CATEGORY,
+                RateLimitCounter.window_start >= cutoff,
+            )
+            .all()
+        )
+        day_used = sum(int(count) for _, count in rows)
+        hour_used = sum(
+            int(count)
+            for start, count in rows
+            if start.replace(tzinfo=None) == current_hour
+        )
+        return {"hour_used": hour_used, "day_used": day_used}
+
+    def _record_attempt(self, now: datetime) -> None:
+        """Atomically count one upstream attempt, visible to every process."""
+        bucket = _hour_bucket(now)
+        import uuid
+
+        self.db.execute(
+            text(
+                """
+                INSERT INTO rate_limit_counters
+                    (id, identity_key, route_category, window_start, request_count, created_at, updated_at)
+                VALUES
+                    (:id, :identity, :category, :window_start, 1, :now, :now)
+                ON CONFLICT (identity_key, route_category, window_start)
+                DO UPDATE SET
+                    request_count = rate_limit_counters.request_count + 1,
+                    updated_at = :now
+                """
+            ),
+            {
+                "id": str(uuid.uuid4()),
+                "identity": _BUDGET_IDENTITY,
+                "category": _BUDGET_CATEGORY,
+                "window_start": bucket,
+                "now": bucket,
+            },
+        )
+        # The attempt is real whether or not the upstream call succeeds, so it
+        # is committed before the request is sent; a rollback must not refund it.
+        self.db.commit()
 
     # ---- configuration / capability -------------------------------------
 
@@ -140,7 +194,7 @@ class IntradayRefreshService:
             else []
         )
         now = _now()
-        budget = _budget_snapshot(now)
+        budget = self._budget_snapshot(now)
         cap = {
             "lane": "intraday_rest",
             "enabled": settings.intraday_enabled,
@@ -166,7 +220,7 @@ class IntradayRefreshService:
                 **budget,
                 "hour_limit": settings.intraday_max_requests_per_hour,
                 "day_limit": settings.intraday_max_requests_per_day,
-                "scope": "process",
+                "scope": "database",
             },
             "min_refresh_seconds": _MIN_REFRESH_SECONDS,
         }
@@ -251,7 +305,7 @@ class IntradayRefreshService:
                 US_MARKET_STRUCTURE,
                 now=current,
             )
-            budget = _budget_snapshot(current)
+            budget = self._budget_snapshot(current)
             status = refresh["status"]
             expected = latest_expected_open(
                 US_MARKET_STRUCTURE,
@@ -280,7 +334,7 @@ class IntradayRefreshService:
                         **budget,
                         "hour_limit": self.settings.intraday_max_requests_per_hour,
                         "day_limit": self.settings.intraday_max_requests_per_day,
-                        "scope": "process",
+                        "scope": "database",
                     },
                 },
                 "budget": budget,
@@ -350,7 +404,7 @@ class IntradayRefreshService:
                 error=state.last_error,
             )
 
-        budget = _budget_snapshot(now)
+        budget = self._budget_snapshot(now)
         if budget["hour_used"] >= self.settings.intraday_max_requests_per_hour:
             return outcome(
                 "budget_exhausted",
@@ -374,7 +428,7 @@ class IntradayRefreshService:
             return outcome("symbol_not_mapped")
 
         state.last_attempt_at = now
-        _record_attempt(now)
+        self._record_attempt(now)
         try:
             bars = provider.get_intraday_bars(
                 mapping.provider_symbol,

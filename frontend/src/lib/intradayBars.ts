@@ -172,7 +172,7 @@ export type ChartUpdatePlan =
  */
 export function planChartUpdate(
   previousTimes: number[],
-  next: IntradayCandle[],
+  next: { open_time: string }[],
   identityChanged: boolean,
 ): ChartUpdatePlan {
   const times = next

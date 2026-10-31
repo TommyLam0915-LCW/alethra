@@ -270,7 +270,7 @@ export default function IntradayMarketPage() {
               <Field label="Minimum refresh">
                 {capability.refresh_seconds}s on the backend (floor {capability.min_refresh_seconds}s)
               </Field>
-              <Field label="Process request budget">
+              <Field label="Upstream request budget (shared via database)">
                 {capability.budget.hour_used}/{capability.budget.hour_limit} per hour,{' '}
                 {capability.budget.day_used}/{capability.budget.day_limit} per day
               </Field>

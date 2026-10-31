@@ -162,9 +162,13 @@ def _resolve(service: IntradayRefreshService, instrument_id: Optional[str], inte
 
 
 @router.get("/market/intraday/capability")
-def intraday_capability():
-    """What this lane can and cannot do right now, without spending a request."""
-    service = IntradayRefreshService(db=None)
+def intraday_capability(db: Session = Depends(get_db)):
+    """What this lane can and cannot do right now, without spending a request.
+
+    The budget shown is read from the shared database counter, so it reports
+    the spend of every process against this database, not just this worker.
+    """
+    service = IntradayRefreshService(db)
     return service.capability()
 
 
@@ -205,8 +209,8 @@ def intraday_refresh_now(
 
     Same bounded path as the read endpoint, but it is the only route a caller
     can use to force a fetch; it is gated by admin auth, the shared refresh rate
-    limit, the per-series minimum interval and the process budget. The forming
-    bar is stored as non-final and can never be frozen as a closed bar.
+    limit, the per-series minimum interval and the shared database budget. The
+    forming bar is stored as non-final and can never be frozen as a closed bar.
     """
     service = IntradayRefreshService(db)
     instrument = _resolve(service, instrument_id, interval)

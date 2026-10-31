@@ -376,7 +376,7 @@ def test_concurrent_reads_coalesce_into_one_upstream_call(db, monkeypatch):
     assert second["refresh"]["upstream_requests"] == 0
 
 
-def test_process_budget_stops_further_requests(db, monkeypatch):
+def test_shared_budget_stops_further_requests(db, monkeypatch):
     provider = FakeIntradayProvider([bar(3)])
     configure(monkeypatch, provider, intraday_max_requests_per_hour=1)
     service = _service(db)
@@ -384,7 +384,32 @@ def test_process_budget_stops_further_requests(db, monkeypatch):
     blocked = service.ensure_series(instrument_id=INSTRUMENT, interval="1min", now=utc(ts(14, 7, 30)))
     assert blocked["status"] == "budget_exhausted"
     assert blocked["refresh"]["attempted_upstream"] is False
+    assert blocked["refresh"]["budget"]["scope"] == "database"
     assert len(provider.calls) == 1
+
+
+def test_budget_spent_by_one_process_blocks_another(db, monkeypatch):
+    """Two sessions model two workers sharing one database.
+
+    A process-local list cannot see its sibling's spend, so the remainder of
+    the hourly budget must come from the shared counter table.
+    """
+    provider = FakeIntradayProvider([bar(3), bar(4)])
+    configure(monkeypatch, provider, intraday_max_requests_per_hour=1)
+    other_worker = TestSession()
+    try:
+        first = _service(db).ensure_series(
+            instrument_id=INSTRUMENT, interval="1min", now=utc(ts(14, 5, 30))
+        )
+        sibling = _service(other_worker).ensure_series(
+            instrument_id=INSTRUMENT, interval="1min", now=utc(ts(14, 7, 30))
+        )
+    finally:
+        other_worker.close()
+    assert first["status"] == "new_bar"
+    assert sibling["status"] == "budget_exhausted"
+    assert sibling["refresh"]["attempted_upstream"] is False
+    assert len(provider.calls) == 1, "one shared budget, not one budget per process"
 
 
 def test_rate_limit_honours_retry_after_and_backs_off(db, monkeypatch):
