@@ -17,10 +17,17 @@ import re
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from urllib.parse import urlsplit
 
 CANDIDATE_DB_PREFIX = "alethra_personal_e2e_candidate"
 CANDIDATE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{2,40}$")
+
+# The worker writes "idle" between polls and "working" while a job runs. Any
+# other state ("error", "stopped") means it will not pick up queued work, even
+# if the heartbeat file itself is fresh.
+WORKER_HEALTHY_STATES = ("idle", "working")
 
 PROFILE_KEYS = (
     "CANDIDATE_ID",
@@ -346,20 +353,79 @@ def _process_identity(pid, ps_bin):
     return {"alive": alive, "cmdline": cmdline.strip(), "database_url": database_url}
 
 
-def _heartbeat_ok(path, worker_pid, max_age_seconds=60):
+def _load_heartbeat(path):
     if not os.path.exists(path):
-        return False, "worker heartbeat file is missing"
+        return None, "worker heartbeat file is missing"
     try:
         with open(path, encoding="utf-8") as handle:
             beat = json.load(handle)
     except (OSError, ValueError) as exc:
-        return False, f"worker heartbeat is unreadable ({type(exc).__name__})"
+        return None, f"worker heartbeat is unreadable ({type(exc).__name__})"
+    if not isinstance(beat, dict):
+        return None, "worker heartbeat is not a JSON object"
+    return beat, ""
+
+
+def _heartbeat_ok(path, worker_pid, max_age_seconds=60, require_state_ok=False):
+    beat, problem = _load_heartbeat(path)
+    if beat is None:
+        return False, problem
     if str(beat.get("pid")) != str(worker_pid):
         return False, f"heartbeat pid {beat.get('pid')} does not match worker pid {worker_pid}"
     age = time.time() - os.path.getmtime(path)
     if age > max_age_seconds:
         return False, f"worker heartbeat is {age:.0f}s old"
+    if require_state_ok:
+        state = str(beat.get("state") or "unknown")
+        if state not in WORKER_HEALTHY_STATES:
+            # The heartbeat's `error` text can embed connection details, so only
+            # the state is reported here; the worker log has the sanitised cause.
+            return False, f"worker heartbeat reports state {state!r}; details are in the worker log"
     return True, ""
+
+
+def evaluate_worker_health(path, worker_pid, max_age_seconds=60):
+    """Distinguish "process alive" from "worker able to take jobs"."""
+    ok, reason = _heartbeat_ok(path, worker_pid, max_age_seconds, require_state_ok=True)
+    beat, _ = _load_heartbeat(path)
+    state = str((beat or {}).get("state") or "unknown")
+    if not ok:
+        return {"WORKER": "unavailable", "STATE": state, "REASON": reason}
+    return {"WORKER": "ready", "STATE": state, "REASON": ""}
+
+
+def check_ready(url, timeout=3.0):
+    """One bounded readiness probe against /health/ready.
+
+    Returns the failed dependency names only. The endpoint's per-check `error`
+    text is never echoed, so a refusal cannot leak SQL or connection details.
+    """
+    payload = {}
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            payload = json.loads(resp.read().decode("utf-8") or "{}")
+        reachable = True
+    except urllib.error.HTTPError as exc:
+        reachable = True
+        try:
+            payload = json.loads(exc.read().decode("utf-8") or "{}")
+        except (ValueError, OSError):
+            payload = {}
+    except (urllib.error.URLError, OSError, ValueError):
+        return {"READY": "no", "STATUS": "unreachable", "FAILED": "endpoint"}
+    if not isinstance(payload, dict):
+        payload = {}
+    status = str(payload.get("status") or ("unreachable" if not reachable else "unknown"))
+    checks = payload.get("checks") if isinstance(payload.get("checks"), dict) else {}
+    failed = sorted(
+        name for name, value in checks.items()
+        if isinstance(value, dict) and value.get("status") == "unavailable"
+    )
+    return {
+        "READY": "yes" if status == "ready" else "no",
+        "STATUS": status,
+        "FAILED": ",".join(failed) or "none",
+    }
 
 
 def _cmd_plan(args):
@@ -411,11 +477,25 @@ def _cmd_verify_runtime(args):
         entry.update({"role": "frontend", "pid": int(args.frontend_pid)})
         entries.append(entry)
     result = verify_runtime_binding(profile, entries)
-    ok, reason = _heartbeat_ok(args.heartbeat, args.worker_pid)
+    ok, reason = _heartbeat_ok(args.heartbeat, args.worker_pid, require_state_ok=True)
     if not ok:
         raise CandidateIdentityError(reason)
     for key, value in result.items():
         print(f"{key}={value}")
+
+
+def _cmd_check_heartbeat(args):
+    result = evaluate_worker_health(args.heartbeat, args.worker_pid, args.max_age_seconds)
+    for key, value in result.items():
+        print(f"{key}={value}")
+    return 0 if result["WORKER"] == "ready" else 3
+
+
+def _cmd_check_ready(args):
+    result = check_ready(args.url, args.timeout)
+    for key, value in result.items():
+        print(f"{key}={value}")
+    return 0 if result["READY"] == "yes" else 3
 
 
 def _cmd_check_process(args):
@@ -477,6 +557,17 @@ def main(argv=None):
     check.add_argument("--pid", required=True)
     check.set_defaults(func=_cmd_check_process)
 
+    heartbeat = sub.add_parser("check-heartbeat")
+    heartbeat.add_argument("--heartbeat", required=True)
+    heartbeat.add_argument("--worker-pid", required=True)
+    heartbeat.add_argument("--max-age-seconds", type=int, default=60)
+    heartbeat.set_defaults(func=_cmd_check_heartbeat)
+
+    ready = sub.add_parser("check-ready")
+    ready.add_argument("--url", required=True)
+    ready.add_argument("--timeout", type=float, default=3.0)
+    ready.set_defaults(func=_cmd_check_ready)
+
     new_check = sub.add_parser("new-check")
     new_check.add_argument("--candidate-id", required=True)
     new_check.add_argument("--profile", required=True)
@@ -493,11 +584,10 @@ def main(argv=None):
 
     args = parser.parse_args(argv)
     try:
-        args.func(args)
+        return args.func(args) or 0
     except CandidateIdentityError as exc:
         print(f"CANDIDATE IDENTITY ERROR: {exc}", file=sys.stderr)
         return 2
-    return 0
 
 
 if __name__ == "__main__":

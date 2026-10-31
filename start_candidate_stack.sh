@@ -31,6 +31,15 @@
 # Overrides are deliberately rejected during resume when they disagree with the
 # saved profile; change the profile with --new-candidate or --reset instead.
 # This never touches the shared review/runtime containers or their database.
+#
+# Readiness is layered, and each layer has its own exit code so a caller can
+# tell "not started" from "started but unusable":
+#   0  full candidate ready (process + database + schema + worker + frontend)
+#   1  refused or misconfigured (bad profile/credentials/port/override)
+#   2  candidate identity or resume preflight mismatch
+#   3  backend process responds but /health/ready says the database is not ready
+#   4  worker process is alive but its heartbeat is not in a healthy state
+#   5  frontend did not answer
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -40,7 +49,19 @@ STATE_DIR="${CANDIDATE_STATE_DIR:-$ROOT/.local/candidate}"
 PROFILE="${CANDIDATE_PROFILE:-$STATE_DIR/candidate-profile.env}"
 HELPER="$ROOT/backend/scripts/candidate_identity.py"
 
-fail() { echo "CANDIDATE SETUP ABORTED: $*" >&2; exit 1; }
+# One operation id per launcher run, so concurrent runs can be told apart in
+# the log files without exposing any identity or credential detail.
+RUN_ID="${CANDIDATE_RUN_ID:-$(date '+%Y%m%dT%H%M%S%z')-$$}"
+
+log() { printf '[%s] [%s] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$RUN_ID" "$*"; }
+
+fail_code() {
+  local code="$1"; shift
+  echo "CANDIDATE SETUP ABORTED (exit $code): $*" >&2
+  exit "$code"
+}
+
+fail() { fail_code 1 "$@"; }
 
 find_python() {
   if [ -n "${CANDIDATE_PYTHON:-}" ]; then echo "$CANDIDATE_PYTHON"; return; fi
@@ -298,7 +319,7 @@ process_state() {
 }
 
 wait_http() {
-  local url="$1" label="$2" tries="${3:-90}"
+  local url="$1" label="$2" tries="${3:-90}" code="${4:-1}"
   for _ in $(seq 1 "$tries"); do
     if "$PYTHON" - "$url" <<'PY' >/dev/null 2>&1
 import sys, urllib.request
@@ -307,25 +328,39 @@ PY
     then return 0; fi
     sleep 2
   done
-  fail "$label did not answer $url within $((tries * 2))s"
+  fail_code "$code" "$label did not answer $url within $((tries * 2))s"
 }
 
+# Layer 2: the process answering /health (liveness) says nothing about the
+# database. /health/ready is the honest gate, and only its check *names* are
+# reported so a refusal never echoes SQL or connection details.
+wait_backend_ready() {
+  local tries="${1:-30}" out="" failed status
+  for _ in $(seq 1 "$tries"); do
+    if out="$("$PYTHON" "$HELPER" check-ready --url "$BACKEND_ORIGIN/health/ready" 2>&1)"; then
+      return 0
+    fi
+    sleep 2
+  done
+  failed="$(printf '%s\n' "$out" | sed -n 's/^FAILED=//p' | head -1)"
+  status="$(printf '%s\n' "$out" | sed -n 's/^STATUS=//p' | head -1)"
+  fail_code 3 "backend process responds but the candidate database is not ready (status: ${status:-unknown}, failed checks: ${failed:-unknown}); the stack is NOT ready. See $LOG_DIR/backend.log"
+}
+
+# Layer 4: a fresh heartbeat only proves the worker is looping. A worker in
+# "error" (the 2026-10-31 outage) or "stopped" must not be called ready.
 wait_worker_heartbeat() {
-  local pid="$1"
+  local pid="$1" out="" reason
   for _ in $(seq 1 30); do
-    if "$PYTHON" - "$HEARTBEAT_FILE" "$pid" <<'PY' >/dev/null 2>&1
-import json, os, sys, time
-try:
-    beat = json.load(open(sys.argv[1], encoding="utf-8"))
-except Exception:
-    sys.exit(1)
-sys.exit(0 if str(beat.get("pid")) == sys.argv[2] and time.time() - os.path.getmtime(sys.argv[1]) <= 60 else 1)
-PY
-    then return 0; fi
+    if out="$("$PYTHON" "$HELPER" check-heartbeat --heartbeat "$HEARTBEAT_FILE" --worker-pid "$pid" 2>&1)"; then
+      WORKER_STATE="$(printf '%s\n' "$out" | sed -n 's/^STATE=//p' | head -1)"
+      return 0
+    fi
     sleep 1
   done
+  reason="$(printf '%s\n' "$out" | sed -n 's/^REASON=//p' | head -1)"
   tail -20 "$LOG_DIR/worker.log" >&2 || true
-  fail "worker pid $pid did not publish a fresh heartbeat"
+  fail_code 4 "worker pid $pid is alive but not healthy (${reason:-no fresh heartbeat}); the stack is NOT ready"
 }
 
 # --- stack lifecycle ---------------------------------------------------------
@@ -335,7 +370,7 @@ start_backend() {
   if [ -n "$pid" ] && pid_alive "$pid"; then
     state="$(process_state backend "$pid")"
     case "$state" in
-      reuse) echo "reusing backend (pid $pid, identity verified)"; return 0 ;;
+      reuse) echo "reusing backend (pid $pid, identity verified; readiness re-checked below)"; return 0 ;;
       stale) echo "ignoring stale backend pid file ($pid)"; rm -f "$BACKEND_PID_FILE" ;;
       *) fail "${state#mismatch:}" ;;
     esac
@@ -357,7 +392,7 @@ start_worker() {
   if [ -n "$pid" ] && pid_alive "$pid"; then
     state="$(process_state worker "$pid")"
     case "$state" in
-      reuse) echo "reusing resident training worker (pid $pid, identity verified)"; return 0 ;;
+      reuse) echo "reusing resident training worker (pid $pid, identity verified)"; wait_worker_heartbeat "$pid"; return 0 ;;
       stale) echo "ignoring stale worker pid file ($pid)"; rm -f "$WORKER_PID_FILE" ;;
       *) fail "${state#mismatch:}" ;;
     esac
@@ -397,21 +432,20 @@ start_frontend() {
       >"$LOG_DIR/frontend.log" 2>&1 &
     echo $! >"$FRONTEND_PID_FILE"
   )
-  wait_http "$FRONTEND_ORIGIN/login" "frontend"
+  wait_http "$FRONTEND_ORIGIN/login" "frontend" 90 5
 }
 
 write_runtime_identity() {
-  local state
-  state="$(sed -n 's/.*"state": "\([^"]*\)".*/\1/p' "$HEARTBEAT_FILE" 2>/dev/null | head -1)"
   {
     printf 'MODE=%s\n' "$MODE"
-    printf 'STARTED_AT=%s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')"
+    printf 'RUN_ID=%s\n' "$RUN_ID"
+    printf 'STARTED_AT=%s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')"
     printf 'CANDIDATE_PROFILE=%s\n' "$PROFILE"
     printf 'BACKEND_PID=%s\n' "$BACKEND_PID"
     printf 'WORKER_PID=%s\n' "$WORKER_PID"
     printf 'FRONTEND_PID=%s\n' "$FRONTEND_PID"
     printf 'HEARTBEAT_FILE=%s\n' "$HEARTBEAT_FILE"
-    printf 'WORKER_STATE=%s\n' "${state:-unknown}"
+    printf 'WORKER_STATE=%s\n' "${WORKER_STATE:-unknown}"
   } >"$STATE_DIR/runtime-identity.env"
   chmod 600 "$STATE_DIR/runtime-identity.env"
 }
@@ -421,11 +455,16 @@ start_stack() {
   BACKEND_PID_FILE="$LOG_DIR/backend.pid"
   WORKER_PID_FILE="$LOG_DIR/worker.pid"
   FRONTEND_PID_FILE="$LOG_DIR/frontend.pid"
+  WORKER_STATE=""
   export_process_env
   start_backend
   BACKEND_PID="$(pid_from_file "$BACKEND_PID_FILE")"
+  log "stage backend: process responds (pid $BACKEND_PID)"
+  wait_backend_ready
+  log "stage database: /health/ready reports ready"
   start_worker
   WORKER_PID="$(pid_from_file "$WORKER_PID_FILE")"
+  log "stage worker: healthy (pid $WORKER_PID, state ${WORKER_STATE:-unknown})"
   start_frontend
   FRONTEND_PID="$(pid_from_file "$FRONTEND_PID_FILE")"
   identity verify-runtime --profile "$PROFILE" \
@@ -433,8 +472,9 @@ start_stack() {
     --frontend-pid "$FRONTEND_PID" --heartbeat "$HEARTBEAT_FILE" \
     || fail "candidate identity verification failed; the stack is NOT ready"
   # Identity is proven above; these checks only confirm the bound processes serve.
-  wait_http "$BACKEND_ORIGIN/health" "backend" 15
-  wait_http "$FRONTEND_ORIGIN/login" "frontend" 15
+  wait_backend_ready 15
+  wait_http "$FRONTEND_ORIGIN/login" "frontend" 15 5
+  log "stage full-candidate: readiness, worker and frontend all passed"
   write_runtime_identity
   print_ready
 }
@@ -442,6 +482,7 @@ start_stack() {
 print_ready() {
   echo
   echo "Candidate stack ready (candidate $CANDIDATE_ID, database $DB_NAME, mode: $MODE):"
+  echo "  checks   : process=ok  database=ready  schema=$EXPECTED_SCHEMA_HEAD  worker=${WORKER_STATE:-unknown}  frontend=ok"
   echo "  open     : $FRONTEND_ORIGIN/login"
   if [ "${CANDIDATE_PASSWORDLESS_MODE:-off}" = "on" ]; then
     echo "  enter    : $FRONTEND_ORIGIN/   (password-free local test mode - synthetic data; the login form still works)"
@@ -451,7 +492,7 @@ print_ready() {
   echo "  login    : $CANDIDATE_EMAIL   password: $CREDENTIALS_FILE (key CANDIDATE_PASSWORD, never printed)"
   echo "  accounts : empty $CANDIDATE_EMPTY_EMAIL · thin $CANDIDATE_THIN_EMAIL (passwords in the same 0600 file)"
   echo "  backend  : $BACKEND_ORIGIN"
-  echo "  worker   : resident pid $WORKER_PID, heartbeat $HEARTBEAT_FILE (identity verified)"
+  echo "  worker   : resident pid $WORKER_PID, state ${WORKER_STATE:-unknown}, heartbeat $HEARTBEAT_FILE (identity verified)"
   echo "  data     : synthetic only - owner 205 reviewed decisions; thin 5 decisions (3 confirmed); empty account has no data"
   echo "  profile  : $PROFILE (database identity is persisted here, not in runtime-identity.env)"
   echo "  reset    : ./start_candidate_stack.sh --reset   (drops ONLY $DB_NAME and reseeds)"
@@ -474,6 +515,7 @@ resume_mode() {
   require_credentials "$CREDENTIALS_FILE"
   echo "mode: RESUME (saved profile $PROFILE; no migration, seed or credential change)"
   readonly_preflight
+  log "stage schema: $DB_NAME at head $EXPECTED_SCHEMA_HEAD with fixture accounts present"
   import_check
   start_stack
 }

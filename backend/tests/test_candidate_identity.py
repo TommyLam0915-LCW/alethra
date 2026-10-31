@@ -8,6 +8,9 @@ import os
 import shlex
 import subprocess
 import sys
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import pytest
@@ -448,3 +451,145 @@ def test_stop_leaves_a_recycled_pid(tmp_path):
         if process.poll() is None:
             process.kill()
             process.wait(timeout=30)
+
+
+# --- unit: layered readiness -------------------------------------------------
+
+def _heartbeat_file(tmp_path, state="idle", pid=321, age_seconds=0.0, extra=None):
+    path = tmp_path / "worker-heartbeat.json"
+    payload = {"pid": pid, "state": state, "beat_at": "2026-10-31T02:12:58.616407"}
+    payload.update(extra or {})
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    if age_seconds:
+        stamp = time.time() - age_seconds
+        os.utime(path, (stamp, stamp))
+    return path
+
+
+@pytest.mark.parametrize("state", ["idle", "working"])
+def test_worker_health_accepts_a_fresh_healthy_heartbeat(tmp_path, state):
+    path = _heartbeat_file(tmp_path, state=state)
+    assert ci.evaluate_worker_health(str(path), 321) == {
+        "WORKER": "ready", "STATE": state, "REASON": "",
+    }
+
+
+def test_worker_health_rejects_the_outage_heartbeat_and_redacts_details(tmp_path):
+    # The 2026-10-31 shape: a fresh heartbeat whose state is "error".
+    path = _heartbeat_file(
+        tmp_path,
+        state="error",
+        extra={"error": 'connection to server at "127.0.0.1", port 54321 failed: Connection refused'},
+    )
+    result = ci.evaluate_worker_health(str(path), 321)
+    assert result["WORKER"] == "unavailable"
+    assert result["STATE"] == "error"
+    assert "127.0.0.1" not in result["REASON"]
+    assert "54321" not in result["REASON"]
+    assert "connection" not in result["REASON"].lower()
+
+
+def test_worker_health_rejects_stopped_and_stale_heartbeats(tmp_path):
+    stopped = _heartbeat_file(tmp_path, state="stopped")
+    assert ci.evaluate_worker_health(str(stopped), 321)["WORKER"] == "unavailable"
+    stale = _heartbeat_file(tmp_path, state="idle", age_seconds=600)
+    result = ci.evaluate_worker_health(str(stale), 321)
+    assert result["WORKER"] == "unavailable"
+    assert "old" in result["REASON"]
+
+
+def test_worker_health_rejects_a_foreign_pid(tmp_path):
+    path = _heartbeat_file(tmp_path)
+    assert ci.evaluate_worker_health(str(path), 999)["WORKER"] == "unavailable"
+
+
+def test_worker_health_cli_exits_three_when_the_worker_is_in_error(tmp_path):
+    path = _heartbeat_file(tmp_path, state="error")
+    result = subprocess.run(
+        [sys.executable, str(BACKEND_DIR / "scripts" / "candidate_identity.py"),
+         "check-heartbeat", "--heartbeat", str(path), "--worker-pid", "321"],
+        text=True, capture_output=True, timeout=60,
+    )
+    assert result.returncode == 3, result.stderr
+    assert "WORKER=unavailable" in result.stdout
+    assert "STATE=error" in result.stdout
+
+
+class _StubReadiness(BaseHTTPRequestHandler):
+    status_code = 200
+    body = b"{}"
+
+    def do_GET(self):  # noqa: N802 - http.server API
+        self.send_response(self.status_code)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(self.body)
+
+    def log_message(self, *args):
+        return
+
+
+def _serve(payload, status_code):
+    handler = type(
+        "Handler",
+        (_StubReadiness,),
+        {"body": json.dumps(payload).encode(), "status_code": status_code},
+    )
+    server = HTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, f"http://127.0.0.1:{server.server_port}/health/ready"
+
+
+def test_readiness_probe_accepts_a_ready_database():
+    server, url = _serve(
+        {"status": "ready", "checks": {"database": {"status": "connected"}, "redis": {"status": "not_configured"}}},
+        200,
+    )
+    try:
+        assert ci.check_ready(url, timeout=5) == {"READY": "yes", "STATUS": "ready", "FAILED": "none"}
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_readiness_probe_reports_the_failed_check_without_sql_details():
+    payload = {
+        "status": "not_ready",
+        "checks": {
+            "database": {"status": "unavailable", "error": "connection failed: password=secret host=127.0.0.1:54321"},
+            "redis": {"status": "not_configured"},
+        },
+    }
+    server, url = _serve(payload, 503)
+    try:
+        result = ci.check_ready(url, timeout=5)
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert result == {"READY": "no", "STATUS": "not_ready", "FAILED": "database"}
+    assert "secret" not in json.dumps(result)
+    assert "54321" not in json.dumps(result)
+
+
+def test_readiness_probe_cli_exits_three_when_not_ready():
+    server, url = _serve({"status": "not_ready", "checks": {"database": {"status": "unavailable"}}}, 503)
+    try:
+        result = subprocess.run(
+            [sys.executable, str(BACKEND_DIR / "scripts" / "candidate_identity.py"),
+             "check-ready", "--url", url, "--timeout", "5"],
+            text=True, capture_output=True, timeout=60,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert result.returncode == 3, result.stderr
+    assert "READY=no" in result.stdout
+    assert "FAILED=database" in result.stdout
+
+
+def test_readiness_probe_reports_an_unreachable_endpoint():
+    server = HTTPServer(("127.0.0.1", 0), _StubReadiness)
+    port = server.server_port
+    server.server_close()
+    result = ci.check_ready(f"http://127.0.0.1:{port}/health/ready", timeout=2)
+    assert result == {"READY": "no", "STATUS": "unreachable", "FAILED": "endpoint"}

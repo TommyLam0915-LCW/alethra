@@ -7,7 +7,7 @@
 | 項目 | 值 |
 | --- | --- |
 | 前端 | `http://127.0.0.1:3100`（Next dev，`NEXT_DEV_DIST_DIR=.next/candidate-3100`） |
-| 後端 | `http://127.0.0.1:8100`（`GET /health` 回 `{"status":"healthy"}`） |
+| 後端 | `http://127.0.0.1:8100`（`GET /health` 只證明 process 仍在；`GET /health/ready` 才代表 DB 可用） |
 | 資料庫 | PostgreSQL `alethra_personal_e2e_candidate_20261029`，`127.0.0.1:54321`（disposable） |
 | Schema head | `r2s3t4u5v6w7` |
 | 背景 worker | `python -m app.workers.training_worker`，pid 檔 `.local/candidate/worker.pid` |
@@ -44,7 +44,7 @@
 
 | 操作 | 指令 | 行為 |
 | --- | --- | --- |
-| 沿用候選 | `./start_candidate_stack.sh` | 只讀核對 profile 指定的 DB 存在、schema head 相符、三個 fixture 帳號存在；不遷移、不 seed、不產生憑證、不建立替代庫。process 逐一核對 cmdline 與 `DATABASE_URL` 後才重用；backend／worker 指向不同 DB 時不會宣稱 ready。 |
+| 沿用候選 | `./start_candidate_stack.sh` | 只讀核對 profile 指定的 DB 存在、schema head 相符、三個 fixture 帳號存在；不遷移、不 seed、不產生憑證、不建立替代庫。process 逐一核對 cmdline 與 `DATABASE_URL` 後才重用。ready 分層確認：process 有回應（`/health`）、DB 可用（`/health/ready`）、worker 心跳狀態健康（`idle`／`working`，`error`／`stopped` 不算）、前端可開；對應 exit code 見腳本頂部。 |
 | 唯讀預檢 | `./start_candidate_stack.sh --plan` | 印出將沿用的 DB 與 `SEED=no`，不啟動 process、不寫入 repo。 |
 | 明確重設 | `./start_candidate_stack.sh --reset` | 先停本候選的已核實 process，只 drop profile 指定的 DB，重建並重新 seed。checkout schema head 與 profile 不符時拒絕。 |
 | 明確新候選 | `./start_candidate_stack.sh --new-candidate --candidate-id <id>` | 新 identity；拒絕覆寫既有 profile、憑證、log 目錄，亦拒絕共用非空 artifact 目錄（需另一個 checkout）。不因 restart 觸發。 |
