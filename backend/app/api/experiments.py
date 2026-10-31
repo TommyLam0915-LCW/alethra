@@ -29,6 +29,7 @@ from app.api.schemas import (
     StrategySpec,
 )
 from app.engine.backtest import compute_config_hash, run_backtest
+from app.lib.error_safety import safe_error_message
 from app.services import emit_event
 from app.services.experiment_record import build_experiment_record
 from app.method_checks import evaluate_checks, MethodReviewResponse
@@ -850,7 +851,9 @@ def run_experiment_backtest(
             "completed_at": datetime.now(timezone.utc).isoformat(),
         }
     except Exception as e:
+        # str(e) can carry absolute paths, a DSN or a token; the engine's own
+        # traceback still goes to the server log.
         raise HTTPException(
             status_code=500,
-            detail=f"Backtest execution failed: {str(e)}"
+            detail=f"Backtest execution failed: {safe_error_message(e)}"
         )

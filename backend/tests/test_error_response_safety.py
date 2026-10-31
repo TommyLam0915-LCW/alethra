@@ -121,3 +121,56 @@ class TestProviderFailureResponse:
         assert "/Users/" not in body
         assert "abc123" not in body
         assert resp.json()["status"]["provider_id"] == "fake"
+
+
+def _create_experiment_with_version(client, auth_headers):
+    resp = client.post(
+        "/api/v1/experiments/",
+        headers=auth_headers,
+        json={
+            "title": "Backtest leak probe",
+            "research_type": "quantitative",
+            "strategy_spec": {
+                "template_type": "buy_and_hold",
+                "asset_ids": ["DEMO-ALPHA"],
+                "start_date": "2024-01-02",
+                "end_date": "2024-03-01",
+                "initial_cash": 100000.0,
+            },
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    return body["id"], body["current_version_id"]
+
+
+class TestBacktestFailureResponse:
+    def test_ad_hoc_backtest_failure_hides_internals(
+        self, client, auth_headers, monkeypatch
+    ):
+        experiment_id, version_id = _create_experiment_with_version(
+            client, auth_headers
+        )
+
+        def leaky_run_backtest(*args, **kwargs):
+            raise RuntimeError(
+                "cannot read /Users/owner/private/artifacts/x/model.joblib "
+                "api_key=abc123 "
+                "postgresql+psycopg2://postgres:hunter2@db:5432/alethra"
+            )
+
+        monkeypatch.setattr("app.api.experiments.run_backtest", leaky_run_backtest)
+
+        resp = client.post(
+            f"/api/v1/experiments/{experiment_id}/versions/{version_id}/backtest",
+            headers=auth_headers,
+            json={},
+        )
+        assert resp.status_code == 500
+        body = resp.text
+        for secret in ("/Users/", "model.joblib", "abc123", "hunter2"):
+            assert secret not in body
+        detail = resp.json()["detail"]
+        assert detail.startswith("Backtest execution failed:")
+        assert "<path>" in detail
+        assert "<redacted-url>" in detail
