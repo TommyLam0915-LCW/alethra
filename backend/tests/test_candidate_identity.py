@@ -593,3 +593,135 @@ def test_readiness_probe_reports_an_unreachable_endpoint():
     server.server_close()
     result = ci.check_ready(f"http://127.0.0.1:{port}/health/ready", timeout=2)
     assert result == {"READY": "no", "STATUS": "unreachable", "FAILED": "endpoint"}
+
+
+# --- integration: the launcher's own gates, not just the helper --------------
+# These source the real start script (CANDIDATE_SOURCE_ONLY keeps it from
+# running a mode) and call its real functions. Nothing is started or stopped.
+
+def _run_sourced(body, extra_env=None, timeout=90):
+    env = {k: v for k, v in os.environ.items() if not k.startswith("CANDIDATE_")}
+    env.update({"CANDIDATE_PYTHON": sys.executable, "CANDIDATE_SOURCE_ONLY": "1"})
+    env.update(extra_env or {})
+    script = "source " + shlex.quote(str(START)) + "\n" + body
+    return subprocess.run(
+        ["bash", "-c", script], cwd=str(REPO_ROOT), env=env,
+        text=True, capture_output=True, timeout=timeout,
+    )
+
+
+def test_shell_readiness_gate_exits_three_and_never_prints_ready(tmp_path):
+    payload = {
+        "status": "not_ready",
+        "checks": {"database": {"status": "unavailable", "error": "password=secret host=127.0.0.1:54321"}},
+    }
+    server, url = _serve(payload, 503)
+    logs = tmp_path / "logs"
+    try:
+        result = _run_sourced(f'''
+LOG_DIR={shlex.quote(str(logs))}
+mkdir -p "$LOG_DIR"
+BACKEND_ORIGIN={shlex.quote(url.rsplit("/health/ready", 1)[0])}
+wait_backend_ready 1
+''')
+    finally:
+        server.shutdown()
+        server.server_close()
+    combined = result.stdout + result.stderr
+    assert result.returncode == 3, combined
+    assert "database is not ready" in result.stderr
+    assert "failed checks: database" in result.stderr
+    assert "secret" not in combined
+    assert "54321" not in combined
+    assert "Candidate stack ready" not in combined
+
+
+def test_shell_worker_gate_exits_four_for_the_outage_heartbeat(tmp_path):
+    heartbeat = _heartbeat_file(
+        tmp_path,
+        state="error",
+        extra={"error": 'connection to server at "127.0.0.1", port 54321 failed: Connection refused'},
+    )
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    result = _run_sourced(f'''
+HEARTBEAT_FILE={shlex.quote(str(heartbeat))}
+LOG_DIR={shlex.quote(str(logs))}
+wait_worker_heartbeat 321 1
+''')
+    combined = result.stdout + result.stderr
+    assert result.returncode == 4, combined
+    assert "worker pid 321 is alive but not healthy" in result.stderr
+    assert "127.0.0.1" not in combined
+    assert "54321" not in combined
+    assert "Candidate stack ready" not in combined
+
+
+def test_shell_frontend_gate_exits_five_when_nothing_answers(tmp_path):
+    probe = HTTPServer(("127.0.0.1", 0), _StubReadiness)
+    port = probe.server_port
+    probe.server_close()
+    result = _run_sourced(
+        f'wait_http {shlex.quote(f"http://127.0.0.1:{port}/login")} frontend 1 5'
+    )
+    assert result.returncode == 5, result.stdout + result.stderr
+    assert "frontend did not answer" in result.stderr
+
+
+def test_shell_partial_start_failure_leaves_a_pending_identity(tmp_path):
+    # The 2026-10-31 shape: the backend process is up but the database is not,
+    # so a previous run's complete-looking runtime-identity.env must be replaced.
+    server, url = _serve({"status": "not_ready", "checks": {"database": {"status": "unavailable"}}}, 503)
+    state = tmp_path / "state"
+    logs = tmp_path / "logs"
+    try:
+        result = _run_sourced(f'''
+MODE=resume
+STATE_DIR={shlex.quote(str(state))}
+LOG_DIR={shlex.quote(str(logs))}
+BACKEND_ORIGIN={shlex.quote(url.rsplit("/health/ready", 1)[0])}
+CANDIDATE_READY_TRIES=1
+export_process_env() {{ :; }}
+start_backend() {{ echo 4242 > "$BACKEND_PID_FILE"; }}
+start_stack
+''')
+    finally:
+        server.shutdown()
+        server.server_close()
+    identity_file = state / "runtime-identity.env"
+    assert identity_file.exists()
+    content = identity_file.read_text(encoding="utf-8")
+    assert content.startswith("STATUS=pending\n")
+    # Pending means "nothing confirmed yet": no process may be recorded as bound.
+    assert "BACKEND_PID=\n" in content
+    assert "STATUS=ready" not in content
+    assert "RUN_ID=" in content
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert "Candidate stack ready" not in result.stdout + result.stderr
+
+
+def test_shell_identity_file_reads_ready_only_after_the_final_gate(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    result = _run_sourced(f'''
+MODE=resume
+STATE_DIR={shlex.quote(str(state))}
+BACKEND_PID=11 WORKER_PID=22 FRONTEND_PID=33
+HEARTBEAT_FILE=/tmp/unused-heartbeat.json
+WORKER_STATE=idle
+write_runtime_identity ready
+''')
+    assert result.returncode == 0, result.stdout + result.stderr
+    content = (state / "runtime-identity.env").read_text(encoding="utf-8")
+    assert content.startswith("STATUS=ready\n")
+    assert "WORKER_STATE=idle" in content
+    assert "STATUS=pending" not in content
+
+
+def test_shell_identity_mismatch_keeps_its_documented_exit_code(tmp_path):
+    result = _run_sourced('''
+identity() { echo "CANDIDATE IDENTITY ERROR: worker pid is not this role" >&2; return 2; }
+verify_runtime_identity
+''')
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "identity verification failed" in result.stderr

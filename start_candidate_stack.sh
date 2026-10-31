@@ -52,6 +52,7 @@ HELPER="$ROOT/backend/scripts/candidate_identity.py"
 # One operation id per launcher run, so concurrent runs can be told apart in
 # the log files without exposing any identity or credential detail.
 RUN_ID="${CANDIDATE_RUN_ID:-$(date '+%Y%m%dT%H%M%S%z')-$$}"
+RUN_STARTED_AT="$(date '+%Y-%m-%dT%H:%M:%S%z')"
 
 log() { printf '[%s] [%s] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$RUN_ID" "$*"; }
 
@@ -350,8 +351,8 @@ wait_backend_ready() {
 # Layer 4: a fresh heartbeat only proves the worker is looping. A worker in
 # "error" (the 2026-10-31 outage) or "stopped" must not be called ready.
 wait_worker_heartbeat() {
-  local pid="$1" out="" reason
-  for _ in $(seq 1 30); do
+  local pid="$1" tries="${2:-30}" out="" reason
+  for _ in $(seq 1 "$tries"); do
     if out="$("$PYTHON" "$HELPER" check-heartbeat --heartbeat "$HEARTBEAT_FILE" --worker-pid "$pid" 2>&1)"; then
       WORKER_STATE="$(printf '%s\n' "$out" | sed -n 's/^STATE=//p' | head -1)"
       return 0
@@ -392,7 +393,7 @@ start_worker() {
   if [ -n "$pid" ] && pid_alive "$pid"; then
     state="$(process_state worker "$pid")"
     case "$state" in
-      reuse) echo "reusing resident training worker (pid $pid, identity verified)"; wait_worker_heartbeat "$pid"; return 0 ;;
+      reuse) echo "reusing resident training worker (pid $pid, identity verified)"; wait_worker_heartbeat "$pid" "${CANDIDATE_WORKER_TRIES:-30}"; return 0 ;;
       stale) echo "ignoring stale worker pid file ($pid)"; rm -f "$WORKER_PID_FILE" ;;
       *) fail "${state#mismatch:}" ;;
     esac
@@ -407,7 +408,7 @@ start_worker() {
     echo $! >"$WORKER_PID_FILE"
   )
   WORKER_PID="$(pid_from_file "$WORKER_PID_FILE")"
-  wait_worker_heartbeat "$WORKER_PID"
+  wait_worker_heartbeat "$WORKER_PID" "${CANDIDATE_WORKER_TRIES:-30}"
 }
 
 start_frontend() {
@@ -435,19 +436,34 @@ start_frontend() {
   wait_http "$FRONTEND_ORIGIN/login" "frontend" 90 5
 }
 
+# Written twice per run: STATUS=pending before anything is started, then
+# STATUS=ready only after the last gate passes. A run that dies halfway must not
+# leave a previous run's complete-looking file in place for the next reader.
 write_runtime_identity() {
+  local status="$1"
   {
+    printf 'STATUS=%s\n' "$status"
     printf 'MODE=%s\n' "$MODE"
     printf 'RUN_ID=%s\n' "$RUN_ID"
-    printf 'STARTED_AT=%s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')"
+    printf 'STARTED_AT=%s\n' "$RUN_STARTED_AT"
+    printf 'UPDATED_AT=%s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')"
     printf 'CANDIDATE_PROFILE=%s\n' "$PROFILE"
-    printf 'BACKEND_PID=%s\n' "$BACKEND_PID"
-    printf 'WORKER_PID=%s\n' "$WORKER_PID"
-    printf 'FRONTEND_PID=%s\n' "$FRONTEND_PID"
-    printf 'HEARTBEAT_FILE=%s\n' "$HEARTBEAT_FILE"
+    printf 'BACKEND_PID=%s\n' "${BACKEND_PID:-}"
+    printf 'WORKER_PID=%s\n' "${WORKER_PID:-}"
+    printf 'FRONTEND_PID=%s\n' "${FRONTEND_PID:-}"
+    printf 'HEARTBEAT_FILE=%s\n' "${HEARTBEAT_FILE:-}"
     printf 'WORKER_STATE=%s\n' "${WORKER_STATE:-unknown}"
   } >"$STATE_DIR/runtime-identity.env"
   chmod 600 "$STATE_DIR/runtime-identity.env"
+}
+
+# Kept separate so the documented exit code 2 survives: `|| fail` would have
+# rewritten an identity mismatch as a generic 1.
+verify_runtime_identity() {
+  identity verify-runtime --profile "$PROFILE" \
+    --backend-pid "${BACKEND_PID:-}" --worker-pid "${WORKER_PID:-}" \
+    --frontend-pid "${FRONTEND_PID:-}" --heartbeat "${HEARTBEAT_FILE:-}" \
+    || fail_code 2 "candidate identity verification failed; the stack is NOT ready"
 }
 
 start_stack() {
@@ -455,27 +471,25 @@ start_stack() {
   BACKEND_PID_FILE="$LOG_DIR/backend.pid"
   WORKER_PID_FILE="$LOG_DIR/worker.pid"
   FRONTEND_PID_FILE="$LOG_DIR/frontend.pid"
-  WORKER_STATE=""
+  BACKEND_PID=""; WORKER_PID=""; FRONTEND_PID=""; WORKER_STATE=""
+  write_runtime_identity pending
   export_process_env
   start_backend
   BACKEND_PID="$(pid_from_file "$BACKEND_PID_FILE")"
   log "stage backend: process responds (pid $BACKEND_PID)"
-  wait_backend_ready
+  wait_backend_ready "${CANDIDATE_READY_TRIES:-30}"
   log "stage database: /health/ready reports ready"
   start_worker
   WORKER_PID="$(pid_from_file "$WORKER_PID_FILE")"
   log "stage worker: healthy (pid $WORKER_PID, state ${WORKER_STATE:-unknown})"
   start_frontend
   FRONTEND_PID="$(pid_from_file "$FRONTEND_PID_FILE")"
-  identity verify-runtime --profile "$PROFILE" \
-    --backend-pid "$BACKEND_PID" --worker-pid "$WORKER_PID" \
-    --frontend-pid "$FRONTEND_PID" --heartbeat "$HEARTBEAT_FILE" \
-    || fail "candidate identity verification failed; the stack is NOT ready"
+  verify_runtime_identity
   # Identity is proven above; these checks only confirm the bound processes serve.
-  wait_backend_ready 15
+  wait_backend_ready "${CANDIDATE_READY_TRIES:-15}"
   wait_http "$FRONTEND_ORIGIN/login" "frontend" 15 5
   log "stage full-candidate: readiness, worker and frontend all passed"
-  write_runtime_identity
+  write_runtime_identity ready
   print_ready
 }
 
@@ -622,6 +636,12 @@ seed_fixture() {
     E2E_THIN_EMAIL="$CANDIDATE_THIN_EMAIL" E2E_THIN_PASSWORD="$CANDIDATE_THIN_PASSWORD" \
     "$PYTHON" scripts/seed_candidate_scenarios.py) | tee -a "$LOG_DIR/seed.log"
 }
+
+# Test seam: source the real functions without running a mode. Executed with
+# this set, the script exits 0 before doing anything.
+if [ "${CANDIDATE_SOURCE_ONLY:-}" = "1" ]; then
+  return 0 2>/dev/null || exit 0
+fi
 
 case "$MODE" in
   plan) plan_mode ;;
