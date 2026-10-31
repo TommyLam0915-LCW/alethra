@@ -572,10 +572,10 @@ function NewExperimentForm() {
                 onChange={(e) => setCommissionRate(e.target.value)}
                 min="0"
                 max="0.05"
-                step="0.001"
+                step="0.0001"
               />
               <p data-testid="exp-commission-hint" style={{ fontSize: '12px', color: 'var(--text-muted)', margin: '4px 0 0' }}>
-                Share of each trade&apos;s value charged per fill, not a percentage. 0.001 = 0.1%.
+                Share of each trade&apos;s value charged per fill, not a percentage. 0.001 = 0.1%; 0.0005 = 0.05%.
               </p>
             </div>
             <div className="form-group">
@@ -589,10 +589,10 @@ function NewExperimentForm() {
                 onChange={(e) => setSlippageRate(e.target.value)}
                 min="0"
                 max="0.05"
-                step="0.001"
+                step="0.0001"
               />
               <p data-testid="exp-slippage-hint" style={{ fontSize: '12px', color: 'var(--text-muted)', margin: '4px 0 0' }}>
-                Price move against you on each fill, not a percentage of return. 0.001 = 0.1%.
+                Price move against you on each fill, not a percentage of return. 0.001 = 0.1%; 0.0005 = 0.05%.
               </p>
             </div>
           </div>

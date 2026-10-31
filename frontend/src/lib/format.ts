@@ -52,3 +52,18 @@ export function formatRatePercent(value: number | string | null | undefined): st
   const decimals = percent !== 0 && Math.abs(percent) < 0.1 ? 3 : 2;
   return `${percent.toFixed(decimals)}%`;
 }
+
+/**
+ * Renders a small flat parameter map as `key=value` pairs.
+ *
+ * Run methodology stores signal and risk parameters as nested objects; two runs
+ * can only be compared if the stored values are readable without parsing JSON.
+ * An empty declared block is distinguished from a missing one.
+ */
+export function formatParamMap(value: unknown): string {
+  if (value === null || value === undefined) return '—';
+  if (typeof value !== 'object') return String(value);
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length === 0) return '— (none declared)';
+  return entries.map(([key, val]) => `${key}=${String(val)}`).join(', ');
+}

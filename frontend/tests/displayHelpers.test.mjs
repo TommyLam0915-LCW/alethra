@@ -6,7 +6,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { formatRatePercent } from '../src/lib/format.ts';
+import { formatRatePercent, formatParamMap } from '../src/lib/format.ts';
 import { explainMlFailure, describeStoredJobFailure } from '../src/lib/mlFailureMessages.ts';
 
 test('rate: a stored fraction is shown as a percentage of trade value', () => {
@@ -29,6 +29,20 @@ test('rate: missing or non-numeric input is shown as absent, never as 0%', () =>
   assert.equal(formatRatePercent(undefined), '—');
   assert.equal(formatRatePercent(''), '—');
   assert.equal(formatRatePercent('not-a-number'), 'not-a-number');
+});
+
+test('params: a stored run parameter map renders as comparable key=value pairs', () => {
+  assert.equal(
+    formatParamMap({ short_window: 5, long_window: 10 }),
+    'short_window=5, long_window=10',
+  );
+  assert.equal(formatParamMap({ stop_pct: 0.05 }), 'stop_pct=0.05');
+});
+
+test('params: an undeclared block is distinguished from no record at all', () => {
+  assert.equal(formatParamMap({}), '— (none declared)');
+  assert.equal(formatParamMap(null), '—');
+  assert.equal(formatParamMap(undefined), '—');
 });
 
 test('ml failure: the backend 60-bar message names the actual bar count and next step', () => {

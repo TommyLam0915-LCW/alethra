@@ -5,7 +5,7 @@ import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import { api, ApiError } from '@/lib/api';
 import { describeRunStatus } from '@/lib/runStatus';
-import { formatDateTime } from '@/lib/format';
+import { formatDateTime, formatParamMap, formatRatePercent } from '@/lib/format';
 import { ACTOR_LABELS, EXIT_REASON_LABELS, SIDE_LABELS, label } from '@/lib/copy';
 
 interface RunDetail {
@@ -156,6 +156,14 @@ const fmt = (v: unknown): string => {
   return String(v);
 };
 
+// Nested run parameters are small flat maps (signal_parameters, risk_parameters);
+// formatParamMap renders them as key=value so two runs can be compared.
+const fmtRateWithRaw = (v: unknown): string => {
+  if (v === null || v === undefined || v === '') return '—';
+  const percent = formatRatePercent(v as number | string);
+  return `${percent} (${String(v)})`;
+};
+
 function isMetricStruct(v: unknown): v is UnavailableMetric {
   return typeof v === 'object' && v !== null && ('value' in v || 'available' in v);
 }
@@ -274,6 +282,7 @@ export default function RunDetailPage() {
   const journalFields = methodology && isStruct(methodology.journal_field_semantics) ? methodology.journal_field_semantics : null;
   const strategyRules = methodology && Array.isArray(methodology.strategy_rules) ? methodology.strategy_rules : null;
   const constraints = methodology && Array.isArray(methodology.constraints) ? methodology.constraints : null;
+  const capturedParameters = methodology && isStruct(methodology.parameters) ? methodology.parameters : null;
 
   return (
     <div className="dash-root" data-testid="run-detail-page" style={{ padding: '32px', maxWidth: '960px', margin: '0 auto' }}>
@@ -544,6 +553,36 @@ export default function RunDetailPage() {
           <h3 style={{ margin: '0 0 12px', fontSize: '15px' }}>Methodology and limitations</h3>
           {methodology ? (
             <div style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
+              {capturedParameters && (
+                <div style={{ marginBottom: '12px' }} data-testid="run-captured-parameters">
+                  <div style={{ fontWeight: 600, marginBottom: '4px' }}>Parameters this run recorded</div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '160px 1fr', gap: '4px 16px' }}>
+                    <div>Commission rate</div>
+                    <div style={{ fontFamily: 'monospace' }}>{fmtRateWithRaw(capturedParameters.commission_rate)}</div>
+                    <div>Slippage rate</div>
+                    <div style={{ fontFamily: 'monospace' }}>{fmtRateWithRaw(capturedParameters.slippage_rate)}</div>
+                    <div>Initial cash</div>
+                    <div style={{ fontFamily: 'monospace' }}>{fmt(capturedParameters.initial_cash)}</div>
+                    <div>Signal parameters</div>
+                    <div style={{ fontFamily: 'monospace' }}>{formatParamMap(capturedParameters.signal_parameters)}</div>
+                    <div>Risk plan (stop / target)</div>
+                    <div style={{ fontFamily: 'monospace' }}>{formatParamMap(capturedParameters.risk_parameters)}</div>
+                    <div>Stop or target declared</div>
+                    <div>
+                      {capturedParameters.risk_parameters_declared === true
+                        ? 'Yes'
+                        : capturedParameters.risk_parameters_declared === false
+                          ? 'No'
+                          : 'Not recorded'}
+                    </div>
+                  </div>
+                  <p style={{ margin: '6px 0 0', fontSize: '12px', color: 'var(--text-muted)' }}>
+                    Copied into this run&apos;s stored methodology when the run was created; not re-read from the
+                    experiment&apos;s current version. Two runs with different values here really did use different
+                    settings.
+                  </p>
+                </div>
+              )}
               {convention && (
                 <div style={{ marginBottom: '12px' }}>
                   <div style={{ fontWeight: 600, marginBottom: '4px' }}>Execution assumptions</div>
