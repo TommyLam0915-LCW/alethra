@@ -32,6 +32,26 @@ class TestSafeErrorMessage:
         for secret in ("abc123", "zyx9", "sk-live-999"):
             assert secret not in msg
 
+    def test_redacts_prefixed_credential_names(self):
+        # Broker and gateway clients name their fields with a prefix, so the
+        # value must be removed even though the credential word is not a
+        # standalone token in the message.
+        msg = safe_error_message(
+            RuntimeError(
+                "gateway config api_token=sk-live-abc123 "
+                "access_token=bearer-xyz "
+                "client_secret=cs-42 "
+                "apiToken=camel-77 "
+                "x-api-key=header-91"
+            )
+        )
+        for secret in ("sk-live-abc123", "bearer-xyz", "cs-42", "camel-77", "header-91"):
+            assert secret not in msg
+        # The name stays visible so the line remains diagnosable.
+        for name in ("api_token", "access_token", "client_secret", "apiToken"):
+            assert name in msg
+        assert msg.count("<redacted>") >= 5
+
     def test_keeps_plain_message_for_the_user(self):
         assert safe_error_message(RuntimeError("simulated training crash")) == "simulated training crash"
         assert safe_error_message(ValueError("研究執行額度不足，此嘗試沒有執行。")) == "研究執行額度不足，此嘗試沒有執行。"

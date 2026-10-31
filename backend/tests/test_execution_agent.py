@@ -36,6 +36,7 @@ from app.services.execution_agent_api import (
 )
 from app.execution_agent.broker_transport import (
     FakeBrokerTransport,
+    BrokerOrderResult,
     BrokerOrderStatus,
     BrokerTransport,
 )
@@ -700,3 +701,332 @@ class TestExecutionAgent:
         agent._process_single_intent(intent)
 
         assert alethra_client.report_order_submitted.call_count == 1
+
+
+# ──────────────────────────────────────────────
+# 6. Agent log safety — the broker error chain
+# ──────────────────────────────────────────────
+
+# Synthetic secret material. It never leaves this test: the transport and the
+# exception below are in-memory stand-ins for a broker client whose error text
+# embeds a gateway configuration path, a token and a database DSN.
+_SENSITIVE_ERROR = (
+    "connect failed at /Users/owner/ibgateway/conf.yaml "
+    "api_token=sk-live-abc123 "
+    "postgresql+psycopg2://postgres:hunter2@db:5432/alethra"
+)
+_SECRET_FRAGMENTS = (
+    "/Users/owner",
+    "conf.yaml",
+    "sk-live-abc123",
+    "hunter2",
+    "postgresql+psycopg2",
+)
+
+
+def _assert_no_secrets(text: str, surface: str) -> None:
+    for fragment in _SECRET_FRAGMENTS:
+        assert fragment not in text, f"{surface} leaked {fragment!r}: {text}"
+
+
+class _RejectingTransport(FakeBrokerTransport):
+    """Fake broker whose client reports a rejection message verbatim."""
+
+    def __init__(self, error_message: str):
+        super().__init__()
+        self._error_message = error_message
+
+    def submit_order(self, *args, **kwargs):
+        return BrokerOrderResult(success=False, error_message=self._error_message)
+
+
+class _ExplodingTransport(FakeBrokerTransport):
+    """Fake broker whose client raises the same raw text as an exception."""
+
+    def __init__(self, error: BaseException):
+        super().__init__()
+        self._error = error
+
+    def submit_order(self, *args, **kwargs):
+        raise self._error
+
+
+class _DbAgentClient:
+    """Platform client backed by the real services and the test database.
+
+    ``AlethraAPIClient`` speaks HTTP, and the agent routes call exactly these
+    service functions, so this adapter exercises the same persistence and
+    scrub path without opening a socket or touching a real platform.
+    """
+
+    def __init__(self, db, user_id, rows):
+        self._db = db
+        self._user_id = user_id
+        self._rows = rows
+
+    def poll_order_intents(self):
+        from app.execution_agent.alethra_client import OrderIntentDTO
+
+        return [
+            OrderIntentDTO(
+                intent_id=row.intent_id,
+                user_id=str(row.user_id),
+                portfolio_id=str(row.portfolio_id),
+                symbol=row.symbol,
+                side=row.side,
+                quantity=row.quantity,
+                order_type=row.order_type,
+                limit_price=row.limit_price,
+                status=row.status.value,
+                expires_at=row.expires_at.isoformat(),
+                created_at=row.created_at.isoformat(),
+                broker_ref=row.broker_ref,
+                rejection_reason=row.rejection_reason,
+                cancel_requested=bool(row.cancel_requested),
+                # The platform poll response carries no execution scope. The
+                # harness grants the fake-transport scope explicitly so the
+                # broker call path (the subject of this test) is reachable;
+                # the scope gate itself is covered by the containment tests.
+                execution_scope="fake-transport",
+            )
+            for row in self._rows
+        ]
+
+    def get_claimed_broker_refs(self):
+        return []
+
+    def report_order_rejected(self, intent_id, reason):
+        return agent_report_rejected(self._db, intent_id, self._user_id, reason)
+
+
+class TestAgentLogSafety:
+    """The agent's own log is written before any downstream filter runs.
+
+    These tests pin that the broker error chain — transport error message,
+    agent log/stderr, agent-facing API response and owner response — carries no
+    secret value, while the line stays diagnosable (error type, controlled
+    code, intent id and the log timestamp).
+    """
+
+    def _agent(self, transport):
+        config = AgentConfig(
+            alethra_api_key="test-key",
+            alethra_api_url="http://localhost:8000",
+            poll_interval_seconds=1,
+            max_reconnect_attempts=3,
+            reconnect_interval_seconds=0,
+        )
+        alethra_client = MagicMock()
+        alethra_client.poll_order_intents.return_value = []
+        alethra_client.get_claimed_broker_refs.return_value = []
+        alethra_client.report_order_rejected.return_value = None
+        agent = ExecutionAgent(config, IBKRClient(transport), alethra_client)
+        return agent, alethra_client
+
+    def _intent(self, intent_id):
+        from app.execution_agent.alethra_client import OrderIntentDTO
+
+        return OrderIntentDTO(
+            intent_id=intent_id,
+            user_id="user-1",
+            portfolio_id="portfolio-1",
+            symbol="US:AAPL",
+            side="BUY",
+            quantity=10,
+            order_type="MARKET",
+            limit_price=None,
+            status="authorized",
+            execution_scope="fake-transport",
+            expires_at=(utcnow() + timedelta(minutes=5)).isoformat(),
+            created_at=utcnow().isoformat(),
+        )
+
+    def _capture_agent_log(self):
+        """Attach the same stderr handler shape ``main()`` configures."""
+        import io
+        import logging
+
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+        )
+        target = logging.getLogger("app.execution_agent.agent")
+        target.addHandler(handler)
+        return target, handler, stream
+
+    def test_rejected_result_is_masked_in_log_and_reported_reason(self):
+        target, handler, stream = self._capture_agent_log()
+        try:
+            agent, alethra_client = self._agent(_RejectingTransport(_SENSITIVE_ERROR))
+            agent.connect()
+            agent._process_single_intent(self._intent("safety-reject-1"))
+        finally:
+            target.removeHandler(handler)
+
+        emitted = stream.getvalue()
+        # Diagnosability kept: error type is implied by the controlled code,
+        # the intent id correlates the line, the formatter adds the timestamp.
+        assert "safety-reject-1" in emitted
+        assert "BROKER_REJECTED" in emitted
+        assert "<path>" in emitted
+        assert "<redacted-url>" in emitted
+        _assert_no_secrets(emitted, "agent log")
+
+        alethra_client.report_order_rejected.assert_called_once()
+        reason = alethra_client.report_order_rejected.call_args.kwargs["reason"]
+        assert "<path>" in reason
+        assert "<redacted-url>" in reason
+        _assert_no_secrets(reason, "reported reason")
+
+    def test_processing_exception_keeps_type_and_intent_id_without_secrets(self):
+        target, handler, stream = self._capture_agent_log()
+        try:
+            agent, alethra_client = self._agent(
+                _ExplodingTransport(RuntimeError(_SENSITIVE_ERROR))
+            )
+            agent.connect()
+            alethra_client.poll_order_intents.return_value = [
+                self._intent("safety-raise-1")
+            ]
+            agent.process_order_intents()
+        finally:
+            target.removeHandler(handler)
+
+        emitted = stream.getvalue()
+        assert "safety-raise-1" in emitted
+        assert "RuntimeError" in emitted
+        assert "<path>" in emitted
+        assert "<redacted-url>" in emitted
+        _assert_no_secrets(emitted, "agent log")
+
+        alethra_client.report_order_rejected.assert_called_once()
+        reason = alethra_client.report_order_rejected.call_args.kwargs["reason"]
+        # Owner-facing wording is unchanged: prefix plus the masked message,
+        # no exception type exposed.
+        assert reason.startswith("Agent error: ")
+        assert "RuntimeError" not in reason
+        _assert_no_secrets(reason, "reported reason")
+
+    def test_owner_and_agent_api_responses_stay_clean_end_to_end(
+        self, client, auth_headers
+    ):
+        portfolio_id = _create_user_and_portfolio(client, auth_headers)
+        intent = _create_and_authorize_intent(client, auth_headers, portfolio_id)
+        intent_id = intent["intent_id"]
+
+        db = _get_db()
+        user = db.query(User).first()
+        row = db.query(OrderIntent).filter(OrderIntent.intent_id == intent_id).first()
+        assert row is not None
+
+        config = AgentConfig(
+            alethra_api_key="test-key",
+            alethra_api_url="http://localhost:8000",
+            poll_interval_seconds=1,
+            max_reconnect_attempts=3,
+            reconnect_interval_seconds=0,
+        )
+        agent = ExecutionAgent(
+            config,
+            IBKRClient(_ExplodingTransport(RuntimeError(_SENSITIVE_ERROR))),
+            _DbAgentClient(db, user.id, [row]),
+        )
+
+        target, handler, stream = self._capture_agent_log()
+        try:
+            agent.connect()
+            agent.process_order_intents()
+        finally:
+            target.removeHandler(handler)
+
+        _assert_no_secrets(stream.getvalue(), "agent log")
+
+        owner_view = client.get(
+            f"/api/v1/execution/intents/{intent_id}", headers=auth_headers
+        )
+        assert owner_view.status_code == 200, owner_view.text
+        assert owner_view.json()["status"] == "rejected"
+        assert "<path>" in owner_view.json()["rejection_reason"]
+        assert "<redacted-url>" in owner_view.json()["rejection_reason"]
+        _assert_no_secrets(owner_view.text, "owner response")
+
+        # The agent-facing HTTP response for the same raw text.
+        second = _create_and_authorize_intent(client, auth_headers, portfolio_id)
+        agent_view = client.post(
+            f"/api/v1/execution-agent/order-intents/{second['intent_id']}/rejected",
+            headers=auth_headers,
+            json={"reason": _SENSITIVE_ERROR},
+        )
+        assert agent_view.status_code == 200, agent_view.text
+        _assert_no_secrets(agent_view.text, "agent API response")
+
+    def test_rejected_is_terminal_and_a_second_report_is_refused(
+        self, client, auth_headers
+    ):
+        portfolio_id = _create_user_and_portfolio(client, auth_headers)
+        intent = _create_and_authorize_intent(client, auth_headers, portfolio_id)
+        intent_id = intent["intent_id"]
+
+        first = client.post(
+            f"/api/v1/execution-agent/order-intents/{intent_id}/rejected",
+            headers=auth_headers,
+            json={"reason": "Insufficient margin"},
+        )
+        assert first.status_code == 200, first.text
+        assert first.json()["status"] == "rejected"
+
+        second = client.post(
+            f"/api/v1/execution-agent/order-intents/{intent_id}/rejected",
+            headers=auth_headers,
+            json={"reason": _SENSITIVE_ERROR},
+        )
+        assert second.status_code == 409, second.text
+
+        owner_view = client.get(
+            f"/api/v1/execution/intents/{intent_id}", headers=auth_headers
+        )
+        assert owner_view.status_code == 200
+        assert owner_view.json()["status"] == "rejected"
+        assert owner_view.json()["rejection_reason"] == "Insufficient margin"
+
+    def test_uncertain_and_cancelled_transitions_are_unchanged(
+        self, client, auth_headers
+    ):
+        portfolio_id = _create_user_and_portfolio(client, auth_headers)
+
+        uncertain = _create_and_authorize_intent(client, auth_headers, portfolio_id)
+        resp = client.post(
+            f"/api/v1/execution-agent/order-intents/{uncertain['intent_id']}/uncertain",
+            headers=auth_headers,
+            json={"reason": "Ambiguous broker state: 2 matching orders"},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["status"] == "uncertain"
+        again = client.post(
+            f"/api/v1/execution-agent/order-intents/{uncertain['intent_id']}/uncertain",
+            headers=auth_headers,
+            json={"reason": "Ambiguous broker state: 2 matching orders"},
+        )
+        assert again.status_code == 409, again.text
+
+        cancelled = _create_and_authorize_intent(client, auth_headers, portfolio_id)
+        submitted = client.post(
+            f"/api/v1/execution-agent/order-intents/{cancelled['intent_id']}/submitted",
+            headers=auth_headers,
+            json={"broker_ref": "FAKE-000001"},
+        )
+        assert submitted.status_code == 200, submitted.text
+        resp = client.post(
+            f"/api/v1/execution-agent/order-intents/{cancelled['intent_id']}/cancelled",
+            headers=auth_headers,
+            json={"reason": "Order cancelled by broker"},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["status"] == "cancelled"
+        again = client.post(
+            f"/api/v1/execution-agent/order-intents/{cancelled['intent_id']}/cancelled",
+            headers=auth_headers,
+            json={"reason": "Order cancelled by broker"},
+        )
+        assert again.status_code == 409, again.text

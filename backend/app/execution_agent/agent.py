@@ -56,9 +56,25 @@ from .broker_transport import (
 )
 from .fill_journal import FillDeliveryJournal, PendingFill
 from app.lib.timeutil import utcnow
+from app.lib.error_safety import safe_error_message, scrub_text
 
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_exception(exc: BaseException) -> str:
+    """Log-safe exception summary: type plus a scrubbed, bounded message.
+
+    Broker and platform clients carry arbitrary upstream text in their
+    exceptions (a gateway configuration path, a DSN with a password, a
+    bearer token). The agent writes its log to stderr before any downstream
+    filter could run, so redaction has to happen at this emission point.
+    The exception type, the log timestamp and the intent id in the message
+    keep the line diagnosable without the secret value.
+    """
+    message = scrub_text(str(exc) or "")
+    return f"{type(exc).__name__}: {message}" if message else type(exc).__name__
+
 
 # Clock-skew tolerance when matching broker orders to an intent's creation time.
 _SUBMISSION_MATCH_SKEW_SECONDS = 60
@@ -149,7 +165,7 @@ class ExecutionAgent:
             logger.info("Reconnection successful")
             return True
         except Exception as e:
-            logger.error(f"Reconnection failed: {e}")
+            logger.error(f"Reconnection failed: {_safe_exception(e)}")
             return False
 
     def reconcile_on_startup(self) -> None:
@@ -163,7 +179,7 @@ class ExecutionAgent:
         try:
             intents = self.alethra_client.poll_order_intents()
         except Exception as e:
-            logger.warning(f"Could not poll intents on startup: {e}")
+            logger.warning(f"Could not poll intents on startup: {_safe_exception(e)}")
             return
 
         for intent in intents:
@@ -221,8 +237,8 @@ class ExecutionAgent:
                 # Failed - increment retry count and continue
                 self.fill_delivery_journal.increment_retry(pending_fill.fill_key)
                 logger.warning(
-                    f"Failed to replay fill delivery {pending_fill.fill_key}: {e}. "
-                    f"Will retry on next poll cycle."
+                    f"Failed to replay fill delivery {pending_fill.fill_key}: "
+                    f"{_safe_exception(e)}. Will retry on next poll cycle."
                 )
 
         logger.info(f"Reconciliation complete: {len(self._submitted_intents)} tracked intents")
@@ -232,7 +248,7 @@ class ExecutionAgent:
         try:
             intents = self.alethra_client.poll_order_intents()
         except Exception as e:
-            logger.error(f"Failed to poll order intents: {e}")
+            logger.error(f"Failed to poll order intents: {_safe_exception(e)}")
             return
 
         if not intents:
@@ -245,14 +261,19 @@ class ExecutionAgent:
             try:
                 self._process_single_intent(intent, kill_switch_active=kill_switch_active)
             except Exception as e:
-                logger.error(f"Error processing intent {intent.intent_id}: {e}")
+                logger.error(
+                    f"Error processing intent {intent.intent_id}: "
+                    f"{_safe_exception(e)}"
+                )
                 try:
                     self.alethra_client.report_order_rejected(
                         intent_id=intent.intent_id,
-                        reason=f"Agent error: {e}",
+                        reason=f"Agent error: {safe_error_message(e)}",
                     )
                 except Exception as report_err:
-                    logger.error(f"Failed to report rejection: {report_err}")
+                    logger.error(
+                        f"Failed to report rejection: {_safe_exception(report_err)}"
+                    )
 
     def _check_kill_switch(self) -> bool:
         """Fetch the execution kill switch state. Fails closed: if the control
@@ -263,7 +284,7 @@ class ExecutionAgent:
             return bool(status.get("kill_switch_active"))
         except Exception as e:
             logger.warning(
-                f"Could not fetch control status ({e}); "
+                f"Could not fetch control status ({_safe_exception(e)}); "
                 f"assuming kill switch ACTIVE (fail-closed)"
             )
             return True
@@ -281,7 +302,9 @@ class ExecutionAgent:
         try:
             platform_claimed = set(self.alethra_client.get_claimed_broker_refs())
         except Exception as e:
-            raise RuntimeError(f"Cannot read platform broker-ref claims: {e}") from e
+            raise RuntimeError(
+                f"Cannot read platform broker-ref claims: {_safe_exception(e)}"
+            ) from e
         claimed = self._claimed_broker_refs | platform_claimed
 
         since = (
@@ -423,8 +446,8 @@ class ExecutionAgent:
             candidates = self._find_unclaimed_broker_orders(intent)
         except Exception as e:
             logger.warning(
-                f"Cannot verify broker state for {intent.intent_id} ({e}); "
-                f"skipping submission, will retry next poll"
+                f"Cannot verify broker state for {intent.intent_id} "
+                f"({_safe_exception(e)}); skipping submission, will retry next poll"
             )
             return
 
@@ -460,8 +483,8 @@ class ExecutionAgent:
                 )
             except Exception as e:
                 logger.warning(
-                    f"Failed to report recovered submission for {intent.intent_id}: {e}. "
-                    f"Will reconcile on next poll."
+                    f"Failed to report recovered submission for {intent.intent_id}: "
+                    f"{_safe_exception(e)}. Will reconcile on next poll."
                 )
             self._monitor_fills_for_known_order(intent.intent_id, broker_ref)
             return
@@ -483,13 +506,19 @@ class ExecutionAgent:
             raise ValueError(f"Unsupported order type: {intent.order_type}")
 
         if not result.success:
+            # The transport forwards whatever its broker client raised. Mask it
+            # before it reaches the agent log, then report the same masked text
+            # so the owner surface and the log agree.
+            safe_reason = scrub_text(
+                result.error_message or "Order submission failed"
+            )
             logger.error(
-                f"Order submission failed for intent {intent.intent_id}: "
-                f"{result.error_message}"
+                f"Order submission failed for intent {intent.intent_id} "
+                f"(code=BROKER_REJECTED): {safe_reason}"
             )
             self.alethra_client.report_order_rejected(
                 intent_id=intent.intent_id,
-                reason=result.error_message or "Order submission failed",
+                reason=safe_reason,
             )
             return
 
@@ -510,8 +539,8 @@ class ExecutionAgent:
             )
         except Exception as e:
             logger.warning(
-                f"Failed to report submission for {intent.intent_id}: {e}. "
-                f"Will reconcile on next poll."
+                f"Failed to report submission for {intent.intent_id}: "
+                f"{_safe_exception(e)}. Will reconcile on next poll."
             )
 
         self._monitor_fills_for_known_order(intent.intent_id, broker_ref)
@@ -548,7 +577,10 @@ class ExecutionAgent:
             # Retry on the next poll — do not report cancelled without broker
             # confirmation, and do not report uncertain (the order state is
             # known, only the cancel attempt failed).
-            logger.error(f"Cancel attempt failed for {intent.intent_id}: {e}")
+            logger.error(
+                f"Cancel attempt failed for {intent.intent_id}: "
+                f"{_safe_exception(e)}"
+            )
             return
 
         if not accepted:
@@ -578,7 +610,7 @@ class ExecutionAgent:
             self.fill_delivery_journal.increment_retry(pending_fill.fill_key)
             logger.warning(
                 f"Failed to upload fill {pending_fill.fill_key} "
-                f"(attempt {pending_fill.retry_count}): {e}"
+                f"(attempt {pending_fill.retry_count}): {_safe_exception(e)}"
             )
             return False
 
@@ -600,7 +632,7 @@ class ExecutionAgent:
             try:
                 status_val = self.ibkr_client.get_order_status(broker_order_id)
             except Exception as e:
-                logger.error(f"Error checking order status: {e}")
+                logger.error(f"Error checking order status: {_safe_exception(e)}")
                 time.sleep(1)
                 continue
 
@@ -684,7 +716,9 @@ class ExecutionAgent:
                         reason=f"Order {status_enum.value.lower()} by broker",
                     )
                 except Exception as e:
-                    logger.error(f"Failed to report cancellation: {e}")
+                    logger.error(
+                        f"Failed to report cancellation: {_safe_exception(e)}"
+                    )
                     # Don't mark complete if cancellation report failed
                     time.sleep(2)
                     continue
@@ -729,13 +763,13 @@ class ExecutionAgent:
                             ib_gateway_port=self.config.ib_gateway_port,
                         )
                     except Exception as e:
-                        logger.warning(f"Heartbeat failed: {e}")
+                        logger.warning(f"Heartbeat failed: {_safe_exception(e)}")
                     last_heartbeat = time.time()
 
                 time.sleep(self.config.poll_interval_seconds)
 
             except Exception as e:
-                logger.error(f"Error in main loop: {e}")
+                logger.error(f"Error in main loop: {_safe_exception(e)}")
                 time.sleep(5)
 
         logger.info("Shutting down execution agent")
@@ -790,7 +824,7 @@ def main():
     try:
         config = load_config_from_env()
     except ValueError as e:
-        logger.error(f"Configuration error: {e}")
+        logger.error(f"Configuration error: {_safe_exception(e)}")
         sys.exit(1)
 
     transport = build_transport(config)
@@ -805,7 +839,7 @@ def main():
         agent = ExecutionAgent(config, ibkr_client, alethra_client)
         agent.run()
     except Exception as e:
-        logger.error(f"Fatal error: {e}")
+        logger.error(f"Fatal error: {_safe_exception(e)}")
         sys.exit(1)
 
 

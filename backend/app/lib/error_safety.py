@@ -17,8 +17,16 @@ _DSN = re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://[^\s'\"]+")
 _ABS_PATH = re.compile(
     r"(?:[A-Za-z]:)?/(?:Users|home|opt|var|private|tmp|root|usr|etc)/[^\s'\":,;)\]]*"
 )
+# Credential names are routinely prefixed (``api_token``, ``access_token``,
+# ``client_secret``, ``apiToken``). A bare ``\btoken\b`` misses those because
+# the preceding underscore or letter is a word character, so the name pattern
+# allows a prefix and the whole name is kept while only the value is removed.
+_SECRET_NAME = (
+    r"api[_-]?key|secret|password|passwd|passphrase|token|authorization"
+    r"|credential|client[_-]?secret"
+)
 _SECRET_ASSIGN = re.compile(
-    r"(?i)\b(api[_-]?key|secret|password|passwd|token|authorization)\b\s*[=:]\s*[^\s,;]+"
+    rf"(?i)\b([A-Za-z0-9_.-]*(?:{_SECRET_NAME}))\b\s*[=:]\s*[^\s,;]+"
 )
 _BEARER = re.compile(r"(?i)(bearer\s+)[^\s'\"]+")
 
