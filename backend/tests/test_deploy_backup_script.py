@@ -115,7 +115,8 @@ def test_backup_publishes_only_a_verified_archive(tmp_path):
     assert (backups[0].stat().st_mode & 0o777) == 0o600
     assert _leftovers(root) == []
     assert "Target verified: database alethra, PostgreSQL 16" in result.stdout
-    assert "psql -U alethra alethra" in result.stdout
+    assert "psql -v ON_ERROR_STOP=1 -U alethra alethra" in result.stdout
+    assert "pruning disabled" in result.stdout
 
 
 def test_backup_refuses_a_database_that_is_not_the_requested_one(tmp_path):
@@ -196,14 +197,39 @@ def test_backup_times_out_instead_of_publishing_a_stalled_dump(tmp_path):
 def test_backup_requires_an_explicit_database_name(tmp_path):
     root, fakebin, dump, log = _project(tmp_path)
 
-    result = _run(root, fakebin, dump, log, {"BACKUP_DB_NAME": "", "POSTGRES_DB": ""})
+    result = _run(root, fakebin, dump, log, {"BACKUP_DB_NAME": ""})
 
     assert result.returncode == 1, result.stdout + result.stderr
-    assert "database name is not set" in result.stderr
+    assert "BACKUP_DB_NAME is required" in result.stderr
     assert _backups(root) == []
 
 
-def test_backup_prunes_old_rotations_after_a_successful_run(tmp_path):
+def test_backup_never_falls_back_to_postgres_env_defaults(tmp_path):
+    root, fakebin, dump, log = _project(tmp_path)
+
+    result = _run(root, fakebin, dump, log, {
+        "BACKUP_DB_NAME": "",
+        "POSTGRES_DB": "alethra",
+        "POSTGRES_USER": "alethra",
+    })
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "BACKUP_DB_NAME is required" in result.stderr
+    assert "pg_dump" not in log.read_text(encoding="utf-8")
+    assert _backups(root) == []
+
+
+def test_backup_refuses_an_unrecognised_prune_setting(tmp_path):
+    root, fakebin, dump, log = _project(tmp_path)
+
+    result = _run(root, fakebin, dump, log, {"BACKUP_PRUNE": "yes"})
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "BACKUP_PRUNE must be 0" in result.stderr
+    assert _backups(root) == []
+
+
+def test_backup_keeps_every_archive_by_default(tmp_path):
     root, fakebin, dump, log = _project(tmp_path)
     backup_dir = root / "backups"
     backup_dir.mkdir()
@@ -215,6 +241,27 @@ def test_backup_prunes_old_rotations_after_a_successful_run(tmp_path):
         old_files.append(path)
 
     result = _run(root, fakebin, dump, log)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    remaining = _backups(root)
+    assert len(remaining) == 9, [path.name for path in remaining]
+    for path in old_files:
+        assert path in remaining
+    assert "pruning disabled" in result.stdout
+
+
+def test_backup_prunes_old_rotations_only_when_explicitly_enabled(tmp_path):
+    root, fakebin, dump, log = _project(tmp_path)
+    backup_dir = root / "backups"
+    backup_dir.mkdir()
+    old_files = []
+    for index in range(8):
+        path = backup_dir / f"alethra_db_2026010{index}_000000.sql.gz"
+        path.write_bytes(gzip.compress(b"-- old\n" + TRAILER.encode()))
+        os.utime(path, (1_000_000 + index, 1_000_000 + index))
+        old_files.append(path)
+
+    result = _run(root, fakebin, dump, log, {"BACKUP_PRUNE": "1"})
 
     assert result.returncode == 0, result.stdout + result.stderr
     remaining = _backups(root)

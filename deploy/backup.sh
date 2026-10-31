@@ -4,7 +4,7 @@
 # ──────────────────────────────────────────────
 #
 # Exit codes:
-#   0  backup written, integrity-checked, retention applied
+#   0  backup written and integrity-checked (nothing is deleted)
 #   1  configuration problem (missing compose file, DB name/user, bad limits)
 #   2  target unavailable or not the requested database
 #   3  pg_dump failed or timed out (no backup file is left behind)
@@ -13,9 +13,12 @@
 # Parameters (environment):
 #   BACKUP_DIR             destination directory (default <project>/backups)
 #   BACKUP_SERVICE         compose service name (default: db)
-#   BACKUP_DB_NAME         database to dump (default: POSTGRES_DB, else refuse)
-#   BACKUP_DB_USER         role used by pg_dump (default: POSTGRES_USER, else refuse)
-#   BACKUP_KEEP            backups retained after a successful run (default 7)
+#   BACKUP_DB_NAME         REQUIRED: database to dump; no fallback to POSTGRES_DB
+#   BACKUP_DB_USER         REQUIRED: role used by pg_dump; no fallback to POSTGRES_USER
+#   BACKUP_KEEP            backups kept when pruning is enabled (default 7)
+#   BACKUP_PRUNE           1 enables deleting older backups beyond BACKUP_KEEP;
+#                          default 0 keeps every backup. Creating a backup does
+#                          not authorise deleting existing ones.
 #   BACKUP_TIMEOUT_SECONDS per-command limit (default 900)
 set -euo pipefail
 
@@ -25,6 +28,7 @@ COMPOSE_FILE="$PROJECT_ROOT/docker-compose.prod.yml"
 BACKUP_DIR="${BACKUP_DIR:-$PROJECT_ROOT/backups}"
 DB_SERVICE="${BACKUP_SERVICE:-db}"
 BACKUP_KEEP="${BACKUP_KEEP:-7}"
+BACKUP_PRUNE="${BACKUP_PRUNE:-0}"
 BACKUP_TIMEOUT_SECONDS="${BACKUP_TIMEOUT_SECONDS:-900}"
 
 fail() {
@@ -72,16 +76,21 @@ cd "$PROJECT_ROOT"
 
 [ -f "$COMPOSE_FILE" ] || fail 1 "compose file not found: $COMPOSE_FILE"
 
-if [ -f .env ]; then
-    set -a
-    source .env
-    set +a
-fi
+# .env is deliberately not sourced here: the compose project already loads it,
+# and inheriting BACKUP_* from a file would re-introduce the silent defaults
+# (identity, and prune-on) this script is meant to refuse.
 
-DB_NAME="${BACKUP_DB_NAME:-${POSTGRES_DB:-}}"
-DB_USER="${BACKUP_DB_USER:-${POSTGRES_USER:-}}"
-[ -n "$DB_NAME" ] || fail 1 "database name is not set; set BACKUP_DB_NAME or POSTGRES_DB"
-[ -n "$DB_USER" ] || fail 1 "database user is not set; set BACKUP_DB_USER or POSTGRES_USER"
+# Identity must be stated explicitly from a verified source. Falling back to
+# POSTGRES_DB/POSTGRES_USER would let a blank setting silently target whatever
+# the environment happens to define.
+DB_NAME="${BACKUP_DB_NAME:-}"
+DB_USER="${BACKUP_DB_USER:-}"
+[ -n "$DB_NAME" ] || fail 1 "BACKUP_DB_NAME is required; take it from the verified profile, and do not rely on POSTGRES_DB"
+[ -n "$DB_USER" ] || fail 1 "BACKUP_DB_USER is required; take it from the verified profile, and do not rely on POSTGRES_USER"
+case "$BACKUP_PRUNE" in
+    ''|0|1) ;;
+    *) fail 1 "BACKUP_PRUNE must be 0 (default, never delete) or 1 (delete beyond BACKUP_KEEP), got '$BACKUP_PRUNE'" ;;
+esac
 case "$BACKUP_KEEP" in
     ''|*[!0-9]*) fail 1 "BACKUP_KEEP must be a positive integer, got '$BACKUP_KEEP'" ;;
 esac
@@ -156,14 +165,21 @@ chmod 600 "$BACKUP_FILE"
 SIZE="$(du -h "$BACKUP_FILE" | cut -f1)"
 echo "==> Backup complete: $BACKUP_FILE ($SIZE)"
 echo ""
-echo "  Restore with:"
+echo "  Restore with (ON_ERROR_STOP halts at the first SQL error):"
 echo "    gunzip -c $BACKUP_FILE | docker compose -f $COMPOSE_FILE exec -T $DB_SERVICE \\"
-echo "      psql -U $DB_USER $DB_NAME"
+echo "      psql -v ON_ERROR_STOP=1 -U $DB_USER $DB_NAME"
+echo "  An archive that passes these checks is not yet a proven restore: verify it"
+echo "  on an isolated target and compare the content before relying on it."
 
-# ── Retention: keep the last N verified backups ───────────────
+# ── Retention: deletion only when explicitly requested ────────
 BACKUP_COUNT=$(ls -1 "$BACKUP_DIR"/alethra_db_*.sql.gz 2>/dev/null | wc -l | tr -d ' ')
-if [ "$BACKUP_COUNT" -gt "$BACKUP_KEEP" ]; then
-    REMOVE_COUNT=$((BACKUP_COUNT - BACKUP_KEEP))
-    echo "==> Pruning $REMOVE_COUNT old backup(s) (keeping last $BACKUP_KEEP)..."
-    ls -1t "$BACKUP_DIR"/alethra_db_*.sql.gz | tail -n "$REMOVE_COUNT" | xargs rm -f
+if [ "$BACKUP_PRUNE" = "1" ]; then
+    if [ "$BACKUP_COUNT" -gt "$BACKUP_KEEP" ]; then
+        REMOVE_COUNT=$((BACKUP_COUNT - BACKUP_KEEP))
+        echo "==> Pruning $REMOVE_COUNT old backup(s) (keeping last $BACKUP_KEEP)..."
+        ls -1t "$BACKUP_DIR"/alethra_db_*.sql.gz | tail -n "$REMOVE_COUNT" | xargs rm -f
+    fi
+else
+    echo "==> Retention: pruning disabled; $BACKUP_COUNT archive(s) kept in $BACKUP_DIR"
+    echo "    Deleting older backups requires BACKUP_PRUNE=1 and its own approval."
 fi

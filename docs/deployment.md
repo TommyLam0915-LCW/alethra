@@ -126,29 +126,58 @@ git pull origin main
 
 ### Database Backup & Restore
 
-```bash
-# Backup (database/user default to POSTGRES_DB / POSTGRES_USER from .env)
-./deploy/backup.sh
-BACKUP_DB_NAME=alethra BACKUP_DB_USER=alethra ./deploy/backup.sh   # explicit target
+`deploy/backup.sh` backs up the `db` service of `docker-compose.prod.yml`. It
+cannot reach a host-exposed container such as the candidate instance's
+PostgreSQL on `127.0.0.1:54321`; that database has no verified backup path yet
+(`RUNTIME_VERIFICATION_PENDING`).
 
-# Restore (replace FILE with the backup path)
-gunzip -c backups/alethra_db_XXXXXXXX_XXXXXX.sql.gz \
-  | docker compose -f docker-compose.prod.yml exec -T db \
-    psql -U alethra alethra
+Read the identity from a verified source and pass it explicitly. The script
+requires both values, refuses when either is empty, and never falls back to
+`POSTGRES_DB` / `POSTGRES_USER`:
+
+```bash
+PROFILE=.local/candidate/candidate-profile.env   # verified identity source
+# For the compose stack itself, read POSTGRES_DB / POSTGRES_USER from its .env.
+DB_NAME="$(sed -n 's/^DB_NAME=//p' "$PROFILE" | head -1)"
+DB_USER="$(sed -n 's/^DB_USER=//p' "$PROFILE" | head -1)"
+[ -n "$DB_NAME" ] && [ -n "$DB_USER" ] \
+  || { echo "profile has no DB_NAME/DB_USER; refusing"; exit 1; }
+BACKUP_DB_NAME="$DB_NAME" BACKUP_DB_USER="$DB_USER" ./deploy/backup.sh
 ```
 
-The backup script refuses to guess: `BACKUP_DB_NAME` / `BACKUP_DB_USER` (or
-`POSTGRES_DB` / `POSTGRES_USER`) must be set, the `db` service must be running,
-and the server must report the same database name before anything is dumped.
-The archive is written to a temporary name, checked for the `pg_dump` completion
-line and a valid gzip stream, and only then published; a failed or timed-out
-dump publishes nothing. Exit codes: 0 ok, 1 configuration, 2 target unavailable
-or mismatched, 3 dump failed/timed out, 4 integrity check failed. Other knobs:
-`BACKUP_DIR`, `BACKUP_SERVICE`, `BACKUP_TIMEOUT_SECONDS` (default 900),
-`BACKUP_KEEP` (default 7 rotations, oldest pruned automatically).
+Only values that describe the compose `db` service are usable here. A profile
+whose `DB_HOST` / `DB_PORT` point at the candidate's host-exposed container
+describes a different server; do not substitute those values expecting a copy
+of that database. The script also refuses when the `db` service is not running
+and when the server reports a database name other than the requested one.
 
-These checks are exercised offline with a stub `docker`; no real backup or
-restore has been run on the candidate database.
+The dump is written to a temporary name, checked for the `pg_dump` completion
+line and a valid gzip stream, and only then published with mode 600; a failed
+or timed-out dump publishes nothing. Those are artifact checks, not proof of
+restorability: a restorable backup still needs an isolated restore plus a
+content comparison against the source. PostgreSQL's `psql` continues after SQL
+errors unless told otherwise, so restore acceptance must stop on the first
+error:
+
+```bash
+gunzip -c backups/alethra_db_XXXXXXXX_XXXXXX.sql.gz \
+  | docker compose -f docker-compose.prod.yml exec -T db \
+    psql -v ON_ERROR_STOP=1 -U <db-user> <db-name>
+```
+
+Exit codes: 0 ok, 1 configuration, 2 target unavailable or mismatched, 3 dump
+failed/timed out, 4 integrity check failed.
+
+Retention is off by default: a successful backup never deletes older archives
+and reports how many it kept. Deletion requires `BACKUP_PRUNE=1` (which prunes
+beyond `BACKUP_KEEP`, default 7) and its own authorisation; approval to create
+a backup does not approve deleting existing ones. The script does not source
+`.env`, so `BACKUP_*` values must come from the invoking environment. Other
+knobs: `BACKUP_DIR`, `BACKUP_SERVICE`, `BACKUP_TIMEOUT_SECONDS` (default 900).
+
+These behaviours are exercised offline with a stub `docker`. No real backup has
+been taken and no isolated restore has been performed, so neither the candidate
+database nor the compose stack has a verified restorable backup.
 
 ---
 
