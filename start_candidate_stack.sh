@@ -528,6 +528,9 @@ resume_mode() {
   HEARTBEAT_FILE="$LOG_DIR/worker-heartbeat.json"
   require_credentials "$CREDENTIALS_FILE"
   echo "mode: RESUME (saved profile $PROFILE; no migration, seed or credential change)"
+  # A refused preflight must not leave the previous run's STATUS=ready in place.
+  mkdir -p "$STATE_DIR"
+  write_runtime_identity pending
   readonly_preflight
   log "stage schema: $DB_NAME at head $EXPECTED_SCHEMA_HEAD with fixture accounts present"
   import_check

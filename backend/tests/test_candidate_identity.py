@@ -292,6 +292,8 @@ def test_shell_plan_uses_saved_database_on_another_date(tmp_path):
     assert f"DB_NAME={DB_NAME}" in result.stdout
     assert "SEED=no" in result.stdout
     assert "2099" not in result.stdout
+    # Read-only means no runtime state either, not just no database writes.
+    assert not (tmp_path / "state" / "runtime-identity.env").exists()
 
 
 def test_shell_plan_rejects_conflicting_database_override(tmp_path):
@@ -349,6 +351,37 @@ def test_shell_resume_without_a_profile_refuses_instead_of_guessing(tmp_path):
     assert "Resume refuses to guess a database" in result.stderr
 
 
+def test_shell_resume_refusal_invalidates_a_previous_ready_identity(tmp_path):
+    # 2026-10-31 shape: the last run left STATUS=ready, then the database went
+    # away. A refused resume must not leave that ready claim standing.
+    profile, _ = _profile(tmp_path)
+    state = tmp_path / "state"
+    state.mkdir()
+    identity_file = state / "runtime-identity.env"
+    identity_file.write_text(
+        "STATUS=ready\nMODE=resume\nBACKEND_PID=11\nWORKER_PID=22\n",
+        encoding="utf-8",
+    )
+
+    result = _run_sourced('''
+require_credentials() { :; }
+readonly_preflight() { fail_code 2 "candidate database is not reachable"; }
+resume_mode
+''', {
+        "CANDIDATE_STATE_DIR": str(state),
+        "CANDIDATE_PROFILE": str(profile),
+    })
+
+    content = identity_file.read_text(encoding="utf-8")
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert content.startswith("STATUS=pending\n")
+    assert "STATUS=ready" not in content
+    assert "RUN_ID=" in content
+    # Pending means nothing is proven, so no process may be recorded as bound.
+    assert "BACKEND_PID=\n" in content
+    assert "WORKER_PID=\n" in content
+
+
 def test_shell_new_candidate_refuses_to_overwrite_an_existing_profile(tmp_path):
     profile, _ = _profile(tmp_path)
     env = {k: v for k, v in os.environ.items() if not k.startswith("CANDIDATE_")}
@@ -378,12 +411,15 @@ def _fake_process(tmp_path, argument, database_url):
     )
 
 
-def _stop_env(tmp_path, profile):
+def _stop_env(tmp_path, profile, extra=None):
     env = {k: v for k, v in os.environ.items() if not k.startswith("CANDIDATE_")}
     env.update({
         "CANDIDATE_PYTHON": sys.executable,
         "CANDIDATE_PROFILE": str(profile),
+        # Never let a test rewrite this checkout's real runtime identity.
+        "CANDIDATE_STATE_DIR": str(tmp_path / "state"),
     })
+    env.update(extra or {})
     return env
 
 
@@ -447,6 +483,62 @@ def test_stop_leaves_a_recycled_pid(tmp_path):
         assert "is not this candidate's process" in result.stdout
         assert process.poll() is None
         assert not (log_dir / "worker.pid").exists()
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=30)
+
+
+def test_stop_marks_a_previous_ready_identity_stopped(tmp_path):
+    profile, _ = _profile(tmp_path)
+    state = tmp_path / "state"
+    state.mkdir()
+    identity_file = state / "runtime-identity.env"
+    identity_file.write_text(
+        "STATUS=ready\nMODE=resume\nRUN_ID=20261030T101212+0800-1111\nBACKEND_PID=11\n",
+        encoding="utf-8",
+    )
+    identity_file.chmod(0o600)
+
+    result = subprocess.run(
+        ["bash", str(STOP)], cwd=str(REPO_ROOT), env=_stop_env(tmp_path, profile),
+        text=True, capture_output=True, timeout=120,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    content = identity_file.read_text(encoding="utf-8")
+    assert content.startswith("STATUS=stopped\n")
+    assert "STATUS=ready" not in content
+    # Everything the record already held must survive the status change.
+    assert "MODE=resume" in content
+    assert "RUN_ID=20261030T101212+0800-1111" in content
+    assert "BACKEND_PID=11" in content
+    assert "STOPPED_AT=" in content
+    assert (identity_file.stat().st_mode & 0o777) == 0o600
+
+
+def test_stop_does_not_claim_stopped_when_a_recorded_pid_is_left_alone(tmp_path):
+    profile, _ = _profile(tmp_path, LOG_DIR=str(tmp_path / "logs"))
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    state = tmp_path / "state"
+    state.mkdir()
+    identity_file = state / "runtime-identity.env"
+    identity_file.write_text("STATUS=ready\nMODE=resume\nBACKEND_PID=\n", encoding="utf-8")
+    url = "postgresql+psycopg2://postgres:testpass@127.0.0.1:54321/other_candidate_db"
+    process = _fake_process(tmp_path, "python -m app.workers.training_worker 2", url)
+    (log_dir / "worker.pid").write_text(str(process.pid), encoding="utf-8")
+    try:
+        result = subprocess.run(
+            ["bash", str(STOP)], cwd=str(REPO_ROOT), env=_stop_env(tmp_path, profile),
+            text=True, capture_output=True, timeout=120,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        content = identity_file.read_text(encoding="utf-8")
+        assert content.startswith("STATUS=stop-incomplete\n")
+        assert "STATUS=ready" not in content
+        assert "STOPPED_AT=" in content
+        assert process.poll() is None
     finally:
         if process.poll() is None:
             process.kill()

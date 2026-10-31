@@ -14,7 +14,7 @@
 | Worker 心跳 | `.local/candidate/worker-heartbeat.json`（`state`、`beat_at`、`poll_interval_seconds`） |
 | 啟動腳本 | `./start_candidate_stack.sh`（resume：只用已保存的候選 profile；不遷移、不 seed、不改憑證；見下節） |
 | 候選 profile | `.local/candidate/candidate-profile.env`（mode 600；持久候選身份：candidate id、DB identity、origin、artifact 路徑） |
-| 每次執行身份 | `.local/candidate/runtime-identity.env`（mode 600；只含 PID、啟動時間、heartbeat，不含 DB identity） |
+| 每次執行身份 | `.local/candidate/runtime-identity.env`（mode 600；`STATUS`＝`pending`／`ready`／`stopped`／`stop-incomplete`、`RUN_ID`、`STARTED_AT`、`UPDATED_AT`、PID、heartbeat；不含 DB identity）。resume 在預檢前先寫 `pending`，只有最後一層 gate 通過才寫 `ready`；停止腳本會改寫為 `stopped`，若有已記錄程序未能核實停止則寫 `stop-incomplete`。 |
 | 憑證檔 | `.local/candidate-credentials.env`（mode 600；只由主持人當面使用，不貼進任何文件或對話） |
 
 憑證檔內的鍵名（只列名稱，不含值）：
@@ -48,7 +48,7 @@
 | 唯讀預檢 | `./start_candidate_stack.sh --plan` | 印出將沿用的 DB 與 `SEED=no`，不啟動 process、不寫入 repo。 |
 | 明確重設 | `./start_candidate_stack.sh --reset` | 先停本候選的已核實 process，只 drop profile 指定的 DB，重建並重新 seed。checkout schema head 與 profile 不符時拒絕。 |
 | 明確新候選 | `./start_candidate_stack.sh --new-candidate --candidate-id <id>` | 新 identity；拒絕覆寫既有 profile、憑證、log 目錄，亦拒絕共用非空 artifact 目錄（需另一個 checkout）。不因 restart 觸發。 |
-| 停止 | `./stop_candidate_stack.sh` | 先核對每個 pid 的身份才送訊號；不合的 process 只報告、不殺。DB 保留。 |
+| 停止 | `./stop_candidate_stack.sh` | 先核對每個 pid 的身份才送訊號；不合的 process 只報告、不殺。DB 保留；`runtime-identity.env` 改寫為 `stopped`（有程序未核實停止則為 `stop-incomplete`）。 |
 
 候選身份只存在 profile；`runtime-identity.env` 的舊 PID 不會被當成目前程序身份。要切換 DB 必須用 `--new-candidate` 或 `--reset`，不會因跨日自動切換。
 

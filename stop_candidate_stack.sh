@@ -58,6 +58,8 @@ stop_pid() {
   kill -9 "$pid" 2>/dev/null || true
 }
 
+STOP_INCOMPLETE=""
+
 stop_role() {
   local role="$1" pid out
   pid="$(pid_of "$role")"
@@ -69,6 +71,7 @@ stop_role() {
   fi
   out="$("$PYTHON" "$HELPER" check-process --profile "$PROFILE" --role "$role" --pid "$pid" 2>&1)" || {
     echo "$role pid $pid could not be checked; left alone: $out"
+    STOP_INCOMPLETE=1
     return 0
   }
   case "$out" in
@@ -86,6 +89,7 @@ stop_role() {
       ;;
     *)
       echo "$role pid $pid does not match the saved candidate identity; left alone: $out"
+      STOP_INCOMPLETE=1
       ;;
   esac
 }
@@ -106,9 +110,39 @@ free_frontend_listener() {
   stop_pid "frontend listener" "$pid"
 }
 
+# A stop must not leave the previous run's STATUS=ready behind: a later reader
+# would otherwise take a stopped stack for a ready one.
+mark_stopped_identity() {
+  local file="$STATE_DIR/runtime-identity.env" status="$1" tmp
+  [ -f "$file" ] || return 0
+  tmp="$(mktemp "$STATE_DIR/.runtime-identity.XXXXXX" 2>/dev/null)" || {
+    echo "runtime identity could not be updated; left as it was"
+    return 0
+  }
+  if ! awk -v status="$status" -v stopped_at="$(date '+%Y-%m-%dT%H:%M:%S%z')" '
+    /^STATUS=/ { print "STATUS=" status; seen = 1; next }
+    /^STOPPED_AT=/ { next }
+    { print }
+    END { if (!seen) print "STATUS=" status; print "STOPPED_AT=" stopped_at }
+  ' "$file" >"$tmp"; then
+    rm -f "$tmp"
+    echo "runtime identity could not be updated; left as it was"
+    return 0
+  fi
+  chmod 600 "$tmp"
+  mv -f "$tmp" "$file" || { rm -f "$tmp"; echo "runtime identity could not be updated; left as it was"; }
+}
+
 stop_role backend
 stop_role worker
 stop_role frontend
 free_frontend_listener
+
+if [ -n "$STOP_INCOMPLETE" ]; then
+  mark_stopped_identity stop-incomplete
+  echo "note: at least one recorded process was left alone; runtime identity says stop-incomplete"
+else
+  mark_stopped_identity stopped
+fi
 
 echo "candidate stack stopped; database and its progress were NOT removed"
