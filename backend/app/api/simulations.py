@@ -1256,6 +1256,25 @@ def advance_simulation(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    """Advance the session by exactly one step of its own bound dataset.
+
+    A daily session moves to the next stored snapshot date — the next trading
+    session present in the bound dataset, not necessarily the next calendar day.
+    An intraday session moves to the next stored bar of its declared timeframe.
+    Each call appends exactly one SimulationDecision and advances the cursor for
+    good; no endpoint steps backward, so "one call = one step" is assertable and
+    a retried call is a second step, not a replay.
+
+    Status: `pending` becomes `active` on the first advance. Any status other
+    than `pending` or `active` returns 400 and changes nothing.
+
+    Dataset exhaustion also returns 400, but it is a state change, not a
+    rejection: the session becomes `completed`, an open position is force-exited
+    at the last observed close (daily) and pending manual orders are expired
+    because their only window has passed. Callers must read the detail text to
+    tell that transition from a refused call; the stored decisions and the
+    returned status are the record, not the HTTP code alone.
+    """
     session = _get_session_with_ownership(session_id, db, current_user)
 
     if session.status not in (SimulationStatus.pending, SimulationStatus.active):
@@ -1592,6 +1611,19 @@ def retire_simulation(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    """Close a session as retired and keep everything it recorded.
+
+    Retiring is a status change, not a liquidation: no position is sold, no
+    pending order is expired, and paper equity is left exactly as it stood. The
+    decisions, orders and fills already stored stay readable, so a retired
+    session remains usable evidence.
+
+    A session already `completed` or `retired` returns 400 and changes nothing.
+    Retirement is final on this API surface: there is no un-retire endpoint, and
+    `resume` only accepts a `paused` session. An agent can therefore assert that
+    the first retire succeeds, and every later retire on the same session is a
+    no-op refusal (still 400), rather than a second transition.
+    """
     session = _get_session_with_ownership(session_id, db, current_user)
     if session.status in (SimulationStatus.completed, SimulationStatus.retired):
         raise HTTPException(status_code=400, detail=f"Cannot retire a '{getattr(session.status, 'value', session.status)}' session")
