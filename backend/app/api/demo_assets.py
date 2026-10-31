@@ -2,7 +2,7 @@ import logging
 
 from fastapi import APIRouter, HTTPException
 from app.providers import get_data_provider, get_provider_info
-from app.providers.data_provider import compute_staleness
+from app.providers.data_provider import ProviderNotConfiguredError, compute_staleness
 from app.lib.error_safety import safe_error_message, safe_provider_status
 
 logger = logging.getLogger(__name__)
@@ -12,6 +12,17 @@ router = APIRouter(tags=["market-data"])
 def _provider_failure(symbol: str, exc: Exception) -> HTTPException:
     provider = get_data_provider()
     logger.warning("Data provider failed for %s: %r", symbol, exc, exc_info=exc)
+    if isinstance(exc, ProviderNotConfiguredError):
+        return HTTPException(
+            status_code=503,
+            detail={
+                "error": safe_error_message(exc),
+                "reason": "provider_not_configured",
+                "available": False,
+                "provider": provider.provider_id,
+                "provider_status": safe_provider_status(provider.get_status()),
+            },
+        )
     return HTTPException(
         status_code=503,
         detail={

@@ -148,6 +148,52 @@ def test_series_venue_outage_is_503_and_never_falls_back(client):
     assert detail["no_fallback"]
 
 
+def test_overview_lists_selectable_intervals_and_retention_limits(client):
+    _install({})
+    body = client.get(BASE).json()
+
+    labels = [i["label"] for i in body["intervals"]]
+    assert labels == ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]
+    assert body["default_interval"] == "1m"
+    assert body["limits"]["max_bars_per_request"] == 720
+    assert body["limits"]["older_history_retrievable"] is False
+    assert body["limits"]["note"]
+    assert body["limits"]["note_zh"]
+
+
+def test_series_payload_carries_interval_retention_and_refresh(client):
+    _install({"/0/public/OHLC": _ohlc_payload(_ohlc_rows(count=4, include_forming=True))})
+    body = client.get(
+        f"{BASE}/series", params={"instrument_id": INSTRUMENT, "interval": "1m"}
+    ).json()
+
+    assert body["interval"] == "1m"
+    assert body["interval_minutes"] == 1
+    # Data time is the last closed candle, not the request time.
+    assert body["data_as_of"] == body["completed"][-1]["close_time"]
+    assert body["fetched_at"]
+
+    retention = body["retention"]
+    assert retention["max_bars_per_request"] == 720
+    assert retention["returned_completed_count"] == 4
+    assert retention["oldest_returned_open_time"] == body["completed"][0]["open_time"]
+    assert retention["older_history_retrievable"] is False
+    assert "since" in retention["note"]
+
+    refresh = body["refresh"]
+    assert refresh["minimum_seconds"] == 15
+    assert refresh["suggested_seconds"] >= refresh["minimum_seconds"]
+
+
+def test_series_rejects_a_limit_beyond_venue_retention(client):
+    _install({})
+    resp = client.get(
+        f"{BASE}/series",
+        params={"instrument_id": INSTRUMENT, "interval": "1m", "limit": 721},
+    )
+    assert resp.status_code == 422
+
+
 # -- snapshot permissions ---------------------------------------------------
 
 def test_snapshot_requires_authentication(client):

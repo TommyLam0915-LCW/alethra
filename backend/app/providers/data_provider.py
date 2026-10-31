@@ -70,6 +70,16 @@ class ProviderRateLimitError(Exception):
         self.retry_after_seconds = retry_after_seconds
 
 
+class ProviderNotConfiguredError(Exception):
+    """The selected provider has no usable credentials or endpoint.
+
+    An unconfigured provider is a normal deployment state, not a crash: the
+    catalog and already-stored data stay readable, while every request that
+    would need a new upstream fetch is refused instead of silently falling back
+    to demo or synthetic data.
+    """
+
+
 def compute_staleness(
     latest_bar_date: Optional[str],
     today: Optional[date] = None,

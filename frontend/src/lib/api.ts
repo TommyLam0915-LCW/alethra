@@ -5,13 +5,14 @@ import {
   type CandidateSession,
   type CandidateStatus,
 } from './candidate';
+import type { CryptoOverview, CryptoSeriesPayload } from './cryptoBars';
 import type { IntradayCapability, IntradaySeriesPayload } from './intradayBars';
 
 export const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 const API_URL = API_BASE_URL;
 
 export class ApiError extends Error {
-  constructor(message: string, public status: number) {
+  constructor(message: string, public status: number, public detail?: unknown) {
     super(message);
     this.name = 'ApiError';
   }
@@ -144,7 +145,7 @@ export async function apiFetch(endpoint: string, options: RequestInit = {}) {
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({ detail: 'Request failed' }));
-    throw new ApiError(formatErrorDetail(error.detail), response.status);
+    throw new ApiError(formatErrorDetail(error.detail), response.status, error.detail);
   }
 
   // 204 No Content carries no body; response.json() would throw on it.
@@ -162,7 +163,7 @@ export async function apiFetchText(endpoint: string, options: RequestInit = {}):
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({ detail: 'Request failed' }));
-    throw new ApiError(formatErrorDetail(error.detail), response.status);
+    throw new ApiError(formatErrorDetail(error.detail), response.status, error.detail);
   }
 
   return response.text();
@@ -552,6 +553,20 @@ export const api = {
       return apiFetch(`/api/v1/market/intraday/refresh?${qs}`, {
         method: 'POST',
       }) as Promise<IntradaySeriesPayload & { requested_by: string }>;
+    },
+  },
+  crypto: {
+    overview: () => apiFetch('/api/v1/market/crypto') as Promise<CryptoOverview>,
+    instruments: () => apiFetch('/api/v1/market/crypto/instruments'),
+    series: (instrumentId: string, interval: string, limit?: number) => {
+      const qs = new URLSearchParams({ instrument_id: instrumentId, interval });
+      if (limit) qs.set('limit', String(limit));
+      return apiFetch(`/api/v1/market/crypto/series?${qs}`) as Promise<CryptoSeriesPayload>;
+    },
+    stored: (instrumentId: string, limit?: number) => {
+      const qs = new URLSearchParams({ instrument_id: instrumentId });
+      if (limit) qs.set('limit', String(limit));
+      return apiFetch(`/api/v1/market/crypto/stored?${qs}`);
     },
   },
   instruments: {

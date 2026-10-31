@@ -49,6 +49,15 @@ interface ProviderStatus {
   status: Record<string, unknown>;
 }
 
+interface DataServiceStatus {
+  state: 'available' | 'unavailable' | 'not_configured' | string;
+  reason: string | null;
+  provider_id: string;
+  provider_name: string;
+  feed_mode: string;
+  detail: string | null;
+}
+
 const DATA_NATURE_LABELS: Record<string, string> = {
   synthetic: 'Synthetic',
   live: 'Live feed',
@@ -115,6 +124,7 @@ export default function MarketDataPage() {
   const [bars, setBars] = useState<Bar[]>([]);
   const [dataQuality, setDataQuality] = useState<DataQuality | null>(null);
   const [providerStatus, setProviderStatus] = useState<ProviderStatus | null>(null);
+  const [dataStatus, setDataStatus] = useState<DataServiceStatus | null>(null);
   const [dataLoading, setDataLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -141,11 +151,19 @@ export default function MarketDataPage() {
     try {
       const data = await api.instruments.list();
       const items: Instrument[] = data.instruments || [];
+      const status: DataServiceStatus | null = data.data_status ?? null;
       setInstruments(items);
-      if (items.length > 0 && !selectedSymbol) {
-        const first = items[0].instrument_id;
-        setSelectedSymbol(first);
-        loadBarData(first);
+      setDataStatus(status);
+      if (!selectedSymbol && items.length > 0) {
+        setSelectedSymbol(items[0].instrument_id);
+      }
+      // An unconfigured provider is a normal state: the catalog above stays
+      // usable, but fetching bars would fail, so the page does not imply data.
+      if (status?.state === 'not_configured') {
+        setBars([]);
+        setLatestBar(null);
+        setDataQuality(null);
+        setError(null);
       }
     } catch (err) {
       console.error('Failed to load instruments:', err);
@@ -153,36 +171,47 @@ export default function MarketDataPage() {
     }
   };
 
-  const loadBarData = useCallback(async (symbol: string) => {
-    setDataLoading(true);
-    setError(null);
-    setDataQuality(null);
-    const today = new Date();
-    const yearAgo = new Date(today.getTime() - 366 * 24 * 60 * 60 * 1000);
-    const iso = (d: Date) => d.toISOString().slice(0, 10);
-    try {
-      if (symbol.includes(':')) {
-        const data = await api.instruments.bars(symbol, iso(yearAgo), iso(today));
-        setBars(data.bars || []);
-        const allBars = data.bars || [];
-        setLatestBar(allBars.length > 0 ? allBars[allBars.length - 1] : null);
-        setDataQuality(data.data_quality || null);
-      } else {
-        const [latest, barsData] = await Promise.all([
-          api.marketData.latest(symbol),
-          api.marketData.bars(symbol, iso(yearAgo), iso(today)),
-        ]);
-        setLatestBar(latest?.bar || null);
-        setBars(barsData?.bars || []);
-        setDataQuality(latest?.data_quality || barsData?.data_quality || null);
+  const loadBarData = useCallback(
+    async (symbol: string) => {
+      if (dataStatus?.state === 'not_configured') {
+        setDataLoading(false);
+        setError(null);
+        setBars([]);
+        setLatestBar(null);
+        setDataQuality(null);
+        return;
       }
-    } catch (err) {
-      console.error('Failed to load bar data:', err);
-      setError("Couldn't load market data. Your selection is saved. Try again.");
-    } finally {
-      setDataLoading(false);
-    }
-  }, []);
+      setDataLoading(true);
+      setError(null);
+      setDataQuality(null);
+      const today = new Date();
+      const yearAgo = new Date(today.getTime() - 366 * 24 * 60 * 60 * 1000);
+      const iso = (d: Date) => d.toISOString().slice(0, 10);
+      try {
+        if (symbol.includes(':')) {
+          const data = await api.instruments.bars(symbol, iso(yearAgo), iso(today));
+          setBars(data.bars || []);
+          const allBars = data.bars || [];
+          setLatestBar(allBars.length > 0 ? allBars[allBars.length - 1] : null);
+          setDataQuality(data.data_quality || null);
+        } else {
+          const [latest, barsData] = await Promise.all([
+            api.marketData.latest(symbol),
+            api.marketData.bars(symbol, iso(yearAgo), iso(today)),
+          ]);
+          setLatestBar(latest?.bar || null);
+          setBars(barsData?.bars || []);
+          setDataQuality(latest?.data_quality || barsData?.data_quality || null);
+        }
+      } catch (err) {
+        console.error('Failed to load bar data:', err);
+        setError("Couldn't load market data. Your selection is saved. Try again.");
+      } finally {
+        setDataLoading(false);
+      }
+    },
+    [dataStatus],
+  );
 
   useEffect(() => {
     if (selectedSymbol) {
@@ -231,10 +260,45 @@ export default function MarketDataPage() {
               Daily bars for listed instruments. Source, adjustment and freshness are shown with the data.
             </p>
           </div>
-          <Link href="/market-data/intraday" style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
-            Intraday bars · internal test
-          </Link>
+          <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap' }}>
+            <Link href="/market-data/crypto" style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
+              Crypto · Kraken spot
+            </Link>
+            <Link href="/market-data/intraday" style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
+              Intraday bars · internal test
+            </Link>
+          </div>
         </div>
+
+        {dataStatus?.state === 'not_configured' && (
+          <div
+            role="status"
+            data-testid="market-data-unconfigured"
+            style={{
+              backgroundColor: 'rgba(217,162,59,0.1)',
+              border: '1px solid var(--warning)',
+              borderRadius: '6px',
+              padding: '12px 16px',
+              marginBottom: '20px',
+              fontSize: '13px',
+              color: 'var(--text-primary)',
+            }}
+          >
+            <strong>Market data provider is not configured.</strong> The instrument catalog stays readable, but
+            no new daily bars can be fetched. No record is substituted with sample data — the page does not
+            show prices it did not receive.
+            {dataStatus.detail && (
+              <div style={{ marginTop: '4px', color: 'var(--text-secondary)' }}>{dataStatus.detail}</div>
+            )}
+            <div style={{ marginTop: '6px' }}>
+              Crypto research runs on its own Kraken spot source:{' '}
+              <Link href="/market-data/crypto" style={{ color: 'var(--text-secondary)' }}>
+                open BTC/USD
+              </Link>
+              .
+            </div>
+          </div>
+        )}
 
         {error && (
           <div
@@ -449,8 +513,13 @@ export default function MarketDataPage() {
               Loading…
             </div>
           ) : !latestBar ? (
-            <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-secondary)', fontSize: '14px' }}>
-              No bars available for this instrument.
+            <div
+              data-testid="market-data-empty"
+              style={{ textAlign: 'center', padding: '40px', color: 'var(--text-secondary)', fontSize: '14px' }}
+            >
+              {dataStatus?.state === 'not_configured'
+                ? 'Daily bars are unavailable while the provider is not configured. Nothing is simulated in their place.'
+                : 'No bars available for this instrument.'}
             </div>
           ) : (
             <>

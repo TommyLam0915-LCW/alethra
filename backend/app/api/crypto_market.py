@@ -63,6 +63,20 @@ MODE_LABELS_ZH = {
     "disconnected": "行情來源未連線",
 }
 
+MINUTES_TO_LABEL: Dict[int, str] = {minutes: label for label, minutes in INTERVAL_ALIASES.items()}
+
+RETENTION_NOTE = (
+    "The venue returns only its most recent ~720 candles per interval. Raising "
+    "the limit can reach older bars inside that window, but bars older than the "
+    "window cannot be paged into with 'since'. Long-term research must accumulate "
+    "what is served here into storage, or use a licensed historical source."
+)
+RETENTION_NOTE_ZH = (
+    "交易所只提供最近約 720 根 K 線；加大 limit 只可取回此窗口內較早的資料，"
+    "更舊的歷史無法透過重複設定 since 取得。長期研究須由本系統持續儲存，"
+    "或改用有授權的歷史數據來源。"
+)
+
 TERMS_STATUS = "NOT_CLEARED_FOR_EXTERNAL_REDISTRIBUTION"
 TERMS_NOTE_ZH = (
     "現階段只供本機／內部研究及模擬交易使用。交易所公開行情不等於可對外重新分發；"
@@ -178,10 +192,41 @@ def _series_mode(series: CandleSeries, provider) -> str:
     return "live_realtime"
 
 
+def _retention_payload(series: CandleSeries) -> Dict[str, Any]:
+    oldest = series.completed[0].open_time.isoformat() if series.completed else None
+    return {
+        "max_bars_per_request": MAX_SERIES_HEIGHT,
+        "returned_completed_count": len(series.completed),
+        "oldest_returned_open_time": oldest,
+        "older_history_retrievable": False,
+        "note": RETENTION_NOTE,
+        "note_zh": RETENTION_NOTE_ZH,
+    }
+
+
+def _refresh_payload(series: CandleSeries) -> Dict[str, Any]:
+    # One bounded REST read per cycle. A bar becomes final only after close_time,
+    # so polling faster than the venue's throttle buys nothing.
+    return {
+        "suggested_seconds": max(15, series.interval_minutes * 15),
+        "minimum_seconds": 15,
+        "note": (
+            "Each cycle is one bounded REST read. The forming candle may change; "
+            "a completed candle is appended only after its close_time."
+        ),
+    }
+
+
 def _series_payload(series: CandleSeries, instrument, provider) -> Dict[str, Any]:
     mode = _series_mode(series, provider)
+    data_as_of = (
+        series.last_completed_close_time.isoformat()
+        if series.last_completed_close_time
+        else None
+    )
     return {
         "instrument": _instrument_payload(instrument),
+        "interval": MINUTES_TO_LABEL.get(series.interval_minutes),
         "interval_minutes": series.interval_minutes,
         "mode": mode,
         "mode_label_zh": MODE_LABELS_ZH[mode],
@@ -190,6 +235,7 @@ def _series_payload(series: CandleSeries, instrument, provider) -> Dict[str, Any
             "once close_time has passed."
         ),
         "fetched_at": series.fetched_at.isoformat(),
+        "data_as_of": data_as_of,
         "completed": [_candle_payload(c) for c in series.completed],
         "forming": _candle_payload(series.forming) if series.forming else None,
         "forming_excluded_from_strategy": True,
@@ -224,6 +270,8 @@ def _series_payload(series: CandleSeries, instrument, provider) -> Dict[str, Any
             "redistribution": TERMS_STATUS,
             "terms_note_zh": TERMS_NOTE_ZH,
         },
+        "retention": _retention_payload(series),
+        "refresh": _refresh_payload(series),
         "unavailability_policy": (
             "If the venue cannot be reached the endpoint returns an error and an "
             "empty series; demo or synthetic bars are never substituted."
@@ -233,7 +281,7 @@ def _series_payload(series: CandleSeries, instrument, provider) -> Dict[str, Any
 
 @router.get("/market/crypto")
 def crypto_market_overview():
-    """Declared venue, pair and the terms status of this lane."""
+    """Declared venue, pair, intervals and the terms status of this lane."""
     provider = get_crypto_provider()
     return {
         "lane": "crypto_research_mode",
@@ -241,6 +289,19 @@ def crypto_market_overview():
         "read_only": True,
         "orders_supported": False,
         "instruments": [_instrument_payload(i) for i in CRYPTO_INSTRUMENTS],
+        "intervals": [
+            {"label": label, "minutes": minutes}
+            for label, minutes in INTERVAL_ALIASES.items()
+            if minutes in KRAKEN_INTERVALS
+        ],
+        "default_interval": "1m",
+        "limits": {
+            "max_bars_per_request": MAX_SERIES_HEIGHT,
+            "max_stored_rows": 2000,
+            "older_history_retrievable": False,
+            "note": RETENTION_NOTE,
+            "note_zh": RETENTION_NOTE_ZH,
+        },
         "venues": [
             {
                 "exchange": i.exchange.value,

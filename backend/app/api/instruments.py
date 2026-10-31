@@ -11,7 +11,7 @@ from app.auth.jwt import require_admin
 from app.auth.safety import rate_limit
 from app.models.user import User
 from app.providers import get_data_provider
-from app.providers.data_provider import compute_staleness
+from app.providers.data_provider import ProviderNotConfiguredError, compute_staleness
 from app.services.market_data_storage import MarketDataStorage
 from app.services.price_view import (
     bar_view,
@@ -52,19 +52,55 @@ def _validated_refresh_range(start_date: str, end_date: str) -> None:
         )
 
 
-def _provider_failure(instrument_id: str, exc: Exception) -> HTTPException:
+def _provider_failure(
+    instrument_id: str,
+    exc: Exception,
+    prefix: str = "Data provider failed to serve data for",
+) -> HTTPException:
     provider = get_data_provider()
     logger.warning("Data provider failed for %s: %r", instrument_id, exc, exc_info=exc)
+    if isinstance(exc, ProviderNotConfiguredError):
+        return HTTPException(
+            status_code=503,
+            detail={
+                "error": safe_error_message(exc),
+                "reason": "provider_not_configured",
+                "available": False,
+                "provider": provider.provider_id,
+                "provider_status": safe_provider_status(provider.get_status()),
+            },
+        )
     return HTTPException(
         status_code=503,
         detail={
-            "error": (
-                f"Data provider failed to serve data for {instrument_id}: "
-                f"{safe_error_message(exc)}"
-            ),
+            "error": f"{prefix} {instrument_id}: {safe_error_message(exc)}",
             "provider_status": safe_provider_status(provider.get_status()),
         },
     )
+
+
+def _data_status(provider) -> dict:
+    """Machine-readable data-service state for the browser.
+
+    ``not_configured`` is a normal deployment state: the catalog and stored
+    bars are still readable, but nothing can be fetched from upstream and no
+    demo/synthetic series is substituted.
+    """
+    status = provider.get_status()
+    if status.get("configured") is False:
+        state = "not_configured"
+    elif provider.is_available():
+        state = "available"
+    else:
+        state = "unavailable"
+    return {
+        "state": state,
+        "reason": status.get("reason"),
+        "provider_id": provider.provider_id,
+        "provider_name": provider.provider_name,
+        "feed_mode": provider.feed_mode,
+        "detail": status.get("detail"),
+    }
 
 
 def _data_coverage(
@@ -182,7 +218,9 @@ def list_instruments(
         ],
         "total": len(instruments),
         "data_available": has_data,
+        "data_status": _data_status(provider),
         "provider": provider.provider_name,
+        "provider_id": provider.provider_id,
         "data_disclaimer": "Price data is synthetic (demo mode) — not live market data.",
         "data_disclaimer_zh": "價格數據為模擬數據（演示模式）— 非即時市場數據。",
     }
@@ -306,6 +344,10 @@ def get_instrument_bars(
                 provider_note=quality.get("note"),
                 provider_note_zh=quality.get("note_zh"),
             )
+    except ProviderNotConfiguredError as exc:
+        # A normal unconfigured state must not be recorded as a provider
+        # outage in storage metadata.
+        raise _provider_failure(instrument_id, exc)
     except Exception as exc:
         storage.mark_error(instrument_id, provider.provider_id, str(exc))
         raise _provider_failure(instrument_id, exc)
@@ -575,19 +617,12 @@ def refresh_instrument_bars(
             "message_zh": f"成功更新 {stored_count} 條數據。",
         }
 
+    except ProviderNotConfiguredError as exc:
+        raise _provider_failure(instrument_id, exc)
     except Exception as exc:
         logger.warning("Data refresh failed for %s: %r", instrument_id, exc, exc_info=exc)
         storage.mark_error(instrument_id, provider.provider_id, str(exc))
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "error": (
-                    f"Failed to refresh data for {instrument_id}: "
-                    f"{safe_error_message(exc)}"
-                ),
-                "provider_status": safe_provider_status(provider.get_status()),
-            },
-        )
+        raise _provider_failure(instrument_id, exc, prefix="Failed to refresh")
 
 
 @router.get("/markets")
