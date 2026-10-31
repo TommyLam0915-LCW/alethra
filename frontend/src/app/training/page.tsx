@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { api, ApiError, API_BASE_URL } from '@/lib/api';
+import { classifyWriteError, parseParameterGridJson } from '@/lib/userErrors';
 import { statusPillClass } from '@/lib/status-styles';
 import AppShell from '@/components/shell/AppShell';
 import PersonalizationPanel from '@/components/training/PersonalizationPanel';
@@ -67,6 +68,67 @@ const ACTIVE_JOB_STATUSES = new Set(['pending', 'running']);
 // A queued job that has not moved in this long is almost always waiting for a
 // worker that is not running in this environment — say so instead of spinning.
 const QUEUE_STALE_MS = 120_000;
+const DEFAULT_PARAMETER_GRID = '{"fast_period": [3, 5, 10], "slow_period": [20, 30]}';
+
+interface ExperimentOption {
+  id: string;
+  title: string;
+  status: string;
+}
+
+interface ActionNotice {
+  tone: 'success' | 'warning' | 'error';
+  message: string;
+  reload: 'jobs' | 'ml' | null;
+}
+
+// Results used to appear in alert() boxes, which dropped the page context and
+// gave no way to continue. One inline box keeps success, failure and an
+// unconfirmed write visually distinct and offers the reload that the user
+// needs before trying again.
+function ActionNoticeBox({
+  tone,
+  message,
+  onReload,
+  testId,
+}: {
+  tone: ActionNotice['tone'];
+  message: string;
+  onReload: (() => void) | null;
+  testId: string;
+}) {
+  const palette =
+    tone === 'success'
+      ? { background: 'rgba(34,197,94,0.12)', border: '1px solid var(--positive)' }
+      : tone === 'warning'
+        ? { background: 'rgba(245,158,11,0.12)', border: '1px solid var(--warning)' }
+        : { background: 'rgba(239,68,68,0.12)', border: '1px solid var(--negative)' };
+  return (
+    <div
+      role={tone === 'success' ? 'status' : 'alert'}
+      data-testid={testId}
+      style={{
+        ...palette,
+        display: 'flex',
+        gap: '12px',
+        alignItems: 'center',
+        flexWrap: 'wrap',
+        padding: '12px',
+        borderRadius: '4px',
+        marginBottom: '16px',
+        fontSize: '13px',
+        color: 'var(--text-primary)',
+      }}
+    >
+      <span>{message}</span>
+      {onReload && (
+        <button type="button" onClick={onReload} className="btn btn-secondary">
+          重新載入列表
+        </button>
+      )}
+    </div>
+  );
+}
 
 const ML_MODEL_TYPE_LABELS: Record<string, string> = {
   logistic_regression: '邏輯回歸',
@@ -111,8 +173,13 @@ export default function TrainingPage() {
   const [showForm, setShowForm] = useState(false);
   const [formData, setFormData] = useState({
     experiment_id: '',
-    parameter_grid: '{"fast_period": [3, 5, 10], "slow_period": [20, 30]}',
+    parameter_grid: DEFAULT_PARAMETER_GRID,
   });
+  const [formError, setFormError] = useState<string | null>(null);
+  const [jobNotice, setJobNotice] = useState<ActionNotice | null>(null);
+  const [experiments, setExperiments] = useState<ExperimentOption[]>([]);
+  const [experimentsError, setExperimentsError] = useState<string | null>(null);
+  const [manualExperiment, setManualExperiment] = useState(false);
   const [creating, setCreating] = useState(false);
   const [mlInstruments, setMlInstruments] = useState<MLInstrument[]>([]);
   const [mlModels, setMlModels] = useState<MLModel[]>([]);
@@ -130,6 +197,8 @@ export default function TrainingPage() {
   const [mlLoadError, setMlLoadError] = useState<string | null>(null);
   const [expandedModelId, setExpandedModelId] = useState<string | null>(null);
   const [latestPredictions, setLatestPredictions] = useState<Record<string, any>>({});
+  const [predictionErrors, setPredictionErrors] = useState<Record<string, string>>({});
+  const [modelActionErrors, setModelActionErrors] = useState<Record<string, string>>({});
   const [deletingModelId, setDeletingModelId] = useState<string | null>(null);
   const [copiedModelApi, setCopiedModelApi] = useState<string | null>(null);
 
@@ -145,6 +214,7 @@ export default function TrainingPage() {
     }
     loadJobs();
     loadMLData();
+    loadExperiments();
   }, [router]);
 
   // Queued/running jobs move without any click: poll while work is in flight so
@@ -172,24 +242,67 @@ export default function TrainingPage() {
     }
   };
 
+  const reloadJobs = () => {
+    setError(null);
+    setLoading(true);
+    loadJobs();
+  };
+
+  // Picking an existing experiment removes the usual copy/paste of a UUID.
+  // If the list cannot be loaded, the manual input stays available instead of
+  // blocking job creation.
+  const loadExperiments = async () => {
+    try {
+      const data = await api.experiments.list();
+      const list: ExperimentOption[] = Array.isArray(data) ? data : [];
+      setExperiments(list);
+      setExperimentsError(null);
+    } catch (err) {
+      console.error('Failed to load experiments:', err);
+      setExperimentsError('無法載入你的研究實驗清單，可改為手動輸入實驗 ID。');
+      setManualExperiment(true);
+    }
+  };
+
   const handleCreateJob = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (creating) return;
+    setJobNotice(null);
+
+    const experimentId = formData.experiment_id.trim();
+    if (!experimentId) {
+      setFormError('請先選擇一個研究實驗，或手動輸入有效的實驗 ID。');
+      return;
+    }
+    const parsedGrid = parseParameterGridJson(formData.parameter_grid);
+    if (!parsedGrid.ok) {
+      setFormError(parsedGrid.message);
+      return;
+    }
+    setFormError(null);
     setCreating(true);
+
     try {
-      const paramGrid = JSON.parse(formData.parameter_grid);
       await api.training.createJob({
-        experiment_id: formData.experiment_id,
-        parameter_grid: paramGrid,
+        experiment_id: experimentId,
+        parameter_grid: parsedGrid.value,
       });
       setShowForm(false);
-      setFormData({
-        experiment_id: '',
-        parameter_grid: '{"fast_period": [3, 5, 10], "slow_period": [20, 30]}',
+      setFormData({ experiment_id: '', parameter_grid: DEFAULT_PARAMETER_GRID });
+      setJobNotice({
+        tone: 'success',
+        message: '訓練任務已建立，列表已重新載入；狀態會自動更新。',
+        reload: null,
       });
       await loadJobs();
     } catch (err) {
       console.error('Failed to create job:', err);
-      alert('建立訓練任務失敗');
+      const failure = classifyWriteError(err, '建立訓練任務');
+      setJobNotice({
+        tone: failure.unconfirmed ? 'warning' : 'error',
+        message: failure.unconfirmed ? failure.message : `建立訓練任務失敗：${failure.message}`,
+        reload: failure.unconfirmed ? 'jobs' : null,
+      });
     } finally {
       setCreating(false);
     }
@@ -197,14 +310,25 @@ export default function TrainingPage() {
 
   const handleCancelJob = async (jobId: string) => {
     if (!confirm('確定要取消此任務嗎？')) return;
+    setJobNotice(null);
     try {
       await api.training.cancel(jobId);
       // Cancelling a queued job returns its reserved quota unit; refresh the
       // quota card too, otherwise it keeps showing the stale reservation.
       await Promise.all([loadJobs(), loadMLData()]);
+      setJobNotice({
+        tone: 'success',
+        message: '取消請求已送出，列表與額度已重新載入；請以任務狀態為準。',
+        reload: null,
+      });
     } catch (err) {
       console.error('Failed to cancel job:', err);
-      alert('取消任務失敗');
+      const failure = classifyWriteError(err, '取消任務');
+      setJobNotice({
+        tone: failure.unconfirmed ? 'warning' : 'error',
+        message: failure.unconfirmed ? failure.message : `取消任務失敗：${failure.message}`,
+        reload: failure.unconfirmed ? 'jobs' : null,
+      });
     }
   };
 
@@ -252,28 +376,52 @@ export default function TrainingPage() {
   };
 
   const handleLatestPrediction = async (modelId: string) => {
+    setPredictionErrors((prev) => {
+      const next = { ...prev };
+      delete next[modelId];
+      return next;
+    });
     try {
       const result = await api.ml.predictLatest(modelId);
       setLatestPredictions((prev) => ({ ...prev, [modelId]: result }));
       // Inference settles one ai_usage unit server-side; refresh the quota card
       // so it does not keep showing the pre-inference balance.
       loadMLData();
-    } catch (err: any) {
+    } catch (err) {
       console.error('Prediction failed:', err);
-      alert(describeMlRefusal(err, '預測失敗'));
+      const failure = classifyWriteError(err, '取得最新預測');
+      // Quota and entitlement refusals already have an exact explanation;
+      // everything else uses the network/service classification.
+      const isRefusal =
+        err instanceof ApiError && (err.status === 429 || err.status === 403);
+      const message = isRefusal
+        ? describeMlRefusal(err, failure.message)
+        : failure.unconfirmed
+          ? failure.message
+          : `預測失敗：${failure.message}`;
+      setPredictionErrors((prev) => ({ ...prev, [modelId]: message }));
       loadMLData();
     }
   };
 
   const handleDeleteModel = async (modelId: string) => {
     if (!confirm('確定刪除此模型？刪除後無法復原。')) return;
+    setModelActionErrors((prev) => {
+      const next = { ...prev };
+      delete next[modelId];
+      return next;
+    });
     setDeletingModelId(modelId);
     try {
       await api.ml.deleteModel(modelId);
       setMlModels((prev) => prev.filter((m) => m.model_id !== modelId));
-    } catch (err: any) {
+    } catch (err) {
       console.error('Delete model failed:', err);
-      alert(err?.message || '刪除模型失敗');
+      const failure = classifyWriteError(err, '刪除模型');
+      setModelActionErrors((prev) => ({
+        ...prev,
+        [modelId]: failure.unconfirmed ? failure.message : `刪除模型失敗：${failure.message}`,
+      }));
     } finally {
       setDeletingModelId(null);
     }
@@ -402,38 +550,125 @@ export default function TrainingPage() {
             <h3 style={{ marginBottom: '16px' }}>建立新訓練任務</h3>
             <form onSubmit={handleCreateJob}>
               <div style={{ marginBottom: '16px' }}>
-                <label style={{ display: 'block', marginBottom: '8px', fontWeight: 500 }}>
-                  實驗 ID
+                <label
+                  htmlFor="training-experiment"
+                  style={{ display: 'block', marginBottom: '8px', fontWeight: 500 }}
+                >
+                  研究實驗
                 </label>
-                <input
-                  type="text"
-                  value={formData.experiment_id}
-                  onChange={(e) => setFormData({ ...formData, experiment_id: e.target.value })}
-                  placeholder="輸入實驗 ID"
-                  required
-                  style={{
-                    width: '100%',
-                    padding: '8px 12px',
-                    border: '1px solid var(--border-strong)',
-                    borderRadius: '4px',
-                    fontSize: '14px',
-                    background: 'var(--surface-2)',
-                    color: 'var(--text-primary)',
-                  }}
-                />
+                {!manualExperiment && experiments.length > 0 ? (
+                  <>
+                    <select
+                      id="training-experiment"
+                      value={formData.experiment_id}
+                      onChange={(e) => {
+                        setFormData({ ...formData, experiment_id: e.target.value });
+                        if (formError) setFormError(null);
+                      }}
+                      required
+                      style={{
+                        width: '100%',
+                        padding: '8px 12px',
+                        border: '1px solid var(--border-strong)',
+                        borderRadius: '4px',
+                        fontSize: '14px',
+                        background: 'var(--surface-2)',
+                        color: 'var(--text-primary)',
+                      }}
+                    >
+                      <option value="">請選擇研究實驗</option>
+                      {experiments.map((exp) => (
+                        <option key={exp.id} value={exp.id}>
+                          {exp.title}（{exp.status}）
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      onClick={() => setManualExperiment(true)}
+                      style={{ marginTop: '8px', padding: '4px 12px', fontSize: '12px' }}
+                    >
+                      手動輸入實驗 ID
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <input
+                      id="training-experiment"
+                      type="text"
+                      value={formData.experiment_id}
+                      onChange={(e) => {
+                        setFormData({ ...formData, experiment_id: e.target.value });
+                        if (formError) setFormError(null);
+                      }}
+                      placeholder="輸入實驗 ID"
+                      required
+                      style={{
+                        width: '100%',
+                        padding: '8px 12px',
+                        border: '1px solid var(--border-strong)',
+                        borderRadius: '4px',
+                        fontSize: '14px',
+                        background: 'var(--surface-2)',
+                        color: 'var(--text-primary)',
+                      }}
+                    />
+                    {experiments.length > 0 && (
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        onClick={() => setManualExperiment(false)}
+                        style={{ marginTop: '8px', padding: '4px 12px', fontSize: '12px' }}
+                      >
+                        改從清單選擇
+                      </button>
+                    )}
+                  </>
+                )}
+                {experimentsError && (
+                  <small
+                    role="status"
+                    style={{ display: 'block', marginTop: '6px', color: 'var(--warning)' }}
+                  >
+                    {experimentsError}
+                  </small>
+                )}
+                {experiments.length === 0 && !experimentsError && (
+                  <small
+                    style={{ display: 'block', marginTop: '6px', color: 'var(--text-muted)' }}
+                  >
+                    你尚未有研究實驗 — 可先{' '}
+                    <Link href="/experiments/new" style={{ color: 'var(--primary)' }}>
+                      建立研究實驗
+                    </Link>
+                    ，或直接輸入現有實驗 ID。
+                  </small>
+                )}
               </div>
               <div style={{ marginBottom: '16px' }}>
-                <label style={{ display: 'block', marginBottom: '8px', fontWeight: 500 }}>
+                <label
+                  htmlFor="training-parameter-grid"
+                  style={{ display: 'block', marginBottom: '8px', fontWeight: 500 }}
+                >
                   參數網格 (JSON)
                 </label>
                 <textarea
+                  id="training-parameter-grid"
                   value={formData.parameter_grid}
-                  onChange={(e) => setFormData({ ...formData, parameter_grid: e.target.value })}
+                  onChange={(e) => {
+                    setFormData({ ...formData, parameter_grid: e.target.value });
+                    if (formError) setFormError(null);
+                  }}
                   rows={8}
+                  aria-invalid={formError ? true : undefined}
+                  aria-describedby={formError ? 'training-form-error' : undefined}
                   style={{
                     width: '100%',
                     padding: '8px 12px',
-                    border: '1px solid var(--border-strong)',
+                    border: formError
+                      ? '1px solid var(--negative)'
+                      : '1px solid var(--border-strong)',
                     borderRadius: '4px',
                     fontSize: '14px',
                     fontFamily: 'monospace',
@@ -443,9 +678,19 @@ export default function TrainingPage() {
                   }}
                 />
                 <small style={{ color: 'var(--text-muted)', marginTop: '4px', display: 'block' }}>
-                  範例：{'{"fast_period": [3, 5, 10], "slow_period": [20, 30]}'}
+                  每個參數對應一個候選值陣列，例如 {DEFAULT_PARAMETER_GRID}
                 </small>
               </div>
+              {formError && (
+                <p
+                  id="training-form-error"
+                  role="alert"
+                  data-testid="training-form-error"
+                  style={{ margin: '0 0 16px', fontSize: '13px', color: 'var(--negative)' }}
+                >
+                  {formError}
+                </p>
+              )}
               <button type="submit" className="btn btn-primary" disabled={creating}>
                 {creating ? '建立中...' : '建立任務'}
               </button>
@@ -453,18 +698,49 @@ export default function TrainingPage() {
           </div>
         )}
 
+        {jobNotice && (
+          <ActionNoticeBox
+            tone={jobNotice.tone}
+            message={jobNotice.message}
+            testId="training-action-notice"
+            onReload={
+              jobNotice.reload
+                ? () => {
+                    setJobNotice(null);
+                    if (jobNotice.reload === 'ml') {
+                      loadMLData();
+                    } else {
+                      reloadJobs();
+                    }
+                  }
+                : null
+            }
+          />
+        )}
+
+        {error && (
+          <ActionNoticeBox
+            tone="warning"
+            testId="training-list-error"
+            message={
+              jobs.length === 0
+                ? `${error} — 載入失敗不代表帳戶內沒有任務；請按「重新載入列表」確認。`
+                : `${error} — 以下為最近一次成功載入的內容，狀態可能不是最新；載入失敗不代表沒有資料。`
+            }
+            onReload={reloadJobs}
+          />
+        )}
+
         {loading ? (
           <div className="card" style={{ textAlign: 'center', padding: '40px' }}>
             載入中...
           </div>
-        ) : error ? (
-          <div className="card" style={{ textAlign: 'center', padding: '40px', color: 'var(--negative)' }}>
-            {error}
-          </div>
         ) : jobs.length === 0 ? (
-          <div className="card" style={{ textAlign: 'center', padding: '60px' }}>
-            <p style={{ color: 'var(--text-secondary)', margin: 0 }}>尚無訓練任務</p>
-          </div>
+          error ? null : (
+            <div className="card" style={{ textAlign: 'center', padding: '60px' }}>
+              <p style={{ color: 'var(--text-secondary)', margin: 0 }}>尚無訓練任務</p>
+            </div>
+          )
         ) : (
           <div style={{ display: 'grid', gap: '16px' }}>
             {jobs.map((job) => (
@@ -875,6 +1151,56 @@ export default function TrainingPage() {
                       </div>
                     </div>
                   </div>
+
+                  {modelActionErrors[model.model_id] && (
+                    <div
+                      role="alert"
+                      data-testid={`model-action-error-${model.model_id}`}
+                      style={{
+                        marginTop: '12px',
+                        padding: '10px 12px',
+                        borderRadius: '4px',
+                        border: '1px solid var(--negative)',
+                        backgroundColor: 'rgba(239,68,68,0.12)',
+                        color: 'var(--text-primary)',
+                        fontSize: '13px',
+                        display: 'flex',
+                        gap: '12px',
+                        alignItems: 'center',
+                        flexWrap: 'wrap',
+                      }}
+                    >
+                      <span>{modelActionErrors[model.model_id]}</span>
+                      <button type="button" className="btn btn-secondary" onClick={() => loadMLData()}>
+                        重新載入模型列表
+                      </button>
+                    </div>
+                  )}
+
+                  {predictionErrors[model.model_id] && (
+                    <div
+                      role="alert"
+                      data-testid={`prediction-error-${model.model_id}`}
+                      style={{
+                        marginTop: '12px',
+                        padding: '10px 12px',
+                        borderRadius: '4px',
+                        border: '1px solid var(--negative)',
+                        backgroundColor: 'rgba(239,68,68,0.12)',
+                        color: 'var(--text-primary)',
+                        fontSize: '13px',
+                        display: 'flex',
+                        gap: '12px',
+                        alignItems: 'center',
+                        flexWrap: 'wrap',
+                      }}
+                    >
+                      <span>{predictionErrors[model.model_id]}</span>
+                      <button type="button" className="btn btn-secondary" onClick={() => loadMLData()}>
+                        重新載入模型列表
+                      </button>
+                    </div>
+                  )}
 
                   {latestPredictions[model.model_id] && (
                     <div style={{

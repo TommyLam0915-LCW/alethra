@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { brand } from '@/lib/brand';
+import { classifyLoginError, type ClassifiedFailure } from '@/lib/userErrors';
 import {
   CANDIDATE_MODE_FALLBACK_LABEL,
   preferredCandidateRole,
@@ -17,7 +18,7 @@ export default function LoginPage() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [displayName, setDisplayName] = useState('');
-  const [error, setError] = useState('');
+  const [error, setError] = useState<ClassifiedFailure | null>(null);
   const [loading, setLoading] = useState(false);
   const [candidate, setCandidate] = useState<CandidateStatus | null>(null);
   const [candidatePending, setCandidatePending] = useState<string | null>(null);
@@ -62,7 +63,8 @@ export default function LoginPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setError('');
+    if (loading) return;
+    setError(null);
     setLoading(true);
 
     try {
@@ -76,8 +78,8 @@ export default function LoginPage() {
         localStorage.setItem('token', response.access_token);
         router.push('/dashboard');
       }
-    } catch (err: any) {
-      setError(err.message || 'Something went wrong. Try again.');
+    } catch (err) {
+      setError(classifyLoginError(err));
     } finally {
       setLoading(false);
     }
@@ -157,7 +159,7 @@ export default function LoginPage() {
                     key={account.role}
                     type="button"
                     data-testid={`candidate-enter-${account.role}`}
-                    disabled={candidatePending !== null}
+                    disabled={candidatePending !== null || loading}
                     onClick={() => enterCandidate(account.role)}
                     style={{
                       padding: '9px 14px',
@@ -166,8 +168,11 @@ export default function LoginPage() {
                       background: 'transparent',
                       color: 'var(--text-white)',
                       fontSize: '13px',
-                      cursor: candidatePending !== null ? 'default' : 'pointer',
-                      opacity: candidatePending !== null && candidatePending !== account.role ? 0.5 : 1,
+                      cursor: candidatePending !== null || loading ? 'default' : 'pointer',
+                      opacity:
+                        candidatePending !== null && candidatePending !== account.role
+                          ? 0.5
+                          : 1,
                     }}
                   >
                     {candidatePending === account.role
@@ -188,8 +193,16 @@ export default function LoginPage() {
           )}
 
           {error && (
-            <div className="login-error">
-              <strong>Error:</strong> {error}
+            <div
+              className="login-error"
+              role="alert"
+              data-testid="login-error"
+              data-error-kind={error.kind}
+            >
+              <strong>
+                {error.kind === 'invalid_credentials' ? '登入失敗：' : '無法登入：'}
+              </strong>{' '}
+              {error.message}
             </div>
           )}
 
@@ -243,8 +256,13 @@ export default function LoginPage() {
 
           <div className="login-switch">
             <button
-              onClick={() => setIsLogin(!isLogin)}
+              type="button"
+              onClick={() => {
+                setIsLogin(!isLogin);
+                setError(null);
+              }}
               className="login-switch-btn"
+              disabled={loading}
             >
               {isLogin ? 'No account? Create one' : 'Already have an account? Sign in'}
             </button>

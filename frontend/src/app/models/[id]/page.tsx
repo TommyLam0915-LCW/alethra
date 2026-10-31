@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
+import { classifyWriteError } from '@/lib/userErrors';
 import { formatDate, formatDateTime } from '@/lib/format';
 
 interface ModelRecord {
@@ -136,6 +137,7 @@ export default function ModelDetailPage() {
   const [compareLoading, setCompareLoading] = useState(false);
   const [showStatusChange, setShowStatusChange] = useState(false);
   const [newStatus, setNewStatus] = useState('');
+  const [statusError, setStatusError] = useState('');
   const [revokeReason, setRevokeReason] = useState('');
   const [revokingVersionId, setRevokingVersionId] = useState<string | null>(null);
   const [exportVersionId, setExportVersionId] = useState('');
@@ -269,34 +271,46 @@ export default function ModelDetailPage() {
 
   const handleStatusChange = async () => {
     if (!newStatus) return;
+    setStatusError('');
     try {
       const updated = await api.modelResearch.update(id, { status: newStatus });
       setRecord(updated);
       setShowStatusChange(false);
       setNewStatus('');
-    } catch (err: any) {
-      alert(err.message);
+    } catch (err) {
+      const failure = classifyWriteError(err, '變更模型狀態');
+      setStatusError(
+        failure.unconfirmed ? failure.message : `變更模型狀態失敗：${failure.message}`,
+      );
     }
   };
 
   const handleLock = async (versionId: string) => {
+    setVersionActionError('');
     try {
       await api.modelResearch.lockVersion(id, versionId);
       loadData();
-    } catch (err: any) {
-      alert(err.message);
+    } catch (err) {
+      const failure = classifyWriteError(err, '鎖定版本');
+      setVersionActionError(
+        failure.unconfirmed ? failure.message : `鎖定版本失敗：${failure.message}`,
+      );
     }
   };
 
   const handleRevoke = async (versionId: string) => {
     if (!revokeReason.trim()) return;
+    setVersionActionError('');
     try {
       await api.modelResearch.revokeVersion(id, versionId, revokeReason);
       setRevokingVersionId(null);
       setRevokeReason('');
       loadData();
-    } catch (err: any) {
-      alert(err.message);
+    } catch (err) {
+      const failure = classifyWriteError(err, '撤銷版本');
+      setVersionActionError(
+        failure.unconfirmed ? failure.message : `撤銷版本失敗：${failure.message}`,
+      );
     }
   };
 
@@ -329,8 +343,13 @@ export default function ModelDetailPage() {
       a.download = `alethra-model-package-${exportResult.id.slice(0, 8)}.json`;
       a.click();
       URL.revokeObjectURL(url);
-    } catch (err: any) {
-      alert(err.message);
+    } catch (err) {
+      const failure = classifyWriteError(err, '下載研究套件');
+      setExportError(
+        failure.kind === 'network' || failure.kind === 'service_unavailable'
+          ? '下載研究套件失敗（連線或伺服器問題）。下載失敗不代表匯出包不存在；請重新整理頁面後再下載。'
+          : `下載研究套件失敗：${failure.message}`,
+      );
     }
   };
 
@@ -376,7 +395,7 @@ export default function ModelDetailPage() {
             {STATUS_LABELS[record.status] || record.status}
           </span>
           {canAddVersions && (
-            <button onClick={() => setShowStatusChange(!showStatusChange)} className="btn btn-secondary" style={{ fontSize: '12px', padding: '4px 12px' }}>
+            <button onClick={() => { setShowStatusChange(!showStatusChange); setStatusError(''); }} className="btn btn-secondary" style={{ fontSize: '12px', padding: '4px 12px' }}>
               變更狀態
             </button>
           )}
@@ -398,6 +417,26 @@ export default function ModelDetailPage() {
             </select>
           </div>
           <button onClick={handleStatusChange} className="btn btn-primary" disabled={!newStatus}>確認變更</button>
+          {statusError && (
+            <div
+              role="alert"
+              data-testid="status-change-error"
+              className="alert alert-warning"
+              style={{ marginTop: '12px', display: 'flex', gap: '12px', alignItems: 'center', flexWrap: 'wrap' }}
+            >
+              <span>{statusError}</span>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => {
+                  setStatusError('');
+                  loadData();
+                }}
+              >
+                重新載入模型
+              </button>
+            </div>
+          )}
         </div>
       )}
 
@@ -507,7 +546,12 @@ export default function ModelDetailPage() {
                 {creatingFromStrategy ? '建立中...' : '建立模型版本'}
               </button>
               {fromStrategyError && (
-                <div className="alert alert-warning" data-testid="from-strategy-error" style={{ marginTop: '12px' }}>
+                <div
+                  className="alert alert-warning"
+                  role="alert"
+                  data-testid="from-strategy-error"
+                  style={{ marginTop: '12px' }}
+                >
                   {fromStrategyError}
                 </div>
               )}
@@ -537,7 +581,24 @@ export default function ModelDetailPage() {
           ) : (
             <div style={{ display: 'grid', gap: '12px' }}>
               {versionActionError && (
-                <div className="alert alert-warning" data-testid="version-action-error">{versionActionError}</div>
+                <div
+                  className="alert alert-warning"
+                  role="alert"
+                  data-testid="version-action-error"
+                  style={{ display: 'flex', gap: '12px', alignItems: 'center', flexWrap: 'wrap' }}
+                >
+                  <span>{versionActionError}</span>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    onClick={() => {
+                      setVersionActionError('');
+                      loadData();
+                    }}
+                  >
+                    重新載入版本
+                  </button>
+                </div>
               )}
               {versions.map((v) => {
                 const isActive = v.id === record.active_version_id;
@@ -709,7 +770,12 @@ export default function ModelDetailPage() {
               </div>
 
               {compareError && (
-                <div className="alert alert-warning" data-testid="compare-error" style={{ marginTop: '12px' }}>
+                <div
+                  className="alert alert-warning"
+                  role="alert"
+                  data-testid="compare-error"
+                  style={{ marginTop: '12px' }}
+                >
                   {compareError}
                 </div>
               )}
@@ -879,7 +945,14 @@ export default function ModelDetailPage() {
             </button>
 
             {exportError && (
-              <div className="alert alert-warning" style={{ marginTop: '12px' }}>{exportError}</div>
+              <div
+                className="alert alert-warning"
+                role="alert"
+                data-testid="export-error"
+                style={{ marginTop: '12px' }}
+              >
+                {exportError}
+              </div>
             )}
           </div>
 
