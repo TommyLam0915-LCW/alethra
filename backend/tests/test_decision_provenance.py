@@ -30,6 +30,7 @@ from app.models.human_decision import (
     HumanDecisionExecutionStatus,
 )
 from app.models.market_data import MarketDataBar
+from app.models.personal_dataset import PersonalizationDatasetSnapshot
 from app.models.user import User
 
 INSTRUMENT = "DEMO-ALPHA"
@@ -376,6 +377,58 @@ class TestPolicyConsequences:
         assert breakdown["unverified_provenance"] == 1
         assert breakdown["unconfirmed"] == 1
         assert preview.json()["included_count"] == 0
+
+    def test_snapshot_creation_refuses_a_non_human_history(
+        self, client, auth_headers
+    ):
+        """Volume does not substitute for a verified owner confirmation."""
+        _, version_id = _create_locked_experiment(client, auth_headers)
+        session_id = _create_session(client, auth_headers, version_id)
+        agent_headers = _api_key_headers("bulk")
+        for i in range(12):
+            resp = _post_decision(
+                client,
+                agent_headers,
+                session_id,
+                f"agent-{i}",
+                action="buy" if i % 2 == 0 else "sell",
+            )
+            assert resp.status_code == 201, resp.text
+
+        _grant_consent(client, auth_headers, version_id)
+
+        refused = client.post(
+            "/api/v1/ml/personal/snapshots",
+            headers=auth_headers,
+            json={"strategy_version_id": version_id},
+        )
+        assert refused.status_code == 400, refused.text
+        detail = refused.json()["detail"]
+        assert detail["code"] == "insufficient_confirmed_decisions"
+        codes = _codes(detail["details"])
+        assert "INSUFFICIENT_CONFIRMED_DECISIONS" in codes
+
+        db = TestSession()
+        try:
+            assert (
+                db.query(PersonalizationDatasetSnapshot)
+                .filter(
+                    PersonalizationDatasetSnapshot.strategy_version_id
+                    == uuid.UUID(str(version_id))
+                )
+                .count()
+                == 0
+            ), "a refused snapshot must not be stored"
+            actors = {
+                row.actor_type
+                for row in db.query(HumanDecisionEvent).filter(
+                    HumanDecisionEvent.server_strategy_version_id
+                    == uuid.UUID(str(version_id))
+                )
+            }
+        finally:
+            db.close()
+        assert actors == {"agent"}
 
     def test_legacy_rows_stay_unknown_and_are_not_rewritten(
         self, client, auth_headers
