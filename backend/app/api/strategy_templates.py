@@ -6,10 +6,10 @@ template parameters. Neither endpoint writes a row, consumes AI usage,
 dispatches a job, calls a provider, or executes a strategy.
 """
 import typing
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Body, Depends
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from app.api.schemas import ALLOWED_TEMPLATES, StrategySpec
 from app.auth.jwt import get_current_user
@@ -92,6 +92,205 @@ UNSUPPORTED_TEMPLATES: List[Dict[str, str]] = [
     },
 ]
 
+class SignalParameterContract(BaseModel):
+    name: str
+    type: str
+    min: Optional[float] = None
+    max: Optional[float] = None
+    required: bool = True
+    unit: str
+    conflict: Optional[str] = None
+
+
+class SpecFieldContract(BaseModel):
+    name: str
+    type: str
+    required: bool
+    executed_by_engine: bool
+    semantics: str
+    default: Optional[Any] = None
+    constraints: Optional[Dict[str, Any]] = None
+
+
+class TemplateEntry(BaseModel):
+    name: str
+    label: str
+    purpose: str
+    required_fields: List[str]
+    signal_parameters: List[SignalParameterContract]
+    known_limits: List[str]
+    supported: bool = True
+
+
+class UnsupportedTemplate(BaseModel):
+    name: str
+    label: str
+    reason: str
+
+
+class SectionKey(BaseModel):
+    key: str
+    unit: str
+    note: str
+
+
+class SectionContract(BaseModel):
+    section: str
+    executed_by_engine: bool
+    note: str
+    keys: List[SectionKey] = []
+
+
+class TemplateListResponse(BaseModel):
+    templates: List[TemplateEntry]
+    unsupported: List[UnsupportedTemplate]
+    spec_fields: List[SpecFieldContract]
+    sections: List[SectionContract]
+    scope_note: str
+
+
+class ValidationIssue(BaseModel):
+    field: str
+    message: str
+
+
+class PreflightResponse(BaseModel):
+    status: Literal["valid", "invalid", "unsupported"]
+    template_type: Optional[str] = None
+    errors: List[ValidationIssue] = []
+    reason: Optional[str] = None
+    scope_note: str
+
+
+# Which spec blocks the engine reads. Derived from the engine modules, not from
+# what the schema happens to store: entry_rule, exit_rule, sizing_rule and
+# execution_timing are persisted and diffed between versions but no engine
+# module reads them, so they must never be described as active risk controls.
+_EXECUTED_FIELDS = {
+    "template_type",
+    "asset_ids",
+    "frequency",
+    "start_date",
+    "end_date",
+    "initial_cash",
+    "signal_parameters",
+    "risk_parameters",
+    "commission_rate",
+    "slippage_rate",
+    "benchmark_id",
+}
+
+_FIELD_SEMANTICS: Dict[str, str] = {
+    "schema_version": "Stored label on the spec; the engine does not read it.",
+    "template_type": "Selects the engine implementation; an unknown value is refused.",
+    "asset_ids": "Every id is loaded for bars; the daily engine trades only the first one.",
+    "frequency": "Must be 1d on the batch path; intraday specs are refused there.",
+    "start_date": "Inclusive first date of the window the engine loads bars for.",
+    "end_date": "Inclusive last date of that window.",
+    "initial_cash": "Starting cash used for position size and the equity curve.",
+    "signal_parameters": "Read by the selected template; keys and bounds are listed per template.",
+    "entry_rule": "Stored and diffed between versions; the template decides entries.",
+    "exit_rule": "Stored and diffed; exits come from the template plus the risk_parameters levels.",
+    "sizing_rule": "Stored and diffed; the template decides size from initial_cash.",
+    "risk_parameters": "Executed as a stop/target plan; see the risk_parameters section.",
+    "execution_timing": "Stored only; entries always execute at the next session's open.",
+    "commission_rate": "Charged on every fill as a fraction of notional.",
+    "slippage_rate": "Moves the execution price; zero is reported as a warning.",
+    "benchmark_id": "Loaded and aligned for the benchmark curve; unavailable data is warned, never filled in.",
+    "currency": "Stored label; the engine treats prices in one unit of account.",
+    "user_approved_at": "Recorded on the spec; it does not gate or change execution.",
+}
+
+_SIGNAL_PARAMETER_UNITS: Dict[str, str] = {
+    "short_window": "sessions (integer count)",
+    "long_window": "sessions (integer count)",
+    "lookback_days": "sessions (integer count)",
+    "threshold_pct": "fraction of price (0.01 = 1%)",
+    "holding_days": "sessions after execution",
+}
+
+_SIGNAL_PARAMETER_CONFLICTS: Dict[str, str] = {
+    "short_window": "Must be strictly below long_window, or the run refuses.",
+    "long_window": "Must be strictly above short_window; at least long_window + 1 bars are needed or the run reports no trades.",
+    "lookback_days": "At least lookback_days + 1 bars are needed or the run reports no trades.",
+    "holding_days": "The fixed hold counts from the execution session, not the signal session.",
+}
+
+_RISK_PARAMETER_KEYS = [
+    SectionKey(
+        key="stop_price",
+        unit="price (same unit as the bars)",
+        note="Absolute stop level; for a long position it must sit below the entry price.",
+    ),
+    SectionKey(
+        key="stop_pct",
+        unit="fraction of entry (0.05 = 5%)",
+        note="Converted to stop_price = entry * (1 - stop_pct); ignored when stop_price is set.",
+    ),
+    SectionKey(
+        key="target_price",
+        unit="price (same unit as the bars)",
+        note="Absolute target level; it must sit above the entry price.",
+    ),
+    SectionKey(
+        key="target_pct",
+        unit="fraction of entry (0.02 = 2%)",
+        note="Converted to target_price = entry * (1 + target_pct); ignored when target_price is set.",
+    ),
+]
+
+
+def _sections() -> List[SectionContract]:
+    """The section-level contract, with the engine's actual read path as source."""
+    return [
+        SectionContract(
+            section="signal_parameters",
+            executed_by_engine=True,
+            note=(
+                "Read by the selected template. Unknown keys are stored but the "
+                "engine does not read them."
+            ),
+        ),
+        SectionContract(
+            section="risk_parameters",
+            executed_by_engine=True,
+            note=(
+                "Executed as a long-only stop/target plan. A price key wins over the "
+                "matching percent key. A stop at or above the entry, or a target at "
+                "or below it, is not simulated and is reported as a warning. An "
+                "absent block means no stop and no target, not zero."
+            ),
+            keys=_RISK_PARAMETER_KEYS,
+        ),
+        SectionContract(
+            section="entry_rule",
+            executed_by_engine=False,
+            note="Stored and diffed between versions; the template decides entries.",
+        ),
+        SectionContract(
+            section="exit_rule",
+            executed_by_engine=False,
+            note=(
+                "Stored and diffed; exits come from the template logic plus the "
+                "risk_parameters levels, never from this block."
+            ),
+        ),
+        SectionContract(
+            section="sizing_rule",
+            executed_by_engine=False,
+            note="Stored and diffed; position size is decided by the template from initial_cash.",
+        ),
+        SectionContract(
+            section="execution_timing",
+            executed_by_engine=False,
+            note=(
+                "Stored only. Signal-driven entries always execute at the next "
+                "session's open; changing this block does not change execution."
+            ),
+        ),
+    ]
+
+
 _CONSTRAINT_ATTRS = ("pattern", "min_length", "max_length", "gt", "ge", "lt", "le")
 
 
@@ -119,6 +318,9 @@ def _field_contract() -> List[Dict[str, Any]]:
             "name": name,
             "type": _type_name(field.annotation),
             "required": field.is_required(),
+            "executed_by_engine": name in _EXECUTED_FIELDS,
+            "semantics": _FIELD_SEMANTICS.get(name, "Stored; the engine does not read it."),
+            "default": None if field.is_required() else field.default,
         }
         constraints = {}
         for meta in field.metadata:
@@ -141,6 +343,8 @@ def _template_entry(name: str) -> Dict[str, Any]:
             "min": rule["min"],
             "max": rule["max"],
             "required": True,
+            "unit": _SIGNAL_PARAMETER_UNITS.get(param, "see the template bounds"),
+            "conflict": _SIGNAL_PARAMETER_CONFLICTS.get(param),
         }
         for param, rule in SIGNAL_PARAMETER_RULES[name].items()
     ]
@@ -179,19 +383,50 @@ def _result(status: str, template_type: Optional[str], errors=None, reason=None)
     return payload
 
 
-@router.get("/strategy-templates")
+@router.get(
+    "/strategy-templates",
+    response_model=TemplateListResponse,
+    summary="List strategy templates and their field contract",
+    description=(
+        "Read-only catalogue of the implemented templates plus the StrategySpec "
+        "field contract. Each field and section states whether the engine reads "
+        "it: entry_rule, exit_rule, sizing_rule and execution_timing are stored "
+        "and diffed between versions but no engine module consumes them, while "
+        "signal_parameters and risk_parameters are executed. Lists no traded "
+        "instrument, provider entitlement or execution authorization."
+    ),
+)
 def list_strategy_templates(user: User = Depends(get_current_user)):
     return {
         "templates": [_template_entry(name) for name in ALLOWED_TEMPLATES],
         "unsupported": UNSUPPORTED_TEMPLATES,
         "spec_fields": _field_contract(),
+        "sections": _sections(),
         "scope_note": SCOPE_NOTE,
     }
 
 
-@router.post("/strategy-specs/preflight")
+@router.post(
+    "/strategy-specs/preflight",
+    response_model=PreflightResponse,
+    summary="Check a strategy spec against the engine contract",
+    description=(
+        "Read-only check of a StrategySpec-shaped object. Returns status "
+        "'valid', 'invalid' (with per-field errors) or 'unsupported' (template "
+        "or timeframe not implemented). It does not create an experiment, "
+        "version or run, load market data, consume quota, or authorize "
+        "execution."
+    ),
+)
 def preflight_strategy_spec(
-    spec: Dict[str, Any] = Body(...),
+    spec: Dict[str, Any] = Body(
+        ...,
+        description=(
+            "A StrategySpec-shaped object. It is validated rather than used to "
+            "create anything, so it may be incomplete or malformed: the errors "
+            "come back in the response body instead of a 422."
+        ),
+    ),
     user: User = Depends(get_current_user),
 ):
     template_type = spec.get("template_type")
