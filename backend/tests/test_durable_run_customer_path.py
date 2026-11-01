@@ -309,3 +309,55 @@ def test_saved_reference_cannot_cite_a_failed_run(client, auth_headers, stored_d
         headers=auth_headers,
     )
     assert listing.json() == []
+
+
+def test_resubmitting_the_same_run_is_a_second_charged_execution(
+    client, auth_headers, stored_dataset
+):
+    """This route has no idempotency key: two POSTs are two runs, two charges.
+
+    Pinned because the UI's retry behaviour depends on it — a caller that
+    retries on timeout spends another research run, so the answer must be a new
+    run id rather than a replayed one.
+    """
+    experiment = _create_experiment(client, auth_headers)
+    first = _run(client, auth_headers, experiment["current_version_id"])
+    second = _run(client, auth_headers, experiment["current_version_id"])
+
+    assert first["id"] != second["id"]
+    assert first["status"] == second["status"] == "completed"
+    assert _quota_state() == {"used": 2, "reserved": 0}
+
+    listing = client.get(
+        f"/api/v1/experiments/{experiment['id']}/runs", headers=auth_headers
+    )
+    assert sorted(row["id"] for row in listing.json()) == sorted(
+        [first["id"], second["id"]]
+    )
+
+
+def test_ad_hoc_backtest_returns_a_result_without_moving_quota(
+    client, auth_headers, stored_dataset
+):
+    """The 200 path still computes; it just has nothing to cite and costs nothing."""
+    experiment = _create_experiment(client, auth_headers)
+
+    resp = client.post(
+        f"/api/v1/experiments/{experiment['id']}"
+        f"/versions/{experiment['current_version_id']}/backtest",
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "completed"
+    assert body["persisted"] is False
+    assert body["run_id"] is None
+    assert body["metrics"]
+    assert body["durable_run"]["path"] == "/api/v1/versions/{version_id}/runs"
+    assert body["durable_run"]["persists"] is True
+
+    listing = client.get(
+        f"/api/v1/experiments/{experiment['id']}/runs", headers=auth_headers
+    )
+    assert listing.json() == []
+    assert _quota_state() == {"used": 0, "reserved": 0}

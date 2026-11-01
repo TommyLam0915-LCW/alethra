@@ -127,6 +127,45 @@
 
 ---
 
+## 六、用量如何計算？哪些操作會扣額度？
+
+系統有兩本獨立的用量帳，互不相通：
+
+| 用量類型 | 對應欄位 | 由甚麼消耗 |
+|---|---|---|
+| `research_run` | `research_run_limit` | 可追溯 run、穩健性研究的每一個執行格 |
+| `ai_usage` | `ai_usage_limit` | AI 助理、模型推論、ML 訓練與個人模型工作 |
+
+**會消耗 `research_run` 的操作**
+- `POST /api/v1/versions/{version_id}/runs`：**每呼叫一次就是一次執行、扣一次額度**。這個端點沒有冪等鍵，所以同一版本連按兩次、或 timeout 後重試，都會產生兩個不同的 run id，各扣一次。重試之前，先看 `GET /api/v1/experiments/{experiment_id}/runs` 確認上一次是否其實已經成功。
+- 穩健性研究（robustness study）：每個尚未完成的執行格，扣一次。**已經完成的格，重跑研究時不會再扣**，系統會沿用既有結果。
+
+**不會消耗 `research_run` 的操作**
+- 即時回測（`POST /api/v1/experiments/{experiment_id}/versions/{version_id}/backtest`）：計算後直接回傳，不入庫、不扣額度，但結果不能引用（見第一節）。
+- 讀取 run、列出 run、比較 run、儲存比較、匯出、加筆記等唯讀或記錄操作。
+
+**扣款時機（reserve → settle）**
+1. 開始執行時先「保留」一個額度（reserved）。
+2. 只有當結果完整寫入 run 記錄（status 為 `completed`）時，才真正「結算」成已用（used）。
+3. 執行失敗、或引擎拒絕計算時，保留額度會被釋放，**用量不變**；該次 run 仍會留下一筆 `failed` 記錄與 `error_details`，方便核對原因。
+
+也就是說：**失敗不會扣你額度，但重複提交、重試會。**
+
+**目前本地系統的預設免費額度**
+沒有 entitlement 紀錄的帳號，使用 `lifetime` 期間計算：
+
+| 用量類型 | 免費額度 |
+|---|---|
+| `research_run` | 5 |
+| `ai_usage` | 10 |
+
+**如何查目前用量**
+- `GET /api/v1/billing/usage/quota?quota_type=research_run_limit&period=lifetime`
+- 回傳包含 `limit`、`used`（已結算）、`reserved`（進行中、尚未結算）、`remaining`（已扣掉 used 與 reserved）、`unlimited`、`source`（`entitlement` 或 `free_plan`）。
+- 額度不足時，建立可追溯 run 會回 `429`，訊息會指出是配額不足，而不是資料或策略有問題。
+
+---
+
 ## 快速對照表
 
 | 問題 | 目前的答案 |
@@ -138,6 +177,9 @@
 | 研究層級的 benchmark 名稱會影響指標嗎？ | 不會；只有 `strategy_spec.benchmark_id` 會 |
 | 訓練模型會自動變成模型研究版本嗎？ | 不會；兩套 `model_type` 沒有自動對應 |
 | 選 `fundamental` 就有基本面資料嗎？ | 沒有；目前只有 OHLCV 價格資料，尚無基本面／因子資料源 |
+| 即時回測會扣額度嗎？ | 不會；它不入庫、不扣 `research_run` |
+| 同一個 run 按兩次會扣兩次嗎？ | 會；端點沒有冪等鍵，每次呼叫都是新的 run、各扣一次 |
+| 執行失敗會扣額度嗎？ | 不會；保留的額度會釋放，但會留下 failed 記錄 |
 
 ---
 
