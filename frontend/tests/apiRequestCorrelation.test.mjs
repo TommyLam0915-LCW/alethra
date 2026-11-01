@@ -127,6 +127,34 @@ test('login 401: wrong credentials stay a credential rejection, not a service er
   assert.equal(calls, 1);
 });
 
+test('login 401: a supplied correlation id is shown, and the login is not resent', async () => {
+  const { calls, result } = await withFetch(
+    () =>
+      jsonResponse(
+        401,
+        { detail: 'Incorrect email or password' },
+        { 'X-Request-ID': 'hdr-401-abc' },
+      ),
+    async () => {
+      let shown;
+      await assert.rejects(
+        () => api.auth.login(credentials),
+        (err) => {
+          assert.ok(err instanceof ApiError);
+          assert.equal(err.status, 401);
+          assert.equal(err.requestId, 'hdr-401-abc');
+          shown = classifyLoginError(err);
+          return true;
+        },
+      );
+      return shown;
+    },
+  );
+  assert.equal(result.kind, 'invalid_credentials');
+  assert.equal(result.reference, 'hdr-401-abc');
+  assert.equal(calls, 1);
+});
+
 test('login 422: the existing validation shape still reaches the user', async () => {
   await withFetch(
     () =>

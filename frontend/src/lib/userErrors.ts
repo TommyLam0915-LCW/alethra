@@ -80,11 +80,16 @@ function isNetworkError(err: unknown): boolean {
 
 export function classifyLoginError(err: unknown): ClassifiedFailure {
   const status = statusOf(err);
+  // The server stamps every response with a correlation id, so a reply that
+  // reached us always has one to show. Dropping it for non-5xx replies was why
+  // a wrong-password attempt showed no reference while the header carried one.
+  const reference = referenceOf(err);
   if (status === 401) {
     return {
       kind: 'invalid_credentials',
       message: '電郵或密碼不正確。請檢查後再試，已輸入的內容會保留。',
       unconfirmed: false,
+      reference,
     };
   }
   if (status === 429) {
@@ -93,6 +98,7 @@ export function classifyLoginError(err: unknown): ClassifiedFailure {
       message:
         '嘗試次數過多，登入暫時受限。請稍候約一分鐘再試；這不是帳密錯誤。',
       unconfirmed: false,
+      reference,
     };
   }
   if (status === 403) {
@@ -100,6 +106,7 @@ export function classifyLoginError(err: unknown): ClassifiedFailure {
       kind: 'forbidden',
       message: '此帳戶目前無法登入。請聯絡管理員確認帳戶狀態。',
       unconfirmed: false,
+      reference,
     };
   }
   if (status !== null && status >= 500) {
@@ -107,7 +114,7 @@ export function classifyLoginError(err: unknown): ClassifiedFailure {
       kind: 'service_unavailable',
       message: `登入服務暫時無法使用（伺服器回應 ${status}）。這不是你的帳密問題，請稍後再試；輸入內容已保留。`,
       unconfirmed: false,
-      reference: referenceOf(err),
+      reference,
     };
   }
   if (isNetworkError(err)) {
@@ -126,12 +133,14 @@ export function classifyLoginError(err: unknown): ClassifiedFailure {
       kind: 'validation',
       message: detail ? `登入資料格式有誤：${detail}` : '登入資料格式有誤，請檢查電郵與密碼格式。',
       unconfirmed: false,
+      reference,
     };
   }
   return {
     kind: 'unknown',
     message: '登入時發生未預期的錯誤，請稍後再試。',
     unconfirmed: false,
+    reference,
   };
 }
 
