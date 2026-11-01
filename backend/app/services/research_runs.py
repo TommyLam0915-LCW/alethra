@@ -121,6 +121,8 @@ def execute_backtest_run(
             "data_source_used": result.get("data_source_used"),
             "data_nature": result.get("data_nature"),
             "dataset_checksum": result.get("dataset_checksum"),
+            "dataset_coverage": result.get("dataset_coverage"),
+            "bars_used": result.get("bars_used"),
             "start_date": result.get("start_date"),
             "end_date": result.get("end_date"),
             "initial_cash": result.get("initial_cash"),

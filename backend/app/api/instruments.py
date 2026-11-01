@@ -1,7 +1,7 @@
 import logging
 
-from fastapi import APIRouter, HTTPException, Depends, Query
-from typing import Optional
+from fastapi import APIRouter, HTTPException, Depends, Query, Request
+from typing import Dict, List, Optional
 from datetime import date, datetime, timezone
 from sqlalchemy.orm import Session
 
@@ -50,6 +50,74 @@ def _validated_refresh_range(start_date: str, end_date: str) -> None:
             status_code=400,
             detail="start_date must be on or before end_date",
         )
+
+
+_STORED_BARS_QUERY_PARAMS = frozenset(
+    {"start_date", "end_date", "provider_id", "timeframe", "limit"}
+)
+
+
+def _reject_unknown_query_params(
+    request: Request, allowed: frozenset
+) -> None:
+    """Refuse a query carrying parameters this route does not read.
+
+    FastAPI silently ignores an unrecognised parameter. A caller that filters
+    with ``start``/``end`` instead of ``start_date``/``end_date`` would then get
+    every stored row back and read the total as if it were the requested
+    window — the 2026-11-01 observation where an empty window returned 183
+    bars. Refusing the request is the only answer that cannot be mistaken for
+    a filtered result.
+    """
+    unknown = sorted(set(request.query_params.keys()) - allowed)
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Unrecognised query parameter(s): {', '.join(unknown)}. "
+                f"Accepted: {', '.join(sorted(allowed))}. Nothing was returned."
+            ),
+        )
+
+
+def _returned_provider_breakdown(
+    bars: list, nature_map: Dict[str, str]
+) -> List[dict]:
+    """Group the bars actually returned by their storage provider.
+
+    One instrument can hold rows from more than one provider. A single total
+    count and one metadata row cannot explain that: the customer sees N bars
+    while the metadata names a smaller stored total for a different provider.
+    The breakdown is computed from the returned rows so it always sums to
+    ``bar_count``.
+    """
+    grouped: Dict[str, dict] = {}
+    for bar in bars:
+        pid = getattr(bar, "provider_id", None) or "unknown"
+        entry = grouped.setdefault(
+            pid,
+            {
+                "provider_id": pid,
+                "data_nature": nature_map.get(pid, "unknown"),
+                "bar_count": 0,
+                "first_bar_date": None,
+                "last_bar_date": None,
+            },
+        )
+        day = bar.bar_date.isoformat()
+        entry["bar_count"] += 1
+        entry["first_bar_date"] = entry["first_bar_date"] or day
+        entry["last_bar_date"] = day
+    return [grouped[pid] for pid in sorted(grouped)]
+
+
+def _series_nature(breakdown: List[dict], fallback: Optional[str]) -> str:
+    natures = {entry["data_nature"] for entry in breakdown} - {"unknown"}
+    if len(natures) > 1:
+        return "mixed"
+    if natures:
+        return next(iter(natures))
+    return fallback or "unknown"
 
 
 def _provider_failure(
@@ -118,6 +186,20 @@ def _data_coverage(
     """
     declared = provider.get_available_range(instrument_id)
     metadata = storage.get_metadata(instrument_id, provider.provider_id)
+    stored_datasets = [
+        {
+            "provider_id": m.provider_id,
+            "data_nature": m.data_nature,
+            "bar_count": m.total_bars or 0,
+            "first_bar_date": (
+                m.first_bar_date.isoformat() if m.first_bar_date else None
+            ),
+            "last_bar_date": (
+                m.last_bar_date.isoformat() if m.last_bar_date else None
+            ),
+        }
+        for m in storage.get_all_metadata(instrument_id)
+    ]
     return {
         "timeframe": timeframe,
         "provider_id": provider.provider_id,
@@ -135,6 +217,12 @@ def _data_coverage(
             else None
         ),
         "stored_bars": metadata.total_bars if metadata else 0,
+        # ``stored_bars`` is the configured provider's total only. These two
+        # fields make the whole storage state legible, so an available range
+        # (the provider's whole universe) is never confused with the rows that
+        # are actually stored, and every stored row is attributable.
+        "stored_rows_total": sum(d["bar_count"] for d in stored_datasets),
+        "stored_datasets": stored_datasets,
     }
 
 
@@ -397,6 +485,7 @@ def get_instrument_bars(
 @router.get("/instruments/{instrument_id}/bars/stored")
 def get_stored_bars(
     instrument_id: str,
+    request: Request,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     provider_id: Optional[str] = None,
@@ -419,7 +508,14 @@ def get_stored_bars(
     - provider_id: Filter by provider (e.g., demo, lseg)
     - timeframe: Bar timeframe; only 1d is stored, others are rejected
     - limit: Maximum number of bars to return
+
+    ``bar_count`` is the number of rows in this response. ``providers`` splits
+    that same total by storage provider, because one instrument can hold rows
+    from more than one provider and a single metadata row cannot speak for all
+    of them.
     """
+    _reject_unknown_query_params(request, _STORED_BARS_QUERY_PARAMS)
+
     inst = get_instrument_by_id(instrument_id)
     if inst is None:
         raise HTTPException(404, f"Instrument not found: {instrument_id}")
@@ -433,8 +529,15 @@ def get_stored_bars(
     provider = get_data_provider()
     storage = MarketDataStorage(db)
 
-    start_date_obj = date.fromisoformat(start_date) if start_date else None
-    end_date_obj = date.fromisoformat(end_date) if end_date else None
+    try:
+        start_date_obj = date.fromisoformat(start_date) if start_date else None
+        end_date_obj = date.fromisoformat(end_date) if end_date else None
+    except (TypeError, ValueError):
+        raise HTTPException(
+            400, "start_date and end_date must be ISO dates (YYYY-MM-DD)"
+        )
+    if start_date_obj and end_date_obj and start_date_obj > end_date_obj:
+        raise HTTPException(400, "start_date must be on or before end_date")
 
     bars = storage.get_bars(
         instrument_id=instrument_id,
@@ -445,12 +548,17 @@ def get_stored_bars(
     )
 
     metadata = storage.get_metadata(instrument_id, provider_id)
+    nature_map = storage.get_nature_map([instrument_id]).get(instrument_id, {})
+    providers = _returned_provider_breakdown(bars, nature_map)
+    series_nature = _series_nature(
+        providers, metadata.data_nature if metadata else None
+    )
 
     def _labels(latest_bar_date: Optional[str], has_bars: bool, is_stale: bool):
         return {
             **resolve_mode(
                 provider,
-                {"data_nature": (metadata.data_nature if metadata else None) or "unknown",
+                {"data_nature": series_nature,
                  "timezone": inst.timezone},
                 timeframe=tf,
                 latest_bar_date=latest_bar_date,
@@ -487,7 +595,9 @@ def get_stored_bars(
     staleness = {}
     if metadata:
         quality = {
-            "data_nature": metadata.data_nature,
+            "data_nature": series_nature,
+            "metadata_data_nature": metadata.data_nature,
+            "returned_bars": len(bars),
             "adjustment": metadata.adjustment_status,
             "timezone": metadata.timezone,
             "currency": metadata.currency,
@@ -502,7 +612,7 @@ def get_stored_bars(
         staleness = compute_staleness(metadata.last_bar_date.isoformat() if metadata.last_bar_date else None)
         quality.update(staleness)
 
-    return {
+    response = {
         "instrument_id": instrument_id,
         "symbol": inst.symbol,
         "name": inst.name,
@@ -512,6 +622,8 @@ def get_stored_bars(
         "timezone": inst.timezone,
         "source": "storage",
         "bar_count": len(bars),
+        "series_nature": series_nature,
+        "providers": providers,
         "data_quality": quality,
         **_labels(
             (quality or {}).get("latest_bar_date"),
@@ -528,6 +640,10 @@ def get_stored_bars(
             },
         },
     }
+    if not bars:
+        response["message"] = "No stored bars in the requested window."
+        response["message_zh"] = "所要求的時間範圍內沒有已儲存的數據。"
+    return response
 
 
 @router.post("/instruments/{instrument_id}/bars/refresh")

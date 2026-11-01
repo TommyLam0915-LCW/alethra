@@ -501,6 +501,21 @@ class MarketDataStorage:
 
         return query.first()
 
+    def get_all_metadata(self, instrument_id: str) -> List[MarketDataMetadata]:
+        """Every stored dataset for one instrument, one row per provider.
+
+        Rows for the same instrument can come from more than one provider
+        (e.g. a seeded synthetic fixture plus a fetched demo series). A caller
+        that needs to explain a total row count must see all of them, not just
+        ``get_metadata``'s first row.
+        """
+        return (
+            self.db.query(MarketDataMetadata)
+            .filter(MarketDataMetadata.instrument_id == instrument_id)
+            .order_by(MarketDataMetadata.provider_id)
+            .all()
+        )
+
     def get_nature_map(
         self,
         instrument_ids: List[str],

@@ -166,15 +166,22 @@ def _load_stored_bars(
     start_date: str,
     end_date: str,
     provider_id: Optional[str] = None,
-) -> Tuple[Dict[str, pd.DataFrame], Dict[str, str], Dict[str, List[str]]]:
+) -> Tuple[
+    Dict[str, pd.DataFrame],
+    Dict[str, str],
+    Dict[str, List[str]],
+    Dict[str, List[str]],
+]:
     """Load bars from database storage with per-asset data nature.
 
-    Returns (data, natures, ambiguous): a dict mapping asset_id to DataFrame
-    (only assets that have stored data from exactly one provider), a dict
-    mapping asset_id to the resolved data_nature
+    Returns (data, natures, ambiguous, providers): a dict mapping asset_id to
+    DataFrame (only assets that have stored data from exactly one provider), a
+    dict mapping asset_id to the resolved data_nature
     ("synthetic"/"live"/"delayed"/"mixed"/"unknown") of the bars actually
     loaded — from MarketDataMetadata for the backing providers. Synthetic-
-    sourced bars must never be presented as real market data.
+    sourced bars must never be presented as real market data. ``providers``
+    maps each loaded asset to its single backing provider id, so a run can
+    record which stored dataset it priced off.
 
     ``ambiguous`` maps asset_id to the sorted provider ids that each hold rows
     in the range. Rows are unique per (instrument, timestamp, provider), so two
@@ -218,7 +225,10 @@ def _load_stored_bars(
         )
         for asset_id, pids in loaded_provider_ids.items()
     }
-    return result, natures, ambiguous
+    providers = {
+        asset_id: sorted(pids) for asset_id, pids in loaded_provider_ids.items()
+    }
+    return result, natures, ambiguous, providers
 
 
 def _fetch_ohlcv_via_provider(
@@ -311,7 +321,9 @@ def run_backtest(
         return _error_result(errors)
 
     ohlcv_data: Dict[str, pd.DataFrame] = {}
+    stored_data: Dict[str, pd.DataFrame] = {}
     stored_natures: Dict[str, str] = {}
+    stored_provider_ids: Dict[str, List[str]] = {}
     provider_data: Dict[str, pd.DataFrame] = {}
     provider_name: str = ""
     feed_mode: str = ""
@@ -322,9 +334,10 @@ def run_backtest(
         if db_session is None:
             errors.append("data_source='stored' requires a database session (db_session)")
             return _error_result(errors)
-        ohlcv_data, stored_natures, stored_ambiguous = _load_stored_bars(
+        ohlcv_data, stored_natures, stored_ambiguous, stored_provider_ids = _load_stored_bars(
             db_session, all_asset_ids, start_date, end_date, provider_id=provider_id
         )
+        stored_data = ohlcv_data
         refusal = _ambiguous_dataset_error(stored_ambiguous, all_asset_ids)
         if refusal:
             return _error_result([refusal])
@@ -338,10 +351,9 @@ def run_backtest(
         dataset_checksum = _compute_stored_checksum(ohlcv_data, all_asset_ids, start_date, end_date)
 
     elif data_source == "provider" or data_source == "auto":
-        stored_data: Dict[str, pd.DataFrame] = {}
         stored_ambiguous: Dict[str, List[str]] = {}
         if data_source == "auto" and db_session is not None:
-            stored_data, stored_natures, stored_ambiguous = _load_stored_bars(
+            stored_data, stored_natures, stored_ambiguous, stored_provider_ids = _load_stored_bars(
                 db_session, all_asset_ids, start_date, end_date, provider_id=provider_id
             )
             # Refuse before any fallback feed is consulted: an asset the user
@@ -410,6 +422,38 @@ def run_backtest(
                 data_nature[aid] = "synthetic"
         else:
             data_nature[aid] = _coerce_nature(stored_natures.get(aid))
+
+    # What the run actually priced off. The checksum identifies the series, but
+    # it cannot say whose series it was: the same instrument can hold a 140-row
+    # stored fixture and a 761-day provider universe, and 140 rows that include
+    # exchange holidays are not 134 sessions. Recording source, provider,
+    # coverage and nature with the run makes that difference reconcilable
+    # afterwards instead of leaving two counts that look contradictory.
+    dataset_coverage: Dict[str, Dict[str, Any]] = {}
+    for aid in asset_ids:
+        df = ohlcv_data.get(aid)
+        if df is None or df.empty:
+            continue
+        provider_ids = stored_provider_ids.get(aid) or []
+        if aid in stored_data and not stored_data[aid].empty:
+            source = "stored"
+            provider_id = provider_ids[0] if len(provider_ids) == 1 else None
+        else:
+            source = "provider"
+            provider_id = (
+                getattr(data_provider, "provider_id", None)
+                if data_provider is not None
+                else "demo"
+            )
+        dataset_coverage[aid] = {
+            "source": source,
+            "provider_id": provider_id,
+            "provider_ids": provider_ids,
+            "data_nature": data_nature.get(aid, "unknown"),
+            "bar_count": int(len(df)),
+            "first_bar_date": df["date"].iloc[0].strftime("%Y-%m-%d"),
+            "last_bar_date": df["date"].iloc[-1].strftime("%Y-%m-%d"),
+        }
 
     config_hash = compute_config_hash(strategy_spec)
 
@@ -581,6 +625,8 @@ def run_backtest(
         "strategy_spec_snapshot": strategy_spec,
         "dataset_snapshot_id": str(uuid.uuid4()),
         "dataset_checksum": dataset_checksum,
+        "dataset_coverage": dataset_coverage,
+        "bars_used": trading_days,
         "engine_version": engine_version,
         "config_hash": config_hash,
         "data_provider": provider_name,
@@ -857,6 +903,8 @@ def _error_result(errors: List[str]) -> Dict[str, Any]:
         "strategy_spec_snapshot": {},
         "dataset_snapshot_id": None,
         "dataset_checksum": None,
+        "dataset_coverage": None,
+        "bars_used": 0,
         "engine_version": ENGINE_VERSION,
         "config_hash": None,
         "data_provider": None,
