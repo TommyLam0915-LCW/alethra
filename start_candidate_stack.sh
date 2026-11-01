@@ -429,7 +429,7 @@ start_frontend() {
     cd frontend
     NEXT_DEV_DIST_DIR=".next/candidate-$FRONTEND_PORT" \
     NEXT_PUBLIC_API_URL="$BACKEND_ORIGIN" \
-      nohup ./node_modules/.bin/next dev -p "$FRONTEND_PORT" \
+      nohup ./node_modules/.bin/next dev -H 127.0.0.1 -p "$FRONTEND_PORT" \
       >"$LOG_DIR/frontend.log" 2>&1 &
     echo $! >"$FRONTEND_PID_FILE"
   )

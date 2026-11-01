@@ -238,7 +238,7 @@ start_dev_server() {
     # NEXT_PUBLIC_API_URL every browser is served.
     NEXT_DEV_DIST_DIR=".next/dev-$FRONTEND_PORT" \
     NEXT_PUBLIC_API_URL="http://localhost:$BACKEND_PORT" \
-      nohup npx next dev -p "$FRONTEND_PORT" >"$LOG_DIR_ABS/frontend-dev.log" 2>&1 &
+      nohup npx next dev -H 127.0.0.1 -p "$FRONTEND_PORT" >"$LOG_DIR_ABS/frontend-dev.log" 2>&1 &
     echo $! >"$LOG_DIR_ABS/frontend.pid"
   )
   echo "waiting for frontend on 127.0.0.1:$FRONTEND_PORT..."
