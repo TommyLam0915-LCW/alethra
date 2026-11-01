@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
+from app.auth.provenance import HUMAN, event_actor_provenance
 from app.lib.timeutil import utcnow
 from app.models.decision_label import DecisionLabelState
 from app.models.experiment import Experiment
@@ -124,9 +125,11 @@ def _review_summary(
     current = [event for event in events if event.id not in superseded]
     labels = latest_labels(db, owner_id, [event.id for event in current])
 
+    human = [event for event in current if event_actor_provenance(event) == HUMAN]
+
     confirmed = 0
     excluded = 0
-    for event in current:
+    for event in human:
         label = labels.get(event.id)
         if label is None:
             continue
@@ -139,7 +142,8 @@ def _review_summary(
         "total_current_decisions": len(current),
         "confirmed": confirmed,
         "excluded": excluded,
-        "unreviewed": len(current) - confirmed - excluded,
+        "unverified_provenance": len(current) - len(human),
+        "unreviewed": len(human) - confirmed - excluded,
     }
 
 

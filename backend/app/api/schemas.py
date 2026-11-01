@@ -1377,6 +1377,9 @@ class HumanDecisionResponse(BaseModel):
     server_snapshot_date: str
     server_data_cutoff_at: str
     decision_instant: Optional[datetime] = None
+    # Provenance is assigned by the server from the verified credential; it is
+    # not part of the create/correct request bodies on purpose.
+    actor_type: str = "unknown"
     execution_status: str
     supersedes_event_id: Optional[UUID]
     metadata_json: Optional[Dict[str, Any]]

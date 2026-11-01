@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
+from app.auth.provenance import HUMAN, event_actor_provenance
 from app.ml.features import build_feature_matrix
 from app.models.decision_label import DecisionLabelState
 from app.models.experiment import Experiment
@@ -70,6 +71,7 @@ def sampling_contract() -> Dict[str, Any]:
 LABEL_DEFINITION = {
     "task_type": TASK_TYPE,
     "label_source": "owner_confirmed_decision",
+    "label_provenance": "verified_password_session",
     "classes": ["buy", "sell", "hold"],
     "definition_zh": (
         "以決策時點之前可見的市場特徵，估計該 owner 在此策略下會選擇的動作。"
@@ -83,6 +85,7 @@ LABEL_DEFINITION = {
 
 EXCLUSION_LABELS_ZH = {
     "unconfirmed": "未經 owner 確認",
+    "unverified_provenance": "來源不是已驗證的本人密碼登入工作階段",
     "excluded": "owner 標記為不可用",
     "missing_market_data": "決策時點缺少已儲存市場資料",
     "missing_features": "特徵暖機不足或含無效值",
@@ -351,7 +354,16 @@ def _dedupe_source_events(
             continue
         reviewed = [event for event in group if event.id in labels]
         pool = reviewed or group
-        kept.append(max(pool, key=lambda event: (event.created_at, str(event.id))))
+        kept.append(
+            max(
+                pool,
+                key=lambda event: (
+                    event_actor_provenance(event) == HUMAN,
+                    event.created_at,
+                    str(event.id),
+                ),
+            )
+        )
         dropped += len(group) - 1
     return kept, dropped
 
@@ -410,6 +422,12 @@ def _assemble(
         def _exclude(code: str) -> None:
             exclusion_breakdown[code] = exclusion_breakdown.get(code, 0) + 1
 
+        # An agent-written or unrecorded-provenance event is not an owner
+        # confirmation and never becomes a label. Historical rows are reported
+        # here, not upgraded.
+        if event_actor_provenance(event) != HUMAN:
+            _exclude("unverified_provenance")
+            continue
         if not instrument or _parse_date(snapshot_date) is None:
             _exclude("invalid_context")
             continue

@@ -66,6 +66,7 @@ def _add_event(
     cutoff="2024-01-31",
     supersedes=None,
     key=None,
+    actor_type="human",
 ):
     db = TestSession()
     try:
@@ -83,6 +84,7 @@ def _add_event(
             server_data_cutoff_at=cutoff,
             execution_status=HumanDecisionExecutionStatus.record_only,
             supersedes_event_id=supersedes,
+            actor_type=actor_type,
         )
         db.add(event)
         db.commit()

@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 from sqlalchemy import (
-    Column, String, Text, DateTime, Integer, Float, ForeignKey,
+    CheckConstraint, Column, String, Text, DateTime, Integer, Float, ForeignKey,
     UniqueConstraint, Enum as SAEnum,
 )
 from sqlalchemy.dialects.postgresql import UUID, JSONB
@@ -52,6 +52,13 @@ class HumanDecisionEvent(Base):
         default=HumanDecisionExecutionStatus.record_only,
     )
 
+    # Verified authentication channel at write time: human (password session),
+    # agent (API key) or unknown. Rows written before this column existed carry
+    # the server default and are never rewritten to human.
+    actor_type = Column(
+        String(16), nullable=False, default="unknown", server_default="unknown"
+    )
+
     supersedes_event_id = Column(
         UUID(as_uuid=True), ForeignKey("human_decision_events.id"), nullable=True
     )
@@ -65,6 +72,10 @@ class HumanDecisionEvent(Base):
         UniqueConstraint(
             "owner_id", "simulation_session_id", "idempotency_key",
             name="uq_human_decision_owner_session_key",
+        ),
+        CheckConstraint(
+            "actor_type IN ('human', 'agent', 'unknown')",
+            name="ck_human_decision_actor_type",
         ),
     )
 

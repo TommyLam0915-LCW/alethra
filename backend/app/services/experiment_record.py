@@ -95,6 +95,7 @@ def _human_decision_entry(event: HumanDecisionEvent) -> Dict[str, Any]:
         "action": _enum_value(event.action),
         "quantity": event.quantity,
         "rationale": event.rationale,
+        "actor_type": getattr(event, "actor_type", None) or "unknown",
         "execution_status": _enum_value(event.execution_status),
         "server_instrument_id": event.server_instrument_id,
         "server_snapshot_date": event.server_snapshot_date,

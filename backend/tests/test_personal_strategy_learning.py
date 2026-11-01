@@ -180,6 +180,7 @@ def _add_event(
             server_snapshot_date=day,
             server_data_cutoff_at=cutoff or day,
             execution_status=HumanDecisionExecutionStatus.record_only,
+            actor_type="human",
             created_at=created_at or datetime(2024, 1, 2, 9, 0),
         )
         db.add(event)
@@ -221,6 +222,7 @@ def _seed_confirmed_decisions(
                     server_snapshot_date=day.isoformat(),
                     server_data_cutoff_at=day.isoformat(),
                     execution_status=HumanDecisionExecutionStatus.record_only,
+                    actor_type="human",
                     created_at=datetime.combine(day, time(9, 0))
                     + timedelta(minutes=j),
                 )
@@ -358,6 +360,7 @@ def test_review_confirmation_updates_snapshot_preview(client, auth_headers):
         "total_current_decisions": 3,
         "confirmed": 0,
         "excluded": 0,
+        "unverified_provenance": 0,
         "unreviewed": 3,
     }
     assert all(row["usable_for_training"] is False for row in body["decisions"])
@@ -640,6 +643,7 @@ def test_insufficient_and_single_class_are_refused(client, auth_headers):
                 server_snapshot_date=day,
                 server_data_cutoff_at=day,
                 execution_status=HumanDecisionExecutionStatus.record_only,
+                actor_type="human",
                 created_at=datetime(2024, 1, 2, 9, 0) + timedelta(minutes=i),
             )
             db.add(event)
@@ -689,6 +693,7 @@ def test_insufficient_and_single_class_are_refused(client, auth_headers):
                     server_snapshot_date=day.isoformat(),
                     server_data_cutoff_at=day.isoformat(),
                     execution_status=HumanDecisionExecutionStatus.record_only,
+                    actor_type="human",
                     created_at=datetime.combine(day, time(9, 0))
                     + timedelta(minutes=j),
                 )
@@ -1545,6 +1550,7 @@ def test_duplicate_source_event_is_counted_once(client, auth_headers):
             server_snapshot_date=original.server_snapshot_date,
             server_data_cutoff_at=original.server_data_cutoff_at,
             execution_status=HumanDecisionExecutionStatus.record_only,
+            actor_type=original.actor_type,
             created_at=original.created_at - timedelta(minutes=30),
         )
         db.add(duplicate)

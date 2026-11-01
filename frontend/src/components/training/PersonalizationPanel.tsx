@@ -40,6 +40,7 @@ interface Eligibility {
   eligible: boolean;
   status: string;
   reasons: EligibilityReason[];
+  warnings?: EligibilityReason[];
   requirements: Record<string, number | string>;
   consent: {
     granted: boolean;
@@ -52,6 +53,7 @@ interface Eligibility {
     eligible_events: number;
     excluded: {
       superseded_revisions: number;
+      unverified_provenance?: number;
       outside_consent_scope: number;
       missing_reason: number;
       missing_snapshot_context: number;
@@ -309,6 +311,10 @@ export default function PersonalizationPanel() {
               <Metric label="工作階段" value={eligibility.dataset.distinct_sessions} />
               <Metric label="決策時點" value={eligibility.dataset.distinct_snapshot_dates} />
               <Metric
+                label="來源未驗證"
+                value={eligibility.dataset.excluded.unverified_provenance ?? 0}
+              />
+              <Metric
                 label="特徵覆蓋"
                 value={
                   eligibility.dataset.feature_coverage.ratio === null
@@ -335,10 +341,23 @@ export default function PersonalizationPanel() {
               </ul>
             )}
 
+            {(eligibility.warnings?.length ?? 0) > 0 && (
+              <ul
+                data-testid="personalization-warnings"
+                style={{ margin: '12px 0 0', paddingLeft: '18px', fontSize: '12px', color: 'var(--text-muted)' }}
+              >
+                {eligibility.warnings?.map((warning) => (
+                  <li key={warning.code} style={{ marginBottom: '4px' }}>
+                    {warning.message_zh}
+                  </li>
+                ))}
+              </ul>
+            )}
+
             <div style={{ marginTop: '16px' }}>
               <div style={{ fontWeight: 600, fontSize: '13px' }}>訓練同意範圍</div>
               <p style={{ margin: '4px 0 8px', fontSize: '12px', color: 'var(--text-muted)' }}>
-                只計入已勾選策略版本內、具理由且未撤回的決策。保存研究記錄或其他 opt-in 不等於訓練同意。
+                只計入已勾選策略版本內、具理由、來源為本人密碼登入且未撤回的決策。保存研究記錄或其他 opt-in 不等於訓練同意。
               </p>
 
               {scopeOptionIds.length === 0 ? (

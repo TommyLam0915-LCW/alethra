@@ -82,7 +82,10 @@ def login(
             detail="Inactive user"
         )
 
-    access_token = create_access_token(data={"sub": str(user.id)})
+    # ``amr`` records that this session began with a password check. Provenance
+    # labelling uses it to separate password sessions from API-key agents; it is
+    # not a claim that a person is present for every later request.
+    access_token = create_access_token(data={"sub": str(user.id), "amr": ["pwd"]})
     return {"access_token": access_token, "token_type": "bearer"}
 
 

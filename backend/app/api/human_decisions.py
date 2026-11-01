@@ -1,7 +1,7 @@
 from datetime import date, datetime, time, timedelta
 from typing import List, Optional
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from app.database import get_db
@@ -14,6 +14,7 @@ from app.models.human_decision import (
     HumanDecisionExecutionStatus,
 )
 from app.auth.jwt import get_current_user
+from app.auth.provenance import request_actor_provenance
 from app.api.schemas import (
     HumanDecisionCreate,
     HumanDecisionCorrect,
@@ -113,6 +114,7 @@ def _event_to_response(event: HumanDecisionEvent) -> HumanDecisionResponse:
         server_data_cutoff_at=event.server_data_cutoff_at,
         decision_instant=event.decision_instant,
         execution_status=event.execution_status.value if isinstance(event.execution_status, HumanDecisionExecutionStatus) else event.execution_status,
+        actor_type=event.actor_type or "unknown",
         supersedes_event_id=event.supersedes_event_id,
         metadata_json=event.metadata_json,
         created_at=event.created_at,
@@ -123,11 +125,15 @@ def _event_to_response(event: HumanDecisionEvent) -> HumanDecisionResponse:
 @router.post("", response_model=HumanDecisionResponse, status_code=status.HTTP_201_CREATED)
 def create_human_decision(
     body: HumanDecisionCreate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     session = _get_session_with_ownership(body.simulation_session_id, db, current_user)
     ctx = _derive_server_context(session, db)
+    # Provenance is the credential the server verified, never a field the caller
+    # sets. An API-key call is an agent's decision even if it claims otherwise.
+    actor_type = request_actor_provenance(request)
 
     existing = db.query(HumanDecisionEvent).filter(
         HumanDecisionEvent.owner_id == current_user.id,
@@ -164,6 +170,7 @@ def create_human_decision(
         execution_status=HumanDecisionExecutionStatus.record_only,
         metadata_json=body.metadata,
         supersedes_event_id=None,
+        actor_type=actor_type,
     )
     db.add(event)
     try:
@@ -174,12 +181,13 @@ def create_human_decision(
             entity_id=str(event.id),
             event_type="human_decision_created",
             actor_id=current_user.id,
-            actor_type="human",
+            actor_type=actor_type,
             payload={
                 "action": body.action,
                 "quantity": body.quantity,
                 "idempotency_key": body.idempotency_key,
                 "simulation_session_id": str(body.simulation_session_id),
+                "actor_type": actor_type,
             },
             data_cutoff_at=ctx["data_cutoff_at"],
         )
@@ -234,9 +242,11 @@ def get_human_decision(
 def correct_human_decision(
     event_id: UUID,
     body: HumanDecisionCorrect,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    actor_type = request_actor_provenance(request)
     original = db.query(HumanDecisionEvent).filter(
         HumanDecisionEvent.id == event_id,
         HumanDecisionEvent.owner_id == current_user.id,
@@ -275,6 +285,7 @@ def correct_human_decision(
         execution_status=HumanDecisionExecutionStatus.record_only,
         metadata_json={**(body.metadata or {}), "correction_reason": body.correction_reason},
         supersedes_event_id=original.id,
+        actor_type=actor_type,
     )
     db.add(correction)
     try:
@@ -285,13 +296,14 @@ def correct_human_decision(
             entity_id=str(correction.id),
             event_type="human_decision_corrected",
             actor_id=current_user.id,
-            actor_type="human",
+            actor_type=actor_type,
             payload={
                 "action": body.action,
                 "quantity": body.quantity,
                 "supersedes_event_id": str(original.id),
                 "correction_reason": body.correction_reason,
                 "simulation_session_id": str(original.simulation_session_id),
+                "actor_type": actor_type,
             },
             data_cutoff_at=ctx["data_cutoff_at"],
         )

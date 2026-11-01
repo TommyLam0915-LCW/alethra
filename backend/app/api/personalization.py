@@ -9,12 +9,13 @@ eligibility endpoint reports measured counts and explicit refusal reasons.
 import uuid
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.auth.api_keys import check_api_key_scope
 from app.auth.jwt import get_current_user
+from app.auth.provenance import HUMAN, request_actor_provenance
 from app.database import get_db
 from app.models.experiment import Experiment
 from app.models.experiment_version import ExperimentVersion
@@ -67,6 +68,7 @@ def list_capabilities(
 @router.put("/personalization/consent")
 def put_personalization_consent(
     body: PersonalizationConsentRequest,
+    request: Request,
     current_user: User = Depends(get_current_user),
     _scope_check=Depends(check_api_key_scope("write")),
     db: Session = Depends(get_db),
@@ -75,6 +77,19 @@ def put_personalization_consent(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="需要明確確認才會記錄個人化訓練同意",
+        )
+
+    # Training consent is an owner legal act. An API credential (agent) or a
+    # credential whose authentication method is unknown cannot consent on the
+    # owner's behalf, so the request is refused rather than mislabelled human.
+    actor_type = request_actor_provenance(request)
+    if actor_type != HUMAN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "personalization training consent requires a password-authenticated "
+                f"owner session (provenance: {actor_type})"
+            ),
         )
 
     unique_ids = list(dict.fromkeys(body.strategy_version_ids))
@@ -93,10 +108,11 @@ def put_personalization_consent(
         entity_id=str(consent.id),
         event_type="personalization_consent_granted",
         actor_id=current_user.id,
-        actor_type="human",
+        actor_type=actor_type,
         payload={
             "consent_version": CONSENT_VERSION,
             "strategy_version_ids": [str(v) for v in unique_ids],
+            "actor_type": actor_type,
         },
     )
     db.commit()
@@ -116,10 +132,14 @@ def put_personalization_consent(
 
 @router.delete("/personalization/consent")
 def delete_personalization_consent(
+    request: Request,
     current_user: User = Depends(get_current_user),
     _scope_check=Depends(check_api_key_scope("write")),
     db: Session = Depends(get_db),
 ):
+    # Revocation is a safety action and stays reachable from any owner
+    # credential; the audit event records which one it actually was.
+    actor_type = request_actor_provenance(request)
     active = get_active_consent(db, current_user.id)
     revoked = revoke_consent(db, current_user.id)
     if active is not None:
@@ -129,8 +149,12 @@ def delete_personalization_consent(
             entity_id=str(active.id),
             event_type="personalization_consent_revoked",
             actor_id=current_user.id,
-            actor_type="human",
-            payload={"consent_version": active.consent_version, "revoked": revoked},
+            actor_type=actor_type,
+            payload={
+                "consent_version": active.consent_version,
+                "revoked": revoked,
+                "actor_type": actor_type,
+            },
         )
     db.commit()
     return {

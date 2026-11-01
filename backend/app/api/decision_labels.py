@@ -9,11 +9,16 @@ is never rewritten.
 import uuid
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.auth.jwt import get_current_user
+from app.auth.provenance import (
+    HUMAN,
+    event_actor_provenance,
+    request_actor_provenance,
+)
 from app.database import get_db
 from app.models.decision_label import DecisionLabel
 from app.models.human_decision import HumanDecisionEvent
@@ -75,14 +80,17 @@ def _event_row(
 ) -> dict:
     action = event.action.value if hasattr(event.action, "value") else str(event.action)
     label_body = label_payload(label)
+    actor_type = event_actor_provenance(event)
     usable = bool(
-        label_body
+        actor_type == HUMAN
+        and label_body
         and label_body["state"] == "confirmed"
         and label_body["action_label"] in ("buy", "sell", "hold")
     )
     return {
         "decision_event_id": str(event.id),
         "simulation_session_id": str(event.simulation_session_id),
+        "actor_type": actor_type,
         "strategy_version_id": (
             str(event.server_strategy_version_id)
             if event.server_strategy_version_id
@@ -149,12 +157,16 @@ def list_decisions_for_review(
         _event_row(event, latest.get(event.id), revision_counts.get(event.id, 0))
         for event in current
     ]
-    confirmed = sum(1 for row in rows if row["usable_for_training"])
+    # Buckets must be disjoint: an agent/unknown event is reported once under
+    # unverified provenance regardless of any label attached to it.
+    human_rows = [row for row in rows if row["actor_type"] == HUMAN]
+    confirmed = sum(1 for row in human_rows if row["usable_for_training"])
     excluded = sum(
         1
-        for row in rows
+        for row in human_rows
         if row["label"] and row["label"]["state"] == "excluded"
     )
+    unverified = len(rows) - len(human_rows)
     return {
         "strategy_version_id": (
             str(strategy_version_id) if strategy_version_id else None
@@ -163,11 +175,13 @@ def list_decisions_for_review(
             "total_current_decisions": len(rows),
             "confirmed": confirmed,
             "excluded": excluded,
-            "unreviewed": len(rows) - confirmed - excluded,
+            "unverified_provenance": unverified,
+            "unreviewed": len(human_rows) - confirmed - excluded,
         },
         "decisions": rows,
         "note": "只有 owner 親自確認的決策才可以成為訓練標籤；"
-        "系統訊號不會自動成為人類標籤。",
+        "系統訊號不會自動成為人類標籤。經 API 產生的決策標示為 agent，"
+        "來源未記錄的標示為 unknown，兩者都不計入可用標籤。",
     }
 
 
@@ -204,9 +218,24 @@ def list_label_revisions(
 def create_label_revision(
     event_id: uuid.UUID,
     payload: DecisionLabelRequest,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    # Confirming or correcting a label is the owner's own judgement act. An API
+    # credential (agent) or a token whose authentication method is unknown
+    # cannot stand in for the owner, so the revision is refused rather than
+    # recorded as if a person made it.
+    actor_type = request_actor_provenance(request)
+    if actor_type != HUMAN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "confirming or correcting a decision label requires a "
+                f"password-authenticated owner session (provenance: {actor_type})"
+            ),
+        )
+
     event = _get_owned_event(event_id, db, current_user)
     try:
         label = record_label(
@@ -227,6 +256,7 @@ def create_label_revision(
         entity_id=str(label.id),
         event_type="decision_label_recorded",
         actor_id=current_user.id,
+        actor_type=actor_type,
         payload={
             "decision_event_id": str(event.id),
             "revision_number": label.revision_number,

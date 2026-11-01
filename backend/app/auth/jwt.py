@@ -61,6 +61,9 @@ def get_current_user(
             if user and user.is_active:
                 request.state.api_key_scopes = None
                 request.state.api_key_id = None
+                # Recorded so provenance is read from the verified credential
+                # rather than assumed from the fact that a request arrived.
+                request.state.auth_amr = payload.get("amr") or []
                 return user
     except (JWTError, ValueError):
         pass
@@ -71,6 +74,7 @@ def get_current_user(
         user, scopes, key_id = result
         request.state.api_key_scopes = scopes
         request.state.api_key_id = key_id
+        request.state.auth_amr = []
         return user
 
     raise credentials_exception

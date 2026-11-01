@@ -11,6 +11,10 @@ Rules encoded here (see docs/personalization-contract.md):
 
 * Only explicitly recorded decisions count. No action is ever synthesised as
   HOLD.
+* Only decisions whose recorded provenance is a password-authenticated owner
+  session count. Events written through an API credential are agent output,
+  and legacy rows without provenance stay unknown; both are reported as
+  excluded instead of being promoted to owner-confirmed.
 * A decision without a stated reason is not a usable label.
 * Superseded revisions do not count; the correction does.
 * Only strategy versions listed in an active training consent count. Saving
@@ -25,6 +29,7 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from sqlalchemy.orm import Session
 
+from app.auth.provenance import HUMAN, event_actor_provenance
 from app.lib.timeutil import utcnow
 from app.models.human_decision import HumanDecisionEvent
 from app.models.market_data import MarketDataBar
@@ -214,12 +219,22 @@ def evaluate_eligibility(
     latest = [event for event in events if event.id not in superseded_ids]
     superseded_count = total_recorded - len(latest)
 
+    # A label is "owner confirmed" only when the server recorded a
+    # password-authenticated owner session as its source. Events written
+    # through an API credential are agent output; legacy rows whose writer was
+    # never recorded stay unknown. Neither is silently promoted, and neither is
+    # rewritten: they are reported as an explicit exclusion.
+    owner_confirmed = [
+        event for event in latest if event_actor_provenance(event) == HUMAN
+    ]
+    unverified_count = len(latest) - len(owner_confirmed)
+
     consent = get_active_consent(db, owner_id)
     scope_ids = set(_scope_strategy_ids(consent))
 
     in_scope: List[HumanDecisionEvent] = []
     outside_scope_count = 0
-    for event in latest:
+    for event in owner_confirmed:
         strategy_id = _as_uuid(event.server_strategy_version_id)
         if strategy_id is not None and strategy_id in scope_ids:
             in_scope.append(event)
@@ -383,6 +398,31 @@ def evaluate_eligibility(
                 0,
             )
         )
+    warnings: List[Dict[str, Any]] = []
+    if unverified_count:
+        warnings.append(
+            _reason(
+                "UNVERIFIED_DECISION_PROVENANCE",
+                f"有 {unverified_count} 筆決策的來源不是已驗證的本人密碼登入工作階段"
+                "（API 代理產生或來源未記錄），不會當作本人確認的標籤，"
+                "亦不會被改寫。這是資料來源說明，不是要求你刪除舊記錄。",
+                unverified_count,
+                0,
+            )
+        )
+
+    warnings: List[Dict[str, Any]] = []
+    if unverified_count:
+        warnings.append(
+            _reason(
+                "UNVERIFIED_DECISION_PROVENANCE",
+                f"有 {unverified_count} 筆決策的來源不是已驗證的本人密碼登入工作階段"
+                "（API 代理產生或來源未記錄），不會當作本人確認的標籤，"
+                "亦不會被改寫。這是資料來源說明，不是要求你刪除舊記錄。",
+                unverified_count,
+                0,
+            )
+        )
 
     if not leaking and coverage_ratio is not None and coverage_ratio < MIN_FEATURE_COVERAGE_RATIO:
         reasons.append(
@@ -429,6 +469,7 @@ def evaluate_eligibility(
         "eligible": dataset_eligible,
         "status": "ELIGIBLE" if dataset_eligible else "NOT_ELIGIBLE",
         "reasons": reasons,
+        "warnings": warnings,
         "requirements": {
             "consent_version": CONSENT_VERSION,
             "min_confirmed_decisions": MIN_CONFIRMED_DECISIONS,
@@ -443,6 +484,7 @@ def evaluate_eligibility(
             "eligible_events": len(confirmed),
             "excluded": {
                 "superseded_revisions": superseded_count,
+                "unverified_provenance": unverified_count,
                 "outside_consent_scope": outside_scope_count,
                 "missing_reason": len(missing_rationale),
                 "missing_snapshot_context": len(invalid_context),

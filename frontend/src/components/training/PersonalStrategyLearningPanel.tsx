@@ -37,6 +37,7 @@ interface ReviewRow {
   quantity: number | null;
   rationale: string | null;
   recorded_at: string | null;
+  actor_type?: 'human' | 'agent' | 'unknown';
   label: ReviewLabel | null;
   revision_count: number;
   usable_for_training: boolean;
@@ -48,6 +49,7 @@ interface ReviewResponse {
     total_current_decisions: number;
     confirmed: number;
     excluded: number;
+    unverified_provenance?: number;
     unreviewed: number;
   };
   decisions: ReviewRow[];
@@ -1552,6 +1554,10 @@ export default function PersonalStrategyLearningPanel() {
                 <Metric label="目前決策" value={summary.total_current_decisions} />
                 <Metric label="已確認" value={summary.confirmed} />
                 <Metric label="已排除" value={summary.excluded} />
+                <Metric
+                  label="來源未驗證"
+                  value={summary.unverified_provenance ?? 0}
+                />
                 <Metric label="未覆核" value={summary.unreviewed} />
               </div>
             )}
@@ -1604,16 +1610,20 @@ export default function PersonalStrategyLearningPanel() {
                             border: '1px solid currentColor',
                             color: row.usable_for_training
                               ? 'var(--positive)'
-                              : row.label?.state === 'excluded'
-                                ? 'var(--warning)'
-                                : 'var(--text-muted)',
+                              : row.actor_type && row.actor_type !== 'human'
+                                ? 'var(--text-muted)'
+                                : row.label?.state === 'excluded'
+                                  ? 'var(--warning)'
+                                  : 'var(--text-muted)',
                           }}
                         >
                           {row.usable_for_training
                             ? `已確認 · ${actionLabel(row.label?.action_label ?? null)}`
-                            : row.label?.state === 'excluded'
-                              ? '已排除'
-                              : '未覆核'}
+                            : row.actor_type && row.actor_type !== 'human'
+                              ? `來源未驗證（${row.actor_type}）`
+                              : row.label?.state === 'excluded'
+                                ? '已排除'
+                                : '未覆核'}
                         </span>
                         {row.revision_count > 1 && (
                           <span style={{ color: 'var(--text-muted)' }}>
