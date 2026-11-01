@@ -235,7 +235,8 @@ export default function ExperimentDetailPage() {
    * Freezing the current version is the product's only gate into replay: the
    * backend refuses to create a simulation session on an unlocked version, and a
    * locked experiment can no longer be edited — new parameters need a new version.
-   * The existing scope keys are carried along, because the PUT replaces the object.
+   * The dedicated lock endpoint carries no strategy fields, so a lock can never
+   * smuggle in a parameter change.
    */
   const handleLock = async () => {
     if (!experiment) return;
@@ -246,8 +247,8 @@ export default function ExperimentDetailPage() {
     setLocking(true);
     setError('');
     try {
-      await api.experiments.update(experimentId, {
-        scope: { ...(experiment.scope ?? {}), status: 'locked' },
+      await api.experiments.lockVersion(experimentId, experiment.current_version_id, {
+        confirm: true,
       });
       setShowLockConfirm(false);
       await loadData();
@@ -371,6 +372,10 @@ export default function ExperimentDetailPage() {
   const latestRun = runs.find(r => r.status === 'completed');
   const currentVersion = versions.find((v) => v.id === experiment.current_version_id) ?? null;
   const isLocked = experiment.status === 'locked';
+  // An experiment can carry the locked status while its current version has no
+  // lock stamp (legacy rows). Replay needs the version stamp, so offer the lock
+  // action in that case instead of a dead end.
+  const currentVersionLocked = Boolean(currentVersion?.locked_at);
 
   return (
     <div className="container" style={{ paddingTop: '40px', paddingBottom: '40px' }}>
@@ -395,7 +400,7 @@ export default function ExperimentDetailPage() {
               </button>
             </Link>
           )}
-          {!isLocked && (
+          {(!isLocked || !currentVersionLocked) && (
             <button
               onClick={() => setShowLockConfirm((open) => !open)}
               className="btn"
@@ -432,7 +437,7 @@ export default function ExperimentDetailPage() {
         </div>
       )}
 
-      {!isLocked && showLockConfirm && (
+      {(!isLocked || !currentVersionLocked) && showLockConfirm && (
         <div className="card" style={{ marginBottom: '20px', borderLeft: '3px solid var(--primary)' }}>
           <h3 style={{ marginTop: 0, marginBottom: '8px' }}>
             {currentVersion ? `Lock version ${currentVersion.version_number}` : 'No version to lock yet'}
@@ -441,6 +446,16 @@ export default function ExperimentDetailPage() {
             Locking freezes this version's strategy parameters and data cutoff. Changing parameters requires a new
             version. Forward simulation, the replay cursor and paper fills all follow this version.
           </p>
+          {isLocked && !currentVersionLocked && currentVersion && (
+            <p
+              data-testid="exp-lock-repair-note"
+              style={{ color: 'var(--warning)', fontSize: '13px', marginTop: 0, marginBottom: '16px' }}
+            >
+              This experiment is marked locked, but version {currentVersion.version_number} has no lock stamp, so a
+              replay session cannot start yet. Confirming freezes it now; the lock time is recorded as the moment you
+              confirm, never backdated.
+            </p>
+          )}
 
           {currentVersion ? (
             <div

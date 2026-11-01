@@ -250,6 +250,11 @@ export const api = {
     update: (id: string, data: any) =>
       apiFetch(`/api/v1/experiments/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
     versions: (id: string) => apiFetch(`/api/v1/experiments/${id}/versions`),
+    lockVersion: (id: string, versionId: string, data: { confirm: boolean; reason?: string }) =>
+      apiFetch(`/api/v1/experiments/${id}/versions/${versionId}/lock`, {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
     record: (id: string) => apiFetch(`/api/v1/experiments/${id}/record`),
     export: (id: string) => apiFetch(`/api/v1/experiments/${id}/export`),
     methodReview: (id: string) => apiFetch(`/api/v1/experiments/${id}/method-review`),

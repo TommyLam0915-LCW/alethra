@@ -15,6 +15,8 @@ from app.auth.jwt import get_current_user
 from app.api.schemas import (
     ExperimentCreate,
     ExperimentUpdate,
+    ExperimentLockRequest,
+    ExperimentLockResponse,
     ExperimentResponse,
     ExperimentVersionResponse,
     LatestRunSummary,
@@ -28,7 +30,7 @@ from app.api.schemas import (
     RevisionResponse,
     StrategySpec,
 )
-from app.engine.backtest import compute_config_hash, run_backtest
+from app.engine.backtest import ENGINE_VERSION, compute_config_hash, run_backtest
 from app.lib.error_safety import safe_error_message
 from app.services import emit_event
 from app.services.experiment_record import build_experiment_record
@@ -168,6 +170,46 @@ def get_experiment(
     return experiment
 
 
+def _freeze_version(
+    db: Session,
+    experiment: Experiment,
+    version: ExperimentVersion,
+    user: User,
+    reason: str | None = None,
+) -> datetime:
+    """Freeze the reviewed contract of one version and record it once.
+
+    The lock time is always the server's clock: a lock never inherits the
+    version's creation time or the spec's data cutoff, because those describe
+    the research, not the moment the owner committed to it.
+    """
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    version.locked_at = now
+    version.locked_by = user.id
+    version.strategy_config_hash = version.config_hash
+    version.dataset_cutoff_at = (version.strategy_spec or {}).get("end_date")
+    version.engine_version = ENGINE_VERSION
+    if reason:
+        version.lock_reason = reason
+    experiment.status = ExperimentStatus.locked
+    experiment.updated_at = now
+    emit_event(
+        db,
+        entity_type="experiment",
+        entity_id=experiment.id,
+        event_type="strategy_locked",
+        actor_id=user.id,
+        rules_locked=True,
+        payload={
+            "locked_at": now.isoformat(),
+            "version_id": str(version.id),
+            "version_number": version.version_number,
+            "dataset_cutoff_at": version.dataset_cutoff_at,
+        },
+    )
+    return now
+
+
 @router.put("/{experiment_id}", response_model=ExperimentResponse)
 def update_experiment(
     experiment_id: UUID,
@@ -184,6 +226,17 @@ def update_experiment(
 
     if experiment.status == ExperimentStatus.locked:
         raise HTTPException(status_code=400, detail="Cannot modify locked experiment")
+
+    if (
+        experiment_data.strategy_spec is not None
+        and experiment_data.scope is not None
+        and experiment_data.scope.get("status") == "locked"
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Strategy parameters cannot be changed and locked in the same request. "
+                   "Save the new version first, then lock it.",
+        )
 
     is_locked_after = False
     if experiment_data.hypothesis is not None and experiment_data.hypothesis != experiment.hypothesis:
@@ -260,25 +313,86 @@ def update_experiment(
         current_version = db.query(ExperimentVersion).filter(
             ExperimentVersion.id == experiment.current_version_id
         ).first()
-        if current_version and current_version.locked_at is None:
-            from app.engine.backtest import ENGINE_VERSION
-            now = datetime.now(timezone.utc).replace(tzinfo=None)
-            current_version.locked_at = now
-            current_version.locked_by = current_user.id
-            current_version.strategy_config_hash = current_version.config_hash
-            current_version.dataset_cutoff_at = current_version.strategy_spec.get("end_date")
-            current_version.engine_version = ENGINE_VERSION
-
-        emit_event(db,
-            entity_type="experiment", entity_id=experiment.id,
-            event_type="strategy_locked", actor_id=current_user.id,
-            rules_locked=True,
-            payload={"locked_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()})
+        # A version that was already frozen keeps its original lock time and
+        # audit event; this path only syncs the experiment-level status.
+        if current_version is not None and current_version.locked_at is None:
+            _freeze_version(db, experiment, current_version, current_user)
 
     experiment.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
     db.commit()
     db.refresh(experiment)
     return experiment
+
+
+@router.post(
+    "/{experiment_id}/versions/{version_id}/lock",
+    response_model=ExperimentLockResponse,
+)
+def lock_version(
+    experiment_id: UUID,
+    version_id: UUID,
+    lock_data: ExperimentLockRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Freeze the current version's strategy contract.
+
+    Separate from ``PUT /experiments/{id}`` so a lock can never be bundled with
+    a parameter change, and so an experiment that is already marked locked but
+    whose version never got a lock stamp can be repaired without direct SQL.
+    """
+    experiment = db.query(Experiment).filter(
+        Experiment.id == experiment_id,
+        Experiment.owner_id == current_user.id,
+    ).first()
+    if not experiment:
+        raise HTTPException(status_code=404, detail="Experiment not found")
+
+    version = db.query(ExperimentVersion).filter(
+        ExperimentVersion.id == version_id,
+        ExperimentVersion.experiment_id == experiment_id,
+    ).first()
+    if not version:
+        raise HTTPException(status_code=404, detail="Version not found")
+
+    if experiment.current_version_id != version.id:
+        raise HTTPException(
+            status_code=409,
+            detail="Only the experiment's current version can be locked",
+        )
+
+    if not lock_data.confirm:
+        raise HTTPException(
+            status_code=400,
+            detail="Locking a version requires explicit confirmation",
+        )
+
+    if version.locked_at is not None:
+        if experiment.status != ExperimentStatus.locked:
+            experiment.status = ExperimentStatus.locked
+            experiment.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+            db.commit()
+        return ExperimentLockResponse(
+            experiment_id=experiment.id,
+            version_id=version.id,
+            experiment_status=ExperimentStatus.locked.value,
+            locked_at=version.locked_at,
+            strategy_config_hash=version.strategy_config_hash,
+            already_locked=True,
+        )
+
+    _freeze_version(db, experiment, version, current_user, reason=lock_data.reason)
+    db.commit()
+    db.refresh(experiment)
+    db.refresh(version)
+    return ExperimentLockResponse(
+        experiment_id=experiment.id,
+        version_id=version.id,
+        experiment_status=ExperimentStatus.locked.value,
+        locked_at=version.locked_at,
+        strategy_config_hash=version.strategy_config_hash,
+        already_locked=False,
+    )
 
 
 @router.get("/{experiment_id}/versions", response_model=List[ExperimentVersionResponse])

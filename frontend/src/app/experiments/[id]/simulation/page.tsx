@@ -57,6 +57,12 @@ interface Experiment {
   current_version_id: string | null;
 }
 
+interface VersionSummary {
+  id: string;
+  version_number: number;
+  locked_at: string | null;
+}
+
 interface LinkedPortfolio {
   id: string;
   status: string;
@@ -157,6 +163,9 @@ export default function SimulationPage() {
   const [linking, setLinking] = useState(false);
   const [priorSessions, setPriorSessions] = useState<SimulationSession[]>([]);
   const [showCreateForm, setShowCreateForm] = useState(false);
+  const [currentVersion, setCurrentVersion] = useState<VersionSummary | null>(null);
+  const [showLockConfirm, setShowLockConfirm] = useState(false);
+  const [locking, setLocking] = useState(false);
 
   useEffect(() => {
     const token = localStorage.getItem('token');
@@ -171,11 +180,12 @@ export default function SimulationPage() {
     try {
       const exp = await api.experiments.get(experimentId);
       setExperiment(exp);
-      if (exp.status !== 'locked') {
-        setError('The experiment must be locked before a walk-forward simulation can run.');
-      }
-      // Fetch available providers for this version
+      // The backend gates session creation on the *version's* lock stamp, not on
+      // the experiment status. Read both so the page can distinguish "ready",
+      // "needs locking" and "legacy row marked locked without a version stamp".
       if (exp.current_version_id) {
+        const versions: VersionSummary[] = (await api.experiments.versions(experimentId)) || [];
+        setCurrentVersion(versions.find((v) => v.id === exp.current_version_id) ?? null);
         loadAvailableProviders(exp.current_version_id);
         loadVersionSessions(exp.current_version_id);
       }
@@ -183,6 +193,23 @@ export default function SimulationPage() {
       setError(err.message || 'Could not load the experiment.');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleLockVersion = async () => {
+    if (!experiment?.current_version_id) return;
+    setLocking(true);
+    setError('');
+    try {
+      await api.experiments.lockVersion(experimentId, experiment.current_version_id, {
+        confirm: true,
+      });
+      setShowLockConfirm(false);
+      await loadExperiment();
+    } catch (err: any) {
+      setError(err.message || 'The version could not be locked.');
+    } finally {
+      setLocking(false);
     }
   };
 
@@ -481,6 +508,7 @@ export default function SimulationPage() {
 
   const isIntraday = !!session?.timeframe && INTRADAY_TIMEFRAMES.includes(session.timeframe);
   const tfLabel = session?.timeframe ? (TIMEFRAME_LABELS[session.timeframe] || session.timeframe) : '';
+  const isVersionLocked = Boolean(currentVersion?.locked_at);
 
   return (
     <div className="container" style={{ paddingTop: '40px', paddingBottom: '40px' }}>
@@ -504,7 +532,54 @@ export default function SimulationPage() {
 
       {error && <div className="alert alert-warning">{error}</div>}
 
-      {(!session || showCreateForm) && experiment?.status === 'locked' && (
+      {experiment && !experiment.current_version_id && (
+        <div className="alert alert-warning">
+          This experiment has no strategy version yet. Create one on the experiment page first.
+        </div>
+      )}
+
+      {experiment && currentVersion && !isVersionLocked && (
+        <div className="card" style={{ marginBottom: '24px' }} data-testid="sim-lock-card">
+          <h3 style={{ marginTop: 0, marginBottom: '8px' }}>
+            Lock version {currentVersion.version_number} to start
+          </h3>
+          <p style={{ fontSize: '14px', color: 'var(--text-secondary)', marginTop: 0, marginBottom: '12px' }}>
+            A replay session must run from a frozen specification. Locking records the strategy parameters,
+            the data cutoff and the moment you confirm; the lock time is never backdated.
+          </p>
+          {showLockConfirm ? (
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <button
+                onClick={handleLockVersion}
+                className="btn btn-primary"
+                data-testid="sim-lock-confirm"
+                disabled={locking}
+              >
+                {locking ? 'Locking…' : 'Confirm lock'}
+              </button>
+              <button
+                onClick={() => setShowLockConfirm(false)}
+                className="btn"
+                data-testid="sim-lock-cancel"
+                style={{ backgroundColor: 'var(--surface-2)' }}
+                disabled={locking}
+              >
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={() => setShowLockConfirm(true)}
+              className="btn btn-primary"
+              data-testid="sim-lock-open"
+            >
+              Lock this version
+            </button>
+          )}
+        </div>
+      )}
+
+      {(!session || showCreateForm) && isVersionLocked && (
         <div className="card" style={{ marginBottom: '24px' }} data-testid="sim-create-card">
           <h3 style={{ marginBottom: '16px' }}>
             {session ? 'Start a new replay session' : 'Start a replay session'}

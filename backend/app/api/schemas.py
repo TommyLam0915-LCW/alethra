@@ -81,6 +81,26 @@ class ExperimentUpdate(BaseModel):
     change_reason: Optional[str] = None
 
 
+class ExperimentLockRequest(BaseModel):
+    """Freezing a version is a separate, explicitly confirmed action.
+
+    It intentionally carries no strategy fields: the lock must freeze the
+    parameters the owner already reviewed, never new ones in the same request.
+    """
+
+    confirm: bool
+    reason: Optional[str] = Field(None, max_length=500)
+
+
+class ExperimentLockResponse(BaseModel):
+    experiment_id: UUID
+    version_id: UUID
+    experiment_status: str
+    locked_at: datetime
+    strategy_config_hash: Optional[str] = None
+    already_locked: bool
+
+
 class LatestRunSummary(BaseModel):
     """Newest research run for an experiment, for the research list."""
 
