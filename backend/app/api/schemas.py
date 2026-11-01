@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any, Optional, List, Dict
+from typing import Any, Literal, Optional, List, Dict
 from uuid import UUID
 import math
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -196,6 +196,47 @@ class ResearchRunResponse(BaseModel):
     completed_at: Optional[datetime]
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class AdHocDurableRunHint(BaseModel):
+    """Where to get the same computation with a stored, auditable run row."""
+
+    method: str = "POST"
+    path: str
+    persists: bool = True
+    note: str
+
+
+class AdHocBacktestResponse(BaseModel):
+    """Result of an ad-hoc backtest, which is computed and returned, not stored.
+
+    ``persisted`` is a constant false and ``run_id`` is always null: this path
+    creates no research run, so it has no id to cite, no comparison target and
+    no quota settlement. ``durable_run`` points at the endpoint that does.
+    """
+
+    status: str
+    persisted: Literal[False] = False
+    run_id: None = None
+    experiment_id: str
+    version_id: str
+    metrics: Dict[str, Any] = Field(default_factory=dict)
+    equity_curve: List[Any] = Field(default_factory=list)
+    benchmark_equity_curve: List[Any] = Field(default_factory=list)
+    trades: List[Any] = Field(default_factory=list)
+    round_trips: List[Any] = Field(default_factory=list)
+    config_hash: Optional[str] = None
+    engine_version: Optional[str] = None
+    data_provider: Optional[str] = None
+    feed_mode: Optional[str] = None
+    data_source_used: Optional[str] = None
+    data_nature: Optional[Dict[str, str]] = None
+    dataset_checksum: Optional[str] = None
+    warnings: List[Any] = Field(default_factory=list)
+    errors: List[Any] = Field(default_factory=list)
+    computed_at: str
+    completed_at: str
+    durable_run: AdHocDurableRunHint
 
 
 class RunComparisonField(BaseModel):

@@ -13,6 +13,8 @@ from app.models.audit_event import AuditEvent
 from app.models.research_note import ResearchNote
 from app.auth.jwt import get_current_user
 from app.api.schemas import (
+    AdHocBacktestResponse,
+    AdHocDurableRunHint,
     ExperimentCreate,
     ExperimentUpdate,
     ExperimentLockRequest,
@@ -906,7 +908,21 @@ def get_method_review(
     )
 
 
-@router.post("/{experiment_id}/versions/{version_id}/backtest")
+@router.post(
+    "/{experiment_id}/versions/{version_id}/backtest",
+    response_model=AdHocBacktestResponse,
+    summary="Run a backtest without persisting a research run",
+    description=(
+        "Executes the version's strategy against stored data and returns the "
+        "computed metrics, curves and trades directly. The result is NOT "
+        "stored: persisted is always false, run_id is always null, no research "
+        "run row is created, no quota is reserved or settled, and the response "
+        "cannot be cited, compared or saved as a run reference. Use "
+        "POST /api/v1/versions/{version_id}/runs for a durable, auditable, "
+        "quota-metered run. This path keeps its previous 200 behaviour for "
+        "existing callers."
+    ),
+)
 def run_experiment_backtest(
     experiment_id: UUID,
     version_id: UUID,
@@ -942,28 +958,38 @@ def run_experiment_backtest(
         # Run backtest engine
         result = run_backtest(strategy_spec, db_session=db)
 
-        # Store results in ExperimentRun (if model exists) or return directly
-        # For now, return results directly since ExperimentRun model may not exist
-        return {
-            "status": result.get("run_status", "error"),
-            "experiment_id": str(experiment_id),
-            "version_id": str(version_id),
-            "metrics": result.get("metrics", {}),
-            "equity_curve": result.get("daily_equity_curve", []),
-            "benchmark_equity_curve": result.get("benchmark_equity_curve", []),
-            "trades": result.get("transactions", []),
-            "round_trips": result.get("round_trips", []),
-            "config_hash": result.get("config_hash"),
-            "engine_version": result.get("engine_version"),
-            "data_provider": result.get("data_provider"),
-            "feed_mode": result.get("feed_mode"),
-            "data_source_used": result.get("data_source_used"),
-            "data_nature": result.get("data_nature"),
-            "dataset_checksum": result.get("dataset_checksum"),
-            "warnings": result.get("warnings", []),
-            "errors": result.get("errors", []),
-            "completed_at": datetime.now(timezone.utc).isoformat(),
-        }
+        # Computed and returned, never stored: no run row, no quota movement.
+        computed_at = datetime.now(timezone.utc).isoformat()
+        return AdHocBacktestResponse(
+            status=result.get("run_status", "error"),
+            experiment_id=str(experiment_id),
+            version_id=str(version_id),
+            metrics=result.get("metrics", {}),
+            equity_curve=result.get("daily_equity_curve", []),
+            benchmark_equity_curve=result.get("benchmark_equity_curve", []),
+            trades=result.get("transactions", []),
+            round_trips=result.get("round_trips", []),
+            config_hash=result.get("config_hash"),
+            engine_version=result.get("engine_version"),
+            data_provider=result.get("data_provider"),
+            feed_mode=result.get("feed_mode"),
+            data_source_used=result.get("data_source_used"),
+            data_nature=result.get("data_nature"),
+            dataset_checksum=result.get("dataset_checksum"),
+            warnings=result.get("warnings", []),
+            errors=result.get("errors", []),
+            computed_at=computed_at,
+            completed_at=computed_at,
+            durable_run=AdHocDurableRunHint(
+                path="/api/v1/versions/{version_id}/runs",
+                note=(
+                    "Substitute this version's id to create a stored research "
+                    "run (id, dataset checksum, metrics) that can be read back, "
+                    "compared and cited; it reserves and settles research-run "
+                    "quota. Requires entitlement and the write API-key scope."
+                ),
+            ),
+        )
     except Exception as e:
         # str(e) can carry absolute paths, a DSN or a token; the engine's own
         # traceback still goes to the server log.
