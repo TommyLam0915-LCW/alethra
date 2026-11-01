@@ -10,6 +10,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.auth.entitlements import (
@@ -32,6 +33,35 @@ logger = logging.getLogger(__name__)
 
 class BacktestRefused(Exception):
     """The engine declined to compute a book, so there is no result to publish."""
+
+
+# PostgreSQL `undefined_column` / `undefined_table`: the database structure
+# does not match the running code (the 2026-11-01 volume_decimal incident).
+_SCHEMA_PG_CODES = {"42703", "42P01"}
+
+
+def _run_failure_detail(exc: BaseException) -> str:
+    """A run-failure message the UI can render without exposing SQL.
+
+    ``str(SQLAlchemyError)`` embeds the failing statement, which names internal
+    tables and columns; ``error_details`` is shown verbatim. The customer gets
+    the classification and a reference, while the full exception still reaches
+    the server log.
+    """
+    if isinstance(exc, SQLAlchemyError):
+        pgcode = getattr(getattr(exc, "orig", None), "pgcode", None)
+        if pgcode in _SCHEMA_PG_CODES:
+            return (
+                "The database structure does not match the running application, "
+                "so this run could not read its dataset. No quota was consumed. "
+                "Quote this run id when reporting it."
+            )
+        return (
+            "The database could not complete this run, so no result was "
+            "recorded. No quota was consumed. Quote this run id when "
+            "reporting it."
+        )
+    return safe_error_message(exc)
 
 
 def execute_backtest_run(
@@ -168,7 +198,7 @@ def execute_backtest_run(
         release_reservation(db, reservation.id)
 
         run.status = RunStatus.failed
-        run.error_details = safe_error_message(e)
+        run.error_details = _run_failure_detail(e)
         run.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
         emit_event(
@@ -177,7 +207,7 @@ def execute_backtest_run(
             entity_id=run.id,
             event_type="research_run_failed",
             actor_id=user.id,
-            payload={"error": str(e)},
+            payload={"error": _run_failure_detail(e)},
             rules_locked=is_locked,
             data_cutoff_at=data_cutoff,
         )

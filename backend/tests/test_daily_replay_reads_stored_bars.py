@@ -160,7 +160,8 @@ def test_advance_refuses_without_its_bound_bars(client, auth_headers):
     assert resp.status_code == 400
     detail = resp.json()["detail"]
     assert INSTRUMENT in detail
-    assert "沒有已儲存的 K 線" in detail
+    assert "has no stored bars" in detail
+    assert "no other data source is substituted" in detail
 
     decisions = client.get(
         f"/api/v1/simulations/{session_id}/decisions", headers=auth_headers

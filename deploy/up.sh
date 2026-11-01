@@ -40,10 +40,10 @@ for i in $(seq 1 30); do
     sleep 2
 done
 
-# Migrations MUST run before the app starts: the backend auto-creates the
-# schema at import time (Base.metadata.create_all), which would leave the
-# database without an alembic_version — running the chain afterwards fails
-# on the unguarded create_table calls in the initial migration.
+# Migrations MUST run before the app starts: the backend no longer touches
+# schema at startup (Alembic owns it), so an unmigrated database starts with
+# /health/ready returning 503 schema_incompatible instead of half-creating
+# tables that would then collide with the migration chain.
 echo "==> Running database migrations..."
 docker compose -f "$COMPOSE_FILE" run --rm backend alembic upgrade head
 docker compose -f "$COMPOSE_FILE" run --rm backend alembic current

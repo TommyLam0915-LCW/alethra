@@ -1,7 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import get_settings
-from app.database import engine, Base
 from app.api import api_router
 from app.api.health import router as health_router
 from app.lib.request_context import (
@@ -13,8 +12,10 @@ from app.models import *
 
 settings = get_settings()
 
-Base.metadata.create_all(bind=engine, checkfirst=True)
-
+# Schema is owned by Alembic. Import-time ``create_all`` can add a new table but
+# cannot add a column to an existing one, which left the 2026-11-01 candidate
+# database half-migrated (later tables present, ``volume_decimal`` missing)
+# while alembic_version stayed behind. Startup must never mutate schema.
 app = FastAPI(
     title="Alethra",
     description="Ideas, tested. Decisions, yours. — Investment research workbench",

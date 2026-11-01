@@ -9,9 +9,9 @@ Usage (from the backend directory, project venv):
         python scripts/seed_review_fixtures.py
 
 If REVIEW_PASSWORD is not provided, a random one is generated and printed.
-Schema is built through the app's real startup path (Base.metadata.create_all),
-which is how this project acquires tables; the Alembic history is not proven to
-replay cleanly on SQLite, so do not run `alembic upgrade head` against a live DB
+Schema is built by calling Base.metadata.create_all in this script (the app no
+longer creates tables at startup); the Alembic history is not proven to replay
+cleanly on SQLite, so do not run `alembic upgrade head` against a live DB
 without separate verification.
 """
 import os

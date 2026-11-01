@@ -3,6 +3,7 @@ import logging
 from fastapi import APIRouter, HTTPException, Depends, Query, Request
 from typing import Dict, List, Optional
 from datetime import date, datetime, timezone
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -436,6 +437,11 @@ def get_instrument_bars(
         # A normal unconfigured state must not be recorded as a provider
         # outage in storage metadata.
         raise _provider_failure(instrument_id, exc)
+    except SQLAlchemyError:
+        # A storage/schema failure is not a provider failure. Reporting it as
+        # one hides a broken dataset behind "provider unavailable", and
+        # mark_error() cannot run on a session whose transaction already failed.
+        raise
     except Exception as exc:
         storage.mark_error(instrument_id, provider.provider_id, str(exc))
         raise _provider_failure(instrument_id, exc)
@@ -735,6 +741,9 @@ def refresh_instrument_bars(
 
     except ProviderNotConfiguredError as exc:
         raise _provider_failure(instrument_id, exc)
+    except SQLAlchemyError:
+        # See get_instrument_bars: a storage failure is not a provider failure.
+        raise
     except Exception as exc:
         logger.warning("Data refresh failed for %s: %r", instrument_id, exc, exc_info=exc)
         storage.mark_error(instrument_id, provider.provider_id, str(exc))

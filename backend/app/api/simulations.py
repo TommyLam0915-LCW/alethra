@@ -127,7 +127,10 @@ def _load_stored_ohlcv(symbol: str, start_date: str, end_date: str, db: Session,
             'high': bar.high,
             'low': bar.low,
             'close': bar.close,
-            'volume': bar.volume or 0,
+            # A crypto row keeps its exact amount in ``volume_decimal`` and
+            # leaves the integer ``volume`` NULL. Turning that NULL into 0
+            # would report a fabricated zero-volume trade.
+            'volume': bar.volume if bar.volume is not None else bar.volume_decimal,
         })
     
     df = pd.DataFrame(data)
