@@ -4,10 +4,12 @@ import { test, expect, type Page } from '@playwright/test';
  * Tracked regression for the local password-free candidate entry.
  *
  * WHAT THIS PROVES
- *   - with the candidate profile's PASSWORDLESS mode ON, opening the candidate
- *     homepage mints one short-lived session for the configured account and
- *     lands in the authed workspace, with a persistent "local test mode /
- *     synthetic data" label;
+ *   - with the candidate profile's PASSWORDLESS mode ON, the homepage offers an
+ *     explicit, clearly labelled local-test entry that mints one short-lived
+ *     session for the configured account and lands in the authed workspace,
+ *     with a persistent "local test mode / synthetic data" label;
+ *   - opening the homepage or the ordinary sign-in page never mints a session
+ *     on its own: development access requires an explicit click;
  *   - the identity is stable across reload (same server-issued subject);
  *   - the scenario switcher can only move between the roles the backend
  *     allowlists, and refuses an unlisted role;
@@ -78,11 +80,12 @@ async function readClaims(page: Page): Promise<Claims | null> {
 
 async function enterFromHomepage(page: Page) {
   await page.goto('/', { waitUntil: 'domcontentloaded' });
+  await page.getByTestId('candidate-entry-cta').click();
   await page.waitForURL((url) => url.pathname === '/dashboard', { timeout: 30000 });
   await expect(page.getByTestId('candidate-mode-bar')).toBeVisible();
 }
 
-test('homepage enters the test workspace without credentials', async ({ page }) => {
+test('homepage offers an explicit test entry that mints one session', async ({ page }) => {
   test.skip(!READY || MODE !== 'on', SKIP);
 
   const sessionPosts: string[] = [];
@@ -92,7 +95,16 @@ test('homepage enters the test workspace without credentials', async ({ page }) 
     }
   });
 
-  await enterFromHomepage(page);
+  await page.goto('/', { waitUntil: 'domcontentloaded' });
+  const cta = page.getByTestId('candidate-entry-cta');
+  await expect(cta).toBeVisible();
+  await expect(page.getByTestId('candidate-entry-note')).toContainText('synthetic data');
+  expect(sessionPosts).toHaveLength(0);
+  expect(await page.evaluate(() => localStorage.getItem('token'))).toBeNull();
+
+  await cta.click();
+  await page.waitForURL((url) => url.pathname === '/dashboard', { timeout: 30000 });
+  await expect(page.getByTestId('candidate-mode-bar')).toBeVisible();
 
   expect(sessionPosts).toHaveLength(1);
   await expect(page.getByTestId('candidate-mode-label')).toContainText('本機測試模式');
@@ -108,6 +120,27 @@ test('homepage enters the test workspace without credentials', async ({ page }) 
 
   const modeRaw = await page.evaluate(() => localStorage.getItem('candidate_mode'));
   expect(modeRaw).toContain('本機測試模式');
+});
+
+test('opening the ordinary sign-in page mints no candidate session', async ({ page }) => {
+  test.skip(!READY || MODE !== 'on', SKIP);
+
+  const sessionPosts: string[] = [];
+  page.on('request', (request) => {
+    if (request.method() === 'POST' && request.url().includes('/api/auth/candidate-session')) {
+      sessionPosts.push(request.url());
+    }
+  });
+
+  await page.goto('/login', { waitUntil: 'domcontentloaded' });
+  await expect(page.getByTestId('candidate-entry-panel')).toBeVisible();
+  await expect(page.locator('.login-form-zone input[type="email"]')).toBeVisible();
+  await page.waitForLoadState('networkidle');
+
+  expect(sessionPosts).toHaveLength(0);
+  expect(await page.evaluate(() => localStorage.getItem('token'))).toBeNull();
+  expect(await page.evaluate(() => localStorage.getItem('candidate_mode'))).toBeNull();
+  expect(new URL(page.url()).pathname).toBe('/login');
 });
 
 test('reload keeps the same candidate identity', async ({ page }) => {
@@ -409,6 +442,7 @@ test('mode off: homepage stays public and mints no session', async ({ page }) =>
   ).toBeVisible();
   expect(new URL(page.url()).pathname).toBe('/');
   expect(posts).toHaveLength(0);
+  await expect(page.getByTestId('candidate-entry-cta')).toHaveCount(0);
   await expect(page.getByTestId('candidate-mode-bar')).toHaveCount(0);
 
   await page.goto('/login', { waitUntil: 'domcontentloaded' });

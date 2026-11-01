@@ -3365,6 +3365,14 @@ textarea:disabled {
   color: var(--text-secondary);
 }
 
+.landing-test-entry {
+  margin-top: 20px;
+}
+
+.landing-test-entry .landing-note {
+  margin-top: 8px;
+}
+
 .landing-preview {
   border: 1px solid var(--border-strong);
   border-radius: 6px;

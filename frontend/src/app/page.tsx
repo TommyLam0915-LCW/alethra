@@ -9,17 +9,23 @@ import {
   CANDIDATE_MODE_FALLBACK_LABEL,
   preferredCandidateRole,
   writeCandidateMode,
+  type CandidateStatus,
 } from '@/lib/candidate';
 
 /**
  * Public landing page. States what the product does and where to start.
  * Limitations are kept in one place (Legal & disclosures) rather than repeated
  * as warning paragraphs; the preview is labelled as illustrative sample data.
+ *
+ * The password-free local candidate entry is a development-only convenience.
+ * It is offered only as an explicit action when the backend reports the mode
+ * enabled; merely opening this page never mints a session.
  */
 export default function HomePage() {
   const router = useRouter();
   const [isLoggedIn, setIsLoggedIn] = useState(false);
-  const [entering, setEntering] = useState(false);
+  const [candidate, setCandidate] = useState<CandidateStatus | null>(null);
+  const [entering, setEntering] = useState<string | null>(null);
   const [entryError, setEntryError] = useState('');
 
   useEffect(() => {
@@ -29,45 +35,50 @@ export default function HomePage() {
       return;
     }
 
-    // Password-free entry exists only for an explicitly enabled local
-    // candidate profile. The backend stays the authority: when the mode is off
+    // Read-only probe. The backend stays the authority: when the mode is off
     // — or the status call is unavailable — this page stays a normal landing
     // page with its sign-in link, without surfacing transport errors.
     let cancelled = false;
     (async () => {
-      let status;
       try {
-        status = await api.candidateSession.status();
+        const status = await api.candidateSession.status();
+        if (cancelled || !status.enabled) return;
+        if (!preferredCandidateRole(status.accounts)) return;
+        setCandidate(status);
       } catch {
-        return;
-      }
-      if (cancelled || !status.enabled) return;
-      const role = preferredCandidateRole(status.accounts);
-      if (!role) return;
-      setEntering(true);
-      try {
-        const session = await api.candidateSession.start(role);
-        if (cancelled) return;
-        localStorage.setItem('token', session.access_token);
-        writeCandidateMode({
-          label_zh: session.mode_label_zh || status.label_zh || CANDIDATE_MODE_FALLBACK_LABEL,
-          session_minutes: status.session_minutes ?? Math.round(session.expires_in / 60),
-          role: session.role,
-          accounts: status.accounts,
-        });
-        router.replace('/dashboard');
-      } catch {
-        if (!cancelled) {
-          setEntering(false);
-          setEntryError('Password-free entry isn’t available right now. Sign in to continue.');
-        }
+        // A missing candidate endpoint is the normal production shape.
       }
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [router]);
+  }, []);
+
+  const enterCandidate = async (role: string) => {
+    if (!candidate || entering) return;
+    setEntryError('');
+    setEntering(role);
+    try {
+      const session = await api.candidateSession.start(role);
+      localStorage.setItem('token', session.access_token);
+      writeCandidateMode({
+        label_zh: session.mode_label_zh || candidate.label_zh || CANDIDATE_MODE_FALLBACK_LABEL,
+        session_minutes: candidate.session_minutes ?? Math.round(session.expires_in / 60),
+        role: session.role,
+        accounts: candidate.accounts,
+      });
+      router.replace('/dashboard');
+    } catch {
+      setEntering(null);
+      setEntryError('Password-free entry isn’t available right now. Sign in to continue.');
+    }
+  };
+
+  const candidateRole = candidate ? preferredCandidateRole(candidate.accounts) : null;
+  const candidateAccount = candidateRole
+    ? candidate?.accounts.find((account) => account.role === candidateRole)
+    : undefined;
 
   return (
     <div className="landing">
@@ -114,15 +125,31 @@ export default function HomePage() {
           </div>
           <p className="landing-support">Research. Paper trading. Personal models.</p>
 
-          {entering && (
-            <p className="landing-note" data-testid="candidate-entry-pending">
-              Opening your workspace…
-            </p>
-          )}
-          {entryError && (
-            <p className="landing-note" role="alert" data-testid="candidate-entry-error">
-              {entryError}
-            </p>
+          {!isLoggedIn && candidateRole && candidate && (
+            <div className="landing-test-entry">
+              <button
+                type="button"
+                className="landing-cta landing-cta-secondary"
+                data-testid="candidate-entry-cta"
+                onClick={() => enterCandidate(candidateRole)}
+                disabled={entering !== null}
+              >
+                {entering
+                  ? 'Opening local test workspace…'
+                  : `Enter local test workspace${
+                      candidateAccount ? ` · ${candidateAccount.label_zh}` : ''
+                    }`}
+              </button>
+              <p className="landing-note" data-testid="candidate-entry-note">
+                {candidate.label_zh || CANDIDATE_MODE_FALLBACK_LABEL} · development only ·
+                synthetic data
+              </p>
+              {entryError && (
+                <p className="landing-note" role="alert" data-testid="candidate-entry-error">
+                  {entryError}
+                </p>
+              )}
+            </div>
           )}
         </section>
 
