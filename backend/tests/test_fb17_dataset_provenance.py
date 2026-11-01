@@ -16,7 +16,7 @@ These tests pin the contract that makes a count attributable:
 - a run records the dataset it priced off and ``bars_used`` matches
   ``metrics["trading_days"]``.
 
-The 140 vs 134 difference is not a constant to change: the seeded fixture is a
+The 140 vs 133 difference is not a constant to change: the seeded fixture is a
 weekday series that includes exchange holidays, while the generator's universe
 is holiday-aware. The tests below assert that each producer's rows are reported
 as stored — including the holiday-row case — rather than being rewritten.
@@ -62,9 +62,10 @@ def _weekdays(start: date, count: int):
     """Weekday series, holidays included — the shape of the seeded fixture.
 
     ``seed_candidate_scenarios`` builds its 140 rows this way, so 2024-01-15
-    (MLK Day) is present. ``real_synthetic_data`` removes its own US holiday
-    set, which is why the same date range is 140 rows from one producer and 134
-    from the other: neither count is wrong, they are different datasets.
+    (MLK Day) is present. ``real_synthetic_data`` reads the shared exchange
+    calendar, which is why the same date range is 140 rows from one producer and
+    133 from the other: the calendar also drops New Year's Day. Neither count is
+    wrong, they are different datasets.
     """
     days = []
     current = start
@@ -243,10 +244,10 @@ class TestStoredBarsProviderBreakdown:
         ]
         assert body["bar_count"] == 5
 
-        # The generator behind the 761-day universe holds its own US holiday
-        # set and drops 2024-01-15 (MLK Day). Same window, different dataset:
-        # 5 stored rows vs 4 generated bars. Storing the fixture does not
-        # rewrite either producer.
+        # The generator behind the 752-day universe reads the shared US
+        # calendar and drops 2024-01-15 (MLK Day). Same window, different
+        # dataset: 5 stored rows vs 4 generated bars. Storing the fixture does
+        # not rewrite either producer.
         generated = real_synthetic_data.get_synthetic_bars(
             "US:AAPL", window["start_date"], window["end_date"]
         )

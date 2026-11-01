@@ -37,6 +37,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["instruments"])
 
 
+def _calendar_coverage(structure) -> Optional[List[str]]:
+    window = structure.calendar_coverage
+    if window is None:
+        return None
+    return [window[0].isoformat(), window[1].isoformat()]
+
+
 def _validated_refresh_range(start_date: str, end_date: str) -> None:
     try:
         start = date.fromisoformat(start_date)
@@ -772,6 +779,7 @@ def list_markets():
                 for s in structure.sessions
             ],
             "holidays_count": len(structure.holidays),
+            "calendar_coverage": _calendar_coverage(structure),
             "default_lot_size": structure.lot_size,
             "instrument_count": instrument_count,
         })
@@ -804,6 +812,7 @@ def get_market(market_code: str):
             for s in structure.sessions
         ],
         "holidays": sorted([h.isoformat() for h in structure.holidays]),
+        "calendar_coverage": _calendar_coverage(structure),
         "default_lot_size": structure.lot_size,
         "instruments": [
             {

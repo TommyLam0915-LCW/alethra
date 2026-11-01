@@ -211,8 +211,10 @@ def market_session_view(
 ) -> dict:
     """Coarse exchange-local session state for the intraday view.
 
-    The calendar has no holiday data, so a weekday that is actually a market
-    holiday is reported as ``unknown_holiday_calendar`` rather than guessed.
+    ``holiday_calendar_complete`` is scoped to the response date: a calendar
+    that ends before it cannot confirm the day either way. Outside a covered
+    date inside the session window the answer is
+    ``unknown_holiday_calendar`` rather than a guess.
     """
     tz = ZoneInfo(structure.timezone)
     local = now.astimezone(tz)
@@ -225,26 +227,23 @@ def market_session_view(
         ),
         None,
     )
-    if not structure.is_trading_day(local.date()):
-        # ``is_trading_day`` folds weekends and holidays together; on a weekday
-        # the reason is a configured holiday, so it is not a weekend close.
-        status = (
-            "closed_weekend" if local.date().weekday() >= 5 else "closed_holiday"
-        )
-    elif structure.holidays or structure.always_open:
-        status = "open" if current else "closed"
-    elif current is not None:
-        # Inside the session window on a weekday, but with no holiday data a
-        # market holiday or early close cannot be ruled out, so "open" would be
-        # a guess. Outside the window "closed" is safe regardless.
-        status = "unknown_holiday_calendar"
+    day_status = structure.trading_day_status(local.date())
+    if day_status == "weekend":
+        status = "closed_weekend"
+    elif day_status == "holiday":
+        status = "closed_holiday"
+    elif day_status == "calendar_unknown":
+        # A covered weekend/holiday is settled above. Outside coverage the
+        # session window decides: no session is closed whichever it is, but
+        # claiming the market open would be a guess.
+        status = "unknown_holiday_calendar" if current is not None else "closed"
     else:
-        status = "closed"
+        status = "open" if current else "closed"
     return {
         "exchange_local_time": local.isoformat(),
         "timezone": structure.timezone,
         "regular_session": current.name if current else None,
         "session_status": status,
-        "holiday_calendar_complete": bool(structure.holidays)
-        or structure.always_open,
+        "holiday_calendar_complete": structure.calendar_covers(local.date())
+        and (bool(structure.holidays) or structure.always_open),
     }

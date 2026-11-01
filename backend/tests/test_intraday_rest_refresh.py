@@ -511,7 +511,11 @@ def test_session_state_reports_weekend():
 
 
 def test_session_state_with_a_complete_calendar_distinguishes_holiday_and_open():
-    calendar = replace(US_MARKET_STRUCTURE, holidays={date(2026, 10, 1)})
+    calendar = replace(
+        US_MARKET_STRUCTURE,
+        holidays={date(2026, 10, 1)},
+        calendar_coverage=(date(2026, 1, 1), date(2026, 12, 31)),
+    )
     holiday = market_session_view(calendar, now=utc(ts(14, 2)))
     assert holiday["session_status"] == "closed_holiday"
     assert holiday["holiday_calendar_complete"] is True
@@ -535,7 +539,9 @@ def test_capability_is_honest_about_permissions(client, monkeypatch):
     assert body["is_realtime"] is False
     assert body["realtime_evidence"] == "none_verified"
     assert body["data_rights"] == "INTERNAL_TEST_ONLY_NOT_CLEARED_FOR_REDISTRIBUTION"
-    assert body["market_calendar_complete"] is False
+    # A US holiday table is configured now; whether it covers a given date is
+    # reported per response by market.holiday_calendar_complete.
+    assert body["market_calendar_complete"] is True
     assert body["declared_intervals"] == ["1min"]
 
 

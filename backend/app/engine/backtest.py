@@ -425,8 +425,8 @@ def run_backtest(
 
     # What the run actually priced off. The checksum identifies the series, but
     # it cannot say whose series it was: the same instrument can hold a 140-row
-    # stored fixture and a 761-day provider universe, and 140 rows that include
-    # exchange holidays are not 134 sessions. Recording source, provider,
+    # stored fixture and a 752-day provider universe, and 140 rows that include
+    # exchange holidays are not 133 sessions. Recording source, provider,
     # coverage and nature with the run makes that difference reconcilable
     # afterwards instead of leaving two counts that look contradictory.
     dataset_coverage: Dict[str, Dict[str, Any]] = {}

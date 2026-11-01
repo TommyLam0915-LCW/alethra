@@ -250,20 +250,31 @@ class TestMarketStatus:
         # facts and the view keeps both.
         assert view["current_session"] == "Regular"
 
-    def test_holiday_calendar_gap_is_disclosed(self):
-        # Both market structures ship with an empty holiday set, so a holiday
-        # would currently be reported as a normal trading day. The response has
-        # to admit that rather than imply a complete calendar.
-        view = market_status_view(
+    def test_holiday_calendar_is_published_with_its_coverage(self):
+        # The US calendar now carries real closures and declares the window it
+        # covers. 2024-12-25 sits inside it, so it is a known closure.
+        covered = market_status_view(
+            US_MARKET_STRUCTURE,
+            provider_available=True, has_bars=True, is_stale=False,
+            now=_et(2024, 12, 25, 10, 0),
+        )
+        assert covered["holiday_calendar_populated"] is True
+        assert covered["holiday_calendar_coverage"] == ["2023-01-01", "2025-12-31"]
+        assert covered["calendar_covers_date"] is True
+        assert covered["market_status"] == "closed"
+        assert covered["market_status_reason"] == "market_holiday"
+
+        # The same date two years later is outside the declared window. The
+        # weekday rules still say "open", and the response now says that this
+        # date is not covered instead of implying the whole calendar is known.
+        uncovered = market_status_view(
             US_MARKET_STRUCTURE,
             provider_available=True, has_bars=True, is_stale=False,
             now=_et(2026, 12, 25, 10, 0),
         )
-        assert view["holiday_calendar_populated"] is False
-        # ...so a real holiday is reported as a normal open session. Pinned as a
-        # known gap: fixing it means populating MarketStructure.holidays.
-        assert view["market_status"] == "open"
-        assert view["current_session"] == "Regular"
+        assert uncovered["holiday_calendar_populated"] is True
+        assert uncovered["calendar_covers_date"] is False
+        assert uncovered["market_status"] == "open"
 
 
 class TestBarsEndpoint:

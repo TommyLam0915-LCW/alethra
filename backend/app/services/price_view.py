@@ -147,6 +147,18 @@ def market_status_view(
         "timezone": structure.timezone,
         "exchange_local_time": local.isoformat(),
         "holiday_calendar_populated": bool(structure.holidays),
+        "holiday_calendar_coverage": (
+            [
+                structure.calendar_coverage[0].isoformat(),
+                structure.calendar_coverage[1].isoformat(),
+            ]
+            if structure.calendar_coverage
+            else None
+        ),
+        # The holiday table cannot speak for dates it does not cover, so the
+        # response says which ones it does instead of leaving the reader to
+        # assume the whole calendar is known.
+        "calendar_covers_date": structure.calendar_covers(local.date()),
         "market_status": status,
         "market_status_label_zh": MARKET_STATUS_LABELS_ZH[status],
         "market_status_reason": reason,

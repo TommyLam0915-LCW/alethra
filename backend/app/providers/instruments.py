@@ -17,9 +17,9 @@ Design principles:
 
 import enum
 from dataclasses import dataclass, field
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 import zoneinfo
 
 
@@ -60,10 +60,78 @@ class AssetType(str, enum.Enum):
     # Future: WARRANT, RIGHT, BOND, etc.
 
 
+# The single exchange-calendar source. Data generation, market-status views and
+# freshness checks all read this table; nothing else may keep its own copy, or
+# two answers to "was this a trading day" drift apart.
+#
+# NYSE/NASDAQ full-day closures. Early-close days (for example the Friday after
+# Thanksgiving, or Christmas Eve) are open sessions and are deliberately absent:
+# treating them as holidays under-counts real bars.
+US_MARKET_HOLIDAYS: Set[date] = {
+    # 2023
+    date(2023, 1, 2),   # New Year's Day observed (Jan 1 was a Sunday)
+    date(2023, 1, 16),  # Martin Luther King Jr. Day
+    date(2023, 2, 20),  # Washington's Birthday
+    date(2023, 4, 7),   # Good Friday
+    date(2023, 5, 29),  # Memorial Day
+    date(2023, 6, 19),  # Juneteenth
+    date(2023, 7, 4),   # Independence Day
+    date(2023, 9, 4),   # Labor Day
+    date(2023, 11, 23), # Thanksgiving
+    date(2023, 12, 25), # Christmas
+    # 2024
+    date(2024, 1, 1),   # New Year's Day
+    date(2024, 1, 15),  # Martin Luther King Jr. Day
+    date(2024, 2, 19),  # Washington's Birthday
+    date(2024, 3, 29),  # Good Friday
+    date(2024, 5, 27),  # Memorial Day
+    date(2024, 6, 19),  # Juneteenth
+    date(2024, 7, 4),   # Independence Day
+    date(2024, 9, 2),   # Labor Day
+    date(2024, 11, 28), # Thanksgiving
+    date(2024, 12, 25), # Christmas
+    # 2025
+    date(2025, 1, 1),   # New Year's Day
+    date(2025, 1, 9),   # National Day of Mourning (President Carter)
+    date(2025, 1, 20),  # Martin Luther King Jr. Day
+    date(2025, 2, 17),  # Washington's Birthday
+    date(2025, 4, 18),  # Good Friday
+    date(2025, 5, 26),  # Memorial Day
+    date(2025, 6, 19),  # Juneteenth
+    date(2025, 7, 4),   # Independence Day
+    date(2025, 9, 1),   # Labor Day
+    date(2025, 11, 27), # Thanksgiving
+    date(2025, 12, 25), # Christmas
+}
+
+US_CALENDAR_COVERAGE: Tuple[date, date] = (date(2023, 1, 1), date(2025, 12, 31))
+
+# HKEX full-day closures. These are the dates the platform already published;
+# they have not been independently re-verified against the HKEX notice, so the
+# coverage window is stated instead of implied.
+HK_MARKET_HOLIDAYS: Set[date] = {
+    # 2024
+    date(2024, 1, 1), date(2024, 2, 12), date(2024, 2, 13),
+    date(2024, 2, 14), date(2024, 3, 29), date(2024, 4, 1),
+    date(2024, 4, 4), date(2024, 4, 5), date(2024, 5, 1),
+    date(2024, 5, 15), date(2024, 6, 10), date(2024, 7, 1),
+    date(2024, 9, 18), date(2024, 10, 1), date(2024, 10, 11),
+    date(2024, 12, 25), date(2024, 12, 26),
+    # 2025
+    date(2025, 1, 1), date(2025, 1, 29), date(2025, 1, 30),
+    date(2025, 1, 31), date(2025, 4, 18), date(2025, 4, 19),
+    date(2025, 4, 21), date(2025, 5, 1), date(2025, 5, 5),
+    date(2025, 5, 31), date(2025, 7, 1), date(2025, 10, 1),
+    date(2025, 10, 7), date(2025, 12, 25), date(2025, 12, 26),
+}
+
+HK_CALENDAR_COVERAGE: Tuple[date, date] = (date(2024, 1, 1), date(2025, 12, 31))
+
+
 @dataclass(frozen=True)
 class TradingSession:
     """Trading session for a market.
-    
+
     Attributes:
         name: Session name (e.g., "Regular", "Pre-market", "After-hours")
         start: Start time (local market time)
@@ -88,6 +156,8 @@ class MarketStructure:
         sessions: Trading sessions
         holidays: Market holidays (non-trading days)
         lot_size: Default lot size (1 for US, variable for HK)
+        calendar_coverage: First and last date the holidays set covers. Outside
+            it the calendar is unknown, not "open".
     """
     market: Market
     exchange: Exchange
@@ -97,9 +167,36 @@ class MarketStructure:
     holidays: Set[date] = field(default_factory=set)
     lot_size: int = 1
     always_open: bool = False
-    
+    calendar_coverage: Optional[Tuple[date, date]] = None
+
+    def calendar_covers(self, d: date) -> bool:
+        """Whether the holiday table is authoritative for this date."""
+        if self.always_open:
+            return True
+        if self.calendar_coverage is None:
+            return False
+        start, end = self.calendar_coverage
+        return start <= d <= end
+
+    def trading_day_status(self, d: date) -> str:
+        """One of 'open', 'weekend', 'holiday', 'calendar_unknown'."""
+        if self.always_open:
+            return "open"
+        if d.weekday() >= 5:
+            return "weekend"
+        if d in self.holidays:
+            return "holiday"
+        if not self.calendar_covers(d):
+            return "calendar_unknown"
+        return "open"
+
     def is_trading_day(self, d: date) -> bool:
-        """Check if a date is a trading day."""
+        """Check if a date is a known non-closed weekday.
+
+        Returns True for dates outside the calendar coverage because the
+        platform has no evidence they were closed; ``trading_day_status`` is
+        the honest query when "unknown" must not read as "open".
+        """
         if self.always_open:
             return True
         # Weekend check
@@ -142,8 +239,9 @@ US_MARKET_STRUCTURE = MarketStructure(
             is_regular=False,
         ),
     ],
-    holidays=set(),  # To be populated with actual US market holidays
+    holidays=US_MARKET_HOLIDAYS,
     lot_size=1,
+    calendar_coverage=US_CALENDAR_COVERAGE,
 )
 
 # HK market structure (HKEX)
@@ -178,8 +276,9 @@ HK_MARKET_STRUCTURE = MarketStructure(
             is_regular=False,
         ),
     ],
-    holidays=set(),  # To be populated with actual HK market holidays
+    holidays=HK_MARKET_HOLIDAYS,
     lot_size=100,  # HK stocks typically trade in board lots of 100 shares
+    calendar_coverage=HK_CALENDAR_COVERAGE,
 )
 
 # Crypto spot venues quote continuously; there is no session close and no
@@ -385,6 +484,24 @@ def get_market_structure(market: Market) -> MarketStructure:
         return CRYPTO_MARKET_STRUCTURE
     else:
         raise ValueError(f"Unknown market: {market}")
+
+
+def trading_days_between(market: Market, start: date, end: date) -> List[date]:
+    """Weekdays the calendar does not know to be closed, both ends inclusive.
+
+    Inside the declared coverage a weekday that is a listed holiday is
+    skipped. Outside it only weekends are removed: an unverified date is not
+    evidence of a closure either, so it is not silently dropped.
+    ``trading_day_status`` tells the caller which days are unverified.
+    """
+    structure = get_market_structure(market)
+    days: List[date] = []
+    d = start
+    while d <= end:
+        if structure.trading_day_status(d) in ("open", "calendar_unknown"):
+            days.append(d)
+        d += timedelta(days=1)
+    return days
 
 
 def parse_instrument_id(instrument_id: str) -> tuple[Market, str]:

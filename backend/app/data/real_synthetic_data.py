@@ -10,10 +10,14 @@ market data credentials. All data is clearly marked as synthetic.
 """
 
 import hashlib
-from datetime import date, timedelta
+from datetime import date
 from typing import Dict, List, Optional
 
-from app.providers.instruments import Market, parse_instrument_id
+from app.providers.instruments import (
+    Market,
+    parse_instrument_id,
+    trading_days_between,
+)
 
 
 _BASE_PRICES: Dict[str, float] = {
@@ -60,31 +64,6 @@ _DAILY_VOL: Dict[str, float] = {
     "HK:3067": 0.018,
 }
 
-_US_HOLIDAYS_2024_2025 = {
-    date(2024, 1, 15), date(2024, 2, 19), date(2024, 3, 29),
-    date(2024, 5, 27), date(2024, 6, 19), date(2024, 7, 4),
-    date(2024, 9, 2), date(2024, 11, 28), date(2024, 11, 29),
-    date(2024, 12, 25),
-    date(2025, 1, 1), date(2025, 1, 20), date(2025, 2, 17),
-    date(2025, 4, 18), date(2025, 5, 26), date(2025, 6, 19),
-    date(2025, 7, 4), date(2025, 9, 1), date(2025, 11, 27),
-    date(2025, 11, 28), date(2025, 12, 25),
-}
-
-_HK_HOLIDAYS_2024_2025 = {
-    date(2024, 1, 1), date(2024, 2, 12), date(2024, 2, 13),
-    date(2024, 2, 14), date(2024, 3, 29), date(2024, 4, 1),
-    date(2024, 4, 4), date(2024, 4, 5), date(2024, 5, 1),
-    date(2024, 5, 15), date(2024, 6, 10), date(2024, 7, 1),
-    date(2024, 9, 18), date(2024, 10, 1), date(2024, 10, 11),
-    date(2024, 12, 25), date(2024, 12, 26),
-    date(2025, 1, 1), date(2025, 1, 29), date(2025, 1, 30),
-    date(2025, 1, 31), date(2025, 4, 18), date(2025, 4, 19),
-    date(2025, 4, 21), date(2025, 5, 1), date(2025, 5, 5),
-    date(2025, 5, 31), date(2025, 7, 1), date(2025, 10, 1),
-    date(2025, 10, 7), date(2025, 12, 25), date(2025, 12, 26),
-}
-
 
 def _seed_for(instrument_id: str) -> int:
     h = hashlib.sha256(f"alethra-synthetic-v1:{instrument_id}".encode()).hexdigest()
@@ -92,14 +71,7 @@ def _seed_for(instrument_id: str) -> int:
 
 
 def _trading_days(market: Market, start: date, end: date) -> List[date]:
-    holidays = _US_HOLIDAYS_2024_2025 if market == Market.US else _HK_HOLIDAYS_2024_2025
-    days = []
-    d = start
-    while d <= end:
-        if d.weekday() < 5 and d not in holidays:
-            days.append(d)
-        d += timedelta(days=1)
-    return days
+    return trading_days_between(market, start, end)
 
 
 def _generate_series(
