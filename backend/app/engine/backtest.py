@@ -840,6 +840,10 @@ def _build_methodology_summary(
                 value is not None
                 for value in exit_rules.plan_from_spec(strategy_spec).values()
             ),
+            # Recorded even when null: a reader has to be able to tell "no
+            # benchmark was requested" from "a benchmark was requested but its
+            # return is absent".
+            "benchmark_id": strategy_spec.get("benchmark_id"),
         },
     }
 

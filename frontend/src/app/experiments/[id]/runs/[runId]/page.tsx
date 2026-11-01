@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import { api, ApiError } from '@/lib/api';
+import { BENCHMARK_METRIC_KEYS, describeBenchmark, describeRecordedBenchmark } from '@/lib/benchmarkState';
 import { describeRunStatus } from '@/lib/runStatus';
 import { formatDateTime, formatParamMap, formatRatePercent } from '@/lib/format';
 import { ACTOR_LABELS, EXIT_REASON_LABELS, SIDE_LABELS, label } from '@/lib/copy';
@@ -36,6 +37,8 @@ type LoadState =
 
 const METRIC_KEYS: [string, string][] = [
   ['total_return_pct', 'Total return (%)'],
+  ['benchmark_total_return_pct', 'Benchmark return (%)'],
+  ['excess_return_pct', 'Excess return vs benchmark (%)'],
   ['net_pnl', 'Net P&L'],
   ['max_drawdown_pct', 'Max drawdown (%)'],
   ['total_trades', 'Trades'],
@@ -284,6 +287,12 @@ export default function RunDetailPage() {
   const constraints = methodology && Array.isArray(methodology.constraints) ? methodology.constraints : null;
   const capturedParameters = methodology && isStruct(methodology.parameters) ? methodology.parameters : null;
 
+  const benchmarkMissingReason = describeBenchmark({
+    metrics: recorded,
+    warnings: run.warnings,
+    methodologyParameters: capturedParameters,
+  }).missingReason;
+
   return (
     <div className="dash-root" data-testid="run-detail-page" style={{ padding: '32px', maxWidth: '960px', margin: '0 auto' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
@@ -327,19 +336,20 @@ export default function RunDetailPage() {
           <div style={{ display: 'grid', gridTemplateColumns: '200px 1fr', gap: '8px 16px', fontSize: '13px', color: 'var(--text-secondary)' }}>
             {METRIC_KEYS.map(([k, label]) => {
               const { text, reason } = fmtMetric(recorded[k]);
+              const shownReason = reason ?? (BENCHMARK_METRIC_KEYS.includes(k) ? benchmarkMissingReason : undefined);
               return (
                 <div key={k} style={{ display: 'contents' }}>
                   <div>{label}</div>
                   <div>
                     <span
-                      style={{ fontWeight: 600, color: reason ? 'var(--text-muted)' : 'var(--text-white)' }}
-                      title={reason}
+                      style={{ fontWeight: 600, color: shownReason ? 'var(--text-muted)' : 'var(--text-white)' }}
+                      title={shownReason}
                       data-testid={`metric-${k}`}
                     >
                       {text}
                     </span>
-                    {reason && (
-                      <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>{reason}</div>
+                    {shownReason && (
+                      <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>{shownReason}</div>
                     )}
                   </div>
                 </div>
@@ -574,6 +584,10 @@ export default function RunDetailPage() {
                         : capturedParameters.risk_parameters_declared === false
                           ? 'No'
                           : 'Not recorded'}
+                    </div>
+                    <div>Benchmark requested</div>
+                    <div style={{ fontFamily: 'monospace' }} data-testid="run-benchmark-requested">
+                      {describeRecordedBenchmark(capturedParameters)}
                     </div>
                   </div>
                   <p style={{ margin: '6px 0 0', fontSize: '12px', color: 'var(--text-muted)' }}>
