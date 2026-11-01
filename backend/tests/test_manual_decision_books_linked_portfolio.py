@@ -965,6 +965,54 @@ class TestCancelExpiryAndBlockers:
         assert account(client, auth_headers, portfolio_id)["current_virtual_cash"] == \
             pytest.approx(INITIAL_CASH + BUY20_B3_NET, abs=1e-6)
 
+    def test_a_retired_account_never_fills_the_order_it_left_pending(
+        self, client, auth_headers
+    ):
+        """Retirement is terminal, so an intent queued before it is not a trade.
+
+        The order was pending when the account closed. The next bar must not turn
+        it into a position, and the reason has to be visible on the order rather
+        than inferred from a missing fill.
+        """
+        ctx = _open_account(client, auth_headers, observed=1)
+        session_id, portfolio_id = ctx["session_id"], ctx["portfolio_id"]
+
+        resp = _submit(client, auth_headers, session_id, action="buy", quantity=20)
+        assert resp.status_code == 200, resp.text
+        order_id = resp.json()["order"]["order_id"]
+
+        retired = client.post(
+            f"/api/v1/paper-portfolio/{portfolio_id}/retire", headers=auth_headers
+        )
+        assert retired.status_code == 200, retired.text
+        assert retired.json()["status"] == "retired"
+        assert retired.json()["closed_at"] is not None
+
+        moved = _advance(client, auth_headers, session_id)
+        assert moved.status_code == 200, moved.text
+
+        view = _order_view(client, auth_headers, session_id, order_id)
+        assert view["order"]["status"] == "pending"
+        assert view["execution"]["blockers"] == ["portfolio_retired"]
+        assert "terminal" in view["execution"]["waiting"]["reason"]
+        assert fills(client, auth_headers, portfolio_id, order_id) == []
+        assert account(client, auth_headers, portfolio_id)["current_virtual_cash"] == \
+            pytest.approx(INITIAL_CASH, abs=1e-9)
+
+        blocked_events = events_for("manual_orders_blocked", session_id)
+        assert len(blocked_events) == 1
+        assert blocked_events[0].payload_json["blocked"][0]["blocker"] == "portfolio_retired"
+
+        refused = _submit(client, auth_headers, session_id, action="buy", quantity=1)
+        assert refused.status_code == 400, refused.text
+        assert "cannot accept new orders" in refused.json()["detail"]
+
+        again = client.post(
+            f"/api/v1/paper-portfolio/{portfolio_id}/retire", headers=auth_headers
+        )
+        assert again.status_code == 400
+        assert again.json()["detail"] == "Cannot retire a 'retired' portfolio"
+
 
 class TestExecutionRefusalsAreAllOrNothing:
     """A trade that cannot complete on both halves completes on neither."""

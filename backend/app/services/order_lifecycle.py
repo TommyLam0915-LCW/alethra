@@ -60,6 +60,8 @@ SETTLEMENT_POLICY_LABEL = "T+1 (next stored trading session of the bound dataset
 BLOCKER_NO_LINKED_SESSION = "no_market_clock"
 BLOCKER_NO_QUOTE = "no_quote_on_window"
 BLOCKER_PORTFOLIO_PAUSED = "portfolio_paused"
+BLOCKER_PORTFOLIO_RETIRED = "portfolio_retired"
+BLOCKER_PORTFOLIO_COMPLETED = "portfolio_completed"
 
 
 class LifecycleError(Exception):
@@ -294,6 +296,27 @@ def execute_due_orders(
     results: List[Dict[str, Any]] = []
     for order in orders:
         if not _is_due(order, execution_date):
+            continue
+
+        if portfolio.status in (PortfolioStatus.retired, PortfolioStatus.completed):
+            # Retirement is terminal, so an intent queued before it is not a trade
+            # the closed account may still make — in either direction.
+            results.append(
+                {
+                    "order_id": str(order.id),
+                    "status": OrderStatus.pending.value,
+                    "executed": False,
+                    "blocker": (
+                        BLOCKER_PORTFOLIO_RETIRED
+                        if portfolio.status == PortfolioStatus.retired
+                        else BLOCKER_PORTFOLIO_COMPLETED
+                    ),
+                    "message": (
+                        f"The account is {portfolio.status.value}, so this order stays pending "
+                        "and is not executed."
+                    ),
+                }
+            )
             continue
 
         if portfolio.status == PortfolioStatus.paused and order.side == OrderSide.BUY:
@@ -612,6 +635,20 @@ def execution_view(
             }
         else:
             view["not_executed_reason"] = order.risk_check_status.value if order.risk_check_status else None
+        return view
+
+    if portfolio.status in (PortfolioStatus.retired, PortfolioStatus.completed):
+        view["blockers"].append(
+            BLOCKER_PORTFOLIO_RETIRED
+            if portfolio.status == PortfolioStatus.retired
+            else BLOCKER_PORTFOLIO_COMPLETED
+        )
+        view["waiting"] = {
+            "reason": (
+                f"The account is {portfolio.status.value}. Retirement is terminal, so a pending "
+                "order is not executed and stays in the journal until it is cancelled."
+            )
+        }
         return view
 
     after_date = order.data_cutoff_at

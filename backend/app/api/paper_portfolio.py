@@ -873,7 +873,18 @@ def create_override_request(
     return decision
 
 
-@router.post("/{portfolio_id}/pause", response_model=PaperPortfolioResponse)
+@router.post(
+    "/{portfolio_id}/pause",
+    response_model=PaperPortfolioResponse,
+    summary="Pause a portfolio's entries",
+    description=(
+        "Only an `active` portfolio can be paused; anything else returns 400. A "
+        "paused account opens no new exposure: the direct lane refuses a buy with "
+        "`portfolio_paused`, and a queued buy is held pending by the executor "
+        "instead of filling. Exits are unaffected, and the pause is reversible "
+        "with `/resume`."
+    ),
+)
 def pause_portfolio(
     portfolio_id: UUID,
     db: Session = Depends(get_db),
@@ -898,7 +909,16 @@ def pause_portfolio(
     return _portfolio_response(portfolio)
 
 
-@router.post("/{portfolio_id}/resume", response_model=PaperPortfolioResponse)
+@router.post(
+    "/{portfolio_id}/resume",
+    response_model=PaperPortfolioResponse,
+    summary="Resume a paused portfolio",
+    description=(
+        "Only a `paused` portfolio can be resumed; anything else returns 400. The "
+        "account returns to `active` and a buy held pending by the pause becomes "
+        "eligible at the next execution window."
+    ),
+)
 def resume_portfolio(
     portfolio_id: UUID,
     db: Session = Depends(get_db),
@@ -923,7 +943,20 @@ def resume_portfolio(
     return _portfolio_response(portfolio)
 
 
-@router.post("/{portfolio_id}/retire", response_model=PaperPortfolioResponse)
+@router.post(
+    "/{portfolio_id}/retire",
+    response_model=PaperPortfolioResponse,
+    summary="Retire a portfolio (terminal)",
+    description=(
+        "Mark the portfolio `retired`, stamp `closed_at`, and emit a "
+        "`portfolio_retired` event carrying `final_cash`. Retirement is terminal: "
+        "it does not liquidate open positions and does not cancel pending orders. "
+        "A pending order is never executed afterwards — the executor reports it "
+        "with the `portfolio_retired` blocker and it stays in the journal until "
+        "cancelled. New orders are refused, and retiring a portfolio that is "
+        "already `retired` or `completed` returns 400."
+    ),
+)
 def retire_portfolio(
     portfolio_id: UUID,
     db: Session = Depends(get_db),
