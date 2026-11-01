@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef, Suspense } from 'react';
+import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { brand } from '@/lib/brand';
@@ -401,6 +402,13 @@ function NewExperimentForm() {
                 <option key={value} value={value}>{text}</option>
               ))}
             </select>
+            <p style={{ margin: '6px 0 0', fontSize: '12px', color: 'var(--text-muted)' }}>
+              Only these templates run on the current engine.{' '}
+              <Link href="/strategy-templates" style={{ color: 'var(--primary-text)' }}>
+                See supported parameters, limits and preflight a spec
+              </Link>
+              .
+            </p>
           </div>
 
           <div className="form-group">

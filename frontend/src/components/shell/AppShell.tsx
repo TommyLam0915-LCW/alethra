@@ -44,6 +44,7 @@ const PRIMARY_NAV: NavItem[] = [
 ];
 
 const TOOL_LINKS = [
+  { href: '/strategy-templates', label: 'Strategy templates' },
   { href: '/training', label: 'Training jobs' },
   { href: '/inference', label: 'Inference runs' },
   { href: '/research-drafts', label: 'Research drafts' },
@@ -56,6 +57,7 @@ const SETTINGS_LINKS = [
   { href: '/api-keys', label: 'API access' },
   { href: '/personal-memory', label: 'Personal research memory' },
   { href: '/subscription', label: 'Subscription & usage' },
+  { href: '/feedback', label: 'Feedback draft' },
   { href: '/legal', label: 'Legal & disclosures' },
 ];
 

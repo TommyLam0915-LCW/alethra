@@ -35,6 +35,7 @@ from app.api.datasets import router as datasets_router
 from app.api.robustness import router as robustness_router
 from app.api.decision_labels import router as decision_labels_router
 from app.api.personal_models import router as personal_models_router
+from app.api.strategy_templates import router as strategy_templates_router
 
 v1_router = APIRouter(prefix="/v1")
 v1_router.include_router(brand_router)
@@ -71,6 +72,7 @@ v1_router.include_router(datasets_router)
 v1_router.include_router(robustness_router)
 v1_router.include_router(decision_labels_router)
 v1_router.include_router(personal_models_router)
+v1_router.include_router(strategy_templates_router)
 
 api_router = APIRouter()
 api_router.include_router(auth_router)

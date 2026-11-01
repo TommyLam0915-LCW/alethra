@@ -22,6 +22,95 @@ ENGINE_VERSION = "1.1.0"
 
 KNOWN_DATA_NATURES = frozenset({"synthetic", "live", "delayed", "mixed", "unknown"})
 
+# Signal parameters each daily template reads, with the bounds the dispatcher
+# enforces. Both the run path and the read-only preflight endpoint consume this
+# table, so the published catalogue cannot promise bounds the engine refuses.
+SIGNAL_PARAMETER_RULES: Dict[str, Dict[str, Dict[str, Any]]] = {
+    "buy_and_hold": {},
+    "sma_crossover": {
+        "short_window": {
+            "type": "integer",
+            "min": 2,
+            "max": 60,
+            "type_message": "SMA windows must be integers",
+            "range_message": "short_window must be between 2 and 60",
+        },
+        "long_window": {
+            "type": "integer",
+            "min": 3,
+            "max": 200,
+            "type_message": "SMA windows must be integers",
+            "range_message": "long_window must be between 3 and 200",
+        },
+    },
+    "price_change_fixed_hold": {
+        "lookback_days": {
+            "type": "integer",
+            "min": 1,
+            "max": 60,
+            "type_message": "lookback_days must be integer 1-60",
+            "range_message": "lookback_days must be integer 1-60",
+        },
+        "threshold_pct": {
+            "type": "number",
+            "min": 0.01,
+            "max": 0.50,
+            "type_message": "threshold_pct must be 0.01-0.50",
+            "range_message": "threshold_pct must be 0.01-0.50",
+        },
+        "holding_days": {
+            "type": "integer",
+            "min": 1,
+            "max": 120,
+            "type_message": "holding_days must be integer 1-120",
+            "range_message": "holding_days must be integer 1-120",
+        },
+    },
+}
+
+SIGNAL_PARAMETER_REQUIREMENTS: Dict[str, str] = {
+    "sma_crossover": "sma_crossover requires signal_parameters.short_window and .long_window",
+    "price_change_fixed_hold": (
+        "price_change_fixed_hold requires signal_parameters.lookback_days, "
+        ".threshold_pct, .holding_days"
+    ),
+}
+
+
+def validate_signal_parameters(template_type: str, signal_parameters: Any) -> List[str]:
+    """Errors the dispatcher reports for a template's signal parameters.
+
+    Unknown templates are the caller's concern; this function only validates the
+    parameters of a template it knows.
+    """
+    rules = SIGNAL_PARAMETER_RULES.get(template_type, {})
+    if not isinstance(signal_parameters, dict):
+        return ["signal_parameters must be an object"]
+    missing = [name for name in rules if signal_parameters.get(name) is None]
+    if missing:
+        return [
+            SIGNAL_PARAMETER_REQUIREMENTS.get(
+                template_type,
+                f"{template_type} requires signal_parameters.{', .'.join(missing)}",
+            )
+        ]
+    errors = []
+    for name, rule in rules.items():
+        value = signal_parameters.get(name)
+        type_ok = isinstance(value, int) if rule["type"] == "integer" else isinstance(value, (int, float))
+        if not type_ok:
+            errors.append(rule["type_message"])
+            continue
+        if value < rule["min"] or value > rule["max"]:
+            errors.append(rule["range_message"])
+    if (
+        template_type == "sma_crossover"
+        and not errors
+        and signal_parameters["short_window"] >= signal_parameters["long_window"]
+    ):
+        errors.append("short_window must be less than long_window")
+    return errors
+
 
 def _coerce_nature(value: Any) -> str:
     """Collapse anything that is not a recognized nature token to "unknown"."""
@@ -366,23 +455,12 @@ def run_backtest(
         )
     elif template_type == "sma_crossover":
         sig_params = strategy_spec.get("signal_parameters", {})
-        short_window = sig_params.get("short_window")
-        long_window = sig_params.get("long_window")
-        if short_window is None or long_window is None:
-            errors.append("sma_crossover requires signal_parameters.short_window and .long_window")
+        signal_errors = validate_signal_parameters(template_type, sig_params)
+        if signal_errors:
+            errors.extend(signal_errors)
             return _error_result(errors)
-        if not isinstance(short_window, int) or not isinstance(long_window, int):
-            errors.append("SMA windows must be integers")
-            return _error_result(errors)
-        if short_window < 2 or short_window > 60:
-            errors.append("short_window must be between 2 and 60")
-            return _error_result(errors)
-        if long_window < 3 or long_window > 200:
-            errors.append("long_window must be between 3 and 200")
-            return _error_result(errors)
-        if short_window >= long_window:
-            errors.append("short_window must be less than long_window")
-            return _error_result(errors)
+        short_window = sig_params["short_window"]
+        long_window = sig_params["long_window"]
 
         transactions, strategy_warnings = run_sma_crossover(
             symbol=symbol,
@@ -396,21 +474,13 @@ def run_backtest(
         )
     elif template_type == "price_change_fixed_hold":
         sig_params = strategy_spec.get("signal_parameters", {})
-        lookback_days = sig_params.get("lookback_days")
-        threshold_pct = sig_params.get("threshold_pct")
-        holding_days = sig_params.get("holding_days")
-        if lookback_days is None or threshold_pct is None or holding_days is None:
-            errors.append("price_change_fixed_hold requires signal_parameters.lookback_days, .threshold_pct, .holding_days")
+        signal_errors = validate_signal_parameters(template_type, sig_params)
+        if signal_errors:
+            errors.extend(signal_errors)
             return _error_result(errors)
-        if not isinstance(lookback_days, int) or lookback_days < 1 or lookback_days > 60:
-            errors.append("lookback_days must be integer 1-60")
-            return _error_result(errors)
-        if not isinstance(threshold_pct, (int, float)) or threshold_pct < 0.01 or threshold_pct > 0.50:
-            errors.append("threshold_pct must be 0.01-0.50")
-            return _error_result(errors)
-        if not isinstance(holding_days, int) or holding_days < 1 or holding_days > 120:
-            errors.append("holding_days must be integer 1-120")
-            return _error_result(errors)
+        lookback_days = sig_params["lookback_days"]
+        threshold_pct = sig_params["threshold_pct"]
+        holding_days = sig_params["holding_days"]
 
         transactions, strategy_warnings = run_price_change_fixed_hold(
             symbol=symbol,

@@ -263,6 +263,16 @@ export const api = {
     compare: (runA: string, runB: string) =>
       apiFetch(`/api/v1/runs/compare?run_a=${runA}&run_b=${runB}`),
   },
+  // Read-only catalogue and preflight. The server derives both from the same
+  // StrategySpec schema and engine rules the create/run paths use.
+  strategyTemplates: {
+    catalog: () => apiFetch('/api/v1/strategy-templates'),
+    preflight: (spec: Record<string, unknown>) =>
+      apiFetch('/api/v1/strategy-specs/preflight', {
+        method: 'POST',
+        body: JSON.stringify(spec),
+      }),
+  },
   revisions: {
     create: (
       experimentId: string,
