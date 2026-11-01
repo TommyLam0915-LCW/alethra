@@ -16,7 +16,7 @@ echo ""
 echo "1. Creating test data..."
 curl -s -X POST "$BASE_URL/api/auth/register" \
   -H "Content-Type: application/json" \
-  -d "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\",\"display_name\":\"Persistence Test\",\"user_type\":\"individual\"}" > /dev/null
+  -d "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\",\"display_name\":\"Persistence Test\",\"user_type\":\"individual\",\"risk_acknowledged\":true}" > /dev/null
 
 TOKEN=$(curl -s -X POST "$BASE_URL/api/auth/login" \
   -H "Content-Type: application/json" \

@@ -23,7 +23,7 @@ EMAIL="persist-test-$(date +%s)@test.com"
 echo "Creating test user: $EMAIL"
 REGISTER_RESP=$(curl -s -X POST "$BASE_URL/api/auth/register" \
   -H "Content-Type: application/json" \
-  -d "{\"email\":\"$EMAIL\",\"password\":\"testpass123\",\"display_name\":\"Persist Test\",\"user_type\":\"individual\"}")
+  -d "{\"email\":\"$EMAIL\",\"password\":\"testpass123\",\"display_name\":\"Persist Test\",\"user_type\":\"individual\",\"risk_acknowledged\":true}")
 USER_ID=$(echo "$REGISTER_RESP" | python3 -c "import sys, json; print(json.load(sys.stdin)['id'])")
 echo "User ID: $USER_ID"
 
@@ -109,7 +109,7 @@ QUOTA_EMAIL="quota-persist-$(date +%s)@test.com"
 echo "Creating quota test user: $QUOTA_EMAIL"
 curl -s -X POST "$BASE_URL/api/auth/register" \
   -H "Content-Type: application/json" \
-  -d "{\"email\":\"$QUOTA_EMAIL\",\"password\":\"testpass123\",\"display_name\":\"Quota Test\",\"user_type\":\"individual\"}" > /dev/null
+  -d "{\"email\":\"$QUOTA_EMAIL\",\"password\":\"testpass123\",\"display_name\":\"Quota Test\",\"user_type\":\"individual\",\"risk_acknowledged\":true}" > /dev/null
 
 QUOTA_LOGIN=$(curl -s -X POST "$BASE_URL/api/auth/login" \
   -H "Content-Type: application/json" \
@@ -169,7 +169,7 @@ TRAINING_EMAIL="training-persist-$(date +%s)@test.com"
 echo "Creating training test user: $TRAINING_EMAIL"
 curl -s -X POST "$BASE_URL/api/auth/register" \
   -H "Content-Type: application/json" \
-  -d "{\"email\":\"$TRAINING_EMAIL\",\"password\":\"testpass123\",\"display_name\":\"Training Test\",\"user_type\":\"individual\"}" > /dev/null
+  -d "{\"email\":\"$TRAINING_EMAIL\",\"password\":\"testpass123\",\"display_name\":\"Training Test\",\"user_type\":\"individual\",\"risk_acknowledged\":true}" > /dev/null
 
 TRAINING_LOGIN=$(curl -s -X POST "$BASE_URL/api/auth/login" \
   -H "Content-Type: application/json" \

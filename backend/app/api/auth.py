@@ -5,6 +5,7 @@ from app.models.user import User
 from app.auth.jwt import get_password_hash, create_access_token, get_current_user
 from app.auth.rate_limit import rate_limit_dependency
 from app.auth.schemas import UserCreate, UserResponse, Token, LoginRequest
+from app.services import emit_event
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -18,8 +19,26 @@ LOGIN_WINDOW_SECONDS = 60
 REGISTRATIONS_PER_WINDOW = 5
 REGISTRATION_WINDOW_SECONDS = 300
 
+# The acknowledgement is recorded as an audit event rather than a new user
+# column: a persisted column is a schema change, while the event ledger already
+# provides an append-only, timestamped record of who acknowledged what and when.
+RISK_DISCLOSURE_PATH = "/legal"
+RISK_DISCLOSURE_AS_OF = "2026-11-01"
 
-@router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
+
+@router.post(
+    "/register",
+    response_model=UserResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create an account after an explicit risk-disclosure acknowledgement",
+    description=(
+        "Registers one user. The request body must set risk_acknowledged=true; omission or "
+        "false is refused with 400 and creates no account, so an account cannot exist without "
+        "the caller stating the disclosure at /legal was read. On success one "
+        "'risk_disclosure_acknowledged' audit event is written for the new user. The response "
+        "is the public user record only: it contains no password hash, token or key."
+    ),
+)
 def register(
     user_data: UserCreate,
     db: Session = Depends(get_db),
@@ -31,6 +50,19 @@ def register(
         )
     ),
 ):
+    # Checked before the email lookup so an unacknowledged request learns
+    # nothing about which addresses are already registered.
+    if not user_data.risk_acknowledged:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Registration requires acknowledging the risk disclosure at /legal: Alethra is a "
+                "research tool, paper fills are not live trades, results are not investment "
+                "advice, and no return is guaranteed. Send risk_acknowledged=true only after the "
+                "user has seen and accepted it."
+            ),
+        )
+
     existing_user = db.query(User).filter(User.email == user_data.email).first()
     if existing_user:
         raise HTTPException(
@@ -45,6 +77,19 @@ def register(
         user_type=user_data.user_type
     )
     db.add(user)
+    db.flush()
+    emit_event(
+        db,
+        entity_type="user",
+        entity_id=str(user.id),
+        event_type="risk_disclosure_acknowledged",
+        actor_id=user.id,
+        payload={
+            "disclosure_path": RISK_DISCLOSURE_PATH,
+            "disclosure_as_of_date": RISK_DISCLOSURE_AS_OF,
+            "acknowledged": True,
+        },
+    )
     db.commit()
     db.refresh(user)
     return user

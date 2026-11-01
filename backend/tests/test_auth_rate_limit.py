@@ -15,6 +15,7 @@ def _register(client, email: str):
     return client.post(
         "/api/auth/register",
         json={
+            "risk_acknowledged": True,
             "email": email,
             "password": "testpass123",
             "display_name": "Rate Limit",

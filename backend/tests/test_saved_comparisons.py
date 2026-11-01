@@ -221,7 +221,7 @@ def test_saved_comparison_cross_user_denied(client, setup_db):
     db.close()
 
     # Login as user_b
-    client.post("/api/auth/register", json={"email": "user_b@test.com", "password": "pass", "display_name": "User B", "user_type": "individual"})
+    client.post("/api/auth/register", json={"risk_acknowledged": True, "email": "user_b@test.com", "password": "pass", "display_name": "User B", "user_type": "individual"})
     login = client.post("/api/auth/login", json={"email": "user_b@test.com", "password": "pass"})
     token = login.json()["access_token"]
     headers = {"Authorization": f"Bearer {token}"}

@@ -330,6 +330,7 @@ class TestProviderSelection:
 
             # Create second user
             resp = client.post("/api/auth/register", json={
+                "risk_acknowledged": True,
                 "email": "other@alethra.io",
                 "password": "otherpass123",
                 "display_name": "Other User",

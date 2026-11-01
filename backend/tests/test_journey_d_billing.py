@@ -30,6 +30,7 @@ from app.services.billing import activate_subscription, create_subscription
 def _register_and_login(client, email, password="testpass123", display_name="Test"):
     """Register a new user and return Bearer auth headers."""
     client.post("/api/auth/register", json={
+        "risk_acknowledged": True,
         "email": email,
         "password": password,
         "display_name": display_name,

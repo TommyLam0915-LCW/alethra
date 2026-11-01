@@ -14,7 +14,7 @@ EMAIL="external-test-$(date +%s)@test.com"
 echo "Creating test user: $EMAIL"
 curl -s -X POST "$BASE_URL/api/auth/register" \
   -H "Content-Type: application/json" \
-  -d "{\"email\":\"$EMAIL\",\"password\":\"testpass123\",\"display_name\":\"External Test\",\"user_type\":\"individual\"}" > /dev/null
+  -d "{\"email\":\"$EMAIL\",\"password\":\"testpass123\",\"display_name\":\"External Test\",\"user_type\":\"individual\",\"risk_acknowledged\":true}" > /dev/null
 
 LOGIN_RESP=$(curl -s -X POST "$BASE_URL/api/auth/login" \
   -H "Content-Type: application/json" \

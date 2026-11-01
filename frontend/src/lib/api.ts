@@ -220,8 +220,14 @@ export interface AIConversationContext {
 
 export const api = {
   auth: {
-    register: (data: { email: string; password: string; display_name?: string }) =>
-      apiFetch('/api/auth/register', { method: 'POST', body: JSON.stringify(data) }),
+    // risk_acknowledged is required by the server: registration is refused with
+    // 400 unless the caller states the risk disclosure at /legal was read.
+    register: (data: {
+      email: string;
+      password: string;
+      display_name?: string;
+      risk_acknowledged: boolean;
+    }) => apiFetch('/api/auth/register', { method: 'POST', body: JSON.stringify(data) }),
     login: (data: { email: string; password: string }) =>
       apiFetch('/api/auth/login', { method: 'POST', body: JSON.stringify(data) }),
     me: () => apiFetch('/api/auth/me'),

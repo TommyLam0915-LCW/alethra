@@ -39,7 +39,7 @@ echo "Step 5: Register test user (verify database)"
 TEST_EMAIL="journey-e-$(date +%s)@test.com"
 REGISTER_RESP=$(curl -s -X POST "$BASE_URL/api/auth/register" \
   -H "Content-Type: application/json" \
-  -d "{\"email\":\"$TEST_EMAIL\",\"password\":\"testpass123\",\"display_name\":\"Journey E\",\"user_type\":\"individual\"}")
+  -d "{\"email\":\"$TEST_EMAIL\",\"password\":\"testpass123\",\"display_name\":\"Journey E\",\"user_type\":\"individual\",\"risk_acknowledged\":true}")
 USER_ID=$(echo "$REGISTER_RESP" | python3 -c "import sys, json; print(json.load(sys.stdin)['id'])")
 echo "User created: $USER_ID"
 echo ""

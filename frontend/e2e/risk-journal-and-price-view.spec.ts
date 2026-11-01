@@ -254,6 +254,7 @@ test.describe('risk plan journal and honest price view', () => {
     await page.locator('input[type="text"]').first().fill(account.displayName);
     await page.locator('input[type="email"]').fill(account.email);
     await page.locator('input[type="password"]').fill(account.password);
+    await page.getByTestId('risk-acknowledgement').check();
     await page.click('button[type="submit"]');
     await page.waitForURL('**/dashboard');
   });

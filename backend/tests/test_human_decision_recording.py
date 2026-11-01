@@ -348,6 +348,7 @@ class TestHumanDecisionRecording:
         event_id = resp.json()["id"]
 
         other_resp = client.post("/api/auth/register", json={
+            "risk_acknowledged": True,
             "email": "other@alethra.io",
             "password": "otherpass123",
             "display_name": "Other User",
@@ -917,6 +918,7 @@ class TestCrossUserWriteProtection:
 
     def _other_user_headers(self, client):
         other_resp = client.post("/api/auth/register", json={
+            "risk_acknowledged": True,
             "email": "other-writer@alethra.io",
             "password": "otherpass123",
             "display_name": "Other Writer",
@@ -1006,11 +1008,14 @@ class TestCrossUserWriteProtection:
         _lock_experiment(client, auth_headers, exp_id)
         session_id = _create_session(client, auth_headers, version_id)
 
+        # The second identity is set up before the count is taken: registering
+        # it legitimately records its own risk-disclosure acknowledgement, and
+        # only the forbidden write below must leave no audit row.
+        other_headers = self._other_user_headers(client)
+
         db_before = TestSession()
         audit_count_before = db_before.query(AuditEvent).count()
         db_before.close()
-
-        other_headers = self._other_user_headers(client)
 
         # Attempt to create against another's session
         client.post("/api/v1/human-decisions", headers=other_headers, json={

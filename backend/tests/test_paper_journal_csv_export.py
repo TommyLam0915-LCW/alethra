@@ -29,6 +29,7 @@ BASE = "/api/v1/paper-portfolio"
 
 def _register_and_login(client, email, password="testpass123"):
     client.post("/api/auth/register", json={
+        "risk_acknowledged": True,
         "email": email, "password": password,
         "display_name": "CSV User", "user_type": "individual",
     })

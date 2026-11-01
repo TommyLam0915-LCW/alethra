@@ -614,6 +614,7 @@ class TestUserIsolation:
     def _create_second_user(self, client):
         """Register and login a second user, return their auth headers."""
         client.post("/api/auth/register", json={
+            "risk_acknowledged": True,
             "email": "user_b_isolation@alethra.io",
             "password": "testpass123",
             "display_name": "User B",

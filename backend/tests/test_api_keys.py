@@ -183,6 +183,7 @@ class TestUserIsolation:
     def test_user_cannot_see_other_keys(self, client):
         # User A
         resp_a = client.post("/api/auth/register", json={
+            "risk_acknowledged": True,
             "email": "userA@test.io",
             "password": "testpass123",
             "display_name": "A",
@@ -195,6 +196,7 @@ class TestUserIsolation:
 
         # User B
         resp_b = client.post("/api/auth/register", json={
+            "risk_acknowledged": True,
             "email": "userB@test.io",
             "password": "testpass123",
             "display_name": "B",

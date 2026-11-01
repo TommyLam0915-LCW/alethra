@@ -378,6 +378,7 @@ class TestPrivacy:
 
         # Create second user
         client.post("/api/auth/register", json={
+            "risk_acknowledged": True,
             "email": "other@alethra.io",
             "password": "otherpass123",
             "display_name": "Other User",

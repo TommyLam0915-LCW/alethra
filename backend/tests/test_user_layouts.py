@@ -8,6 +8,7 @@ MAX_LAYOUT_BYTES = 65536
 
 def second_user_headers(client, email="layout-second@alethra.io"):
     resp = client.post("/api/auth/register", json={
+        "risk_acknowledged": True,
         "email": email,
         "password": "testpass123",
         "display_name": "Second User",

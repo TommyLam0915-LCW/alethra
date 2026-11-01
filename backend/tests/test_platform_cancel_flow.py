@@ -284,6 +284,7 @@ class TestPlatformCancelFlow:
 
         other_email = f"other-{uuid4().hex[:8]}@example.com"
         client.post("/api/auth/register", json={
+            "risk_acknowledged": True,
             "email": other_email,
             "password": "otherpass123",
             "display_name": "Other",

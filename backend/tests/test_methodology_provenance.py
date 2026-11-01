@@ -39,6 +39,42 @@ def _base_spec(**overrides):
     return spec
 
 
+def test_a_run_with_a_benchmark_records_which_one_it_compared_against():
+    result = run_backtest(_base_spec())
+
+    assert result["run_status"] == "completed"
+    benchmark_return = result["metrics"]["benchmark_total_return_pct"]
+    assert benchmark_return is not None
+    assert result["metrics"]["excess_return_pct"] == round(
+        result["metrics"]["total_return_pct"] - benchmark_return, 4
+    )
+    assert result["methodology_summary"]["parameters"]["benchmark_id"] == "DEMO-BENCHMARK"
+
+
+def test_a_run_without_a_benchmark_records_no_comparison_instead_of_inventing_one():
+    result = run_backtest(_base_spec(benchmark_id=None))
+
+    assert result["run_status"] == "completed"
+    assert result["metrics"]["benchmark_total_return_pct"] is None
+    assert result["metrics"]["excess_return_pct"] is None
+    # Present-but-null is the signal for "none requested"; a missing key would
+    # be indistinguishable from a run stored before the field existed.
+    assert "benchmark_id" in result["methodology_summary"]["parameters"]
+    assert result["methodology_summary"]["parameters"]["benchmark_id"] is None
+    assert not any("enchmark" in w for w in result.get("warnings", []))
+
+
+def test_the_stored_parameters_distinguish_no_benchmark_from_no_record():
+    summary = _build_methodology_summary(_base_spec(), "buy_and_hold", data_nature={})
+    assert summary["parameters"]["benchmark_id"] == "DEMO-BENCHMARK"
+
+    without = _build_methodology_summary(
+        _base_spec(benchmark_id=None), "buy_and_hold", data_nature={}
+    )
+    assert "benchmark_id" in without["parameters"]
+    assert without["parameters"]["benchmark_id"] is None
+
+
 def test_a_synthetic_run_says_synthetic_and_no_longer_clains_demo_only_by_default():
     result = run_backtest(_base_spec())
     assert result["run_status"] == "completed"

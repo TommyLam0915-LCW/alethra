@@ -27,6 +27,7 @@ class TestDemoAssetsEndpoint:
 class TestAuthEndpoints:
     def test_register_and_login(self, client):
         resp = client.post("/api/auth/register", json={
+            "risk_acknowledged": True,
             "email": "newuser@alethra.io",
             "password": "securepass123",
             "display_name": "New User",
@@ -365,6 +366,7 @@ class TestTimelineEndpoint:
         eid = exp["id"]
 
         other = client.post("/api/auth/register", json={
+            "risk_acknowledged": True,
             "email": "other@alethra.io",
             "password": "testpass123",
             "display_name": "Other",

@@ -54,6 +54,7 @@ class TestJourneyEOperations:
         """Verify system handles restarts gracefully via idempotency."""
         # Register user
         client.post("/api/auth/register", json={
+            "risk_acknowledged": True,
             "email": "journey-e-restart@test.com",
             "password": "testpass123",
             "display_name": "Test",
@@ -155,6 +156,7 @@ class TestJourneyEOperations:
 
         # Should be able to create and retrieve data
         client.post("/api/auth/register", json={
+            "risk_acknowledged": True,
             "email": "journey-e-shutdown@test.com",
             "password": "testpass123",
             "display_name": "Test",
@@ -181,6 +183,7 @@ class TestJourneyEOperations:
         """Verify system handles multiple requests correctly."""
         # Register user
         client.post("/api/auth/register", json={
+            "risk_acknowledged": True,
             "email": "journey-e-concurrent@test.com",
             "password": "testpass123",
             "display_name": "Test",

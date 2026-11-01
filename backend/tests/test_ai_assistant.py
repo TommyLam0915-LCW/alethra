@@ -362,6 +362,7 @@ class TestConversations:
         client.post(
             "/api/auth/register",
             json={
+                "risk_acknowledged": True,
                 "email": email,
                 "password": "testpass123",
                 "display_name": "Mem",

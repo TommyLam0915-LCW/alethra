@@ -206,6 +206,9 @@ def main(argv=None):
                 "password": password,
                 "display_name": account["display_name"],
                 "user_type": "individual",
+                # Registration is refused with 400 unless this is set; the
+                # seed is an operator action, not a customer sign-up.
+                "risk_acknowledged": True,
             },
         )
         if status == 201:

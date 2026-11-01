@@ -175,6 +175,7 @@ def client():
 @pytest.fixture()
 def auth_headers(client):
     resp = client.post("/api/auth/register", json={
+        "risk_acknowledged": True,
         "email": "test@alethra.io",
         "password": "testpass123",
         "display_name": "Test User",

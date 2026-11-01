@@ -271,6 +271,7 @@ def _second_user_headers(client):
         "password": "otherpass123",
         "display_name": "Other Owner",
         "user_type": "individual",
+        "risk_acknowledged": True,
     }
     client.post("/api/auth/register", json=payload)
     login = client.post(

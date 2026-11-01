@@ -16,7 +16,7 @@ echo ""
 echo "1. Registering user..."
 curl -s -X POST "$BASE_URL/api/auth/register" \
   -H "Content-Type: application/json" \
-  -d "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\",\"display_name\":\"Quota Test\",\"user_type\":\"individual\"}" > /dev/null
+  -d "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\",\"display_name\":\"Quota Test\",\"user_type\":\"individual\",\"risk_acknowledged\":true}" > /dev/null
 
 # Step 2: Login (Session 1)
 echo "2. Login Session 1..."

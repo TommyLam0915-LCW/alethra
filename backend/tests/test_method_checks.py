@@ -435,6 +435,7 @@ class TestMethodReviewAPI:
         # Create experiment as different user
         other_user_headers = auth_headers
         resp = client.post("/api/auth/register", json={
+            "risk_acknowledged": True,
             "email": "other@alethra.io",
             "password": "testpass123",
             "display_name": "Other User",

@@ -28,6 +28,7 @@ test.describe('Backbone Workflow Acceptance', () => {
     // Create test account
     const registerResp = await request.post(`${BACKEND_URL}/api/auth/register`, {
       data: {
+        risk_acknowledged: true,
         email: TEST_EMAIL,
         password: TEST_PASSWORD,
         display_name: 'Backbone Test User',

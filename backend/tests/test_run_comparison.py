@@ -285,7 +285,7 @@ def test_compare_runs_cross_user_rejected(client, setup_db):
     db.close()
 
     # Login as user_a
-    client.post("/api/auth/register", json={"email": "user_a@test.com", "password": "testpass123", "display_name": "User A", "user_type": "individual"})
+    client.post("/api/auth/register", json={"risk_acknowledged": True, "email": "user_a@test.com", "password": "testpass123", "display_name": "User A", "user_type": "individual"})
     login = client.post("/api/auth/login", json={"email": "user_a@test.com", "password": "testpass123"})
     token = login.json()["access_token"]
     headers = {"Authorization": f"Bearer {token}"}

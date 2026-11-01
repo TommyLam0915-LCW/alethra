@@ -52,6 +52,7 @@ def _second_account(client):
     client.post(
         "/api/auth/register",
         json={
+            "risk_acknowledged": True,
             "email": email,
             "password": "otherpass123",
             "display_name": "Other",

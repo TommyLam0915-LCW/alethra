@@ -83,6 +83,7 @@ async function call(
  */
 async function runUserProgram(api: APIRequestContext): Promise<Trade> {
   await call(api, 'POST', '/api/auth/register', undefined, {
+    risk_acknowledged: true,
     email: account.email,
     password: account.password,
     display_name: account.displayName,

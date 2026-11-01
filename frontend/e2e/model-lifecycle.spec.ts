@@ -111,6 +111,7 @@ test.describe('personal model version lifecycle journey', () => {
     page = await browser.newPage();
     const registration = await page.request.post(`${runtime.backendBase}/api/auth/register`, {
       data: {
+        risk_acknowledged: true,
         email: ACCOUNT.email,
         password: ACCOUNT.password,
         display_name: 'Model Lifecycle User',
@@ -260,6 +261,7 @@ test.describe('personal model version lifecycle journey', () => {
   test('another account cannot compare or roll back the record', async () => {
     const registration = await page.request.post(`${runtime.backendBase}/api/auth/register`, {
       data: {
+        risk_acknowledged: true,
         email: OUTSIDER.email,
         password: OUTSIDER.password,
         display_name: 'Model Outsider',

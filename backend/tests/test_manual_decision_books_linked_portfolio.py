@@ -1629,6 +1629,7 @@ class TestOwnership:
                            quantity=20).json()["order"]["order_id"]
 
         client.post("/api/auth/register", json={
+            "risk_acknowledged": True,
             "email": "intruder@alethra.io", "password": "intruderpass123",
             "display_name": "Intruder", "user_type": "individual",
         })

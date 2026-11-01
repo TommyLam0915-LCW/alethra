@@ -106,6 +106,7 @@ def _events(entity_id: str, event_type: str = None) -> list:
 
 def _create_user2(client) -> dict:
     client.post("/api/auth/register", json={
+        "risk_acknowledged": True,
         "email": "lifecycle-user2@alethra.io",
         "password": "testpass123",
         "display_name": "User 2",

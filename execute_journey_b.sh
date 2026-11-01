@@ -18,7 +18,7 @@ echo ""
 echo "Step 1: Register user"
 REGISTER_RESP=$(curl -s -X POST "$BASE_URL/api/auth/register" \
   -H "Content-Type: application/json" \
-  -d "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\",\"display_name\":\"$DISPLAY_NAME\",\"user_type\":\"individual\"}")
+  -d "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\",\"display_name\":\"$DISPLAY_NAME\",\"user_type\":\"individual\",\"risk_acknowledged\":true}")
 echo "$REGISTER_RESP" | python3 -m json.tool 2>/dev/null || echo "$REGISTER_RESP"
 echo ""
 

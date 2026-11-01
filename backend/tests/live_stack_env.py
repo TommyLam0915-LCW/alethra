@@ -384,6 +384,7 @@ class LiveProbe:
         self._email = f"liveprobe+{suffix}@probe.alethra.dev"
         self._password = secrets.token_urlsafe(24)
         resp = self._raw("POST", "/api/auth/register", json={
+            "risk_acknowledged": True,
             "email": self._email,
             "password": self._password,
             "display_name": "live probe",

@@ -120,7 +120,24 @@
 
 ---
 
-## 7. 本輪未改動的部分
+## 7. 註冊：風險披露確認（`POST /api/auth/register`）
+
+- `UserCreate` 新增 `risk_acknowledged: bool`（預設 `false`）。伺服器**在查詢 email 是否存在之前**檢查：缺欄位或 `false` 一律回 `400`，且不建立帳戶。拒絕訊息不區分「已註冊」與「未註冊」的 email，避免洩漏帳戶存在與否。
+- 成功註冊寫入一筆 append-only `AuditEvent`：`entity_type="user"`、`event_type="risk_disclosure_acknowledged"`、`actor_type="human"`、`payload` 為 `{disclosure_path: "/legal", disclosure_as_of_date: "2026-11-01", acknowledged: true}`。**不是**新的 user 欄位，因此不可按 user 直接查欄位；要查需讀事件表。
+- 回應只含公開帳戶欄位（`id`、`email`、`display_name`、`user_type`、`created_at`、`is_active`、`is_admin`）；不含密碼雜湊、token、金鑰。
+- 前端 `/login` 的註冊表單有必勾的披露核取方塊（連往 `/legal`），未勾時送出按鈕停用且不發請求；伺服器端檢查才是真正的門檻。
+
+---
+
+## 8. 本機測試入口（candidate session）的範圍
+
+- `/api/auth/candidate-session` 是**開發／驗收用的本機測試入口**，不是客戶登入方式；`/login` 面板已明示此點。
+- 前端只有在 localStorage 已存在顯式 `candidate_mode` 時才會自動續期；一般 email／密碼流程不會寫入 `candidate_mode`，因此不會觸發自動續期。
+- 本地儲存的 `candidate_mode` 只是顯示狀態，改寫或偽造都無法擴權：後端仍要求本機 candidate 模式、loopback 來源與 allowlist 內的角色。
+
+---
+
+## 9. 本輪未改動的部分
 
 - 不重寫任何歷史 run、訂單、事件或血緣欄位。
 - 不套用 pending migration；不重建資料庫；不以空值或 0 填補缺欄位。

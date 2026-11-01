@@ -352,6 +352,7 @@ class TestMLAPIEndpoints:
     @pytest.fixture
     def auth_token(self, client):
         client.post("/api/auth/register", json={
+            "risk_acknowledged": True,
             "email": "ml-test@example.com",
             "password": "testpassword123",
             "display_name": "ML Test User",
@@ -408,6 +409,7 @@ class TestMLAPIEndpoints:
 
     def _fresh_user_token(self, client, email):
         client.post("/api/auth/register", json={
+            "risk_acknowledged": True,
             "email": email,
             "password": "testpassword123",
             "display_name": "Quota User",
@@ -535,6 +537,7 @@ class TestModelOwnership:
     @pytest.fixture
     def user1_token(self, client):
         client.post("/api/auth/register", json={
+            "risk_acknowledged": True,
             "email": "user1@example.com",
             "password": "testpassword123",
             "display_name": "User 1",
@@ -548,6 +551,7 @@ class TestModelOwnership:
     @pytest.fixture
     def user2_token(self, client):
         client.post("/api/auth/register", json={
+            "risk_acknowledged": True,
             "email": "user2@example.com",
             "password": "testpassword123",
             "display_name": "User 2",
@@ -658,6 +662,7 @@ class TestInferenceUsageTracking:
     @pytest.fixture
     def auth_token(self, client):
         client.post("/api/auth/register", json={
+            "risk_acknowledged": True,
             "email": "usage_test@example.com",
             "password": "testpassword123",
             "display_name": "Usage Test User",
@@ -792,6 +797,7 @@ class TestInferenceUsageTracking:
         """D. Accessing another user's model must not create a usage record."""
         # Train as user1
         client.post("/api/auth/register", json={
+            "risk_acknowledged": True,
             "email": "user1_usage@example.com",
             "password": "testpassword123",
             "display_name": "User 1",

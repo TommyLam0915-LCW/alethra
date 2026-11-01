@@ -124,6 +124,7 @@ test.describe('strategy revision journey', () => {
     page = await browser.newPage();
     const registration = await page.request.post(`${runtime.backendBase}/api/auth/register`, {
       data: {
+        risk_acknowledged: true,
         email: ACCOUNT.email,
         password: ACCOUNT.password,
         display_name: 'Revision Journey User',

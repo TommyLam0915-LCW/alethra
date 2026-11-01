@@ -56,6 +56,7 @@ def admin_and_user(client):
     db.refresh(admin)
 
     resp = client.post("/api/auth/register", json={
+        "risk_acknowledged": True,
         "email": "user@alethra.io",
         "password": "userpass123",
         "display_name": "Regular User",

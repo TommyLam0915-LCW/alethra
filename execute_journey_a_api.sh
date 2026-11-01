@@ -14,7 +14,7 @@ echo ""
 echo "1. Registering user..."
 REGISTER_RESP=$(curl -s -X POST "$BASE_URL/api/auth/register" \
   -H "Content-Type: application/json" \
-  -d "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\",\"display_name\":\"Journey A Test\",\"user_type\":\"individual\"}")
+  -d "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\",\"display_name\":\"Journey A Test\",\"user_type\":\"individual\",\"risk_acknowledged\":true}")
 echo "Register response: $REGISTER_RESP" | head -c 200
 echo ""
 

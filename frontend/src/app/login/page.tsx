@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { api } from '@/lib/api';
 import { brand } from '@/lib/brand';
 import { classifyLoginError, type ClassifiedFailure } from '@/lib/userErrors';
@@ -20,6 +21,7 @@ export default function LoginPage() {
   const [displayName, setDisplayName] = useState('');
   const [error, setError] = useState<ClassifiedFailure | null>(null);
   const [loading, setLoading] = useState(false);
+  const [riskAcknowledged, setRiskAcknowledged] = useState(false);
   const [candidate, setCandidate] = useState<CandidateStatus | null>(null);
   const [candidatePending, setCandidatePending] = useState<string | null>(null);
   const [candidateError, setCandidateError] = useState('');
@@ -64,6 +66,9 @@ export default function LoginPage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (loading) return;
+    // The submit button is disabled until this is true; guarding here as well
+    // keeps the request from leaving if the button state is bypassed.
+    if (!isLogin && !riskAcknowledged) return;
     setError(null);
     setLoading(true);
 
@@ -73,7 +78,12 @@ export default function LoginPage() {
         localStorage.setItem('token', response.access_token);
         router.push('/dashboard');
       } else {
-        await api.auth.register({ email, password, display_name: displayName || undefined });
+        await api.auth.register({
+          email,
+          password,
+          display_name: displayName || undefined,
+          risk_acknowledged: riskAcknowledged,
+        });
         const response = await api.auth.login({ email, password });
         localStorage.setItem('token', response.access_token);
         router.push('/dashboard');
@@ -139,6 +149,13 @@ export default function LoginPage() {
               >
                 {candidate.label_zh || CANDIDATE_MODE_FALLBACK_LABEL}
               </div>
+              <p
+                data-testid="candidate-entry-scope"
+                style={{ margin: '0 0 8px', fontSize: '13px', lineHeight: 1.6, color: 'var(--text-secondary)' }}
+              >
+                Development-only test entry. This is not a customer sign-in method and
+                must not be presented to customers as one.
+              </p>
               <p style={{ margin: '0 0 12px', fontSize: '13px', lineHeight: 1.6, color: 'var(--text-secondary)' }}>
                 No password needed. Only the synthetic accounts configured for this
                 candidate environment are available; identity, consent, usage and
@@ -270,10 +287,41 @@ export default function LoginPage() {
               />
             </div>
 
+            {!isLogin && (
+              <label
+                style={{
+                  display: 'flex',
+                  gap: '10px',
+                  alignItems: 'flex-start',
+                  fontSize: '12px',
+                  lineHeight: 1.6,
+                  color: 'var(--text-secondary)',
+                  cursor: 'pointer',
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={riskAcknowledged}
+                  onChange={(e) => setRiskAcknowledged(e.target.checked)}
+                  data-testid="risk-acknowledgement"
+                  required
+                  style={{ marginTop: '3px', flex: '0 0 auto' }}
+                />
+                <span>
+                  I have read the{' '}
+                  <Link href="/legal" target="_blank" rel="noreferrer" style={{ color: 'var(--accent-blue)' }}>
+                    risk disclosure
+                  </Link>
+                  . I understand Alethra is a research tool: backtest and paper results are not
+                  investment advice, are not live trades, and do not predict future returns.
+                </span>
+              </label>
+            )}
+
             <button
               type="submit"
               className="login-submit"
-              disabled={loading}
+              disabled={loading || (!isLogin && !riskAcknowledged)}
             >
               {loading ? 'Signing in…' : isLogin ? 'Sign in' : 'Create account'}
             </button>
@@ -285,6 +333,7 @@ export default function LoginPage() {
               onClick={() => {
                 setIsLogin(!isLogin);
                 setError(null);
+                setRiskAcknowledged(false);
               }}
               className="login-switch-btn"
               disabled={loading}

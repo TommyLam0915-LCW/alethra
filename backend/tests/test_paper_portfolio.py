@@ -308,6 +308,7 @@ class TestPrivateUserCannotReadOtherPortfolio:
 
         # Create user 2
         resp = client.post("/api/auth/register", json={
+            "risk_acknowledged": True,
             "email": "user2@alethra.io",
             "password": "testpass123",
             "display_name": "User 2",

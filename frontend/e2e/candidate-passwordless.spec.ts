@@ -22,6 +22,10 @@ import { test, expect, type Page } from '@playwright/test';
  *   - an expired session that cannot be renewed returns to sign-in with a
  *     single renewal attempt (no retry loop) and no leftover token/marker;
  *   - the ordinary email/password login remains available;
+ *   - the panel states it is a development-only test entry, not a customer
+ *     sign-in method;
+ *   - registration cannot be submitted until the risk disclosure at /legal is
+ *     acknowledged, and leaving register mode clears that acknowledgement;
  *   - with the mode OFF the homepage stays public, no session is minted, and
  *     the login page shows no candidate panel.
  *
@@ -455,4 +459,47 @@ test('mode off: homepage stays public and mints no session', async ({ page }) =>
     });
     expect(refused.status()).toBe(404);
   }
+});
+
+test('the password-free panel states it is a development-only test entry', async ({ page }) => {
+  test.skip(!READY || MODE !== 'on', SKIP);
+
+  await page.goto('/login', { waitUntil: 'domcontentloaded' });
+  await expect(page.getByTestId('candidate-entry-panel')).toBeVisible();
+  const scope = page.getByTestId('candidate-entry-scope');
+  await expect(scope).toContainText('Development-only test entry');
+  await expect(scope).toContainText('not a customer sign-in method');
+});
+
+test('registration is blocked until the risk disclosure is acknowledged', async ({ page }) => {
+  test.skip(!READY, SKIP);
+
+  await page.goto('/login', { waitUntil: 'domcontentloaded' });
+  const form = page.locator('.login-form-zone');
+  const acknowledgement = form.getByTestId('risk-acknowledgement');
+  const submit = form.getByRole('button', { name: 'Create account', exact: true });
+  const toRegister = form.getByRole('button', { name: 'No account? Create one' });
+
+  // Dev mode serves HTML before React hydrates, and a click issued in that
+  // window is dropped. Retry the toggle until the client state actually
+  // changes instead of sleeping for a guessed hydration delay.
+  await expect(async () => {
+    if ((await acknowledgement.count()) === 0) await toRegister.click();
+    await expect(acknowledgement).toHaveCount(1);
+  }).toPass({ timeout: 20_000 });
+
+  await expect(acknowledgement).not.toBeChecked();
+  await expect(submit).toBeDisabled();
+  await expect(form.getByRole('link', { name: 'risk disclosure' })).toHaveAttribute('href', '/legal');
+
+  await acknowledgement.check();
+  await expect(submit).toBeEnabled();
+
+  // Leaving register mode clears the acknowledgement; it must not carry over.
+  await form.getByRole('button', { name: 'Already have an account? Sign in' }).click();
+  await expect(acknowledgement).toHaveCount(0);
+  await toRegister.click();
+  await expect(acknowledgement).toHaveCount(1);
+  await expect(acknowledgement).not.toBeChecked();
+  await expect(submit).toBeDisabled();
 });

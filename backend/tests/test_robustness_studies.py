@@ -146,6 +146,7 @@ def _register_second_user(client) -> dict:
     client.post(
         "/api/auth/register",
         json={
+            "risk_acknowledged": True,
             "email": email,
             "password": "otherpass123",
             "display_name": "Other User",

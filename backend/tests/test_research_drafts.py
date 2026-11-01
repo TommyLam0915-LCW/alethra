@@ -94,6 +94,7 @@ class TestResearchDraftOwnership:
         resp1 = client.post(
             "/api/auth/register",
             json={
+                "risk_acknowledged": True,
                 "email": "user1@test.com",
                 "password": "pass1234",
                 "display_name": "User 1",
@@ -109,6 +110,7 @@ class TestResearchDraftOwnership:
         resp2 = client.post(
             "/api/auth/register",
             json={
+                "risk_acknowledged": True,
                 "email": "user2@test.com",
                 "password": "pass1234",
                 "display_name": "User 2",
@@ -136,6 +138,7 @@ class TestResearchDraftOwnership:
         resp1 = client.post(
             "/api/auth/register",
             json={
+                "risk_acknowledged": True,
                 "email": "owner@test.com",
                 "password": "pass1234",
                 "display_name": "Owner",
@@ -151,6 +154,7 @@ class TestResearchDraftOwnership:
         resp2 = client.post(
             "/api/auth/register",
             json={
+                "risk_acknowledged": True,
                 "email": "other@test.com",
                 "password": "pass1234",
                 "display_name": "Other",
@@ -601,7 +605,13 @@ def _register_and_login(client, email, password="pass1234", name="User"):
     """Helper: register + login, return auth headers dict."""
     client.post(
         "/api/auth/register",
-        json={"email": email, "password": password, "display_name": name, "user_type": "individual"},
+        json={
+            "risk_acknowledged": True,
+            "email": email,
+            "password": password,
+            "display_name": name,
+            "user_type": "individual",
+        },
     )
     token = client.post(
         "/api/auth/login",
@@ -1152,6 +1162,7 @@ class TestSecureFieldTransfer:
         create_resp = client.post(
             "/api/auth/register",
             json={
+                "risk_acknowledged": True,
                 "email": "authtest@test.com",
                 "password": "pass1234",
                 "display_name": "Auth Test",
@@ -1185,6 +1196,7 @@ class TestSecureFieldTransfer:
         user1_resp = client.post(
             "/api/auth/register",
             json={
+                "risk_acknowledged": True,
                 "email": "owner@test.com",
                 "password": "pass1234",
                 "display_name": "Owner",
@@ -1200,6 +1212,7 @@ class TestSecureFieldTransfer:
         user2_resp = client.post(
             "/api/auth/register",
             json={
+                "risk_acknowledged": True,
                 "email": "other@test.com",
                 "password": "pass1234",
                 "display_name": "Other",

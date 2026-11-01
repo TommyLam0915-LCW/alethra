@@ -263,6 +263,7 @@ def test_journey_is_owner_scoped(client, auth_headers):
         "password": "otherpass123",
         "display_name": "Other",
         "user_type": "individual",
+        "risk_acknowledged": True,
     }
     client.post("/api/auth/register", json=payload)
     login = client.post(

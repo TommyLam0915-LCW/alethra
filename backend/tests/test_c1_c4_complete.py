@@ -536,6 +536,7 @@ class TestC3RegressionCases:
     def test_cross_user_replay_protection(self, client):
         def register(email):
             client.post("/api/auth/register", json={
+                "risk_acknowledged": True,
                 "email": email,
                 "password": "testpass123",
                 "display_name": email.split("@")[0],

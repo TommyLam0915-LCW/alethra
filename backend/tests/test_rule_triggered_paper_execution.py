@@ -633,6 +633,7 @@ class TestLinkBoundaries:
         # A second account's session must not be linkable, and the refusal must
         # not reveal that the session exists.
         other = client.post("/api/auth/register", json={
+            "risk_acknowledged": True,
             "email": "other@alethra.io",
             "password": "otherpass123",
             "display_name": "Other User",
@@ -772,6 +773,7 @@ class TestReplaySessionListing:
         _start_session(client, auth_headers, version_id)
 
         other = client.post("/api/auth/register", json={
+            "risk_acknowledged": True,
             "email": "lister@alethra.io",
             "password": "listerpass123",
             "display_name": "Lister",

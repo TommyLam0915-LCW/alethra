@@ -40,6 +40,16 @@ def _settings(**overrides) -> Settings:
     return Settings(**values)
 
 
+_LOOP = None
+
+
+def _loop():
+    global _LOOP
+    if _LOOP is None:
+        _LOOP = asyncio.new_event_loop()
+    return _LOOP
+
+
 def _call(app, method: str, path: str, *, peer="127.0.0.1", json=None, token=None):
     headers = {"Authorization": f"Bearer {token}"} if token else None
 
@@ -48,7 +58,11 @@ def _call(app, method: str, path: str, *, peer="127.0.0.1", json=None, token=Non
         async with httpx.AsyncClient(transport=transport, base_url="http://candidate.test") as async_client:
             return await async_client.request(method, path, json=json, headers=headers)
 
-    return asyncio.run(run())
+    # asyncio.run() clears the thread's current event loop when it returns, and
+    # tests that run later in the same session then fail on lazy imports that
+    # need one (ib_insync via the broker transport). One reusable loop keeps the
+    # process state intact without leaking a loop per call.
+    return _loop().run_until_complete(run())
 
 
 @pytest.fixture()
@@ -63,7 +77,13 @@ def candidate_app(client):
 def _register(client, email: str, password: str = PASSWORD):
     resp = client.post(
         "/api/auth/register",
-        json={"email": email, "password": password, "display_name": "Candidate", "user_type": "individual"},
+        json={
+            "risk_acknowledged": True,
+            "email": email,
+            "password": password,
+            "display_name": "Candidate",
+            "user_type": "individual",
+        },
     )
     assert resp.status_code == 201, resp.text
     return resp.json()

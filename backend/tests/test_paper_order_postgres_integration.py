@@ -565,6 +565,7 @@ class TestPersonalApiProvenance:
         cash_before = _cash(portfolio_id)
 
         client.post("/api/auth/register", json={
+            "risk_acknowledged": True,
             "email": "intruder@alethra.io",
             "password": "anotherpass123",
             "display_name": "Intruder",

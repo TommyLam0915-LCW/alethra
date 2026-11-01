@@ -66,6 +66,7 @@ def _create_plan(db, name="Pro", price=9900, features=None):
 def _create_user_via_api(client):
     email = f"billing-{uuid.uuid4().hex[:8]}@test.io"
     resp = client.post("/api/auth/register", json={
+        "risk_acknowledged": True,
         "email": email,
         "password": "testpass123",
         "display_name": "Billing Test",
@@ -543,6 +544,7 @@ class TestUsageTracking:
         db = _get_db()
         user_email = f"quota-test-{uuid.uuid4().hex[:8]}@test.io"
         resp = client.post("/api/auth/register", json={
+            "risk_acknowledged": True,
             "email": user_email,
             "password": "testpass123",
             "display_name": "Quota Test",
@@ -587,6 +589,7 @@ class TestUsageTracking:
         db = _get_db()
         user_email = f"enforce-test-{uuid.uuid4().hex[:8]}@test.io"
         resp = client.post("/api/auth/register", json={
+            "risk_acknowledged": True,
             "email": user_email,
             "password": "testpass123",
             "display_name": "Enforce Test",
@@ -615,6 +618,7 @@ class TestUsageTracking:
         db = _get_db()
         user_email = f"increment-test-{uuid.uuid4().hex[:8]}@test.io"
         resp = client.post("/api/auth/register", json={
+            "risk_acknowledged": True,
             "email": user_email,
             "password": "testpass123",
             "display_name": "Increment Test",
@@ -647,6 +651,7 @@ class TestUsageRecordModel:
         db = _get_db()
         user_email = f"usage-record-{uuid.uuid4().hex[:8]}@test.io"
         resp = client.post("/api/auth/register", json={
+            "risk_acknowledged": True,
             "email": user_email,
             "password": "testpass123",
             "display_name": "Usage Record Test",

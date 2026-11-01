@@ -71,6 +71,7 @@ class C4TestHarness:
         email = f"c4_test_{uuid4().hex[:8]}@test.io"
 
         resp = self.client.post("/api/auth/register", json={
+            "risk_acknowledged": True,
             "email": email,
             "password": "testpass123",
             "display_name": "C4 Test User",

@@ -127,6 +127,7 @@ test.describe('research record journey', () => {
     page = await browser.newPage();
     const registration = await page.request.post(`${runtime.backendBase}/api/auth/register`, {
       data: {
+        risk_acknowledged: true,
         email: ACCOUNT.email,
         password: ACCOUNT.password,
         display_name: 'Record Journey User',
@@ -319,6 +320,7 @@ test.describe('research record journey', () => {
   test('another account and anonymous callers cannot read the record', async () => {
     const registration = await page.request.post(`${runtime.backendBase}/api/auth/register`, {
       data: {
+        risk_acknowledged: true,
         email: OUTSIDER.email,
         password: OUTSIDER.password,
         display_name: 'Record Outsider',

@@ -74,6 +74,7 @@ def _second_account(client):
         "password": "otherpass123",
         "display_name": "Other Owner",
         "user_type": "individual",
+        "risk_acknowledged": True,
     }
     client.post("/api/auth/register", json=payload)
     login = client.post(

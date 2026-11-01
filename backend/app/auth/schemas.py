@@ -9,6 +9,17 @@ class UserCreate(BaseModel):
     password: str = Field(..., min_length=8)
     display_name: Optional[str] = None
     user_type: str = Field(default="individual", pattern="^(individual|educator|team|student)$")
+    # Defaulting to false rather than omitting the field keeps the refusal a
+    # readable 400 instead of a bare validation error, and makes an account
+    # impossible to create without the caller stating the disclosure was read.
+    risk_acknowledged: bool = Field(
+        default=False,
+        description=(
+            "Must be true. The account is refused unless the caller states the user has read the "
+            "risk disclosure at /legal: Alethra is a research tool, paper fills are not live "
+            "trades, and no return is guaranteed."
+        ),
+    )
 
 
 class UserResponse(BaseModel):

@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 def second_user_headers(client: TestClient, email="second@alethra.io"):
     resp = client.post("/api/auth/register", json={
+        "risk_acknowledged": True,
         "email": email,
         "password": "testpass123",
         "display_name": "Second User",
