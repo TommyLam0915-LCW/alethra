@@ -250,6 +250,72 @@ class TestAgentStrategyTestTrainingAuthorization:
         assert "AGENT_STRATEGY_SCREENING_ENABLED" in str(exc_info.value)
 
 
+class TestAgentStrategyOwnerConsentMode:
+    """The local-trial switch is an operator capability, never the consent.
+
+    It only decides whether the process may act on a consent row the owner
+    recorded for themselves; it cannot create one and it is local-only.
+    """
+
+    def test_requires_screening_enabled(self):
+        with pytest.raises(Exception) as exc_info:
+            _fresh_settings(
+                APP_ENV="development",
+                DATABASE_URL="sqlite:///./auth.db",
+                AGENT_STRATEGY_OWNER_CONSENT_MODE="true",
+            )
+        assert "AGENT_STRATEGY_SCREENING_ENABLED" in str(exc_info.value)
+
+    def test_production_rejects_the_mode(self):
+        with pytest.raises(Exception) as exc_info:
+            _prod_settings(
+                AGENT_STRATEGY_SCREENING_ENABLED="true",
+                AGENT_STRATEGY_OWNER_CONSENT_MODE="true",
+            )
+        # Screening is refused before the mode is even considered.
+        assert "AGENT_STRATEGY_SCREENING_ENABLED" in str(exc_info.value)
+
+    def test_staging_rejects_the_mode(self):
+        with pytest.raises(Exception) as exc_info:
+            _fresh_settings(
+                APP_ENV="staging",
+                JWT_SECRET_KEY="b" * 48,
+                DATABASE_URL="postgresql://db.example.com/test",
+                AGENT_STRATEGY_SCREENING_ENABLED="true",
+                AGENT_STRATEGY_OWNER_CONSENT_MODE="true",
+            )
+        assert "AGENT_STRATEGY_SCREENING_ENABLED" in str(exc_info.value)
+
+    def test_remote_database_rejects_the_mode(self):
+        with pytest.raises(Exception) as exc_info:
+            _fresh_settings(
+                APP_ENV="development",
+                DATABASE_URL="postgresql://db.example.com/test",
+                AGENT_STRATEGY_SCREENING_ENABLED="true",
+                AGENT_STRATEGY_OWNER_CONSENT_MODE="true",
+            )
+        assert "AGENT_STRATEGY_SCREENING_ENABLED" in str(exc_info.value)
+
+    def test_local_development_accepts_the_mode(self):
+        s = _fresh_settings(
+            APP_ENV="development",
+            DATABASE_URL="sqlite:///./auth.db",
+            AGENT_STRATEGY_SCREENING_ENABLED="true",
+            AGENT_STRATEGY_OWNER_CONSENT_MODE="true",
+        )
+        assert s.agent_strategy_owner_consent_mode is True
+        # The switch does not impersonate either fixture or a consent row.
+        assert s.agent_strategy_test_snapshot_authorization == ""
+        assert s.agent_strategy_test_training_authorization == ""
+
+    def test_default_is_off(self):
+        s = _fresh_settings(
+            APP_ENV="development",
+            DATABASE_URL="sqlite:///./auth.db",
+        )
+        assert s.agent_strategy_owner_consent_mode is False
+
+
 class TestCorsValidation:
     def test_production_rejects_wildcard_cors(self):
         with pytest.raises(Exception) as exc_info:

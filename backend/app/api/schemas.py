@@ -2,18 +2,35 @@ from datetime import datetime
 from typing import Any, Literal, Optional, List, Dict
 from uuid import UUID
 import math
+import re
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from app.providers.instruments import parse_crypto_instrument_id
 
 
 ALLOWED_TEMPLATES = ("buy_and_hold", "sma_crossover", "price_change_fixed_hold")
 ALLOWED_DEMO_ASSETS = ("DEMO-ALPHA", "DEMO-BETA", "DEMO-BENCHMARK")
 
-import re
 _INSTRUMENT_RE = re.compile(r"^[A-Z]{2,4}:[A-Za-z0-9.\-]{1,20}$")
+# Crypto ids carry the venue as a third part (CRYPTO:VENUE:BASE-QUOTE), which
+# the two-part equity pattern above deliberately does not match.
+_CRYPTO_INSTRUMENT_RE = re.compile(
+    r"^CRYPTO:[A-Z]{2,12}:[A-Z0-9.]{1,12}-[A-Z0-9.]{1,12}$"
+)
 
 
 def _is_valid_asset_id(aid: str) -> bool:
-    return aid in ALLOWED_DEMO_ASSETS or bool(_INSTRUMENT_RE.match(aid))
+    if aid in ALLOWED_DEMO_ASSETS or _INSTRUMENT_RE.match(aid):
+        return True
+    if not _CRYPTO_INSTRUMENT_RE.match(aid):
+        return False
+    # Reuse the canonical parser so an unknown venue is rejected here rather
+    # than stored in a strategy that can never resolve its instrument.
+    try:
+        parse_crypto_instrument_id(aid)
+    except ValueError:
+        return False
+    return True
 
 
 class StrategySpec(BaseModel):

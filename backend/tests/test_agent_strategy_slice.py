@@ -57,6 +57,7 @@ from app.config import (
 )
 from app.services.agent_strategy import (
     COMMISSION_RATE,
+    CONSENT_VERSION,
     EXECUTION_POLICY_VERSION,
     FEATURE_EXCLUSIONS,
     HOLD_BARS,
@@ -934,9 +935,9 @@ class TestConsentFailClosed:
         assert body["consent_policy"]["acceptance_owner_only"] is True
         assert body["consent_policy"]["fail_closed"] is True
         assert body["consent_policy"]["training_allowed"] is False
-        assert body["training"]["real_training"] == "NOT_APPROVED"
+        assert body["training"]["customer_release_training"] == "NOT_APPROVED"
+        assert body["training"]["customer_release_inference"] == "NOT_APPROVED"
         assert body["training"]["model_activation"] == "NOT_APPROVED"
-        assert body["training"]["inference"] == "NOT_APPROVED"
         assert body["training"]["activation_available"] is False
         assert body["training"]["authorized_in_this_process"] is False
 
@@ -1455,8 +1456,10 @@ class TestReadySnapshot:
             "purpose_authorized": True,
             "authorization_mode": SNAPSHOT_AUTHORIZATION_MODE,
             "real_owner_consent": False,
+            "owner_consent_mode": False,
             "movable_to_customer_environment": False,
             "usable_for_fixture_training": False,
+            "usable_for_owner_trial_training": False,
             "usable_for_real_training": False,
         }
 
@@ -1964,12 +1967,14 @@ class TestReadySnapshot:
 
 
 def _enable_test_training_authorization(
-    monkeypatch, tmp_path, *, training=None, snapshot=None
+    monkeypatch, tmp_path, *, training=None, snapshot=None, owner_consent_mode=False
 ):
     """Install both development fixtures and send artifacts to ``tmp_path``.
 
     ``training``/``snapshot`` accept an explicit token so a test can prove the
     chain stays closed when either fixture is absent (``""``).
+    ``owner_consent_mode`` turns on the separate local-trial basis so a test can
+    prove it is not the same thing as the fixture or as the owner's consent.
     """
     from types import SimpleNamespace
 
@@ -1989,6 +1994,7 @@ def _enable_test_training_authorization(
         ),
         agent_strategy_test_snapshot_authorization=snapshot_token,
         agent_strategy_test_training_authorization=training_token,
+        agent_strategy_owner_consent_mode=owner_consent_mode,
     )
     monkeypatch.setattr(
         "app.services.agent_strategy.get_settings", lambda: settings
@@ -2292,7 +2298,7 @@ class TestFixtureTrainingChain:
         assert detail["code"] == "agent_strategy_training_not_authorized"
         assert (
             detail["details"]["reason_code"]
-            == "agent_strategy_test_training_authorization_not_configured"
+            == "agent_strategy_training_authorization_not_configured"
         )
         assert detail["details"]["consent_status"] == "active"
         assert _training_job_rows() == []
@@ -2664,8 +2670,271 @@ class TestFixtureTrainingChain:
         # Authorization to run the fixture chain never becomes an activation.
         assert after_body["training"]["activation_available"] is False
         assert after_body["training"]["model_activation"] == "NOT_APPROVED"
-        assert after_body["training"]["real_training"] == "NOT_APPROVED"
-        assert after_body["training"]["inference"] == "NOT_APPROVED"
-        assert after_body["training"]["customer_release"] == "NOT_APPROVED"
+        assert after_body["training"]["customer_release_training"] == "NOT_APPROVED"
+        assert after_body["training"]["customer_release_inference"] == "NOT_APPROVED"
         assert after_body["snapshot_creation"]["usable_for_fixture_training"] is True
+        assert after_body["snapshot_creation"]["usable_for_owner_trial_training"] is False
         assert after_body["snapshot_creation"]["usable_for_real_training"] is False
+        # The owner's own consent is now visible as such, separate from the
+        # fixture that is actually authorizing this chain.
+        assert after_body["snapshot_creation"]["real_owner_consent"] is True
+
+
+class TestMachineCandidateLane:
+    """Rule candidates are a screening lane of their own, not human imitation.
+
+    A locked SMA rule already logs an entry signal for every candidate, so the
+    lane needs no prior human BUY and must not invent one. The outcome then
+    follows the declared execution policy: a counterfactual replay once the
+    label window is complete, ``immature`` while it is still open, and a
+    recorded constraint rather than a loss when the candidate cannot be priced.
+    """
+
+    def test_rule_candidates_are_labelled_without_a_human_decision(
+        self, client, auth_headers, monkeypatch, tmp_path
+    ):
+        # Enabling screening is a process capability, not a consent or a
+        # training grant; this test only needs the data lane open.
+        _enable_test_training_authorization(monkeypatch, tmp_path)
+        _seed_bars(INSTRUMENT, _regime_series(180))
+        version_id = _create_locked_strategy(
+            client, auth_headers, title="Machine-only lane", window_days=180
+        )
+        body = {"strategy_version_id": str(version_id)}
+        collected = client.post(
+            "/api/v1/agent-strategy/candidates/collect",
+            headers=auth_headers,
+            json=body,
+        )
+        assert collected.status_code == 200, collected.text
+        built = client.post(
+            "/api/v1/agent-strategy/candidates/outcomes",
+            headers=auth_headers,
+            json=body,
+        )
+        assert built.status_code == 200, built.text
+
+        db = TestSession()
+        try:
+            # Nothing in this lane needs, or writes, a human decision record.
+            assert db.query(HumanDecisionEvent).count() == 0
+            candidates = (
+                db.query(AgentCandidate)
+                .filter(AgentCandidate.strategy_version_id == version_id)
+                .all()
+            )
+            outcomes = (
+                db.query(AgentCandidateOutcome)
+                .join(
+                    AgentCandidate,
+                    AgentCandidateOutcome.candidate_id == AgentCandidate.id,
+                )
+                .filter(
+                    AgentCandidate.strategy_version_id == version_id,
+                    AgentCandidateOutcome.is_current.is_(True),
+                )
+                .all()
+            )
+        finally:
+            db.close()
+
+        assert candidates
+        # ``created_by_actor_type`` labels the credential that triggered the
+        # write (here the owner's password session). The logged action is the
+        # rule's own signal, never a human judgement, and no HumanDecisionEvent
+        # is written or backfilled.
+        assert {row.created_by_actor_type for row in candidates} == {"human"}
+        assert {row.logged_action for row in candidates} == {"rule_entry_signal"}
+        assert len(outcomes) == len(candidates)
+
+        statuses = {row.outcome_status for row in outcomes}
+        assert {"counterfactual", "immature"} <= statuses
+        assert statuses <= {"observed", "counterfactual", "immature", "unavailable"}
+        # With no paper fills, nothing can be misreported as observed.
+        assert "observed" not in statuses
+
+        for row in outcomes:
+            if row.outcome_status == "counterfactual":
+                assert row.outcome_source == "counterfactual_replay"
+                assert row.selection_reason == "counterfactual_replay"
+                assert row.counterfactual is True
+                assert row.label_maturity == "mature"
+                continue
+            # An open label window or an unpriceable bar carries no return; it
+            # is not stored as a 0% result and not counted as a loss.
+            assert row.gross_return_pct is None
+            assert row.net_return_pct is None
+            assert row.label_eligible is False
+            assert row.counterfactual is False
+
+        eligibility = evaluate_eligibility(TestSession(), _owner_id(), version_id)
+        assert eligibility["not_human_quality_evaluation"] is True
+        assert eligibility["candidate_count"] == len(candidates)
+        assert eligibility["outcome_distribution"]["counterfactual"] >= 1
+        assert eligibility["outcome_distribution"]["immature"] >= 1
+
+
+class TestOwnerTrialAuthorization:
+    """The owner's own consent authorizes a local trial; the fixture never does.
+
+    These tests pin the second authorization basis added after the fixture-only
+    slice: ``AGENT_STRATEGY_OWNER_CONSENT_MODE`` is a process switch, the owner's
+    recorded consent is the permission, and neither is the other.
+    """
+
+    def test_owner_consent_alone_opens_snapshot_and_training(
+        self, client, auth_headers, monkeypatch, tmp_path
+    ):
+        _enable_test_training_authorization(
+            monkeypatch, tmp_path, training="", snapshot="", owner_consent_mode=True
+        )
+        _seed_bars(INSTRUMENT, _regime_series(180))
+        version_id = _create_locked_strategy(
+            client, auth_headers, title="Owner trial", window_days=180
+        )
+        body = {"strategy_version_id": str(version_id)}
+        for route in (
+            "/api/v1/agent-strategy/candidates/collect",
+            "/api/v1/agent-strategy/candidates/outcomes",
+        ):
+            resp = client.post(route, headers=auth_headers, json=body)
+            assert resp.status_code == 200, (route, resp.text)
+
+        # These are rule candidates built from stored bars; no human BUY exists.
+        db = TestSession()
+        try:
+            assert db.query(HumanDecisionEvent).count() == 0
+        finally:
+            db.close()
+
+        # The switch alone is not a permission: without the owner's consent the
+        # snapshot write is refused before anything is frozen.
+        blocked = client.post(
+            "/api/v1/agent-strategy/snapshots", headers=auth_headers, json=body
+        )
+        assert blocked.status_code == 409, blocked.text
+        assert (
+            blocked.json()["detail"]["code"]
+            == "agent_strategy_consent_not_configured"
+        )
+
+        accepted = _accept_consent(client, auth_headers)
+        assert accepted.status_code == 200, accepted.text
+        consent_id = accepted.json()["consent_id"]
+
+        capabilities = client.get(
+            "/api/v1/agent-strategy/capabilities", headers=auth_headers
+        )
+        assert capabilities.status_code == 200, capabilities.text
+        cap = capabilities.json()
+        assert cap["snapshot_creation"]["usable_for_owner_trial_training"] is True
+        assert cap["snapshot_creation"]["usable_for_fixture_training"] is False
+        assert cap["snapshot_creation"]["real_owner_consent"] is True
+        assert cap["snapshot_creation"]["authorization_mode"] == (
+            "owner_consent_local_trial"
+        )
+        assert cap["training"]["authorization_mode"] == "owner_consent_local_trial"
+        assert cap["training"]["authorized_in_this_process"] is True
+        # A local trial never becomes a customer release or an activation.
+        assert cap["training"]["customer_release_training"] == "NOT_APPROVED"
+        assert cap["training"]["customer_release_inference"] == "NOT_APPROVED"
+        assert cap["training"]["model_activation"] == "NOT_APPROVED"
+        assert cap["training"]["activation_available"] is False
+
+        created = client.post(
+            "/api/v1/agent-strategy/snapshots", headers=auth_headers, json=body
+        )
+        assert created.status_code == 200, created.text
+        snapshot = created.json()
+        assert snapshot["status"] == "ready"
+        assert snapshot["included_count"] > 0
+        # The row records the owner's consent, not the test fixture.
+        assert snapshot["authorization"]["real_owner_consent"] is True
+        assert snapshot["authorization"]["basis"] == "active"
+        assert snapshot["consent_policy_version"] == CONSENT_VERSION
+        assert snapshot["usable_for_owner_trial_training"] is True
+        assert snapshot["usable_for_fixture_training"] is False
+        assert snapshot["usable_for_real_training"] is False
+        assert snapshot["integrity"]["checksum_verified"] is True
+
+        trained = client.post(
+            "/api/v1/agent-strategy/training/jobs",
+            headers=auth_headers,
+            json={"snapshot_id": snapshot["id"]},
+        )
+        assert trained.status_code == 200, trained.text
+        job = trained.json()
+        assert job["status"] == "completed"
+        assert job["activation_status"] == "NOT_APPROVED"
+        assert job["movable_to_customer_environment"] is False
+        assert job["lineage"]["consent_record_id"] == consent_id
+        assert job["lineage"]["dataset_checksum"] == snapshot["checksum"]
+        assert job["metrics"]["not_a_profit_claim"] is True
+
+    def test_owner_consent_mode_without_consent_refuses_training(
+        self, client, auth_headers, monkeypatch, tmp_path
+    ):
+        snapshot = _ready_fixture_snapshot(
+            client, auth_headers, monkeypatch, tmp_path
+        )
+        _enable_test_training_authorization(
+            monkeypatch, tmp_path, training="", snapshot="", owner_consent_mode=True
+        )
+        resp = client.post(
+            "/api/v1/agent-strategy/training/jobs",
+            headers=auth_headers,
+            json={"snapshot_id": snapshot["id"]},
+        )
+        assert resp.status_code == 409, resp.text
+        detail = resp.json()["detail"]
+        assert detail["code"] == "agent_strategy_training_not_authorized"
+        assert detail["details"]["reason_code"] == "agent_strategy_consent_not_configured"
+        assert detail["details"]["owner_consent_mode"] is True
+        assert detail["details"]["fixture_granted"] is False
+        assert _training_job_rows() == []
+
+    def test_consent_without_the_trial_switch_refuses_snapshot_creation(
+        self, client, auth_headers, monkeypatch, tmp_path
+    ):
+        _enable_test_training_authorization(
+            monkeypatch, tmp_path, training="", snapshot="", owner_consent_mode=False
+        )
+        _seed_bars(INSTRUMENT, _regime_series(180))
+        version_id = _create_locked_strategy(
+            client, auth_headers, title="Consent only, no switch", window_days=180
+        )
+        body = {"strategy_version_id": str(version_id)}
+        for route in (
+            "/api/v1/agent-strategy/candidates/collect",
+            "/api/v1/agent-strategy/candidates/outcomes",
+        ):
+            resp = client.post(route, headers=auth_headers, json=body)
+            assert resp.status_code == 200, (route, resp.text)
+
+        accepted = _accept_consent(client, auth_headers)
+        assert accepted.status_code == 200, accepted.text
+
+        resp = client.post(
+            "/api/v1/agent-strategy/snapshots", headers=auth_headers, json=body
+        )
+        assert resp.status_code == 409, resp.text
+        detail = resp.json()["detail"]
+        assert detail["code"] == "agent_strategy_snapshot_not_approved"
+        assert detail["details"]["owner_consent_mode"] is False
+        assert detail["details"]["authorization_reason"] == (
+            "AGENT_STRATEGY_TEST_AUTHORIZATION_NOT_CONFIGURED"
+        )
+
+        db = TestSession()
+        try:
+            ready = (
+                db.query(AgentDatasetSnapshot)
+                .filter(
+                    AgentDatasetSnapshot.strategy_version_id == version_id,
+                    AgentDatasetSnapshot.status == "ready",
+                )
+                .count()
+            )
+        finally:
+            db.close()
+        assert ready == 0

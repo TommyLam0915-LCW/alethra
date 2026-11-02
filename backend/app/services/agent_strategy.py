@@ -395,10 +395,16 @@ def revoke_consent(
 def training_authorization(
     db: Session, owner_id: uuid.UUID, settings=None
 ) -> Dict[str, Any]:
-    """Four separate judgments for the training/inference chain.
+    """Separate judgments for the training/inference chain.
 
-    The development fixture and the owner's own consent are two different
-    things and both are required here; neither alone is enough.
+    Two bases can authorize a training run and they are never merged:
+
+    * the development fixture, which is a test harness and says nothing about
+      a real owner;
+    * ``AGENT_STRATEGY_OWNER_CONSENT_MODE`` in a local trial, which only becomes
+      a permission when the authenticated owner's own consent row exists.
+
+    Neither the fixture nor the switch is consent, and neither alone is enough.
     """
     settings = settings or get_settings()
     configured = (
@@ -413,40 +419,53 @@ def training_authorization(
         configured == AGENT_STRATEGY_TEST_TRAINING_AUTHORIZATION
         and environment_allowed
     )
+    owner_consent_mode = (
+        bool(getattr(settings, "agent_strategy_owner_consent_mode", False))
+        and environment_allowed
+    )
     consent = consent_status(db, owner_id)
     consent_active = consent["status"] == "active"
+    trial_granted = consent_active and owner_consent_mode
 
     if not consent_active:
         reason_code = "agent_strategy_consent_not_configured"
-    elif not fixture_granted:
-        reason_code = "agent_strategy_test_training_authorization_not_configured"
+    elif not (fixture_granted or owner_consent_mode):
+        reason_code = "agent_strategy_training_authorization_not_configured"
     else:
         reason_code = None
+
+    if fixture_granted and consent_active:
+        authorization_mode = "test_only_fixture_and_owner_consent"
+    elif trial_granted:
+        authorization_mode = "owner_consent_local_trial"
+    else:
+        authorization_mode = "none"
 
     return {
         "purpose": PURPOSE,
         "environment_allowed": environment_allowed,
         "fixture_granted": fixture_granted,
-        "authorization_mode": (
-            "test_only_fixture_and_owner_consent" if fixture_granted and consent_active
-            else "none"
-        ),
+        "owner_consent_mode": owner_consent_mode,
+        "authorization_mode": authorization_mode,
         "real_owner_consent": consent_active,
         "consent_status": consent["status"],
         "consent_record_id": consent.get("consent_id"),
-        "granted": consent_active and fixture_granted,
+        "granted": trial_granted or (fixture_granted and consent_active),
         "reason_code": reason_code,
         "model_activation": "NOT_APPROVED",
         "movable_to_customer_environment": False,
     }
 
 
-def snapshot_authorization(settings=None) -> Dict[str, Any]:
+def snapshot_authorization(
+    settings=None, *, owner_consent_active: bool = False
+) -> Dict[str, Any]:
     """Whether this process may freeze a ready dataset, and on what basis.
 
-    The basis is the development-only fixture; it is deliberately not owner
-    consent, so a snapshot created here stays labelled as such and cannot be
-    reused as a customer dataset or a training permission.
+    A snapshot can be created on the development fixture or, in a local owner
+    trial, on the owner's own recorded consent. The fixture basis is never
+    reported as consent, and consent without the operator switch is not a
+    permission either.
     """
     settings = settings or get_settings()
     configured = (
@@ -457,25 +476,40 @@ def snapshot_authorization(settings=None) -> Dict[str, Any]:
         and bool(getattr(settings, "agent_strategy_screening_enabled", False))
         and is_local_database_url(getattr(settings, "database_url", ""))
     )
-    granted = (
+    fixture_granted = (
         configured == AGENT_STRATEGY_TEST_SNAPSHOT_AUTHORIZATION
         and environment_allowed
     )
+    owner_consent_mode = (
+        bool(getattr(settings, "agent_strategy_owner_consent_mode", False))
+        and environment_allowed
+    )
+    trial_granted = owner_consent_active and owner_consent_mode
+    granted = fixture_granted or trial_granted
+    if fixture_granted:
+        mode = SNAPSHOT_AUTHORIZATION_MODE
+    elif trial_granted:
+        mode = "owner_consent_local_trial"
+    else:
+        mode = "none"
     if granted:
         reason_code = None
     elif configured:
         reason_code = "AGENT_STRATEGY_TEST_AUTHORIZATION_ENVIRONMENT_REFUSED"
+    elif owner_consent_mode:
+        reason_code = "agent_strategy_consent_not_configured"
     else:
         reason_code = "AGENT_STRATEGY_TEST_AUTHORIZATION_NOT_CONFIGURED"
     return {
         "purpose": PURPOSE,
-        "mode": SNAPSHOT_AUTHORIZATION_MODE if granted else "none",
+        "mode": mode,
         "authorization_id": (
-            AGENT_STRATEGY_TEST_SNAPSHOT_AUTHORIZATION if granted else None
+            AGENT_STRATEGY_TEST_SNAPSHOT_AUTHORIZATION if fixture_granted else None
         ),
         "granted": granted,
         "environment_allowed": environment_allowed,
-        "real_owner_consent": False,
+        "owner_consent_mode": owner_consent_mode,
+        "real_owner_consent": bool(trial_granted),
         "movable_to_customer_environment": False,
         "reason_code": reason_code,
     }
@@ -1470,13 +1504,22 @@ def evaluate_eligibility(
                 "requirement": "active agent-strategy consent",
             }
         )
-    elif not authorization["fixture_granted"]:
+    elif not authorization["granted"]:
         reasons.append(
             {
-                "code": "AGENT_STRATEGY_TRAINING_FIXTURE_NOT_CONFIGURED",
-                "message_zh": "尚未設定開發訓練授權；本輪不會訓練或推論。",
-                "measured": authorization["fixture_granted"],
-                "requirement": "AGENT_STRATEGY_TEST_TRAINING_AUTHORIZATION",
+                "code": "AGENT_STRATEGY_TRAINING_AUTHORIZATION_NOT_CONFIGURED",
+                "message_zh": (
+                    "尚未設定訓練授權；本輪不會訓練或推論。開發測試可用 fixture，"
+                    "本機 owner 試用則需 AGENT_STRATEGY_OWNER_CONSENT_MODE。"
+                ),
+                "measured": {
+                    "fixture_granted": authorization["fixture_granted"],
+                    "owner_consent_mode": authorization["owner_consent_mode"],
+                },
+                "requirement": (
+                    "AGENT_STRATEGY_TEST_TRAINING_AUTHORIZATION or "
+                    "AGENT_STRATEGY_OWNER_CONSENT_MODE with active owner consent"
+                ),
             }
         )
 
@@ -1875,10 +1918,12 @@ def create_snapshot(
     """Freeze one reproducible dataset, or record an explicit refusal.
 
     Success requires four separate conditions: the owner's locked version
-    exists, this process is allowed to write (development + screening), the
-    development test authorization is present, and the data passes the
-    eligibility and chronological-split checks. Without the authorization the
-    historical refusal record is kept; a data refusal writes nothing.
+    exists, this process is allowed to write (development + screening), some
+    authorization basis is present, and the data passes the eligibility and
+    chronological-split checks. The basis may be the development fixture or, in
+    a local owner trial, the owner's own recorded consent; the two are never
+    merged. Without any basis the historical refusal record is kept; a data
+    refusal writes nothing.
 
     The returned snapshot is immutable: rows carry their exact outcome id and
     version, and the checksum covers rows, versions and split manifest. A
@@ -1897,15 +1942,23 @@ def create_snapshot(
         db, owner_id, strategy_version_id, instrument_id=instrument_id
     )
     consent = preview["consent"]
-    authorization = snapshot_authorization()
+    authorization = snapshot_authorization(
+        owner_consent_active=consent["status"] == "active"
+    )
 
     if not authorization["granted"]:
         if consent["status"] == "active":
-            # Real consent, if it ever exists, is separate from the test
-            # authorization; it does not by itself enable this write path.
+            # The owner has consented, but this process has no basis to act on
+            # it: either the trial switch is off or the environment refuses it.
+            # Consent is not a permission by itself.
             raise AgentStrategyRefused(
                 "agent_strategy_snapshot_not_approved",
-                "本輪只批准以開發測試授權建立資料快照，未批准真實同意路徑。",
+                "已記錄 owner 同意，但此程序未啟用本機 owner 試用授權，"
+                "所以不會建立資料快照；測試 fixture 與 owner 同意不會互相代替。",
+                {
+                    "authorization_reason": authorization["reason_code"],
+                    "owner_consent_mode": authorization["owner_consent_mode"],
+                },
             )
         refusal_payload = {
             "strategy_version_id": str(strategy_version_id),
@@ -1989,14 +2042,21 @@ def create_snapshot(
         payload["deduplicated"] = True
         return payload
 
+    owner_trial_basis = authorization["mode"] == "owner_consent_local_trial"
     snapshot = AgentDatasetSnapshot(
         owner_id=owner_id,
         strategy_version_id=strategy_version_id,
         purpose=PURPOSE,
-        # The authorization basis is recorded in the two fields the model has
-        # for it. The value names the test fixture; it is not owner consent.
-        consent_policy_version=AGENT_STRATEGY_TEST_SNAPSHOT_AUTHORIZATION,
-        consent_status=SNAPSHOT_AUTHORIZATION_MODE,
+        # Record the basis that actually authorized this write. Under the
+        # fixture that is the fixture token plus its mode label; under a local
+        # owner trial it is the consent version the owner accepted and their
+        # live status. Neither value ever means "training is approved".
+        consent_policy_version=(
+            CONSENT_VERSION
+            if owner_trial_basis
+            else AGENT_STRATEGY_TEST_SNAPSHOT_AUTHORIZATION
+        ),
+        consent_status="active" if owner_trial_basis else SNAPSHOT_AUTHORIZATION_MODE,
         status="ready",
         candidate_ids_json=[row["candidate_id"] for row in preview["rows"]],
         rows_json=preview["rows"],
@@ -2376,6 +2436,12 @@ def snapshot_payload(snapshot: AgentDatasetSnapshot) -> Dict[str, Any]:
             "checksum_verified": None,
             "reason": "refused_record_has_no_dataset_payload",
         }
+    # ``active`` is the row's own record that the owner's consent authorized
+    # this snapshot; the fixture mode label never means owner consent.
+    owner_trial_basis = snapshot.consent_status == "active"
+    verified_ready = (
+        snapshot.status == "ready" and integrity.get("checksum_verified") is True
+    )
     return {
         "id": str(snapshot.id),
         "strategy_version_id": str(snapshot.strategy_version_id),
@@ -2385,7 +2451,7 @@ def snapshot_payload(snapshot: AgentDatasetSnapshot) -> Dict[str, Any]:
         "authorization": {
             "basis": snapshot.consent_status,
             "policy_version": snapshot.consent_policy_version,
-            "real_owner_consent": False,
+            "real_owner_consent": owner_trial_basis,
             "movable_to_customer_environment": False,
         },
         "status": snapshot.status,
@@ -2405,13 +2471,13 @@ def snapshot_payload(snapshot: AgentDatasetSnapshot) -> Dict[str, Any]:
         "integrity": integrity,
         "failure_reason": snapshot.failure_reason,
         "created_at": snapshot.created_at.isoformat() if snapshot.created_at else None,
-        # A ready fixture snapshot can feed the development training chain when
-        # the fixture and the owner's consent are both present; it is never a
-        # customer training set and never usable for real training.
+        # Two bases, kept apart. A ready fixture snapshot feeds the development
+        # chain; an owner-trial snapshot carries the owner's own consent. Neither
+        # is a customer training set and neither is usable for real training.
         "usable_for_fixture_training": (
-            snapshot.status == "ready"
-            and integrity.get("checksum_verified") is True
+            verified_ready and snapshot.consent_status == SNAPSHOT_AUTHORIZATION_MODE
         ),
+        "usable_for_owner_trial_training": verified_ready and owner_trial_basis,
         "usable_for_real_training": False,
     }
 

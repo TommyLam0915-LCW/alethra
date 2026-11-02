@@ -47,6 +47,7 @@ const TOOL_LINKS = [
   { href: '/strategy-templates', label: 'Strategy templates' },
   { href: '/training', label: 'Training jobs' },
   { href: '/inference', label: 'Inference runs' },
+  { href: '/agent-strategy', label: 'Agent screening' },
   { href: '/research-drafts', label: 'Research drafts' },
   { href: '/execution', label: 'Execution intents' },
   { href: '/paper-portfolio', label: 'Paper portfolios' },

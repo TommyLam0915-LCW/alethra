@@ -7,9 +7,11 @@ freeze a ready snapshot, record the owner's own consent, and run one bounded
 training → artifact → inference chain over a frozen snapshot.
 
 What they deliberately do not do: activate a model, release it to a customer
-environment, or use real customer data. Training requires both the development
-training fixture and a consent row the authenticated owner recorded for
-themselves; the agent cannot accept consent on the owner's behalf.
+environment, or use another account's data. Every training run needs a consent
+row the authenticated owner recorded for themselves, plus one authorization
+basis: the development fixture or, in a local trial, the operator's owner-consent
+mode. The agent cannot accept consent on the owner's behalf, and the fixture is
+never reported as the owner's consent.
 """
 
 import uuid
@@ -143,38 +145,53 @@ def get_capability(
     db: Session = Depends(get_db),
 ):
     settings = get_settings()
-    authorization = snapshot_authorization(settings)
+    consent = consent_status(db, current_user.id)
+    owner_consent_active = consent["status"] == "active"
+    authorization = snapshot_authorization(
+        settings, owner_consent_active=owner_consent_active
+    )
     training_auth = training_authorization(
         db, current_user.id, settings
+    )
+    local_trial_authorized = (
+        training_auth["authorization_mode"] == "owner_consent_local_trial"
+    )
+    fixture_authorized = training_auth["authorization_mode"] == (
+        "test_only_fixture_and_owner_consent"
     )
     return {
         "capability": capability(),
         "enabled_in_this_process": settings.agent_strategy_screening_enabled,
         "consent_policy": consent_policy(),
-        # Four separate judgments the caller can read apart: the write path is
-        # implemented, this process is allowed, this purpose is authorized by
-        # the test fixture, and a snapshot is still never a training set.
+        # Separate judgments the caller can read apart: the write path is
+        # implemented, this process is allowed to write, this purpose has a
+        # basis (the test fixture or the owner's own recorded consent), and no
+        # basis is a customer release or a model activation.
         "snapshot_creation": {
             "implemented": True,
             "environment_allowed": authorization["environment_allowed"],
             "purpose_authorized": authorization["granted"],
             "authorization_mode": authorization["mode"],
-            "real_owner_consent": False,
+            "real_owner_consent": owner_consent_active,
+            "owner_consent_mode": authorization["owner_consent_mode"],
             "movable_to_customer_environment": False,
-            "usable_for_fixture_training": training_auth["granted"],
+            "usable_for_fixture_training": fixture_authorized,
+            "usable_for_owner_trial_training": local_trial_authorized,
             "usable_for_real_training": False,
         },
         "training": {
-            "implementation": "development_fixture_only",
-            "real_training": "NOT_APPROVED",
-            "model_activation": "NOT_APPROVED",
-            "inference": "NOT_APPROVED",
-            "customer_release": "NOT_APPROVED",
-            "activation_available": False,
-            "requires_owner_consent_and_fixture": True,
+            "implementation": "development_fixture_or_local_owner_trial",
+            # ``authorized_in_this_process`` says a run may start now. The
+            # status keys below describe the delivered contract, which is still
+            # not released for a customer environment, even in the owner trial.
             "authorized_in_this_process": training_auth["granted"],
             "authorization_mode": training_auth["authorization_mode"],
+            "local_owner_trial_authorized": local_trial_authorized,
             "consent_status": training_auth["consent_status"],
+            "customer_release_training": "NOT_APPROVED",
+            "customer_release_inference": "NOT_APPROVED",
+            "model_activation": "NOT_APPROVED",
+            "activation_available": False,
         },
     }
 

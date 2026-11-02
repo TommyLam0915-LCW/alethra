@@ -70,6 +70,10 @@ class Settings(BaseSettings):
     # The same kind of fixture for training and inference. It never becomes an
     # owner-consent value and never enables a customer process.
     agent_strategy_test_training_authorization: str = ""
+    # Purpose-level switch for the local owner trial. It is an operator
+    # capability, not consent: the owner's own recorded row is still required,
+    # so enabling this cannot manufacture a permission the owner never gave.
+    agent_strategy_owner_consent_mode: bool = False
     # Bounded intraday REST updates. Off by default: enabling it spends real
     # provider quota, and a real request also requires the interval to be
     # listed in intraday_verified_intervals after it was confirmed against the
@@ -124,6 +128,7 @@ class Settings(BaseSettings):
         self._validate_agent_strategy_screening()
         self._validate_agent_strategy_test_snapshot_authorization()
         self._validate_agent_strategy_test_training_authorization()
+        self._validate_agent_strategy_owner_consent_mode()
         self._validate_intraday_bounds()
         self._validate_crypto_budget_bounds()
 
@@ -251,6 +256,26 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"{env_name} requires a sqlite or loopback DATABASE_URL; "
                 f"{remote_reason}"
+            )
+
+    def _validate_agent_strategy_owner_consent_mode(self) -> None:
+        if not self.agent_strategy_owner_consent_mode:
+            return
+        if not self.agent_strategy_screening_enabled:
+            raise ValueError(
+                "AGENT_STRATEGY_OWNER_CONSENT_MODE requires "
+                "AGENT_STRATEGY_SCREENING_ENABLED=true."
+            )
+        if self.is_production_like or self.app_env != "development":
+            raise ValueError(
+                "AGENT_STRATEGY_OWNER_CONSENT_MODE is a local trial profile and "
+                f"must be off when APP_ENV={self.app_env}; a customer deployment "
+                "needs its own reviewed release."
+            )
+        if not is_local_database_url(self.database_url):
+            raise ValueError(
+                "AGENT_STRATEGY_OWNER_CONSENT_MODE requires a sqlite or loopback "
+                "DATABASE_URL; refusing to run an owner trial against a remote DB."
             )
 
     def _validate_intraday_bounds(self) -> None:

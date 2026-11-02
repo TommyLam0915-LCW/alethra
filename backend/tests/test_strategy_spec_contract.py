@@ -144,6 +144,29 @@ def test_preflight_separates_unsupported_from_invalid(client, auth_headers):
     assert body["errors"][0]["field"] == "timeframe"
 
 
+def test_preflight_accepts_a_venue_qualified_crypto_pair(client, auth_headers):
+    body = _preflight(
+        client, auth_headers, dict(BASE_SPEC, asset_ids=["CRYPTO:KRAKEN:BTC-USD"])
+    )
+    assert body["status"] == "valid"
+    assert body["errors"] == []
+
+
+@pytest.mark.parametrize(
+    "asset_id",
+    [
+        "CRYPTO:KRAKEN",           # missing pair
+        "CRYPTO:KRAKEN:BTCUSD",    # missing separator
+        "CRYPTO:NOWHERE:BTC-USD",  # unknown venue
+        "crypto:KRAKEN:BTC-USD",   # lowercase market segment
+    ],
+)
+def test_preflight_rejects_malformed_crypto_ids(client, auth_headers, asset_id):
+    body = _preflight(client, auth_headers, dict(BASE_SPEC, asset_ids=[asset_id]))
+    assert body["status"] == "invalid"
+    assert any(issue["field"] == "asset_ids" for issue in body["errors"])
+
+
 @pytest.mark.parametrize("path", ["/api/v1/strategy-templates", "/api/v1/strategy-specs/preflight"])
 def test_contract_routes_publish_a_typed_schema_and_description(client, path):
     spec = client.get("/openapi.json").json()

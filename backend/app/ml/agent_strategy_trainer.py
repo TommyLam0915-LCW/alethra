@@ -219,10 +219,13 @@ def _authorize(db, owner_id: uuid.UUID, settings=None) -> Dict[str, Any]:
     if not authorization["granted"]:
         raise AgentStrategyRefused(
             "agent_strategy_training_not_authorized",
-            "訓練需要已記錄的 owner 同意與開發訓練授權，兩者皆具備才會執行。",
+            "訓練需要 owner 本人已記錄的同意，以及一項授權基礎"
+            "（開發測試 fixture，或本機 owner 試用模式）；兩者皆具備才會執行。",
             {
                 "reason_code": authorization["reason_code"],
                 "fixture_granted": authorization["fixture_granted"],
+                "owner_consent_mode": authorization["owner_consent_mode"],
+                "authorization_mode": authorization["authorization_mode"],
                 "consent_status": authorization["consent_status"],
                 "model_activation": authorization["model_activation"],
             },

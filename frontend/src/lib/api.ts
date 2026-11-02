@@ -883,6 +883,95 @@ export const api = {
     listPersonalSelections: (recordId: string) =>
       apiFetch(`/api/v1/ml/personal/records/${recordId}/selections`),
   },
+  // Isolated agent-candidate screening slice. Every write here can be refused
+  // for consent, authorization or data reasons; callers show those refusals as
+  // returned instead of turning them into a generic failure.
+  agentStrategy: {
+    capabilities: () => apiFetch('/api/v1/agent-strategy/capabilities'),
+    consentPolicy: () => apiFetch('/api/v1/agent-strategy/consent-policy'),
+    // The acknowledgement is the full acceptance text the owner just read,
+    // echoed back exactly; the server validates it against its own copy.
+    acceptConsent: (data: {
+      policy_version: string;
+      acceptance_text_version: string;
+      acknowledgement: string;
+    }) =>
+      apiFetch('/api/v1/agent-strategy/consent', {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+    revokeConsent: (reason?: string | null) =>
+      apiFetch('/api/v1/agent-strategy/consent/revoke', {
+        method: 'POST',
+        body: JSON.stringify({ reason: reason ?? null }),
+      }),
+    contract: () => apiFetch('/api/v1/agent-strategy/contract'),
+    validateLineage: (lineage: Record<string, unknown>) =>
+      apiFetch('/api/v1/agent-strategy/contract/validate', {
+        method: 'POST',
+        body: JSON.stringify({ lineage }),
+      }),
+    collectCandidates: (data: {
+      strategy_version_id: string;
+      instrument_id?: string;
+      provider_id?: string;
+    }) =>
+      apiFetch('/api/v1/agent-strategy/candidates/collect', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    candidates: (strategyVersionId: string, instrumentId?: string) => {
+      const qs = new URLSearchParams({ strategy_version_id: strategyVersionId });
+      if (instrumentId) qs.set('instrument_id', instrumentId);
+      return apiFetch(`/api/v1/agent-strategy/candidates?${qs}`);
+    },
+    candidateOutcomes: (candidateId: string) =>
+      apiFetch(`/api/v1/agent-strategy/candidates/${candidateId}/outcomes`),
+    buildOutcomes: (data: {
+      strategy_version_id: string;
+      instrument_id?: string;
+      explicit_functional_test_order_ids?: string[];
+    }) =>
+      apiFetch('/api/v1/agent-strategy/candidates/outcomes', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    eligibility: (strategyVersionId: string, instrumentId?: string) => {
+      const qs = new URLSearchParams({ strategy_version_id: strategyVersionId });
+      if (instrumentId) qs.set('instrument_id', instrumentId);
+      return apiFetch(`/api/v1/agent-strategy/eligibility?${qs}`);
+    },
+    previewSnapshot: (data: { strategy_version_id: string; instrument_id?: string }) =>
+      apiFetch('/api/v1/agent-strategy/snapshots/preview', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    createSnapshot: (data: { strategy_version_id: string; instrument_id?: string }) =>
+      apiFetch('/api/v1/agent-strategy/snapshots', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    getSnapshot: (snapshotId: string) =>
+      apiFetch(`/api/v1/agent-strategy/snapshots/${snapshotId}`),
+    listTrainingJobs: (snapshotId?: string) =>
+      apiFetch(
+        `/api/v1/agent-strategy/training/jobs${
+          snapshotId ? `?snapshot_id=${encodeURIComponent(snapshotId)}` : ''
+        }`,
+      ),
+    getTrainingJob: (jobId: string) =>
+      apiFetch(`/api/v1/agent-strategy/training/jobs/${jobId}`),
+    train: (snapshotId: string) =>
+      apiFetch('/api/v1/agent-strategy/training/jobs', {
+        method: 'POST',
+        body: JSON.stringify({ snapshot_id: snapshotId }),
+      }),
+    infer: (jobId: string, features: Record<string, number>) =>
+      apiFetch(`/api/v1/agent-strategy/training/jobs/${jobId}/inference`, {
+        method: 'POST',
+        body: JSON.stringify({ features }),
+      }),
+  },
   billing: {
     listPlans: () => apiFetch('/api/v1/plans'),
     getMySubscription: () => apiFetch('/api/v1/subscriptions/me'),
