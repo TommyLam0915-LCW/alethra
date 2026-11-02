@@ -36,7 +36,9 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
+from app.auth.candidate_access import is_local_database_url
 from app.auth.provenance import UNKNOWN
+from app.config import AGENT_STRATEGY_TEST_SNAPSHOT_AUTHORIZATION, get_settings
 from app.lib.timeutil import utcnow as _utcnow
 from app.models.agent_strategy import (
     AgentCandidate,
@@ -64,6 +66,10 @@ PURPOSE = "agent_strategy_screening"
 CAPABILITY_STATUS = "DEVELOPMENT"
 CAPABILITY_STATUS_LABEL_ZH = "開發中／尚不可在原客戶環境執行"
 CONSENT_VERSION = "agent-strategy-learning-v1"
+LABEL_DEFINITION_VERSION = "cost-adjusted-net-return-v1"
+# Stored in the snapshot's authorization-basis columns. It says plainly that
+# the dataset was created under the development fixture, not owner consent.
+SNAPSHOT_AUTHORIZATION_MODE = "test_only_fixture"
 
 EXECUTION_POLICY_VERSION = "next-open-fixed-hold-v1"
 EXIT_POLICY = "close_after_5_bars"
@@ -183,6 +189,46 @@ def consent_status(db: Session, owner_id: uuid.UUID) -> Dict[str, Any]:
         "status": "not_configured",
         "fail_closed": True,
         "reason_code": "AGENT_STRATEGY_CONSENT_NOT_CONFIGURED",
+    }
+
+
+def snapshot_authorization(settings=None) -> Dict[str, Any]:
+    """Whether this process may freeze a ready dataset, and on what basis.
+
+    The basis is the development-only fixture; it is deliberately not owner
+    consent, so a snapshot created here stays labelled as such and cannot be
+    reused as a customer dataset or a training permission.
+    """
+    settings = settings or get_settings()
+    configured = (
+        getattr(settings, "agent_strategy_test_snapshot_authorization", "") or ""
+    ).strip()
+    environment_allowed = (
+        getattr(settings, "app_env", "") == "development"
+        and bool(getattr(settings, "agent_strategy_screening_enabled", False))
+        and is_local_database_url(getattr(settings, "database_url", ""))
+    )
+    granted = (
+        configured == AGENT_STRATEGY_TEST_SNAPSHOT_AUTHORIZATION
+        and environment_allowed
+    )
+    if granted:
+        reason_code = None
+    elif configured:
+        reason_code = "AGENT_STRATEGY_TEST_AUTHORIZATION_ENVIRONMENT_REFUSED"
+    else:
+        reason_code = "AGENT_STRATEGY_TEST_AUTHORIZATION_NOT_CONFIGURED"
+    return {
+        "purpose": PURPOSE,
+        "mode": SNAPSHOT_AUTHORIZATION_MODE if granted else "none",
+        "authorization_id": (
+            AGENT_STRATEGY_TEST_SNAPSHOT_AUTHORIZATION if granted else None
+        ),
+        "granted": granted,
+        "environment_allowed": environment_allowed,
+        "real_owner_consent": False,
+        "movable_to_customer_environment": False,
+        "reason_code": reason_code,
     }
 
 
@@ -1317,6 +1363,7 @@ def build_split_manifest(
 def _label_definition() -> Dict[str, Any]:
     return {
         "task_type": PURPOSE,
+        "label_definition_version": LABEL_DEFINITION_VERSION,
         "label_source": "cost_adjusted_outcome",
         "label_kind": "net_return_pct",
         "observed_source": "actual_paper_round_trip",
@@ -1346,6 +1393,98 @@ def _canonical_checksum(rows: List[dict], label_definition: dict) -> str:
         separators=(",", ":"),
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _dataset_checksum_input(
+    *,
+    strategy_version_id: str,
+    purpose: str,
+    rows: List[dict],
+    feature_names: List[str],
+    label_definition: dict,
+    split_manifest: dict,
+    included_count: int,
+    excluded_count: int,
+    date_range_start: Optional[str],
+    date_range_end: Optional[str],
+    data_cutoff_at: Optional[str],
+) -> Dict[str, Any]:
+    """Everything a frozen dataset consists of, including its versions.
+
+    All inputs are stored on the snapshot, so the checksum can be recomputed
+    from the record alone without re-reading a current outcome.
+    """
+    return {
+        "purpose": purpose,
+        "strategy_version_id": strategy_version_id,
+        "versions": {
+            "feature_schema": sorted(
+                {row["feature_schema_version"] for row in rows}
+            ),
+            "label_definition": sorted(
+                {row["label_definition_version"] for row in rows}
+            ),
+            "execution_policy": sorted(
+                {row["execution_policy_version"] for row in rows}
+            ),
+            "cost_model": sorted(
+                {row["outcome_cost_model_version"] for row in rows}
+            ),
+            "split_policy": split_manifest.get("policy_version"),
+        },
+        "feature_names": feature_names,
+        "rows": rows,
+        "label_definition": label_definition,
+        "split_manifest": split_manifest,
+        "included_count": included_count,
+        "excluded_count": excluded_count,
+        "date_range_start": date_range_start,
+        "date_range_end": date_range_end,
+        "data_cutoff_at": data_cutoff_at,
+    }
+
+
+def _checksum_of(payload: Dict[str, Any]) -> str:
+    canonical = json.dumps(
+        payload, sort_keys=True, default=str, separators=(",", ":")
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _ready_checksum(preview: Dict[str, Any]) -> str:
+    return _checksum_of(
+        _dataset_checksum_input(
+            strategy_version_id=preview["strategy_version_id"],
+            purpose=preview["purpose"],
+            rows=preview["rows"],
+            feature_names=preview["feature_names"],
+            label_definition=preview["label_definition"],
+            split_manifest=preview["split_manifest"],
+            included_count=preview["included_count"],
+            excluded_count=preview["excluded_count"],
+            date_range_start=preview["date_range_start"],
+            date_range_end=preview["date_range_end"],
+            data_cutoff_at=preview["data_cutoff_at"],
+        )
+    )
+
+
+def _stored_checksum(snapshot: AgentDatasetSnapshot) -> str:
+    return _checksum_of(
+        _dataset_checksum_input(
+            strategy_version_id=str(snapshot.strategy_version_id),
+            purpose=snapshot.purpose,
+            rows=snapshot.rows_json or [],
+            feature_names=snapshot.feature_names_json or [],
+            label_definition=snapshot.label_definition_json or {},
+            split_manifest=snapshot.split_manifest_json or {},
+            included_count=snapshot.included_count,
+            excluded_count=snapshot.excluded_count,
+            date_range_start=snapshot.date_range_start,
+            date_range_end=snapshot.date_range_end,
+            data_cutoff_at=snapshot.data_cutoff_at,
+        )
+    )
 
 
 def preview_snapshot(
@@ -1387,6 +1526,8 @@ def preview_snapshot(
             "decision_instant_source": candidate.decision_instant_source,
             "data_cutoff_at": candidate.data_cutoff_at,
             "feature_bar_date": candidate.feature_bar_date,
+            "feature_schema_version": candidate.feature_schema_version,
+            "label_definition_version": LABEL_DEFINITION_VERSION,
             "features": candidate.features_json,
             "execution_policy_version": candidate.execution_policy_version,
             # A snapshot references the exact outcome version it consumed, so
@@ -1423,6 +1564,12 @@ def preview_snapshot(
         and manifest["refusal_reason"] is None
         and all(size > 0 for size in split_sizes.values())
     )
+    signal_dates = sorted(row["signal_date"] for row in dataset_rows)
+    cutoffs = sorted(
+        row["data_cutoff_at"]
+        for row in dataset_rows
+        if row.get("data_cutoff_at")
+    )
 
     return {
         "strategy_version_id": str(strategy_version_id),
@@ -1437,6 +1584,9 @@ def preview_snapshot(
         "rows": dataset_rows,
         "included_count": len(dataset_rows),
         "excluded_count": sum(exclusions.values()),
+        "date_range_start": signal_dates[0] if signal_dates else None,
+        "date_range_end": signal_dates[-1] if signal_dates else None,
+        "data_cutoff_at": cutoffs[-1] if cutoffs else None,
         "exclusion_breakdown": dict(exclusions),
         "exclusion_labels_zh": {
             key: EXCLUSION_LABELS_ZH.get(key, key) for key in exclusions
@@ -1456,17 +1606,41 @@ def create_snapshot(
     *,
     instrument_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Record a refused snapshot while no research consent exists.
+    """Freeze one reproducible dataset, or record an explicit refusal.
 
-    The row is an audit record, not a training set: it has no rows and cannot
-    be consumed. A ready snapshot is only possible once a consent interface is
-    approved and implemented.
+    Success requires four separate conditions: the owner's locked version
+    exists, this process is allowed to write (development + screening), the
+    development test authorization is present, and the data passes the
+    eligibility and chronological-split checks. Without the authorization the
+    historical refusal record is kept; a data refusal writes nothing.
+
+    The returned snapshot is immutable: rows carry their exact outcome id and
+    version, and the checksum covers rows, versions and split manifest. A
+    repeated request with identical content returns the same snapshot.
     """
+    _get_owned_locked_version(db, owner_id, strategy_version_id)
+    # Serialize concurrent creates for the same version so "check then insert"
+    # cannot produce two identical ready rows. SQLite ignores FOR UPDATE.
+    (
+        db.query(ExperimentVersion)
+        .filter(ExperimentVersion.id == strategy_version_id)
+        .with_for_update()
+        .first()
+    )
     preview = preview_snapshot(
         db, owner_id, strategy_version_id, instrument_id=instrument_id
     )
     consent = preview["consent"]
-    if consent["status"] != "active":
+    authorization = snapshot_authorization()
+
+    if not authorization["granted"]:
+        if consent["status"] == "active":
+            # Real consent, if it ever exists, is separate from the test
+            # authorization; it does not by itself enable this write path.
+            raise AgentStrategyRefused(
+                "agent_strategy_snapshot_not_approved",
+                "本輪只批准以開發測試授權建立資料快照，未批准真實同意路徑。",
+            )
         refusal_payload = {
             "strategy_version_id": str(strategy_version_id),
             "purpose": PURPOSE,
@@ -1495,8 +1669,12 @@ def create_snapshot(
             checksum=_canonical_checksum([], refusal_payload),
             failure_reason="agent_strategy_consent_not_configured",
         )
-        db.add(snapshot)
-        db.commit()
+        try:
+            db.add(snapshot)
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
         db.refresh(snapshot)
         raise AgentStrategyRefused(
             "agent_strategy_consent_not_configured",
@@ -1509,10 +1687,114 @@ def create_snapshot(
             },
         )
 
-    raise AgentStrategyRefused(
-        "agent_strategy_snapshot_not_approved",
-        "本輪未批准建立可訓練的代理策略資料集。",
+    data_reasons = _snapshot_data_blockers(preview)
+    if data_reasons:
+        db.rollback()
+        raise AgentStrategyRefused(
+            "snapshot_data_not_eligible",
+            "資料資格或時間切分未通過，沒有建立任何 ready 快照。",
+            {
+                "reasons": data_reasons,
+                "included_count": preview["included_count"],
+                "excluded_count": preview["excluded_count"],
+                "screening_ready": preview["screening_ready"],
+                "split_refusal_reason": preview["split_manifest"].get(
+                    "refusal_reason"
+                ),
+            },
+        )
+
+    checksum = _ready_checksum(preview)
+    existing = (
+        db.query(AgentDatasetSnapshot)
+        .filter(
+            AgentDatasetSnapshot.owner_id == owner_id,
+            AgentDatasetSnapshot.strategy_version_id == strategy_version_id,
+            AgentDatasetSnapshot.purpose == PURPOSE,
+            AgentDatasetSnapshot.status == "ready",
+            AgentDatasetSnapshot.checksum == checksum,
+        )
+        .first()
     )
+    if existing is not None:
+        db.rollback()
+        payload = snapshot_payload(existing)
+        payload["created"] = False
+        payload["deduplicated"] = True
+        return payload
+
+    snapshot = AgentDatasetSnapshot(
+        owner_id=owner_id,
+        strategy_version_id=strategy_version_id,
+        purpose=PURPOSE,
+        # The authorization basis is recorded in the two fields the model has
+        # for it. The value names the test fixture; it is not owner consent.
+        consent_policy_version=AGENT_STRATEGY_TEST_SNAPSHOT_AUTHORIZATION,
+        consent_status=SNAPSHOT_AUTHORIZATION_MODE,
+        status="ready",
+        candidate_ids_json=[row["candidate_id"] for row in preview["rows"]],
+        rows_json=preview["rows"],
+        feature_names_json=preview["feature_names"],
+        label_definition_json=preview["label_definition"],
+        exclusion_breakdown_json=preview["exclusion_breakdown"],
+        outcome_distribution_json=preview["outcome_distribution"],
+        split_manifest_json=preview["split_manifest"],
+        included_count=preview["included_count"],
+        excluded_count=preview["excluded_count"],
+        date_range_start=preview["date_range_start"],
+        date_range_end=preview["date_range_end"],
+        data_cutoff_at=preview["data_cutoff_at"],
+        checksum=checksum,
+        failure_reason=None,
+    )
+    try:
+        db.add(snapshot)
+        # One commit: the row, its rows/candidate ids and its manifest land
+        # together or not at all.
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    db.refresh(snapshot)
+    payload = snapshot_payload(snapshot)
+    payload["created"] = True
+    payload["deduplicated"] = False
+    return payload
+
+
+def _snapshot_data_blockers(preview: Dict[str, Any]) -> List[Dict[str, Any]]:
+    blockers: List[Dict[str, Any]] = []
+    manifest = preview["split_manifest"]
+    if not preview["rows"]:
+        blockers.append(
+            {"code": "NO_ELIGIBLE_ROWS", "message_zh": "沒有可凍結的合格資料列。"}
+        )
+    if not preview["screening_ready"]:
+        blockers.append(
+            {
+                "code": "SCREENING_NOT_READY",
+                "message_zh": "資料資格未達最低門檻。",
+                "reasons": preview["eligibility"].get("reasons", []),
+            }
+        )
+    if manifest.get("refusal_reason"):
+        blockers.append(
+            {
+                "code": "SPLIT_REFUSED",
+                "message_zh": "時間切分被拒絕。",
+                "reason": manifest["refusal_reason"],
+            }
+        )
+    for name in ("train", "validation", "test"):
+        if not manifest["splits"][name]["candidate_ids"]:
+            blockers.append(
+                {
+                    "code": "EMPTY_SPLIT",
+                    "message_zh": f"{name} 切分沒有任何樣本。",
+                    "split": name,
+                }
+            )
+    return blockers
 
 
 # ---------------------------------------------------------------------------
@@ -1796,12 +2078,29 @@ def outcome_payload(outcome: AgentCandidateOutcome) -> Dict[str, Any]:
 
 
 def snapshot_payload(snapshot: AgentDatasetSnapshot) -> Dict[str, Any]:
+    if snapshot.status == "ready":
+        recomputed = _stored_checksum(snapshot)
+        integrity = {
+            "checksum_verified": recomputed == snapshot.checksum,
+            "recomputed_checksum": recomputed,
+        }
+    else:
+        integrity = {
+            "checksum_verified": None,
+            "reason": "refused_record_has_no_dataset_payload",
+        }
     return {
         "id": str(snapshot.id),
         "strategy_version_id": str(snapshot.strategy_version_id),
         "purpose": snapshot.purpose,
         "consent_policy_version": snapshot.consent_policy_version,
         "consent_status": snapshot.consent_status,
+        "authorization": {
+            "basis": snapshot.consent_status,
+            "policy_version": snapshot.consent_policy_version,
+            "real_owner_consent": False,
+            "movable_to_customer_environment": False,
+        },
         "status": snapshot.status,
         "candidate_ids": snapshot.candidate_ids_json,
         "rows": snapshot.rows_json,
@@ -1812,8 +2111,30 @@ def snapshot_payload(snapshot: AgentDatasetSnapshot) -> Dict[str, Any]:
         "split_manifest": snapshot.split_manifest_json,
         "included_count": snapshot.included_count,
         "excluded_count": snapshot.excluded_count,
+        "date_range_start": snapshot.date_range_start,
+        "date_range_end": snapshot.date_range_end,
+        "data_cutoff_at": snapshot.data_cutoff_at,
         "checksum": snapshot.checksum,
+        "integrity": integrity,
         "failure_reason": snapshot.failure_reason,
         "created_at": snapshot.created_at.isoformat() if snapshot.created_at else None,
         "usable_for_training": False,
     }
+
+
+def get_snapshot(
+    db: Session, owner_id: uuid.UUID, snapshot_id: uuid.UUID
+) -> Dict[str, Any]:
+    snapshot = (
+        db.query(AgentDatasetSnapshot)
+        .filter(
+            AgentDatasetSnapshot.id == snapshot_id,
+            AgentDatasetSnapshot.owner_id == owner_id,
+        )
+        .first()
+    )
+    if snapshot is None:
+        raise AgentStrategyRefused(
+            "snapshot_not_found", "找不到此帳號擁有的資料快照。"
+        )
+    return snapshot_payload(snapshot)

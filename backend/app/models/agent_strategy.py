@@ -166,8 +166,12 @@ class AgentDatasetSnapshot(Base):
     )
 
     purpose = Column(String(64), nullable=False, default="agent_strategy_screening")
+    # The authorization basis actually used, not necessarily owner consent.
+    # ``not_configured`` marks a refused audit row; ``test_only_fixture`` marks
+    # a dataset frozen under the development authorization fixture. No value
+    # here ever means "training is approved".
     consent_policy_version = Column(String(64), nullable=False)
-    # not_configured | active | revoked
+    # not_configured | test_only_fixture | active | revoked
     consent_status = Column(String(32), nullable=False)
     # ready | refused
     status = Column(String(16), nullable=False)

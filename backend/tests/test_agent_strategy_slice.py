@@ -43,13 +43,16 @@ from app.models.paper_portfolio import (
     PortfolioStatus,
 )
 from app.models.user import User
+from app.config import AGENT_STRATEGY_TEST_SNAPSHOT_AUTHORIZATION
 from app.services.agent_strategy import (
     COMMISSION_RATE,
     EXECUTION_POLICY_VERSION,
     FEATURE_EXCLUSIONS,
     HOLD_BARS,
     INITIAL_NOTIONAL,
+    LABEL_DEFINITION_VERSION,
     SLIPPAGE_RATE,
+    SNAPSHOT_AUTHORIZATION_MODE,
     AgentStrategyRefused,
     _canonical_checksum,
     build_outcomes,
@@ -61,11 +64,16 @@ from app.services.agent_strategy import (
     existing_trade_eligibility,
     list_candidates,
     preview_snapshot,
+    snapshot_authorization,
     snapshot_payload,
     training_contract,
     validate_lineage,
 )
-from app.services.personal_dataset import daily_bar_available_at, features_as_of
+from app.services.personal_dataset import (
+    FEATURE_SCHEMA_VERSION,
+    daily_bar_available_at,
+    features_as_of,
+)
 
 INSTRUMENT = "DEMO-ALPHA"
 EXPENSIVE = "DEMO-BETA"
@@ -111,7 +119,9 @@ def _zigzag(levels=7, count=40, base=50.0):
     return [base + float(i % levels) for i in range(count)]
 
 
-def _create_locked_strategy(client, headers, instrument=INSTRUMENT, title="Screening"):
+def _create_locked_strategy(
+    client, headers, instrument=INSTRUMENT, title="Screening", window_days=80
+):
     resp = client.post(
         "/api/v1/experiments/",
         headers=headers,
@@ -122,7 +132,7 @@ def _create_locked_strategy(client, headers, instrument=INSTRUMENT, title="Scree
                 "template_type": "sma_crossover",
                 "asset_ids": [instrument],
                 "start_date": START.isoformat(),
-                "end_date": (START + timedelta(days=80)).isoformat(),
+                "end_date": (START + timedelta(days=window_days)).isoformat(),
                 "initial_cash": 100000,
                 "signal_parameters": {"short_window": 2, "long_window": 3},
             },
@@ -1328,3 +1338,588 @@ def _paper_snapshot(db):
         for decision in db.query(DecisionRecord).order_by(DecisionRecord.id).all()
     ]
     return orders, fills, cash, decisions
+
+
+# ---------------------------------------------------------------------------
+# Ready snapshot: the success path, its read-back and its immutability
+# ---------------------------------------------------------------------------
+
+
+def _enable_test_snapshot_authorization(monkeypatch, token=None):
+    """Install the development-only authorization fixture for one test.
+
+    This is the test-only policy fixture the directive allows. It is not owner
+    consent, and the settings validator refuses it outside development + local
+    database + screening enabled. Tests that need the *absent* fixture pass
+    ``token=""``.
+    """
+    from types import SimpleNamespace
+
+    authorization = (
+        AGENT_STRATEGY_TEST_SNAPSHOT_AUTHORIZATION if token is None else token
+    )
+    settings = SimpleNamespace(
+        app_env="development",
+        agent_strategy_screening_enabled=True,
+        database_url="sqlite:///./test.db",
+        agent_strategy_test_snapshot_authorization=authorization,
+    )
+    monkeypatch.setattr(
+        "app.services.agent_strategy.get_settings", lambda: settings
+    )
+    monkeypatch.setattr("app.api.agent_strategy.get_settings", lambda: settings)
+    return settings
+
+
+def _ready_screening_flow(client, headers, monkeypatch):
+    """Collect, build outcomes and preview over HTTP on a ready-sized fixture."""
+    _enable_test_snapshot_authorization(monkeypatch)
+    _seed_bars(INSTRUMENT, _zigzag(levels=5, count=180))
+    version_id = _create_locked_strategy(
+        client, headers, title="Ready snapshot", window_days=180
+    )
+    body = {"strategy_version_id": str(version_id)}
+
+    collect = client.post(
+        "/api/v1/agent-strategy/candidates/collect", headers=headers, json=body
+    )
+    assert collect.status_code == 200, collect.text
+    outcomes = client.post(
+        "/api/v1/agent-strategy/candidates/outcomes", headers=headers, json=body
+    )
+    assert outcomes.status_code == 200, outcomes.text
+    eligibility = client.get(
+        "/api/v1/agent-strategy/eligibility",
+        headers=headers,
+        params={"strategy_version_id": str(version_id)},
+    )
+    assert eligibility.status_code == 200, eligibility.text
+    preview = client.post(
+        "/api/v1/agent-strategy/snapshots/preview", headers=headers, json=body
+    )
+    assert preview.status_code == 200, preview.text
+    return version_id, eligibility.json(), preview.json()
+
+
+class TestReadySnapshot:
+    """A snapshot is created only when all four judgments pass, and it freezes."""
+
+    def test_http_create_freezes_reproducible_content_and_reads_back(
+        self, client, auth_headers, monkeypatch
+    ):
+        version_id, eligibility, preview = _ready_screening_flow(
+            client, auth_headers, monkeypatch
+        )
+        assert eligibility["screening_ready"] is True
+        assert preview["screening_ready"] is True
+        assert preview["rows"]
+
+        capabilities = client.get(
+            "/api/v1/agent-strategy/capabilities", headers=auth_headers
+        )
+        assert capabilities.status_code == 200, capabilities.text
+        assert capabilities.json()["snapshot_creation"] == {
+            "implemented": True,
+            "environment_allowed": True,
+            "purpose_authorized": True,
+            "authorization_mode": SNAPSHOT_AUTHORIZATION_MODE,
+            "real_owner_consent": False,
+            "movable_to_customer_environment": False,
+            "usable_for_training": False,
+        }
+
+        resp = client.post(
+            "/api/v1/agent-strategy/snapshots",
+            headers=auth_headers,
+            json={"strategy_version_id": str(version_id)},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+
+        # Identity and success bookkeeping.
+        assert uuid.UUID(body["id"])
+        assert body["status"] == "ready"
+        assert body["created"] is True
+        assert body["deduplicated"] is False
+        assert body["failure_reason"] is None
+        assert body["created_at"]
+
+        # The frozen rows are exactly the previewed rows and carry their own
+        # candidate id, outcome id and outcome version, not a current-row link.
+        assert body["candidate_ids"] == [
+            row["candidate_id"] for row in preview["rows"]
+        ]
+        assert body["rows"] == preview["rows"]
+        assert body["included_count"] == len(preview["rows"])
+        assert body["excluded_count"] == preview["excluded_count"]
+        for row in body["rows"]:
+            assert uuid.UUID(row["candidate_id"])
+            assert uuid.UUID(row["outcome_id"])
+            assert row["outcome_version"] >= 1
+            assert row["outcome_selection_reason"]
+            assert row["outcome_status"] in {"observed", "counterfactual"}
+            assert row["outcome_source"] in {
+                "paper_fill",
+                "counterfactual_replay",
+            }
+            assert row["feature_schema_version"] == FEATURE_SCHEMA_VERSION
+            assert row["label_definition_version"] == LABEL_DEFINITION_VERSION
+            assert row["execution_policy_version"] == EXECUTION_POLICY_VERSION
+            assert row["outcome_cost_model_version"]
+            assert row["label_maturity"]
+            assert row["label_eligible"] is True
+            assert row["features"] or row["candidate_id"]  # a frozen row exists
+            assert row["data_cutoff_at"] <= row["decision_date"]
+
+        # Version set, split/purge manifest, date range and checksum.
+        assert body["feature_names"] == preview["feature_names"]
+        assert (
+            body["label_definition"]["label_definition_version"]
+            == LABEL_DEFINITION_VERSION
+        )
+        manifest = body["split_manifest"]
+        assert manifest["policy_version"]
+        assert manifest["no_shuffle"] is True
+        assert manifest["refusal_reason"] is None
+        assigned = [
+            candidate_id
+            for split in manifest["splits"].values()
+            for candidate_id in split["candidate_ids"]
+        ]
+        purged = [item["candidate_id"] for item in manifest["purged"]]
+        assert set(assigned).isdisjoint(purged)
+        assert set(assigned) | set(purged) == set(body["candidate_ids"])
+        assert (
+            manifest["total_assigned"] + manifest["total_purged"]
+            == manifest["total_eligible"]
+        )
+        assert all(
+            manifest["splits"][name]["candidate_ids"]
+            for name in ("train", "validation", "test")
+        )
+        assert body["date_range_start"]
+        assert body["date_range_end"]
+        assert body["data_cutoff_at"]
+        assert body["checksum"]
+        # The stored content recomputes to the published checksum.
+        assert body["integrity"]["checksum_verified"] is True
+        assert body["integrity"]["recomputed_checksum"] == body["checksum"]
+
+        # The authorization basis is the fixture, never owner consent.
+        assert body["consent_status"] == SNAPSHOT_AUTHORIZATION_MODE
+        assert (
+            body["consent_policy_version"]
+            == AGENT_STRATEGY_TEST_SNAPSHOT_AUTHORIZATION
+        )
+        assert body["authorization"] == {
+            "basis": SNAPSHOT_AUTHORIZATION_MODE,
+            "policy_version": AGENT_STRATEGY_TEST_SNAPSHOT_AUTHORIZATION,
+            "real_owner_consent": False,
+            "movable_to_customer_environment": False,
+        }
+        assert body["usable_for_training"] is False
+
+        # GET read-back is the same payload, and the row is really persisted.
+        read = client.get(
+            f"/api/v1/agent-strategy/snapshots/{body['id']}", headers=auth_headers
+        )
+        assert read.status_code == 200, read.text
+        read_body = read.json()
+        assert {key: read_body[key] for key in read_body} == {
+            key: body[key] for key in read_body
+        }
+        assert read_body["id"] == body["id"]
+
+        db = TestSession()
+        try:
+            stored = db.get(AgentDatasetSnapshot, uuid.UUID(body["id"]))
+            assert stored.status == "ready"
+            assert stored.candidate_ids_json == body["candidate_ids"]
+            assert stored.rows_json == body["rows"]
+            assert stored.included_count == body["included_count"]
+            for row in body["rows"]:
+                outcome = db.get(
+                    AgentCandidateOutcome, uuid.UUID(row["outcome_id"])
+                )
+                assert outcome is not None
+                assert str(outcome.candidate_id) == row["candidate_id"]
+                assert outcome.version_seq == row["outcome_version"]
+        finally:
+            db.close()
+
+    def test_repeated_request_returns_the_same_snapshot(self, client, auth_headers, monkeypatch):
+        version_id, _, _ = _ready_screening_flow(client, auth_headers, monkeypatch)
+        body = {"strategy_version_id": str(version_id)}
+
+        first = client.post(
+            "/api/v1/agent-strategy/snapshots", headers=auth_headers, json=body
+        )
+        assert first.status_code == 200, first.text
+        second = client.post(
+            "/api/v1/agent-strategy/snapshots", headers=auth_headers, json=body
+        )
+        assert second.status_code == 200, second.text
+
+        assert first.json()["created"] is True
+        assert second.json()["id"] == first.json()["id"]
+        assert second.json()["created"] is False
+        assert second.json()["deduplicated"] is True
+        assert second.json()["checksum"] == first.json()["checksum"]
+
+        db = TestSession()
+        try:
+            ready = (
+                db.query(AgentDatasetSnapshot)
+                .filter(
+                    AgentDatasetSnapshot.strategy_version_id == version_id,
+                    AgentDatasetSnapshot.status == "ready",
+                )
+                .all()
+            )
+        finally:
+            db.close()
+        assert len(ready) == 1
+
+    def test_old_ready_snapshot_is_unchanged_when_observed_evidence_arrives(
+        self, client, auth_headers, monkeypatch
+    ):
+        version_id, _, _ = _ready_screening_flow(client, auth_headers, monkeypatch)
+        body = {"strategy_version_id": str(version_id)}
+        first = client.post(
+            "/api/v1/agent-strategy/snapshots", headers=auth_headers, json=body
+        )
+        assert first.status_code == 200, first.text
+        first_body = first.json()
+        first_read = client.get(
+            f"/api/v1/agent-strategy/snapshots/{first_body['id']}",
+            headers=auth_headers,
+        )
+        assert first_read.status_code == 200, first_read.text
+
+        target = next(
+            row
+            for row in first_body["rows"]
+            if row["outcome_status"] == "counterfactual"
+        )
+
+        db = TestSession()
+        try:
+            portfolio = PaperPortfolio(
+                owner_id=_owner_id(),
+                currency="USD",
+                initial_virtual_cash=100000.0,
+                current_virtual_cash=90000.0,
+                status=PortfolioStatus.active,
+            )
+            db.add(portfolio)
+            db.flush()
+            _filled_round_trip_leg(
+                db,
+                portfolio,
+                OrderSide.BUY,
+                target["entry_execution_date"],
+                100.0,
+                -1000.0,
+                version_id,
+            )
+            _filled_round_trip_leg(
+                db,
+                portfolio,
+                OrderSide.SELL,
+                target["exit_execution_date"],
+                110.0,
+                1100.0,
+                None,
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        rebuild = client.post(
+            "/api/v1/agent-strategy/candidates/outcomes",
+            headers=auth_headers,
+            json=body,
+        )
+        assert rebuild.status_code == 200, rebuild.text
+
+        preview_after = client.post(
+            "/api/v1/agent-strategy/snapshots/preview",
+            headers=auth_headers,
+            json=body,
+        )
+        assert preview_after.status_code == 200, preview_after.text
+        preview_after_body = preview_after.json()
+        refreshed = next(
+            row
+            for row in preview_after_body["rows"]
+            if row["candidate_id"] == target["candidate_id"]
+        )
+        assert refreshed["outcome_version"] == target["outcome_version"] + 1
+        assert refreshed["outcome_status"] == "observed"
+        assert refreshed["outcome_source"] == "paper_fill"
+        assert preview_after_body["checksum"] != first_body["checksum"]
+
+        second = client.post(
+            "/api/v1/agent-strategy/snapshots", headers=auth_headers, json=body
+        )
+        assert second.status_code == 200, second.text
+        second_body = second.json()
+        assert second_body["created"] is True
+        assert second_body["id"] != first_body["id"]
+        assert second_body["checksum"] != first_body["checksum"]
+
+        # The old snapshot's payload did not move, even though the current
+        # outcome for that candidate did.
+        read_after = client.get(
+            f"/api/v1/agent-strategy/snapshots/{first_body['id']}",
+            headers=auth_headers,
+        )
+        assert read_after.status_code == 200, read_after.text
+        assert read_after.json() == first_read.json()
+
+        db = TestSession()
+        try:
+            frozen = db.get(AgentDatasetSnapshot, uuid.UUID(first_body["id"]))
+            assert frozen.rows_json == first_body["rows"]
+            assert frozen.checksum == first_body["checksum"]
+            old_outcome = db.get(
+                AgentCandidateOutcome, uuid.UUID(target["outcome_id"])
+            )
+            assert old_outcome.version_seq == target["outcome_version"]
+            # The old version is retained as evidence but no longer current.
+            assert old_outcome.is_current is False
+            newest = db.get(
+                AgentDatasetSnapshot, uuid.UUID(second_body["id"])
+            )
+            newest_row = next(
+                row
+                for row in newest.rows_json
+                if row["candidate_id"] == target["candidate_id"]
+            )
+            assert newest_row["outcome_version"] == target["outcome_version"] + 1
+            assert newest_row["outcome_id"] != target["outcome_id"]
+        finally:
+            db.close()
+
+    def test_non_owner_cannot_read_or_create(self, client, auth_headers, monkeypatch):
+        version_id, _, _ = _ready_screening_flow(client, auth_headers, monkeypatch)
+        snapshot = client.post(
+            "/api/v1/agent-strategy/snapshots",
+            headers=auth_headers,
+            json={"strategy_version_id": str(version_id)},
+        )
+        assert snapshot.status_code == 200, snapshot.text
+
+        other = client.post(
+            "/api/auth/register",
+            json={
+                "risk_acknowledged": True,
+                "email": "other-owner@alethra.io",
+                "password": "otherpass123",
+                "display_name": "Other Owner",
+                "user_type": "individual",
+            },
+        )
+        assert other.status_code in (201, 400), other.text
+        login = client.post(
+            "/api/auth/login",
+            json={"email": "other-owner@alethra.io", "password": "otherpass123"},
+        )
+        assert login.status_code == 200, login.text
+        other_headers = {
+            "Authorization": f"Bearer {login.json()['access_token']}"
+        }
+
+        read = client.get(
+            f"/api/v1/agent-strategy/snapshots/{snapshot.json()['id']}",
+            headers=other_headers,
+        )
+        assert read.status_code == 404, read.text
+        assert read.json()["detail"]["code"] == "snapshot_not_found"
+
+        create = client.post(
+            "/api/v1/agent-strategy/snapshots",
+            headers=other_headers,
+            json={"strategy_version_id": str(version_id)},
+        )
+        assert create.status_code == 409, create.text
+        assert create.json()["detail"]["code"] == "strategy_version_not_found"
+
+        db = TestSession()
+        try:
+            ready = (
+                db.query(AgentDatasetSnapshot)
+                .filter(AgentDatasetSnapshot.status == "ready")
+                .count()
+            )
+        finally:
+            db.close()
+        assert ready == 1
+
+    def test_read_only_api_key_cannot_create_a_snapshot(
+        self, client, auth_headers, monkeypatch
+    ):
+        version_id, _, _ = _ready_screening_flow(client, auth_headers, monkeypatch)
+        key = client.post(
+            "/api/v1/api-keys",
+            headers=auth_headers,
+            json={"name": "ready-snapshot-read-only", "scopes": ["read"]},
+        )
+        assert key.status_code == 201, key.text
+        read_only_headers = {
+            "Authorization": f"Bearer {key.json()['raw_key']}"
+        }
+
+        resp = client.post(
+            "/api/v1/agent-strategy/snapshots",
+            headers=read_only_headers,
+            json={"strategy_version_id": str(version_id)},
+        )
+        assert resp.status_code == 403, resp.text
+        detail = resp.json()["detail"]
+        assert detail["error"] == "insufficient_scope"
+        assert detail["required_scope"] == "write"
+        assert "write" not in detail["held_scopes"]
+
+        db = TestSession()
+        try:
+            ready = (
+                db.query(AgentDatasetSnapshot)
+                .filter(AgentDatasetSnapshot.status == "ready")
+                .count()
+            )
+        finally:
+            db.close()
+        assert ready == 0
+
+    def test_ineligible_data_is_refused_without_a_ready_row(
+        self, client, auth_headers, monkeypatch
+    ):
+        _enable_test_snapshot_authorization(monkeypatch)
+        # Too few stored observations to reach the screening minimum.
+        _seed_bars(INSTRUMENT, _zigzag(count=40))
+        version_id = _create_locked_strategy(client, auth_headers)
+        body = {"strategy_version_id": str(version_id)}
+        for route in (
+            "/api/v1/agent-strategy/candidates/collect",
+            "/api/v1/agent-strategy/candidates/outcomes",
+        ):
+            resp = client.post(route, headers=auth_headers, json=body)
+            assert resp.status_code == 200, (route, resp.text)
+
+        preview = client.post(
+            "/api/v1/agent-strategy/snapshots/preview",
+            headers=auth_headers,
+            json=body,
+        )
+        assert preview.status_code == 200, preview.text
+        assert preview.json()["screening_ready"] is False
+
+        resp = client.post(
+            "/api/v1/agent-strategy/snapshots", headers=auth_headers, json=body
+        )
+        assert resp.status_code == 409, resp.text
+        detail = resp.json()["detail"]
+        assert detail["code"] == "snapshot_data_not_eligible"
+        assert detail["details"]["screening_ready"] is False
+        reason_codes = {item["code"] for item in detail["details"]["reasons"]}
+        assert "SCREENING_NOT_READY" in reason_codes
+
+        db = TestSession()
+        try:
+            snapshots = (
+                db.query(AgentDatasetSnapshot)
+                .filter(AgentDatasetSnapshot.strategy_version_id == version_id)
+                .all()
+            )
+        finally:
+            db.close()
+        # A data refusal writes nothing at all: no ready row, no half-product.
+        assert snapshots == []
+
+    def test_screening_enabled_without_the_fixture_still_refuses(
+        self, client, auth_headers, monkeypatch
+    ):
+        _enable_test_snapshot_authorization(monkeypatch, token="")
+        _seed_bars(INSTRUMENT, _zigzag(levels=5, count=180))
+        version_id = _create_locked_strategy(
+            client, auth_headers, title="No fixture", window_days=180
+        )
+        body = {"strategy_version_id": str(version_id)}
+        for route in (
+            "/api/v1/agent-strategy/candidates/collect",
+            "/api/v1/agent-strategy/candidates/outcomes",
+        ):
+            resp = client.post(route, headers=auth_headers, json=body)
+            assert resp.status_code == 200, (route, resp.text)
+
+        capabilities = client.get(
+            "/api/v1/agent-strategy/capabilities", headers=auth_headers
+        )
+        assert capabilities.status_code == 200, capabilities.text
+        creation = capabilities.json()["snapshot_creation"]
+        assert creation["implemented"] is True
+        assert creation["environment_allowed"] is True
+        assert creation["purpose_authorized"] is False
+        assert creation["authorization_mode"] == "none"
+
+        resp = client.post(
+            "/api/v1/agent-strategy/snapshots", headers=auth_headers, json=body
+        )
+        assert resp.status_code == 409, resp.text
+        detail = resp.json()["detail"]
+        assert detail["code"] == "agent_strategy_consent_not_configured"
+        assert detail["details"]["status"] == "refused"
+        assert detail["details"]["stored_rows"] == 0
+
+        db = TestSession()
+        try:
+            snapshots = (
+                db.query(AgentDatasetSnapshot)
+                .filter(AgentDatasetSnapshot.strategy_version_id == version_id)
+                .all()
+            )
+            statuses = [snapshot.status for snapshot in snapshots]
+        finally:
+            db.close()
+        # The historical refusal audit row is kept; no ready row is written.
+        assert statuses == ["refused"]
+
+    def test_snapshot_authorization_reports_environment_refusal(self):
+        from types import SimpleNamespace
+
+        granted = snapshot_authorization(
+            SimpleNamespace(
+                app_env="development",
+                agent_strategy_screening_enabled=True,
+                database_url="sqlite:///./test.db",
+                agent_strategy_test_snapshot_authorization=(
+                    AGENT_STRATEGY_TEST_SNAPSHOT_AUTHORIZATION
+                ),
+            )
+        )
+        assert granted["granted"] is True
+        assert granted["mode"] == SNAPSHOT_AUTHORIZATION_MODE
+        assert granted["real_owner_consent"] is False
+        assert granted["movable_to_customer_environment"] is False
+        assert granted["reason_code"] is None
+
+        refused = snapshot_authorization(
+            SimpleNamespace(
+                app_env="production",
+                agent_strategy_screening_enabled=True,
+                database_url="postgresql://db.example.com/alethra",
+                agent_strategy_test_snapshot_authorization=(
+                    AGENT_STRATEGY_TEST_SNAPSHOT_AUTHORIZATION
+                ),
+            )
+        )
+        assert refused["granted"] is False
+        assert refused["environment_allowed"] is False
+        assert refused["mode"] == "none"
+        assert refused["real_owner_consent"] is False
+        assert refused["movable_to_customer_environment"] is False
+        assert (
+            refused["reason_code"]
+            == "AGENT_STRATEGY_TEST_AUTHORIZATION_ENVIRONMENT_REFUSED"
+        )

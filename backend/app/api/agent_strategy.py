@@ -35,8 +35,10 @@ from app.services.agent_strategy import (
     create_snapshot,
     evaluate_eligibility,
     existing_trade_eligibility,
+    get_snapshot,
     list_candidates,
     preview_snapshot,
+    snapshot_authorization,
     training_contract,
     validate_lineage,
 )
@@ -106,10 +108,24 @@ def get_capability(
     current_user: User = Depends(get_current_user),
     _scope_check=Depends(check_api_key_scope("read")),
 ):
+    settings = get_settings()
+    authorization = snapshot_authorization(settings)
     return {
         "capability": capability(),
-        "enabled_in_this_process": get_settings().agent_strategy_screening_enabled,
+        "enabled_in_this_process": settings.agent_strategy_screening_enabled,
         "consent_policy": consent_policy(),
+        # Four separate judgments the caller can read apart: the write path is
+        # implemented, this process is allowed, this purpose is authorized by
+        # the test fixture, and a snapshot is still never a training set.
+        "snapshot_creation": {
+            "implemented": True,
+            "environment_allowed": authorization["environment_allowed"],
+            "purpose_authorized": authorization["granted"],
+            "authorization_mode": authorization["mode"],
+            "real_owner_consent": False,
+            "movable_to_customer_environment": False,
+            "usable_for_training": False,
+        },
         "training": {
             "real_training": "NOT_APPROVED",
             "model_activation": "NOT_APPROVED",
@@ -258,6 +274,26 @@ def post_create_snapshot(
             instrument_id=body.instrument_id,
         )
     except AgentStrategyRefused as exc:
+        raise _refusal_http(exc)
+
+
+@router.get("/snapshots/{snapshot_id}")
+def get_snapshot_by_id(
+    snapshot_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope("read")),
+    db: Session = Depends(get_db),
+):
+    try:
+        return get_snapshot(db, current_user.id, snapshot_id)
+    except AgentStrategyRefused as exc:
+        if exc.code == "snapshot_not_found":
+            # A snapshot owned by someone else is reported as absent, not as
+            # forbidden, so the route does not confirm that it exists.
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"code": exc.code, "message_zh": exc.message_zh},
+            )
         raise _refusal_http(exc)
 
 
