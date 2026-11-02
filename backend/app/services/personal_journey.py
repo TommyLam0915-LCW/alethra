@@ -133,6 +133,10 @@ def _review_summary(
         label = labels.get(event.id)
         if label is None:
             continue
+        # Only a confirmation written through a password-authenticated owner
+        # session counts. Anything else stays in ``unreviewed``.
+        if (label.actor_type or "unknown") != HUMAN:
+            continue
         if label.state is DecisionLabelState.excluded:
             excluded += 1
         elif label.action_label in USABLE_ACTIONS:

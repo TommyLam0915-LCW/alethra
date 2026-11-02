@@ -15,6 +15,7 @@ from datetime import date, datetime
 
 from tests.conftest import TestSession
 from app.models.audit_event import AuditEvent
+from app.models.decision_label import DecisionLabel, DecisionLabelState
 from app.models.human_decision import (
     HumanDecisionAction,
     HumanDecisionEvent,
@@ -90,6 +91,33 @@ def _add_event(
         db.commit()
         db.refresh(event)
         return event.id
+    finally:
+        db.close()
+
+
+def _confirm(
+    owner_id,
+    event_id,
+    action="buy",
+    *,
+    state="confirmed",
+    actor_type="human",
+):
+    db = TestSession()
+    try:
+        db.add(
+            DecisionLabel(
+                owner_id=owner_id,
+                decision_event_id=event_id,
+                revision_number=1,
+                state=DecisionLabelState(state),
+                action_label=action if state == "confirmed" else None,
+                exclusion_reason="test_trade" if state == "excluded" else None,
+                author_id=owner_id,
+                actor_type=actor_type,
+            )
+        )
+        db.commit()
     finally:
         db.close()
 
@@ -256,7 +284,8 @@ class TestConsentContract:
     def test_revoke_drops_scope_and_returns_to_refusal(self, client, auth_headers):
         owner_id = _current_user_id()
         _, version_id = _create_experiment(client, auth_headers)
-        _add_event(owner_id, uuid.UUID(version_id))
+        event_id = _add_event(owner_id, uuid.UUID(version_id))
+        _confirm(owner_id, event_id)
         client.put(
             "/api/v1/ml/personalization/consent",
             headers=auth_headers,
@@ -290,7 +319,7 @@ class TestDatasetIntegrity:
         session_id = uuid.uuid4()
 
         original = _add_event(owner_id, version_a, session_id=session_id, key="orig")
-        _add_event(
+        corrected = _add_event(
             owner_id,
             version_a,
             session_id=session_id,
@@ -298,9 +327,20 @@ class TestDatasetIntegrity:
             rationale="corrected after reviewing the bar",
             key="correction",
         )
-        _add_event(owner_id, version_a, session_id=session_id, rationale=None, key="no-reason")
-        _add_event(owner_id, version_a, action=HumanDecisionAction.sell, session_id=session_id, key="sell")
+        no_reason = _add_event(
+            owner_id, version_a, session_id=session_id, rationale=None, key="no-reason"
+        )
+        sell = _add_event(
+            owner_id,
+            version_a,
+            action=HumanDecisionAction.sell,
+            session_id=session_id,
+            key="sell",
+        )
         _add_event(owner_id, version_b, session_id=uuid.uuid4(), key="other-strategy")
+        _confirm(owner_id, corrected, "buy")
+        _confirm(owner_id, no_reason, "buy")
+        _confirm(owner_id, sell, "sell")
 
         client.put(
             "/api/v1/ml/personalization/consent",
@@ -332,7 +372,8 @@ class TestDatasetIntegrity:
         owner_id = _current_user_id()
         _, version_id = _create_experiment(client, auth_headers)
         version_id = uuid.UUID(version_id)
-        _add_event(owner_id, version_id, key="mine")
+        mine = _add_event(owner_id, version_id, key="mine")
+        _confirm(owner_id, mine)
 
         other_owner = uuid.uuid4()
         db = TestSession()
@@ -365,8 +406,14 @@ class TestDatasetIntegrity:
         owner_id = _current_user_id()
         _, version_id = _create_experiment(client, auth_headers)
         version_id = uuid.UUID(version_id)
-        _add_event(owner_id, version_id, snapshot="2024-01-10", key="covered")
-        _add_event(owner_id, version_id, snapshot="2024-01-11", key="missing")
+        covered_event = _add_event(
+            owner_id, version_id, snapshot="2024-01-10", key="covered"
+        )
+        missing_event = _add_event(
+            owner_id, version_id, snapshot="2024-01-11", key="missing"
+        )
+        _confirm(owner_id, covered_event)
+        _confirm(owner_id, missing_event)
         _add_bar("US:AAPL", date(2024, 1, 10))
 
         client.put(

@@ -119,8 +119,10 @@ def test_compare_runs_authorized_same_experiment(client, auth_headers, setup_db)
     assert len(data["conditions_comparison"]) > 0
 
 
-def test_compare_runs_different_experiments_rejected(client, auth_headers, setup_db):
-    """Test that comparing runs from different experiments is rejected."""
+def test_compare_runs_different_experiments_is_labelled_not_rejected(client, auth_headers, setup_db):
+    """Cross-experiment comparison of the same owner's runs is allowed, but it
+    must be reported as such: per-side experiment identity is preserved and the
+    result is never presented as a fair comparison."""
     
     db = TestSession()
 
@@ -146,11 +148,34 @@ def test_compare_runs_different_experiments_rejected(client, auth_headers, setup
 
     run_1_str = str(run_1.id)
     run_2_str = str(run_2.id)
+    experiment_1_str = str(experiment_1.id)
+    experiment_2_str = str(experiment_2.id)
+    version_1_str = str(version_1.id)
+    version_2_str = str(version_2.id)
     db.close()
 
     response = client.get(f"/api/v1/runs/compare?run_a={run_1_str}&run_b={run_2_str}", headers=auth_headers)
-    assert response.status_code == 400
-    assert "same experiment" in response.json()["detail"]
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["experiment_a_id"] == experiment_1_str
+    assert data["experiment_b_id"] == experiment_2_str
+    assert data["experiment_version_a_id"] == version_1_str
+    assert data["experiment_version_b_id"] == version_2_str
+    assert data["experiment_id"] == experiment_1_str, "anchor stays run A's experiment"
+
+    comparability = data["comparability"]
+    assert comparability is not None
+    assert comparability["same_experiment"] is False
+    assert comparability["fair_comparison"] is False, "cross-experiment must never default to fair"
+    dimensions = {d["dimension"]: d for d in comparability["dimensions"]}
+    assert set(dimensions) == {"dataset", "period", "costs", "engine_version", "spec_source"}
+    assert dimensions["period"]["status"] == "unknown", "these runs record no period"
+    assert any("唔同實驗" in msg for msg in data["limitations"])
+
+    sides = {side["run_id"]: side for side in data["sides"]}
+    assert sides[run_1_str]["experiment_id"] == experiment_1_str
+    assert sides[run_2_str]["experiment_id"] == experiment_2_str
 
 
 def test_compare_runs_same_run_rejected(client, auth_headers, setup_db):

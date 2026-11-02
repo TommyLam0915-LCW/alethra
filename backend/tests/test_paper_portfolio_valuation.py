@@ -26,6 +26,7 @@ arithmetic facts instead of silently following the code under test.
 import pytest
 
 from app.api.paper_portfolio import _latest_available_bar
+from tests.conftest import TestSession
 
 ASSET = "DEMO-ALPHA"
 # Demo fixture (synthetic, not market data): last bar 2024-02-13, open 54.0, close 54.5.
@@ -304,3 +305,226 @@ class TestPartialExitAccounting:
         ).json()
         assert positions[0]["status"] == "closed"
         assert positions[0]["quantity"] == 0
+
+
+# ── session-bound valuation ──────────────────────────────────────────────
+#
+# A portfolio linked to a replay session must be marked from that session's own
+# stored bars at its cursor — not from the demo fixture, which knows none of its
+# instruments. These tests pin the lane split: mode, price source, as-of and P&L
+# basis are stated, a bar past the cursor is never used, and an unadvanced
+# session reports null instead of inventing a mark.
+
+import uuid as _uuid
+from datetime import date, datetime
+
+STORED_ASSET = "US:AAPL"
+STALE_CLOSE = 999.0  # a bar AFTER the cursor: using it would be look-ahead
+
+
+def _seed_session_and_bars(*, cursor="2024-03-04", with_bars=True):
+    """Create an owned daily session plus its stored bars; return (session_id, provider).
+
+    Bars are seeded under a per-call provider so the market-data unique key
+    cannot collide between tests, and the instrument is deliberately outside the
+    demo fixture so the demo fallback could never accidentally price it.
+    """
+    from app.models.experiment import Experiment, ExperimentStatus, Visibility
+    from app.models.experiment_version import ExperimentVersion
+    from app.models.market_data import MarketDataBar
+    from app.models.simulation import SimulationSession, SimulationStatus
+    from app.models.user import User
+
+    provider = f"test-stored-{_uuid.uuid4().hex[:8]}"
+    db = TestSession()
+    try:
+        user = db.query(User).filter(User.email == "test@alethra.io").one()
+        experiment = Experiment(
+            id=_uuid.uuid4(), owner_id=user.id,
+            title="Session-bound valuation (synthetic)",
+            hypothesis="stored bars value a bound account at its cursor",
+            status=ExperimentStatus.locked, visibility=Visibility.private,
+            current_version_id=None,
+        )
+        db.add(experiment)
+        db.flush()
+        version = ExperimentVersion(
+            id=_uuid.uuid4(), experiment_id=experiment.id, version_number=1,
+            strategy_spec={"asset_ids": [STORED_ASSET], "commission_rate": 0.0},
+            created_by=user.id,
+            locked_at=datetime(2024, 3, 4, 12, 0, 0), locked_by=user.id,
+            lock_reason="valuation fixture", dataset_cutoff_at="2024-03-04",
+            strategy_config_hash="synthetic-valuation",
+        )
+        db.add(version)
+        db.flush()
+        experiment.current_version_id = version.id
+        session = SimulationSession(
+            id=_uuid.uuid4(), experiment_version_id=version.id, owner_id=user.id,
+            initial_virtual_cash=100_000.0, data_cutoff_at="2024-03-04",
+            current_snapshot_date=cursor, timeframe=None,
+            status=SimulationStatus.active, provider_id=provider, state_version=1,
+        )
+        db.add(session)
+        if with_bars:
+            for (bar_day, close) in (
+                (date(2024, 3, 1), 100.0),
+                (date(2024, 3, 4), 110.0),
+                (date(2024, 3, 5), STALE_CLOSE),
+            ):
+                db.add(MarketDataBar(
+                    id=_uuid.uuid4(), instrument_id=STORED_ASSET, provider_id=provider,
+                    bar_date=bar_day,
+                    bar_timestamp=datetime.combine(bar_day, datetime.min.time()),
+                    open=close, high=close, low=close, close=close, volume=1000,
+                ))
+        db.commit()
+        return str(session.id), provider
+    finally:
+        db.close()
+
+
+def _seed_position_and_entry_fill(portfolio_id, *, quantity=10.0, entry=100.0,
+                                  commission=0.5):
+    """Insert one open position plus the BUY fill that opened it.
+
+    The fill is the record the valuation reads the entry commission from, so the
+    P&L basis is tied to money that actually moved rather than a default rate.
+    """
+    from app.models.paper_portfolio import (
+        OrderSide, OrderStatus, PaperFill, PaperOrder, PaperPosition,
+        PositionStatus,
+    )
+
+    db = TestSession()
+    try:
+        pid = _uuid.UUID(portfolio_id)
+        position = PaperPosition(
+            id=_uuid.uuid4(), portfolio_id=pid, asset_id=STORED_ASSET,
+            quantity=quantity, average_entry_price=entry,
+            status=PositionStatus.open,
+        )
+        order = PaperOrder(
+            id=_uuid.uuid4(), portfolio_id=pid, asset_id=STORED_ASSET,
+            side=OrderSide.BUY, quantity=quantity, status=OrderStatus.filled,
+            actor_type="human",
+        )
+        db.add_all([position, order])
+        db.flush()
+        db.add(PaperFill(
+            id=_uuid.uuid4(), paper_order_id=order.id, execution_date="2024-03-04",
+            observed_price=entry, execution_price_before_costs=entry,
+            slippage_amount=0.0, commission_amount=commission, quantity=quantity,
+            gross_amount=quantity * entry,
+            net_cash_change=-(quantity * entry + commission),
+            simulated_fill_reason="rule_entry",
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+
+def _bound_portfolio(client, headers, session_id):
+    resp = client.post(
+        "/api/v1/paper-portfolio",
+        headers=headers,
+        json={"initial_virtual_cash": 100_000.0, "simulation_session_id": session_id},
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json()["id"]
+
+
+class TestSessionBoundValuation:
+    def test_bound_account_is_marked_at_its_cursor_not_from_demo(self, client, auth_headers):
+        session_id, provider = _seed_session_and_bars(cursor="2024-03-04")
+        portfolio_id = _bound_portfolio(client, auth_headers, session_id)
+        _seed_position_and_entry_fill(portfolio_id)
+
+        portfolio = client.get(
+            f"/api/v1/paper-portfolio/{portfolio_id}", headers=auth_headers
+        ).json()
+        valuation = portfolio["valuation"]
+        assert valuation["mode"] == "session_replay"
+        assert valuation["mode_label_zh"] == "策略回放（已存行情）"
+        assert valuation["provider"] == provider
+        assert valuation["price_source"] == "stored_market_data_bar"
+        assert valuation["unrealized_pnl_basis"] == "net_of_entry_commission"
+        # Cursor is 2024-03-04, so the 2024-03-05 bar (999) must not be read.
+        assert valuation["data_as_of"] == "2024-03-04T00:00:00"
+        assert valuation["unpriced_assets"] == []
+
+        # (110 - 100) * 10, less the 0.5 commission the fill actually recorded.
+        expected = round((110.0 - 100.0) * 10 - 0.5, 4)
+        assert portfolio["total_unrealized_pnl"] == pytest.approx(expected)
+        assert portfolio["total_unrealized_pnl"] != pytest.approx(
+            (STALE_CLOSE - 100.0) * 10
+        )
+
+        position = client.get(
+            f"/api/v1/paper-portfolio/{portfolio_id}/positions", headers=auth_headers
+        ).json()[0]
+        assert position["mark_price"] == pytest.approx(110.0)
+        assert position["mark_as_of"] == "2024-03-04T00:00:00"
+        assert position["mark_source"] == "stored_market_data_bar"
+        assert position["unrealized_pnl"] == pytest.approx(expected)
+        assert position["unrealized_pnl_basis"] == "net_of_entry_commission"
+
+    def test_unadvanced_session_reports_null_rather_than_zero(self, client, auth_headers):
+        session_id, provider = _seed_session_and_bars(cursor=None, with_bars=False)
+        portfolio_id = _bound_portfolio(client, auth_headers, session_id)
+        _seed_position_and_entry_fill(portfolio_id)
+
+        portfolio = client.get(
+            f"/api/v1/paper-portfolio/{portfolio_id}", headers=auth_headers
+        ).json()
+        valuation = portfolio["valuation"]
+        assert valuation["mode"] == "session_replay"
+        assert valuation["mode_label_zh"] == "策略回放（未開始）"
+        assert valuation["provider"] == provider
+        assert valuation["data_as_of"] is None
+        assert valuation["unpriced_assets"] == [STORED_ASSET]
+        assert "不代表 0" in valuation["note"]
+        assert portfolio["total_unrealized_pnl"] is None
+
+        position = client.get(
+            f"/api/v1/paper-portfolio/{portfolio_id}/positions", headers=auth_headers
+        ).json()[0]
+        assert position["unrealized_pnl"] is None
+        assert position["mark_price"] is None
+        assert position["mark_source"] is None
+
+    def test_session_and_decision_state_the_gross_price_basis(self, client, auth_headers):
+        session_id, _provider = _seed_session_and_bars(cursor="2024-03-04")
+        _bound_portfolio(client, auth_headers, session_id)
+
+        from app.models.simulation import DecisionType, SimulationDecision
+
+        db = TestSession()
+        try:
+            db.add(SimulationDecision(
+                id=_uuid.uuid4(), session_id=_uuid.UUID(session_id), step_number=1,
+                snapshot_date="2024-03-04", data_cutoff_at="2024-03-04",
+                engine_version="test", decision_type=DecisionType.simulated_entry,
+                paper_cash=99_000.0,
+                paper_position={"asset_id": STORED_ASSET, "shares": 10,
+                                "unrealized_pnl": 100.0},
+                paper_equity=100_100.0,
+            ))
+            db.commit()
+        finally:
+            db.close()
+
+        session = client.get(
+            f"/api/v1/simulations/{session_id}", headers=auth_headers
+        ).json()
+        assert session["valuation"]["mode"] == "session_replay"
+        assert session["valuation"]["price_source"] == "stored_market_data_bar"
+        assert session["valuation"]["data_as_of"] == "2024-03-04"
+        assert session["valuation"]["unrealized_pnl_basis"] == "gross_price_move"
+
+        decision = client.get(
+            f"/api/v1/simulations/{session_id}/decisions", headers=auth_headers
+        ).json()[0]
+        assert decision["paper_position"]["unrealized_pnl"] == pytest.approx(100.0)
+        assert decision["position_valuation_basis"] == "gross_price_move"
+

@@ -75,6 +75,19 @@ interface DiffEntry {
   new_value: any;
 }
 
+interface SavedComparisonSummary {
+  id: string;
+  run_a_id: string;
+  run_b_id: string;
+  run_a_experiment_id: string;
+  run_b_experiment_id: string;
+  run_a_experiment_version_id: string;
+  run_b_experiment_version_id: string;
+  scope: 'same_experiment' | 'cross_experiment';
+  purpose: string;
+  updated_at: string;
+}
+
 interface CheckResult {
   rule_id: string;
   rule_version: string;
@@ -143,7 +156,7 @@ export default function ExperimentDetailPage() {
   const [methodReview, setMethodReview] = useState<MethodReview | null>(null);
   const [methodReviewLoading, setMethodReviewLoading] = useState(false);
   const [selectedRuns, setSelectedRuns] = useState<string[]>([]);
-  const [savedComparisons, setSavedComparisons] = useState<any[]>([]);
+  const [savedComparisons, setSavedComparisons] = useState<SavedComparisonSummary[]>([]);
   const [dataVersion, setDataVersion] = useState(0);
   // A failed initial load is not an empty experiment. Keep the reason so the page
   // can tell "you do not have this research" apart from "the service is down",
@@ -1068,30 +1081,51 @@ export default function ExperimentDetailPage() {
         <div className="card">
           <h3 style={{ marginTop: 0, marginBottom: '16px' }}>Saved comparisons</h3>
           <div style={{ display: 'grid', gap: '8px' }}>
-            {savedComparisons.map((saved) => (
-              <Link
-                key={saved.id}
-                href={`/experiments/${experimentId}/runs/compare?saved_comparison_id=${saved.id}`}
-                style={{
-                  padding: '12px',
-                  backgroundColor: 'var(--surface-2)',
-                  borderRadius: '6px',
-                  textDecoration: 'none',
-                  color: 'inherit',
-                  border: '1px solid var(--border-strong)',
-                }}
-              >
-                <div style={{ fontSize: '14px', fontWeight: 500, marginBottom: '4px' }}>
-                  {saved.purpose}
-                </div>
-                <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
-                  Run A: {saved.run_a_id.slice(0, 8)}... → Run B: {saved.run_b_id.slice(0, 8)}...
-                </div>
-                <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '4px' }}>
-                  Updated {formatDateTime(saved.updated_at)}
-                </div>
-              </Link>
-            ))}
+            {savedComparisons.map((saved) => {
+              const outsideSide = saved.run_a_experiment_id !== experimentId
+                ? 'Run A'
+                : saved.run_b_experiment_id !== experimentId
+                  ? 'Run B'
+                  : null;
+              const outsideExperimentId = outsideSide === 'Run A'
+                ? saved.run_a_experiment_id
+                : saved.run_b_experiment_id;
+              return (
+                <Link
+                  key={saved.id}
+                  href={`/experiments/${experimentId}/runs/compare?saved_comparison_id=${saved.id}`}
+                  data-testid="saved-comparison"
+                  style={{
+                    padding: '12px',
+                    backgroundColor: 'var(--surface-2)',
+                    borderRadius: '6px',
+                    textDecoration: 'none',
+                    color: 'inherit',
+                    border: '1px solid var(--border-strong)',
+                  }}
+                >
+                  <div style={{ fontSize: '14px', fontWeight: 500, marginBottom: '4px' }}>
+                    {saved.purpose}
+                  </div>
+                  <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
+                    Run A: {saved.run_a_id.slice(0, 8)}... → Run B: {saved.run_b_id.slice(0, 8)}...
+                  </div>
+                  {saved.scope === 'cross_experiment' && outsideSide && (
+                    <div
+                      data-testid="saved-comparison-cross-experiment"
+                      style={{ fontSize: '11px', color: 'var(--warning)', marginTop: '4px' }}
+                    >
+                      Cross-experiment: {outsideSide} belongs to experiment{' '}
+                      {outsideExperimentId.slice(0, 8)}..., not the one this page shows.
+                      Their conditions may differ; open it to see what is comparable.
+                    </div>
+                  )}
+                  <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '4px' }}>
+                    Updated {formatDateTime(saved.updated_at)}
+                  </div>
+                </Link>
+              );
+            })}
           </div>
         </div>
       )}

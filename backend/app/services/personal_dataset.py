@@ -86,6 +86,7 @@ LABEL_DEFINITION = {
 EXCLUSION_LABELS_ZH = {
     "unconfirmed": "未經 owner 確認",
     "unverified_provenance": "來源不是已驗證的本人密碼登入工作階段",
+    "unverified_confirmation": "確認動作不是由已驗證的本人密碼登入工作階段寫入",
     "excluded": "owner 標記為不可用",
     "missing_market_data": "決策時點缺少已儲存市場資料",
     "missing_features": "特徵暖機不足或含無效值",
@@ -438,6 +439,12 @@ def _assemble(
         label = labels.get(event.id)
         if label is None:
             _exclude("unconfirmed")
+            continue
+        # A confirmation revision is only an owner confirmation when a
+        # password-authenticated owner session wrote it. Rows from another
+        # channel are reported, never promoted.
+        if (label.actor_type or "unknown") != HUMAN:
+            _exclude("unverified_confirmation")
             continue
         if label.state is DecisionLabelState.excluded:
             _exclude("excluded")

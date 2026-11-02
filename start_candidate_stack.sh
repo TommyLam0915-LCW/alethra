@@ -466,6 +466,21 @@ verify_runtime_identity() {
     || fail_code 2 "candidate identity verification failed; the stack is NOT ready"
 }
 
+batch_predeploy_gate() {
+  local output rc
+  if output="$(cd "$ROOT/backend" && "$PYTHON" scripts/operation_batch.py predeploy 2>&1)"; then
+    log "stage batch predeploy: no claimed customer write batch"
+    return 0
+  else
+    rc=$?
+  fi
+  printf '%s\n' "$output" >&2
+  if [ "$rc" -eq 2 ]; then
+    fail "a customer write batch is still claimed; complete or abandon it before deploying this dev line"
+  fi
+  fail "batch predeploy check could not run (exit $rc)"
+}
+
 start_stack() {
   mkdir -p "$LOG_DIR" "$STATE_DIR"
   BACKEND_PID_FILE="$LOG_DIR/backend.pid"
@@ -474,6 +489,7 @@ start_stack() {
   BACKEND_PID=""; WORKER_PID=""; FRONTEND_PID=""; WORKER_STATE=""
   write_runtime_identity pending
   export_process_env
+  batch_predeploy_gate
   start_backend
   BACKEND_PID="$(pid_from_file "$BACKEND_PID_FILE")"
   log "stage backend: process responds (pid $BACKEND_PID)"

@@ -231,10 +231,17 @@ test.describe('unified research flow', () => {
     );
     await expect(page.getByText('Selected results:')).toBeVisible();
 
-    const runARow = page.locator('li', { hasText: 'Run A:' });
-    await expect(runARow).toHaveCount(1);
-    await expect(runARow).toContainText(`Run A: ${runA.slice(0, 8)}`);
-    await expect(page.locator('li', { hasText: 'Run B:' })).toContainText(`Run B: ${runB.slice(0, 8)}`);
+    const runARow = page.getByTestId('comparison-run-a');
+    await expect(runARow).toContainText('Run A');
+    await expect(runARow).toContainText(`(${runA.slice(0, 8)}`);
+    const runBRow = page.getByTestId('comparison-run-b');
+    await expect(runBRow).toContainText('Run B');
+    await expect(runBRow).toContainText(`(${runB.slice(0, 8)}`);
+
+    // Both runs are in this experiment, so neither side may be presented as
+    // belonging to some other experiment.
+    await expect(runARow).not.toContainText('· experiment ');
+    await expect(runBRow).not.toContainText('· experiment ');
 
     const runALink = runARow.locator('a');
     await expect(runALink).toHaveAttribute('href', `${journey.experimentPath}/runs/${runA}`);
@@ -246,12 +253,46 @@ test.describe('unified research flow', () => {
     await expect(page.getByText('Selected results:')).toBeVisible();
   });
 
+  test('states whether the two results are comparable like-for-like', async () => {
+    const panel = page.getByTestId('comparison-comparability');
+    await expect(panel, 'the server comparability report must be shown').toBeVisible();
+
+    const verdict = page.getByTestId('comparability-verdict');
+    await expect(verdict).toBeVisible();
+
+    const dimensions = ['dataset', 'period', 'costs', 'engine_version', 'spec_source'];
+    const statuses: string[] = [];
+    for (const dimension of dimensions) {
+      const row = page.getByTestId(`comparability-dimension-${dimension}`);
+      await expect(row, `${dimension} must be reported`).toBeVisible();
+      // Read the status cell only; A/B value cells may contain the word too.
+      statuses.push((await row.locator('td').nth(1).innerText()).trim());
+    }
+    expect(statuses.every((status) => ['Match', 'Differs', 'Unknown'].includes(status))).toBe(true);
+
+    // An unknown basis is never promoted to a match: the like-for-like
+    // verdict may only appear when every reported basis is a match.
+    const verdictText = (await verdict.innerText()).trim();
+    if (verdictText.startsWith('Same basis')) {
+      expect(statuses.every((status) => status === 'Match')).toBe(true);
+    } else {
+      expect(statuses.some((status) => status !== 'Match')).toBe(true);
+    }
+  });
+
   test('saves the comparison purpose and notes', async () => {
     await page.getByPlaceholder('e.g. Check how commission rate affects returns').fill(journey.purpose);
     await page.getByPlaceholder('Record your observations and conclusions…').fill(journey.notesV1);
 
     const responsePromise = page.waitForResponse(
       (res) => res.request().method() === 'POST' && res.url().includes('/api/v1/saved-comparisons')
+    );
+    // The page may only say "saved" after reading the record back. Capture that
+    // GET so the test proves the claim rests on server state, not local state.
+    const readbackPromise = page.waitForResponse(
+      (res) =>
+        res.request().method() === 'GET' &&
+        /\/api\/v1\/saved-comparisons\/[0-9a-f-]{36}$/.test(new URL(res.url()).pathname)
     );
     await page.getByRole('button', { name: 'Save' }).click();
     const created = await responsePromise;
@@ -260,7 +301,12 @@ test.describe('unified research flow', () => {
     journey.savedId = body.id;
     expect(body.notes).toBe(journey.notesV1);
 
+    const readback = await readbackPromise;
+    expect(readback.status()).toBe(200);
+    expect(((await readback.json()) as { id: string }).id).toBe(journey.savedId);
+
     await expect(page.getByText('Comparison saved')).toBeVisible();
+    await expect(page.getByTestId('comparison-saved-id')).toHaveText(journey.savedId);
     await expect(page.getByRole('button', { name: 'Update' })).toBeVisible();
   });
 
@@ -269,6 +315,11 @@ test.describe('unified research flow', () => {
     await page.goto(`${runtime.frontendBase}${journey.experimentPath}`);
 
     await expect(ownedSavedLinks(page)).toHaveCount(1);
+    // Both runs live in this experiment: the row must not claim a cross-
+    // experiment comparison.
+    await expect(
+      savedComparisonsCard(page).getByTestId('saved-comparison-cross-experiment')
+    ).toHaveCount(0);
     await ownedSavedLinks(page).first().click();
     await page.waitForURL(`**saved_comparison_id=${journey.savedId}`);
 

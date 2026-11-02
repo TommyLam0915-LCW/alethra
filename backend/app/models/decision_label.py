@@ -15,6 +15,7 @@ then confirms it here.
 import uuid
 
 from sqlalchemy import (
+    CheckConstraint,
     Column,
     DateTime,
     ForeignKey,
@@ -65,6 +66,12 @@ class DecisionLabel(Base):
     exclusion_reason = Column(SAEnum(DecisionExclusionReason), nullable=True)
 
     author_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    # The authentication channel that wrote this confirmation revision. Only a
+    # password-authenticated owner session can produce ``human``; historical
+    # rows stay ``unknown`` and are never promoted.
+    actor_type = Column(
+        String(16), nullable=False, default="unknown", server_default="unknown"
+    )
     supersedes_label_id = Column(
         UUID(as_uuid=True), ForeignKey("decision_labels.id"), nullable=True
     )
@@ -76,6 +83,10 @@ class DecisionLabel(Base):
             "decision_event_id",
             "revision_number",
             name="uq_decision_label_event_revision",
+        ),
+        CheckConstraint(
+            "actor_type IN ('human', 'agent', 'unknown')",
+            name="ck_decision_label_actor_type",
         ),
     )
 

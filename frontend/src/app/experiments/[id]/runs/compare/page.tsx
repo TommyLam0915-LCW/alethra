@@ -31,6 +31,30 @@ interface PeriodOverlap {
   overlap: { start: string; end: string };
 }
 
+interface ComparabilityDimension {
+  dimension: string;
+  status: 'match' | 'differ' | 'unknown';
+  value_a: any;
+  value_b: any;
+  reason?: string | null;
+}
+
+interface RunComparability {
+  same_experiment: boolean;
+  fair_comparison: boolean;
+  dimensions: ComparabilityDimension[];
+}
+
+interface ComparisonSide {
+  run_id: string;
+  experiment_id: string;
+  experiment_version_id: string;
+  experiment_version_number?: number | null;
+  status: string;
+  spec_source: 'run_verified' | 'version_current_unverified';
+  spec_source_note: string;
+}
+
 interface ComparisonData {
   run_a_id: string;
   run_b_id: string;
@@ -39,11 +63,43 @@ interface ComparisonData {
   experiment_version_b_id: string;
   status_a: string;
   status_b: string;
+  sides?: ComparisonSide[];
   metrics_comparison: ComparisonField[];
   conditions_comparison: ComparisonField[];
   limitations: string[];
   period_overlap?: PeriodOverlap;
+  comparability?: RunComparability;
 }
+
+const DIMENSION_LABELS: Record<string, string> = {
+  dataset: 'Dataset (checksum and provider)',
+  period: 'Period',
+  costs: 'Costs (commission and slippage)',
+  engine_version: 'Engine version',
+  spec_source: 'Strategy spec source',
+};
+
+function describeDimensionValue(dimension: string, value: any): string {
+  if (value === null || value === undefined) return 'not recorded';
+  switch (dimension) {
+    case 'dataset': {
+      const checksum = value.checksum ? String(value.checksum).slice(0, 12) + '…' : 'checksum not recorded';
+      const provider = value.provider ? String(value.provider) : 'provider not recorded';
+      return `${checksum} · ${provider}`;
+    }
+    case 'period':
+      return `${value.start ?? 'unknown'} → ${value.end ?? 'unknown'}`;
+    case 'costs':
+      return `commission ${value.commission_rate ?? 'unknown'} · slippage ${value.slippage_rate ?? 'unknown'}`;
+    case 'engine_version':
+      return String(value);
+    case 'spec_source':
+      return `${value.source ?? 'unknown'}${value.experiment_version_number != null ? ` · v${value.experiment_version_number}` : ''}`;
+    default:
+      return typeof value === 'object' ? JSON.stringify(value) : String(value);
+  }
+}
+
 
 const PROVENANCE_LABELS: Record<string, string> = {
   captured: 'Captured',
@@ -265,28 +321,44 @@ export default function RunComparisonPage() {
       // Empty notes field → send null so the stored note is cleared (omitting
       // it would keep the previous value server-side).
       const notesValue = notes.trim() ? notes.trim() : null;
+      let savedId: string | null = savedComparisonId;
       if (savedComparisonId) {
         // Update the SAME record (PATCH), never a duplicate create.
         await api.savedComparisons.update(savedComparisonId, {
           purpose: purpose.trim(),
           notes: notesValue,
         });
-        setSaveSuccess(true);
       } else {
         // Create new saved comparison and retain the returned identity so a
         // second save PATCHes this record instead of POSTing a duplicate.
-        const saved = await api.savedComparisons.create({
+        const created = await api.savedComparisons.create({
           experiment_id: experimentId,
           run_a_id: runA!,
           run_b_id: runB!,
           purpose: purpose.trim(),
           notes: notesValue,
         });
-        setSavedComparisonId(saved.id);
-        setSaveSuccess(true);
+        if (!created?.id) {
+          throw new Error('The save response did not include a record id');
+        }
+        savedId = created.id;
       }
+
+      // A write is only reported as saved after the server returns the same
+      // record with the submitted purpose. Without that read-back there is no
+      // proof the comparison was persisted.
+      const readback = savedId
+        ? await api.savedComparisons.get(savedId)
+        : null;
+      if (!readback || readback.id !== savedId || readback.purpose !== purpose.trim()) {
+        throw new Error('The comparison could not be read back after saving');
+      }
+      setSavedComparisonId(readback.id);
+      activeSavedIdRef.current = readback.id;
+      setSaveSuccess(true);
     } catch (err: any) {
       // Leave purpose/notes state untouched so the user's text survives a failed save.
+      setSaveSuccess(false);
       setSaveError(err.message || 'The comparison could not be saved');
     } finally {
       setSaving(false);
@@ -572,16 +644,25 @@ export default function RunComparisonPage() {
           </div>
         )}
 
-        {saveSuccess && (
-          <div role="status" style={{
-            background: 'rgba(34,197,94,0.14)',
-            border: '1px solid rgba(34,197,94,0.34)',
-            color: 'var(--positive)',
-            padding: '8px',
-            marginBottom: '12px',
-            borderRadius: '4px',
-          }}>
-            Comparison saved
+        {saveSuccess && savedComparisonId && (
+          <div
+            role="status"
+            data-testid="comparison-save-success"
+            style={{
+              background: 'rgba(34,197,94,0.14)',
+              border: '1px solid rgba(34,197,94,0.34)',
+              color: 'var(--positive)',
+              padding: '8px',
+              marginBottom: '12px',
+              borderRadius: '4px',
+            }}
+          >
+            Comparison saved · record{' '}
+            <code data-testid="comparison-saved-id" style={{ fontSize: '12px' }}>{savedComparisonId}</code>
+            <div style={{ fontSize: '11px', marginTop: '4px', color: 'var(--text-secondary)' }}>
+              Read back from the server after saving. Reopening this page with{` `}
+              saved_comparison_id shows this stored record.
+            </div>
           </div>
         )}
 
@@ -612,28 +693,60 @@ export default function RunComparisonPage() {
       }}>
         <strong>Selected results:</strong>
         <ul style={{ margin: '8px 0 0 20px', listStyle: 'none', padding: 0 }}>
-          <li style={{ marginBottom: '4px' }} data-testid="comparison-run-a">
-            Run A
-            {versionNumbers[comparison.experiment_version_a_id] != null && (
-              <> · version v{versionNumbers[comparison.experiment_version_a_id]}</>
-            )}
-            {' — '}status: {label(RUN_STATUS_LABELS, comparison.status_a)} ·{' '}
-            <Link href={`/experiments/${experimentId}/runs/${comparison.run_a_id}`} style={{ color: 'var(--primary-text)', textDecoration: 'none' }}>
-              open result
-            </Link>
-            <span style={{ color: 'var(--text-muted)', fontSize: '11px' }}> ({comparison.run_a_id.slice(0, 8)}…)</span>
-          </li>
-          <li data-testid="comparison-run-b">
-            Run B
-            {versionNumbers[comparison.experiment_version_b_id] != null && (
-              <> · version v{versionNumbers[comparison.experiment_version_b_id]}</>
-            )}
-            {' — '}status: {label(RUN_STATUS_LABELS, comparison.status_b)} ·{' '}
-            <Link href={`/experiments/${experimentId}/runs/${comparison.run_b_id}`} style={{ color: 'var(--primary-text)', textDecoration: 'none' }}>
-              open result
-            </Link>
-            <span style={{ color: 'var(--text-muted)', fontSize: '11px' }}> ({comparison.run_b_id.slice(0, 8)}…)</span>
-          </li>
+          {([
+            {
+              key: 'a',
+              label: 'Run A',
+              runId: comparison.run_a_id,
+              versionId: comparison.experiment_version_a_id,
+              status: comparison.status_a,
+              side: comparison.sides?.[0],
+            },
+            {
+              key: 'b',
+              label: 'Run B',
+              runId: comparison.run_b_id,
+              versionId: comparison.experiment_version_b_id,
+              status: comparison.status_b,
+              side: comparison.sides?.[1],
+            },
+          ] as const).map((entry) => {
+            const versionNumber =
+              entry.side?.experiment_version_number ??
+              versionNumbers[entry.versionId];
+            const sideExperimentId = entry.side?.experiment_id ?? experimentId;
+            return (
+              <li
+                key={entry.key}
+                style={{ marginBottom: '4px' }}
+                data-testid={`comparison-run-${entry.key}`}
+              >
+                {entry.label}
+                {versionNumber != null && <> · version v{versionNumber}</>}
+                {entry.side && entry.side.experiment_id !== comparison.experiment_id && (
+                  <> · experiment {entry.side.experiment_id.slice(0, 8)}…</>
+                )}
+                {' — '}status: {label(RUN_STATUS_LABELS, entry.status)} ·{' '}
+                <Link
+                  href={`/experiments/${sideExperimentId}/runs/${entry.runId}`}
+                  style={{ color: 'var(--primary-text)', textDecoration: 'none' }}
+                >
+                  open result
+                </Link>
+                <span style={{ color: 'var(--text-muted)', fontSize: '11px' }}> ({entry.runId.slice(0, 8)}…)</span>
+                {entry.side && (
+                  <div
+                    data-testid={`comparison-run-${entry.key}-spec-source`}
+                    style={{ color: 'var(--text-muted)', fontSize: '11px', marginLeft: '8px' }}
+                  >
+                    spec: {entry.side.spec_source === 'run_verified'
+                      ? 'proven against this run (config hash matches)'
+                      : 'current version metadata — not proven to be what this run executed'}
+                  </div>
+                )}
+              </li>
+            );
+          })}
         </ul>
         <details style={{ marginTop: '10px', fontSize: '12px', color: 'var(--text-secondary)' }}>
           <summary style={{ cursor: 'pointer' }}>How to read the source status</summary>
@@ -645,6 +758,79 @@ export default function RunComparisonPage() {
           </ul>
         </details>
       </div>
+
+      {/* Comparability verdict: only the server's dimension checks may call two
+          results fairly comparable. Unknown is never promoted to a match. */}
+      {comparison.comparability && (
+        <div
+          data-testid="comparison-comparability"
+          style={{
+            background: comparison.comparability.fair_comparison
+              ? 'rgba(34,197,94,0.12)'
+              : 'rgba(245,158,11,0.14)',
+            borderLeft: `4px solid ${comparison.comparability.fair_comparison ? 'var(--positive)' : 'var(--warning)'}`,
+            padding: '12px',
+            marginBottom: '24px',
+          }}
+        >
+          <strong>Can these results be compared like-for-like?</strong>
+          <div
+            data-testid="comparability-verdict"
+            style={{ marginTop: '6px', fontSize: '13px' }}
+          >
+            {comparison.comparability.fair_comparison
+              ? 'Same basis: dataset, period, costs, engine version and spec source all match.'
+              : comparison.comparability.dimensions.some((d) => d.status === 'differ')
+                ? 'Not a like-for-like comparison: at least one basis differs. The metric gap mixes every difference listed below, so it does not isolate the effect of one setting.'
+                : 'Comparability is unconfirmed: at least one basis is unknown. An unknown basis is not treated as a match.'}
+          </div>
+          {!comparison.comparability.same_experiment && (
+            <div style={{ marginTop: '6px', fontSize: '12px', color: 'var(--text-secondary)' }}>
+              These runs belong to different experiments. Each side keeps its own experiment and version identity;
+              saving the comparison files it under the experiment you opened it from.
+            </div>
+          )}
+          <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: '10px', fontSize: '12px' }}>
+            <thead>
+              <tr style={{ borderBottom: '1px solid var(--border-strong)' }}>
+                <th style={{ padding: '6px', textAlign: 'left' }}>Basis</th>
+                <th style={{ padding: '6px', textAlign: 'left' }}>Status</th>
+                <th style={{ padding: '6px', textAlign: 'left' }}>Run A</th>
+                <th style={{ padding: '6px', textAlign: 'left' }}>Run B</th>
+              </tr>
+            </thead>
+            <tbody>
+              {comparison.comparability.dimensions.map((dimension) => (
+                <tr
+                  key={dimension.dimension}
+                  data-testid={`comparability-dimension-${dimension.dimension}`}
+                  style={{ borderBottom: '1px solid var(--border)' }}
+                >
+                  <td style={{ padding: '6px' }}>{DIMENSION_LABELS[dimension.dimension] ?? dimension.dimension}</td>
+                  <td style={{ padding: '6px', color: dimension.status === 'match'
+                    ? 'var(--positive)'
+                    : dimension.status === 'differ' ? 'var(--warning)' : 'var(--text-secondary)' }}>
+                    {dimension.status === 'match' ? 'Match' : dimension.status === 'differ' ? 'Differs' : 'Unknown'}
+                  </td>
+                  <td style={{ padding: '6px' }}>{describeDimensionValue(dimension.dimension, dimension.value_a)}</td>
+                  <td style={{ padding: '6px' }}>{describeDimensionValue(dimension.dimension, dimension.value_b)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {comparison.comparability.dimensions.some((d) => d.reason) && (
+            <ul style={{ margin: '8px 0 0 20px', fontSize: '12px', color: 'var(--text-secondary)' }}>
+              {comparison.comparability.dimensions
+                .filter((d) => d.reason)
+                .map((d) => (
+                  <li key={d.dimension}>
+                    <strong>{DIMENSION_LABELS[d.dimension] ?? d.dimension}:</strong> {d.reason}
+                  </li>
+                ))}
+            </ul>
+          )}
+        </div>
+      )}
 
       {/* Limitations */}
       {comparison.limitations.length > 0 && (

@@ -120,6 +120,7 @@ from app.models.robustness import (
     STUDY_STATUSES,
     ATTEMPT_STATUSES,
 )
+from app.models.operation_batch import OperationBatch, BATCH_STATUSES
 
 __all__ = [
     "User",
@@ -242,4 +243,6 @@ __all__ = [
     "STUDY_KINDS",
     "STUDY_STATUSES",
     "ATTEMPT_STATUSES",
+    "OperationBatch",
+    "BATCH_STATUSES",
 ]

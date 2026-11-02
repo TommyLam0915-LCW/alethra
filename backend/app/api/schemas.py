@@ -250,18 +250,56 @@ class RunComparisonField(BaseModel):
     evidence_detail: Optional[dict] = None  # source_category, record_id, field_path, derivation
 
 
+class RunComparisonSide(BaseModel):
+    """One run's own identity and where its strategy spec came from.
+
+    A spec read from the current version is only proven to be the spec the run
+    actually executed when its hash matches the run's recorded config_hash.
+    """
+
+    run_id: UUID
+    experiment_id: UUID
+    experiment_version_id: UUID
+    experiment_version_number: Optional[int] = None
+    status: str
+    spec_source: str  # "run_verified" | "version_current_unverified"
+    spec_source_note: str
+
+
+class ComparabilityDimension(BaseModel):
+    dimension: str
+    status: str  # "match" | "differ" | "unknown"
+    value_a: Any = None
+    value_b: Any = None
+    reason: Optional[str] = None
+
+
+class RunComparability(BaseModel):
+    same_experiment: bool
+    # True only when dataset, period, costs, engine and spec source all match.
+    # An unknown comparison input is never treated as a match.
+    fair_comparison: bool
+    dimensions: List[ComparabilityDimension]
+
+
 class RunComparisonResponse(BaseModel):
     run_a_id: UUID
     run_b_id: UUID
+    # Kept as the anchor (run A's experiment) for existing clients. The two
+    # side fields below are the authoritative per-run identity.
     experiment_id: UUID
+    experiment_a_id: UUID
+    experiment_b_id: UUID
     experiment_version_a_id: UUID
     experiment_version_b_id: UUID
     status_a: str
     status_b: str
+    sides: List["RunComparisonSide"] = Field(default_factory=list)
     metrics_comparison: List[RunComparisonField]
     conditions_comparison: List[RunComparisonField]
     limitations: List[str]
     period_overlap: Optional[dict] = None
+    comparability: Optional[RunComparability] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -317,6 +355,27 @@ class SimulationSessionCreate(BaseModel):
     provider_id: Optional[str] = Field(None, max_length=50)
 
 
+class PaperValuationBasis(BaseModel):
+    """What the mark-to-market numbers are actually based on.
+
+    ``mode`` names the valuation lane, ``price_source`` names the data the mark
+    was read from, and ``unrealized_pnl_basis`` states whether the figure is
+    gross price movement or net of the entry commission already paid. They are
+    separate fields because a replay session and its paper account can value the
+    same asset from the same stored bar while still presenting different P&L
+    bases.
+    """
+
+    mode: str
+    mode_label_zh: str
+    provider: str
+    price_source: Optional[str] = None
+    data_as_of: Optional[str] = None
+    unpriced_assets: List[str] = Field(default_factory=list)
+    unrealized_pnl_basis: Optional[str] = None
+    note: str
+
+
 class SimulationSessionResponse(BaseModel):
     id: UUID
     experiment_version_id: UUID
@@ -339,8 +398,38 @@ class SimulationSessionResponse(BaseModel):
     state_version: int
     created_at: datetime
     updated_at: datetime
+    # Derived from the session's own cursor rather than passed in by callers,
+    # because every endpoint returns the ORM object directly. A replay prices
+    # its position from the stored bar it just advanced onto, which is a
+    # different basis from the paper account's demo-fixture marks.
+    valuation: Optional[PaperValuationBasis] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+    @model_validator(mode="after")
+    def _derive_valuation_basis(self) -> "SimulationSessionResponse":
+        as_of = (
+            self.current_bar_timestamp.isoformat()
+            if self.current_bar_timestamp is not None
+            else self.current_snapshot_date
+        )
+        started = as_of is not None
+        self.valuation = PaperValuationBasis(
+            mode="session_replay",
+            mode_label_zh="策略回放（已存行情）" if started else "策略回放（未開始）",
+            provider=self.provider_id or "stored_market_data",
+            price_source="stored_market_data_bar",
+            data_as_of=as_of,
+            unpriced_assets=[],
+            unrealized_pnl_basis="gross_price_move",
+            note=(
+                "回放以已儲存行情 bar 估值，未實現損益為未扣手續費的價格變動；"
+                "與紙上帳戶的估值來源及損益基礎分開列示。"
+                if started
+                else "回放尚未推進到任何 bar，暫無估值基準。"
+            ),
+        )
+        return self
 
 
 class SimulationDecisionResponse(BaseModel):
@@ -358,8 +447,17 @@ class SimulationDecisionResponse(BaseModel):
     paper_equity: float
     warnings: Optional[list]
     created_at: datetime
+    # The replay's position P&L is a raw price move; naming the basis here stops
+    # it being read as the account's commission-aware figure.
+    position_valuation_basis: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+    @model_validator(mode="after")
+    def _derive_position_basis(self) -> "SimulationDecisionResponse":
+        if isinstance(self.paper_position, dict) and "unrealized_pnl" in self.paper_position:
+            self.position_valuation_basis = "gross_price_move"
+        return self
 
 
 class SimulationAdvanceResponse(BaseModel):
@@ -403,17 +501,6 @@ class PaperPortfolioCreate(BaseModel):
     simulation_session_id: Optional[UUID] = None
 
 
-class PaperValuationBasis(BaseModel):
-    """What the mark-to-market numbers on a paper portfolio are actually based on."""
-
-    mode: str
-    mode_label_zh: str
-    provider: str
-    data_as_of: Optional[str] = None
-    unpriced_assets: List[str] = Field(default_factory=list)
-    note: str
-
-
 class PaperPortfolioResponse(BaseModel):
     id: UUID
     owner_id: UUID
@@ -444,6 +531,12 @@ class PaperPositionResponse(BaseModel):
     realized_pnl: Optional[float]
     unrealized_pnl: Optional[float]
     status: str
+    # The exact mark behind unrealized_pnl, so a null figure is diagnosable and
+    # a non-null one can be traced to its source and as-of time.
+    mark_price: Optional[float] = None
+    mark_as_of: Optional[str] = None
+    mark_source: Optional[str] = None
+    unrealized_pnl_basis: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -1421,6 +1514,14 @@ class HumanDecisionResponse(BaseModel):
     # Provenance is assigned by the server from the verified credential; it is
     # not part of the create/correct request bodies on purpose.
     actor_type: str = "unknown"
+    # Recording a decision and confirming it for training are separate acts.
+    # A recorded decision starts pending and only an explicit owner review
+    # revision (written through a password-authenticated session) confirms it.
+    confirmation_status: str = "pending_owner_confirmation"
+    confirmed_by: Optional[UUID] = None
+    confirmed_at: Optional[datetime] = None
+    confirmation_label_id: Optional[UUID] = None
+    confirmation_provenance: Optional[str] = None
     execution_status: str
     supersedes_event_id: Optional[UUID]
     metadata_json: Optional[Dict[str, Any]]

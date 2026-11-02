@@ -21,6 +21,10 @@ from app.models.user import User
 
 VALID_ACTIONS = {"buy", "sell", "hold"}
 
+PENDING_OWNER_CONFIRMATION = "pending_owner_confirmation"
+CONFIRMED = "confirmed"
+EXCLUDED = "excluded"
+
 
 class LabelRefused(ValueError):
     """A label request the contract must reject (not a server error)."""
@@ -73,6 +77,7 @@ def record_label(
     action_label: Optional[str],
     note: Optional[str],
     exclusion_reason: Optional[str],
+    actor_type: str = "unknown",
 ) -> DecisionLabel:
     """Append a review revision for one of the author's own decisions.
 
@@ -129,6 +134,7 @@ def record_label(
         note=normalized_note,
         exclusion_reason=resolved_reason,
         author_id=author.id,
+        actor_type=actor_type,
         supersedes_label_id=previous.id if previous else None,
         metadata_json={
             "recorded_action": recorded_action,
@@ -158,6 +164,7 @@ def label_payload(label: Optional[DecisionLabel]) -> Optional[Dict[str, Any]]:
             else label.exclusion_reason
         ),
         "author_id": str(label.author_id),
+        "actor_type": label.actor_type or "unknown",
         "supersedes_label_id": (
             str(label.supersedes_label_id) if label.supersedes_label_id else None
         ),
@@ -167,6 +174,46 @@ def label_payload(label: Optional[DecisionLabel]) -> Optional[Dict[str, Any]]:
             (label.metadata_json or {}).get("action_overridden")
         ),
     }
+
+
+def confirmation_details(
+    event: HumanDecisionEvent, label: Optional[DecisionLabel]
+) -> Dict[str, Any]:
+    """The confirmation state of a recorded decision.
+
+    The recorded decision and the owner's confirmation are separate acts:
+    recording a decision leaves it pending, and only an explicit review
+    revision moves it to ``confirmed`` or ``excluded``. The revision's
+    authentication channel is reported separately so an unverified label can
+    never be read as an owner confirmation.
+    """
+    if label is None:
+        status = PENDING_OWNER_CONFIRMATION
+    elif label.state is DecisionLabelState.excluded:
+        status = EXCLUDED
+    else:
+        status = CONFIRMED
+
+    provenance = (label.actor_type or "unknown") if label else None
+    return {
+        "status": status,
+        "label_id": str(label.id) if label else None,
+        "label_revision": label.revision_number if label else None,
+        "confirmed_by": str(label.author_id) if label else None,
+        "confirmed_at": _iso(label.created_at) if label else None,
+        "provenance": provenance,
+    }
+
+
+def event_confirmation(
+    event: HumanDecisionEvent, label: Optional[DecisionLabel]
+) -> Dict[str, Any]:
+    """Confirmation status plus whether the label itself is owner-verified."""
+    details = confirmation_details(event, label)
+    details["owner_verified"] = bool(
+        details["status"] == CONFIRMED and details["provenance"] == "human"
+    )
+    return details
 
 
 def _iso(value: datetime) -> Optional[str]:

@@ -236,6 +236,7 @@ def _seed_confirmed_decisions(
                     action_label=None,
                     note=None,
                     exclusion_reason=None,
+                    actor_type="human",
                 )
                 ids.append(event.id)
                 index += 1
@@ -657,6 +658,7 @@ def test_insufficient_and_single_class_are_refused(client, auth_headers):
                 action_label=None,
                 note=None,
                 exclusion_reason=None,
+                actor_type="human",
             )
         db.commit()
     finally:
@@ -708,6 +710,7 @@ def test_insufficient_and_single_class_are_refused(client, auth_headers):
                     action_label=None,
                     note=None,
                     exclusion_reason=None,
+                    actor_type="human",
                 )
         db.commit()
     finally:
@@ -1564,6 +1567,7 @@ def test_duplicate_source_event_is_counted_once(client, auth_headers):
             action_label=None,
             note=None,
             exclusion_reason=None,
+            actor_type="human",
         )
         duplicate_id = duplicate.id
         db.commit()

@@ -8,7 +8,17 @@ from app.models.experiment import Experiment
 from app.models.experiment_version import ExperimentVersion
 from app.models.research_run import ResearchRun, RunStatus
 from app.auth.jwt import get_current_user
-from app.api.schemas import ResearchRunResponse, VersionDiffResponse, VersionDiffEntry, RunComparisonResponse, RunComparisonField
+from app.api.schemas import (
+    ResearchRunResponse,
+    VersionDiffResponse,
+    VersionDiffEntry,
+    RunComparisonResponse,
+    RunComparisonField,
+    RunComparisonSide,
+    RunComparability,
+    ComparabilityDimension,
+)
+from app.engine.backtest import compute_config_hash
 from app.auth.entitlements import require_entitlement
 from app.auth.api_keys import check_api_key_scope
 from app.services.research_runs import execute_backtest_run
@@ -255,6 +265,100 @@ def _effective_period(run: ResearchRun, result: Optional[dict], spec: dict) -> t
     return None, None, "unknown"
 
 
+def _spec_source(run: ResearchRun, version: ExperimentVersion) -> tuple:
+    """Whether the current version spec is provably the spec this run executed.
+
+    The run stores a ``config_hash`` of the spec it was executed with, so the
+    current version's spec can be checked against it. A match proves the fields
+    read here are the run's own; a mismatch means they are current metadata and
+    must not be presented as what the run used.
+    """
+    spec = version.strategy_spec or {}
+    if compute_config_hash(spec) == run.config_hash:
+        return (
+            "run_verified",
+            "The current version spec hashes to this run's config_hash, so it is "
+            "the spec the run executed.",
+        )
+    return (
+        "version_current_unverified",
+        "The current version spec does not hash to this run's config_hash; these "
+        "field values are current version metadata and may differ from what the "
+        "run executed.",
+    )
+
+
+def _comparability_dimension(
+    name: str,
+    value_a,
+    value_b,
+    *,
+    missing_reason: str,
+    differ_reason: str,
+) -> ComparabilityDimension:
+    if value_a is None or value_b is None:
+        return ComparabilityDimension(
+            dimension=name,
+            status="unknown",
+            value_a=value_a,
+            value_b=value_b,
+            reason=missing_reason,
+        )
+    if value_a == value_b:
+        return ComparabilityDimension(
+            dimension=name,
+            status="match",
+            value_a=value_a,
+            value_b=value_b,
+        )
+    return ComparabilityDimension(
+        dimension=name,
+        status="differ",
+        value_a=value_a,
+        value_b=value_b,
+        reason=differ_reason,
+    )
+
+
+def _append_limitation(limitations: List[str], message: str) -> None:
+    if message not in limitations:
+        limitations.append(message)
+
+
+def _cost_values(run: ResearchRun, spec: dict, result: Optional[dict]) -> dict:
+    commission, _, _ = _resolve_field("commission_rate", run, spec, result)
+    slippage, _, _ = _resolve_field("slippage_rate", run, spec, result)
+    return {"commission_rate": commission, "slippage_rate": slippage}
+
+
+def _cost_dimension(run_a, run_b, spec_a, spec_b, result_a, result_b) -> ComparabilityDimension:
+    costs_a = _cost_values(run_a, spec_a, result_a)
+    costs_b = _cost_values(run_b, spec_b, result_b)
+    complete_a = all(v is not None for v in costs_a.values())
+    complete_b = all(v is not None for v in costs_b.values())
+    if not complete_a or not complete_b:
+        return ComparabilityDimension(
+            dimension="costs",
+            status="unknown",
+            value_a=costs_a,
+            value_b=costs_b,
+            reason="Commission or slippage is missing on at least one side, so the "
+            "cost basis cannot be compared.",
+        )
+    if costs_a == costs_b:
+        return ComparabilityDimension(
+            dimension="costs", status="match", value_a=costs_a, value_b=costs_b
+        )
+    return ComparabilityDimension(
+        dimension="costs",
+        status="differ",
+        value_a=costs_a,
+        value_b=costs_b,
+        reason="The two runs used different commission or slippage settings, so "
+        "their returns are not on the same cost basis.",
+    )
+
+
 @router.get("/runs/compare", response_model=RunComparisonResponse)
 def compare_runs(
     run_a: UUID = Query(..., description="First run ID"),
@@ -262,7 +366,14 @@ def compare_runs(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Compare two research runs from the same experiment."""
+    """Compare two completed runs owned by the current user.
+
+    Runs may belong to the same experiment or to two different experiments of
+    the same owner. Each run's experiment/version identity is preserved, and a
+    ``comparability`` report states whether dataset, period, costs, engine and
+    spec provenance actually match. A cross-experiment comparison is never
+    labelled fair by default: the dimension checks decide it.
+    """
     # Fetch both runs with ownership check
     run_a_obj = db.query(ResearchRun).join(
         ExperimentVersion, ResearchRun.experiment_version_id == ExperimentVersion.id
@@ -285,15 +396,11 @@ def compare_runs(
     if not run_a_obj or not run_b_obj:
         raise HTTPException(status_code=404, detail="Run not found or not authorized")
 
-    # Verify same experiment
     version_a = db.query(ExperimentVersion).filter(ExperimentVersion.id == run_a_obj.experiment_version_id).first()
     version_b = db.query(ExperimentVersion).filter(ExperimentVersion.id == run_b_obj.experiment_version_id).first()
 
     if not version_a or not version_b:
         raise HTTPException(status_code=404, detail="Version not found")
-
-    if version_a.experiment_id != version_b.experiment_id:
-        raise HTTPException(status_code=400, detail="Runs must be from the same experiment")
 
     # Prevent comparing a run with itself
     if run_a == run_b:
@@ -307,6 +414,8 @@ def compare_runs(
             status_code=400,
             detail="Only completed runs can be compared",
         )
+
+    same_experiment = version_a.experiment_id == version_b.experiment_id
 
     # Get strategy specs
     spec_a = version_a.strategy_spec or {}
@@ -325,6 +434,9 @@ def compare_runs(
     conditions_comparison = []
     for field in CONDITION_FIELDS:
         conditions_comparison.append(_compare_field(field, run_a_obj, run_b_obj, version_a, version_b, spec_a, spec_b, result_a, result_b))
+
+    spec_source_a, spec_note_a = _spec_source(run_a_obj, version_a)
+    spec_source_b, spec_note_b = _spec_source(run_b_obj, version_b)
 
     # Check period overlap
     period_overlap = None
@@ -350,10 +462,10 @@ def compare_runs(
     limitations = []
     suppress_return_delta = False
     if periods_differ:
-        limitations.append("兩個 runs 日期範圍唔同，完整期間嘅累計回報唔可以直接比較")
+        _append_limitation(limitations, "兩個 runs 日期範圍唔同，完整期間嘅累計回報唔可以直接比較")
         suppress_return_delta = True
     if periods_incomplete:
-        limitations.append("無法確定其中一個或多個 run 嘅完整日期範圍，累計回報唔可以直接比較")
+        _append_limitation(limitations, "無法確定其中一個或多個 run 嘅完整日期範圍，累計回報唔可以直接比較")
         suppress_return_delta = True
 
     if suppress_return_delta:
@@ -363,34 +475,174 @@ def compare_runs(
                 field_comp.comparison_status = "insufficient"
                 # Keep value_a and value_b as recorded; frontend will not show delta
 
+    # Comparability inputs: only these decide whether the two results sit on
+    # the same basis. An unknown input is never treated as a match.
+    checksum_a, _, _ = _resolve_field("dataset_checksum", run_a_obj, spec_a, result_a)
+    checksum_b, _, _ = _resolve_field("dataset_checksum", run_b_obj, spec_b, result_b)
+    provider_a = (result_a or {}).get("data_provider")
+    provider_b = (result_b or {}).get("data_provider")
+
+    dataset_dim = _comparability_dimension(
+        "dataset",
+        {"checksum": checksum_a, "provider": provider_a},
+        {"checksum": checksum_b, "provider": provider_b},
+        missing_reason="The dataset checksum or data provider is missing on at least "
+        "one side, so the data basis cannot be compared.",
+        differ_reason="The two runs used a different dataset checksum or data "
+        "provider, so their returns are not on the same data basis.",
+    )
+
+    if periods_known:
+        period_dim = _comparability_dimension(
+            "period",
+            {"start": start_a, "end": end_a},
+            {"start": start_b, "end": end_b},
+            missing_reason="The full period is unknown on at least one side.",
+            differ_reason="The two runs cover different date ranges, so their "
+            "cumulative returns are not directly comparable.",
+        )
+    else:
+        period_dim = ComparabilityDimension(
+            dimension="period",
+            status="unknown",
+            value_a={"start": start_a, "end": end_a},
+            value_b={"start": start_b, "end": end_b},
+            reason="The full period is unknown on at least one side.",
+        )
+
+    costs_dim = _cost_dimension(run_a_obj, run_b_obj, spec_a, spec_b, result_a, result_b)
+
+    engine_dim = _comparability_dimension(
+        "engine_version",
+        run_a_obj.engine_version,
+        run_b_obj.engine_version,
+        missing_reason="The engine version is missing on at least one side.",
+        differ_reason="The two runs used different engine versions, so their "
+        "results are not directly comparable.",
+    )
+
+    spec_source_dim = ComparabilityDimension(
+        dimension="spec_source",
+        status=(
+            "match"
+            if spec_source_a == "run_verified" and spec_source_b == "run_verified"
+            else "unknown"
+        ),
+        value_a={
+            "source": spec_source_a,
+            "config_hash": run_a_obj.config_hash,
+            "experiment_version_id": str(version_a.id),
+            "experiment_version_number": version_a.version_number,
+        },
+        value_b={
+            "source": spec_source_b,
+            "config_hash": run_b_obj.config_hash,
+            "experiment_version_id": str(version_b.id),
+            "experiment_version_number": version_b.version_number,
+        },
+        reason=(
+            None
+            if spec_source_a == "run_verified" and spec_source_b == "run_verified"
+            else "At least one side's strategy spec is read from a current version "
+            "that is not proven (by config_hash) to be the spec the run executed."
+        ),
+    )
+
+    dimensions = [dataset_dim, period_dim, costs_dim, engine_dim, spec_source_dim]
+    fair_comparison = all(d.status == "match" for d in dimensions)
+
+    if not same_experiment:
+        _append_limitation(
+            limitations,
+            "兩個 run 屬於唔同實驗；平台保留各自嘅實驗與版本身分，只有可比性檢查全部一致時，"
+            "先會標示為同一基礎嘅比較。",
+        )
+    if dataset_dim.status == "differ":
+        _append_limitation(
+            limitations,
+            "兩個 run 嘅 dataset checksum 或數據提供者唔同，數據基礎唔一致，回報差異唔可以直接歸因。",
+        )
+    elif dataset_dim.status == "unknown":
+        _append_limitation(
+            limitations,
+            "未能確認兩個 run 嘅 dataset checksum 或數據提供者係否相同，數據基礎嘅一致性未成立。",
+        )
+    if costs_dim.status == "differ":
+        _append_limitation(
+            limitations,
+            "兩個 run 嘅佣金或滑價設定唔同，回報唔係喺同一個成本基礎上計算。",
+        )
+    elif costs_dim.status == "unknown":
+        _append_limitation(
+            limitations,
+            "未能確認兩個 run 嘅佣金或滑價設定係否相同，成本基礎嘅一致性未成立。",
+        )
+    if engine_dim.status == "differ":
+        _append_limitation(
+            limitations,
+            "兩個 run 使用唔同引擎版本，結果唔可以直接比較。",
+        )
+    if spec_source_dim.status != "match":
+        _append_limitation(
+            limitations,
+            "最少一邊嘅策略規格未能用 config_hash 證實就係該 run 當時使用嘅版本；規格欄位只屬目前版本資料。",
+        )
+
     # Check for missing critical fields (dataset_checksum resolved from run column,
     # data_provider resolved from result_json — provider_id column does not exist here)
     missing_fields = []
-    checksum_a, _, _ = _resolve_field("dataset_checksum", run_a_obj, spec_a, result_a)
-    checksum_b, _, _ = _resolve_field("dataset_checksum", run_b_obj, spec_b, result_b)
     if not checksum_a or not checksum_b:
         missing_fields.append("dataset_checksum")
-    provider_a = (result_a or {}).get("data_provider")
-    provider_b = (result_b or {}).get("data_provider")
     if not provider_a or not provider_b:
         missing_fields.append("data_provider")
 
     if missing_fields:
-        limitations.append(f"部分資料來源資訊缺失：{', '.join(missing_fields)}")
+        _append_limitation(limitations, f"部分資料來源資訊缺失：{', '.join(missing_fields)}")
+
+    sides = [
+        RunComparisonSide(
+            run_id=run_a_obj.id,
+            experiment_id=version_a.experiment_id,
+            experiment_version_id=version_a.id,
+            experiment_version_number=version_a.version_number,
+            status=run_a_obj.status.value,
+            spec_source=spec_source_a,
+            spec_source_note=spec_note_a,
+        ),
+        RunComparisonSide(
+            run_id=run_b_obj.id,
+            experiment_id=version_b.experiment_id,
+            experiment_version_id=version_b.id,
+            experiment_version_number=version_b.version_number,
+            status=run_b_obj.status.value,
+            spec_source=spec_source_b,
+            spec_source_note=spec_note_b,
+        ),
+    ]
 
     return RunComparisonResponse(
         run_a_id=run_a_obj.id,
         run_b_id=run_b_obj.id,
         experiment_id=version_a.experiment_id,
+        experiment_a_id=version_a.experiment_id,
+        experiment_b_id=version_b.experiment_id,
         experiment_version_a_id=version_a.id,
         experiment_version_b_id=version_b.id,
         status_a=run_a_obj.status,
         status_b=run_b_obj.status,
+        sides=sides,
         metrics_comparison=metrics_comparison,
         conditions_comparison=conditions_comparison,
         limitations=limitations,
         period_overlap=period_overlap,
+        comparability=RunComparability(
+            same_experiment=same_experiment,
+            fair_comparison=fair_comparison,
+            dimensions=dimensions,
+        ),
     )
+
+
 @router.get("/runs/{run_id}", response_model=ResearchRunResponse)
 def get_run(
     run_id: UUID,

@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import csv
 import io
 import uuid
@@ -34,6 +34,7 @@ from app.auth.rate_limit import api_key_rate_limit_dependency
 from app.auth.safety import safety_control
 from app.config import get_settings
 from app.models.kill_switch import KillSwitchScope
+from app.models.market_data import MarketDataBar
 from app.models.simulation import SimulationSession
 from app.api.schemas import (
     PaperPortfolioCreate,
@@ -142,8 +143,11 @@ def _latest_available_bar(asset_id: str) -> Optional[dict]:
     if ohlcv is None or ohlcv.empty:
         return None
     row = ohlcv.iloc[-1]
+    as_of = row["date"].strftime("%Y-%m-%d")
     return {
-        "date": row["date"].strftime("%Y-%m-%d"),
+        "date": as_of,
+        "as_of": as_of,
+        "source": "demo_synthetic_fixture",
         "open": float(row["open"]),
         "close": float(row["close"]),
     }
@@ -159,10 +163,100 @@ def _mark_prices(asset_ids: Iterable[str]) -> Dict[str, dict]:
     return marks
 
 
+def _bound_session(db: Session, portfolio: PaperPortfolio) -> Optional[SimulationSession]:
+    if portfolio.simulation_session_id is None:
+        return None
+    return (
+        db.query(SimulationSession)
+        .filter(SimulationSession.id == portfolio.simulation_session_id)
+        .first()
+    )
+
+
+def _session_cursor(session: SimulationSession):
+    """The point in replay time a bound account may be valued at, or None."""
+    if session.timeframe not in (None, "", "1d"):
+        if session.current_bar_timestamp is None:
+            return None
+        return ("timestamp", session.current_bar_timestamp)
+    if not session.current_snapshot_date:
+        return None
+    try:
+        return ("date", date.fromisoformat(session.current_snapshot_date[:10]))
+    except ValueError:
+        return None
+
+
+def _session_bound_marks(
+    db: Session, portfolio: PaperPortfolio, asset_ids: Iterable[str]
+) -> Dict[str, dict]:
+    """Mark a bound account from the bars its session has already replayed.
+
+    The cursor is the guarantee: marks are read at or before the point the
+    replay reached, so a valuation can never see a future bar. A missing bar
+    leaves the asset unpriced rather than falling back to the demo fixture — a
+    bound account must not be valued from data its session never replayed.
+    """
+    session = _bound_session(db, portfolio)
+    if session is None:
+        return {}
+    cursor = _session_cursor(session)
+    if cursor is None:
+        return {}
+
+    kind, value = cursor
+    marks: Dict[str, dict] = {}
+    for asset_id in {a for a in asset_ids if a}:
+        query = db.query(MarketDataBar).filter(MarketDataBar.instrument_id == asset_id)
+        if session.provider_id:
+            query = query.filter(MarketDataBar.provider_id == session.provider_id)
+        if kind == "timestamp":
+            query = query.filter(MarketDataBar.bar_timestamp <= value)
+        else:
+            query = query.filter(MarketDataBar.bar_date <= value)
+        bar = query.order_by(MarketDataBar.bar_timestamp.desc()).first()
+        if bar is None:
+            continue
+        marks[asset_id] = {
+            "close": float(bar.close),
+            "date": bar.bar_date.isoformat(),
+            "as_of": bar.bar_timestamp.isoformat(),
+            "source": "stored_market_data_bar",
+        }
+    return marks
+
+
+def _entry_commission_per_share(
+    db: Session, portfolio: PaperPortfolio, position: PaperPosition
+) -> Optional[float]:
+    """The entry commission a fill actually recorded for these shares.
+
+    The session lane books at its locked spec's rate, which is often 0.0, while
+    the direct lane uses the default. Reading the rate back from the fill keeps
+    the mark tied to the money that actually left the account instead of
+    assuming one rate for every portfolio.
+    """
+    row = (
+        db.query(PaperFill.commission_amount, PaperFill.quantity)
+        .join(PaperOrder, PaperFill.paper_order_id == PaperOrder.id)
+        .filter(
+            PaperOrder.portfolio_id == portfolio.id,
+            PaperOrder.asset_id == position.asset_id,
+            PaperOrder.side == OrderSide.BUY,
+        )
+        .order_by(PaperOrder.created_at.desc(), PaperFill.bar_timestamp.desc())
+        .first()
+    )
+    if row is None or not float(row.quantity):
+        return None
+    return float(row.commission_amount) / float(row.quantity)
+
+
 def _unrealized_pnl(
     position: PaperPosition,
     marks: Dict[str, dict],
     commission_rate: float = DEFAULT_COMMISSION_RATE,
+    entry_commission_per_share: Optional[float] = None,
 ) -> Optional[float]:
     """Mark-to-market P&L for an open position, or None when it cannot be marked.
 
@@ -172,7 +266,8 @@ def _unrealized_pnl(
     The entry commission already paid on these shares is deducted, because cash
     was debited for it at the open. Leaving it out would overstate the position
     and break the identity realised + unrealized == movement in cash plus
-    holdings.
+    holdings. ``entry_commission_per_share`` wins when the ledger has a fill to
+    read it from; the rate is only a fallback.
     """
     if position.status != PositionStatus.open:
         return None
@@ -182,40 +277,97 @@ def _unrealized_pnl(
     average_entry = float(position.average_entry_price)
     quantity = float(position.quantity)
     gross = (bar["close"] - average_entry) * quantity
-    return round(gross - average_entry * quantity * commission_rate, 4)
+    per_share = (
+        entry_commission_per_share
+        if entry_commission_per_share is not None
+        else average_entry * commission_rate
+    )
+    return round(gross - per_share * quantity, 4)
 
 
-def _portfolio_response(portfolio: PaperPortfolio) -> PaperPortfolioResponse:
-    """Serialise a portfolio with its unrealized P&L marked from real bar data."""
+def _portfolio_response(
+    portfolio: PaperPortfolio, db: Optional[Session] = None
+) -> PaperPortfolioResponse:
+    """Serialise a portfolio with its unrealized P&L marked from real bar data.
+
+    A portfolio bound to a replay session is valued from that session's stored
+    bars at its own cursor; an unbound one from the demo fixture. The two lanes
+    report different ``mode``/``price_source``/``data_as_of`` values on purpose,
+    because a bound account silently marked from the demo fixture is exactly the
+    mismatch this field set exists to prevent.
+    """
     open_positions = [p for p in portfolio.positions if p.status == PositionStatus.open]
-    marks = _mark_prices(p.asset_id for p in open_positions)
-    values = [_unrealized_pnl(p, marks) for p in open_positions]
+    session = _bound_session(db, portfolio) if db is not None else None
+    session_valuation = session is not None
+
+    if session_valuation:
+        marks = _session_bound_marks(db, portfolio, (p.asset_id for p in open_positions))
+    else:
+        marks = _mark_prices(p.asset_id for p in open_positions)
+
+    commissions = {
+        p.id: _entry_commission_per_share(db, portfolio, p)
+        for p in open_positions
+    } if db is not None else {}
+    values = [
+        _unrealized_pnl(
+            p,
+            marks,
+            entry_commission_per_share=commissions.get(p.id),
+        )
+        for p in open_positions
+    ]
     unpriced = sorted({
         p.asset_id for p, value in zip(open_positions, values) if value is None
     })
     total_unrealized = None if unpriced else round(sum(v for v in values if v is not None), 4)
-    as_of = sorted({bar["date"] for bar in marks.values()})
+    as_of = sorted({bar.get("as_of") or bar["date"] for bar in marks.values()})
 
-    note = (
-        "估值使用內建合成 demo 收盤價，非即時行情；已實現與未實現損益均已扣除佣金，"
-        "滑價已含在成交價內；無可用價格的標的不計入未實現損益。"
-        if open_positions
-        else "目前沒有持有部位，未實現損益為 0。"
-    )
-    if unpriced:
-        note = f"以下標的沒有可用價格，未實現損益無法計算：{', '.join(unpriced)}。" + note
+    if session_valuation:
+        provider = session.provider_id or "stored_market_data"
+        cursor = _session_cursor(session)
+        note = (
+            "估值使用此回放 session 已儲存行情 bar，並以其游標為上限；"
+            "未實現損益已扣除成交紀錄中的入場佣金，無可用 bar 的標的不計入。"
+            if cursor is not None
+            else "此回放 session 尚未推進到任何 bar，暫無可用估值資料；未實現損益為 null，不代表 0。"
+        )
+        if unpriced:
+            note = f"以下標的在回放游標前沒有已儲存行情，未實現損益無法計算：{', '.join(unpriced)}。" + note
+        valuation = PaperValuationBasis(
+            mode="session_replay",
+            mode_label_zh="策略回放（已存行情）" if cursor is not None else "策略回放（未開始）",
+            provider=provider,
+            price_source="stored_market_data_bar",
+            data_as_of=(as_of[-1] if as_of else None),
+            unpriced_assets=unpriced,
+            unrealized_pnl_basis="net_of_entry_commission",
+            note=note,
+        )
+    else:
+        note = (
+            "估值使用內建合成 demo 收盤價，非即時行情；已實現與未實現損益均已扣除佣金，"
+            "滑價已含在成交價內；無可用價格的標的不計入未實現損益。"
+            if open_positions
+            else "目前沒有持有部位，未實現損益為 0。"
+        )
+        if unpriced:
+            note = f"以下標的沒有可用價格，未實現損益無法計算：{', '.join(unpriced)}。" + note
+        valuation = PaperValuationBasis(
+            mode="synthetic_fixture",
+            mode_label_zh="合成數據",
+            provider="Demo (Synthetic)",
+            price_source="demo_synthetic_fixture",
+            data_as_of=(as_of[-1] if as_of else None),
+            unpriced_assets=unpriced,
+            unrealized_pnl_basis="net_of_entry_commission",
+            note=note,
+        )
 
     return PaperPortfolioResponse.model_validate(portfolio).model_copy(
         update={
             "total_unrealized_pnl": total_unrealized,
-            "valuation": PaperValuationBasis(
-                mode="synthetic_fixture",
-                mode_label_zh="合成數據",
-                provider="Demo (Synthetic)",
-                data_as_of=(as_of[-1] if as_of else None),
-                unpriced_assets=unpriced,
-                note=note,
-            ),
+            "valuation": valuation,
         }
     )
 
@@ -358,7 +510,7 @@ def create_portfolio(
 
     db.commit()
     db.refresh(portfolio)
-    return _portfolio_response(portfolio)
+    return _portfolio_response(portfolio, db)
 
 
 @router.get("", response_model=List[PaperPortfolioResponse])
@@ -367,7 +519,7 @@ def list_portfolios(
     current_user: User = Depends(get_current_user),
 ):
     portfolios = db.query(PaperPortfolio).filter(PaperPortfolio.owner_id == current_user.id).all()
-    return [_portfolio_response(p) for p in portfolios]
+    return [_portfolio_response(p, db) for p in portfolios]
 
 
 @router.get("/{portfolio_id}", response_model=PaperPortfolioResponse)
@@ -376,7 +528,9 @@ def get_portfolio(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    return _portfolio_response(_get_portfolio_with_ownership(portfolio_id, db, current_user))
+    return _portfolio_response(
+        _get_portfolio_with_ownership(portfolio_id, db, current_user), db
+    )
 
 
 @router.get("/{portfolio_id}/positions", response_model=List[PaperPositionResponse])
@@ -391,13 +545,39 @@ def list_positions(
     if status_filter:
         query = query.filter(PaperPosition.status == status_filter)
     positions = query.all()
-    marks = _mark_prices(p.asset_id for p in positions)
-    return [
-        PaperPositionResponse.model_validate(p).model_copy(
-            update={"unrealized_pnl": _unrealized_pnl(p, marks)}
+    open_positions = [p for p in positions if p.status == PositionStatus.open]
+    # Same lane selection as the portfolio view: a bound account is marked at
+    # its replay cursor, so a position and its portfolio cannot disagree.
+    if _bound_session(db, portfolio) is not None:
+        marks = _session_bound_marks(db, portfolio, (p.asset_id for p in open_positions))
+    else:
+        marks = _mark_prices(p.asset_id for p in open_positions)
+
+    responses: List[PaperPositionResponse] = []
+    for position in positions:
+        if position.status != PositionStatus.open:
+            responses.append(PaperPositionResponse.model_validate(position))
+            continue
+        value = _unrealized_pnl(
+            position,
+            marks,
+            entry_commission_per_share=_entry_commission_per_share(db, portfolio, position),
         )
-        for p in positions
-    ]
+        mark = marks.get(position.asset_id)
+        responses.append(
+            PaperPositionResponse.model_validate(position).model_copy(
+                update={
+                    "unrealized_pnl": value,
+                    "mark_price": mark["close"] if mark else None,
+                    "mark_as_of": (mark.get("as_of") or mark["date"]) if mark else None,
+                    "mark_source": mark["source"] if mark else None,
+                    "unrealized_pnl_basis": (
+                        "net_of_entry_commission" if value is not None else None
+                    ),
+                }
+            )
+        )
+    return responses
 
 
 @router.post("/{portfolio_id}/orders", response_model=PaperOrderResponse, status_code=status.HTTP_201_CREATED)
@@ -906,7 +1086,7 @@ def pause_portfolio(
 
     db.commit()
     db.refresh(portfolio)
-    return _portfolio_response(portfolio)
+    return _portfolio_response(portfolio, db)
 
 
 @router.post(
@@ -940,7 +1120,7 @@ def resume_portfolio(
 
     db.commit()
     db.refresh(portfolio)
-    return _portfolio_response(portfolio)
+    return _portfolio_response(portfolio, db)
 
 
 @router.post(
@@ -980,7 +1160,7 @@ def retire_portfolio(
 
     db.commit()
     db.refresh(portfolio)
-    return _portfolio_response(portfolio)
+    return _portfolio_response(portfolio, db)
 
 
 # ── Trade-journal export (CSV + JSON) ──────────────────────────────────

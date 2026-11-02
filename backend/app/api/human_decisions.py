@@ -22,7 +22,9 @@ from app.api.schemas import (
 )
 from app.lib.timeutil import utcnow
 from app.engine.intraday import INTRADAY_TIMEFRAMES
+from app.models.decision_label import DecisionLabel
 from app.services import emit_event
+from app.services.decision_labels import event_confirmation, latest_labels
 
 router = APIRouter(prefix="/human-decisions", tags=["human-decisions"])
 
@@ -98,7 +100,11 @@ def _derive_server_context(
     }
 
 
-def _event_to_response(event: HumanDecisionEvent) -> HumanDecisionResponse:
+def _event_to_response(
+    event: HumanDecisionEvent,
+    label: Optional[DecisionLabel] = None,
+) -> HumanDecisionResponse:
+    confirmation = event_confirmation(event, label)
     return HumanDecisionResponse(
         id=event.id,
         owner_id=event.owner_id,
@@ -117,6 +123,11 @@ def _event_to_response(event: HumanDecisionEvent) -> HumanDecisionResponse:
         actor_type=event.actor_type or "unknown",
         supersedes_event_id=event.supersedes_event_id,
         metadata_json=event.metadata_json,
+        confirmation_status=confirmation["status"],
+        confirmed_by=confirmation["confirmed_by"],
+        confirmed_at=confirmation["confirmed_at"],
+        confirmation_label_id=confirmation["label_id"],
+        confirmation_provenance=confirmation["provenance"],
         created_at=event.created_at,
         updated_at=event.updated_at,
     )
@@ -148,7 +159,10 @@ def create_human_decision(
             and existing.rationale == body.rationale
         )
         if same_content:
-            return _event_to_response(existing)
+            label = latest_labels(
+                db, current_user.id, [existing.id]
+            ).get(existing.id)
+            return _event_to_response(existing, label)
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Idempotency key conflict: same key with different content",
@@ -216,7 +230,8 @@ def list_human_decisions(
             HumanDecisionEvent.simulation_session_id == simulation_session_id
         )
     events = query.order_by(HumanDecisionEvent.created_at.asc()).all()
-    return [_event_to_response(e) for e in events]
+    labels = latest_labels(db, current_user.id, [event.id for event in events])
+    return [_event_to_response(e, labels.get(e.id)) for e in events]
 
 
 @router.get("/{event_id}", response_model=HumanDecisionResponse)
@@ -231,7 +246,8 @@ def get_human_decision(
     ).first()
     if not event:
         raise HTTPException(status_code=404, detail="Human decision event not found")
-    return _event_to_response(event)
+    label = latest_labels(db, current_user.id, [event.id]).get(event.id)
+    return _event_to_response(event, label)
 
 
 @router.post(

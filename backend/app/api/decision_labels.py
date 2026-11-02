@@ -25,7 +25,9 @@ from app.models.human_decision import HumanDecisionEvent
 from app.models.user import User
 from app.services import emit_event
 from app.services.decision_labels import (
+    CONFIRMED,
     LabelRefused,
+    event_confirmation,
     label_payload,
     latest_labels,
     record_label,
@@ -81,11 +83,14 @@ def _event_row(
     action = event.action.value if hasattr(event.action, "value") else str(event.action)
     label_body = label_payload(label)
     actor_type = event_actor_provenance(event)
+    confirmation = event_confirmation(event, label)
     usable = bool(
         actor_type == HUMAN
+        and confirmation["status"] == CONFIRMED
+        and confirmation["owner_verified"]
         and label_body
-        and label_body["state"] == "confirmed"
         and label_body["action_label"] in ("buy", "sell", "hold")
+        and (event.rationale or "").strip()
     )
     return {
         "decision_event_id": str(event.id),
@@ -111,6 +116,11 @@ def _event_row(
         ),
         "label": label_body,
         "revision_count": revision_count,
+        "confirmation_status": confirmation["status"],
+        "confirmed_by": confirmation["confirmed_by"],
+        "confirmed_at": confirmation["confirmed_at"],
+        "confirmation_label_id": confirmation["label_id"],
+        "confirmation_provenance": confirmation["provenance"],
         "usable_for_training": usable,
     }
 
@@ -164,7 +174,9 @@ def list_decisions_for_review(
     excluded = sum(
         1
         for row in human_rows
-        if row["label"] and row["label"]["state"] == "excluded"
+        if row["label"]
+        and row["label"]["state"] == "excluded"
+        and row["confirmation_provenance"] == HUMAN
     )
     unverified = len(rows) - len(human_rows)
     return {
@@ -246,6 +258,7 @@ def create_label_revision(
             action_label=payload.action_label,
             note=payload.note,
             exclusion_reason=payload.exclusion_reason,
+            actor_type=actor_type,
         )
     except LabelRefused as exc:
         raise HTTPException(status_code=400, detail=str(exc))

@@ -75,6 +75,59 @@ def test_create_saved_comparison(client, auth_headers, setup_db):
     db.close()
 
 
+def test_create_cross_experiment_defaults_anchor_to_run_a(client, auth_headers, setup_db):
+    """Saving a comparison between two of the owner's experiments works without
+    an explicit anchor: the row is listed under run A's experiment, and both
+    side identities are returned."""
+    db = TestSession()
+    seed = _seed_user_experiment_runs(db)
+
+    other_exp = Experiment(id=uuid4(), owner_id=seed["user_id"], title="Other", status="draft", visibility="private")
+    db.add(other_exp)
+    other_version = ExperimentVersion(id=uuid4(), experiment_id=other_exp.id, version_number=1, strategy_spec={}, created_by=seed["user_id"])
+    db.add(other_version)
+    other_run = ResearchRun(id=uuid4(), experiment_version_id=other_version.id, engine_version="1.0.0", config_hash="x", status=RunStatus.completed)
+    db.add(other_run)
+    db.commit()
+    other_run_id = str(other_run.id)
+    other_exp_id = str(other_exp.id)
+    other_version_id = str(other_version.id)
+    db.close()
+
+    resp = client.post("/api/v1/saved-comparisons", json={
+        "run_a_id": other_run_id,
+        "run_b_id": str(seed["run_b_id"]),
+        "purpose": "Cross-experiment comparison",
+    }, headers=auth_headers)
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["experiment_id"] == other_exp_id, "anchor defaults to run A's experiment"
+    assert body["run_a_experiment_id"] == other_exp_id
+    assert body["run_b_experiment_id"] == str(seed["experiment_id"])
+    assert body["run_a_experiment_version_id"] == other_version_id
+    assert body["scope"] == "cross_experiment"
+
+
+def test_create_rejects_anchor_that_is_a_third_experiment(client, auth_headers, setup_db):
+    """The anchor must be one of the two compared experiments, not a third."""
+    db = TestSession()
+    seed = _seed_user_experiment_runs(db)
+    third = Experiment(id=uuid4(), owner_id=seed["user_id"], title="Third", status="draft", visibility="private")
+    db.add(third)
+    db.commit()
+    third_id = str(third.id)
+    db.close()
+
+    resp = client.post("/api/v1/saved-comparisons", json={
+        "experiment_id": third_id,
+        "run_a_id": str(seed["run_a_id"]),
+        "run_b_id": str(seed["run_b_id"]),
+        "purpose": "Third anchor",
+    }, headers=auth_headers)
+    assert resp.status_code == 400
+    assert "anchor" in resp.json()["detail"]
+
+
 def test_list_saved_comparisons(client, auth_headers, setup_db):
     """Test listing saved comparisons for an experiment."""
     db = TestSession()
@@ -394,9 +447,10 @@ def test_update_persists_and_identity_is_immutable_fresh_session(client, auth_he
 # Step 3 — referenced-resource authorization (both runs) + safe failure
 # --------------------------------------------------------------------------
 
-def test_get_denied_when_referenced_run_not_in_experiment(client, auth_headers, setup_db):
-    """A crafted saved comparison whose run_a_id points at a run belonging to a
-    DIFFERENT experiment must 404 on GET (run re-authorization, no leak)."""
+def test_get_allows_same_owner_cross_experiment_with_both_identities(client, auth_headers, setup_db):
+    """A saved comparison may reference two of the owner's own runs from
+    different experiments. GET keeps the saved anchor but reports both side
+    experiments and labels the scope cross_experiment."""
     db = TestSession()
     seed = _seed_user_experiment_runs(db)
 
@@ -409,10 +463,54 @@ def test_get_denied_when_referenced_run_not_in_experiment(client, auth_headers, 
     db.add(foreign_run)
     db.commit()
     foreign_run_id = uuid.UUID(str(foreign_run.id))
+    other_exp_id = str(other_exp.id)
+    other_version_id = str(other_version.id)
 
     saved = SavedComparison(
         id=uuid4(), author_id=seed["user_id"], experiment_id=seed["experiment_id"],
         run_a_id=foreign_run_id, run_b_id=seed["run_b_id"], purpose="Cross-experiment ref",
+    )
+    db.add(saved)
+    db.commit()
+    saved_id = str(saved.id)
+    db.close()
+
+    resp = client.get(f"/api/v1/saved-comparisons/{saved_id}", headers=auth_headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["experiment_id"] == str(seed["experiment_id"]), "anchor is preserved"
+    assert body["run_a_experiment_id"] == other_exp_id
+    assert body["run_b_experiment_id"] == str(seed["experiment_id"])
+    assert body["run_a_experiment_version_id"] == other_version_id
+    assert body["run_b_experiment_version_id"] == str(seed["version_id"])
+    assert body["scope"] == "cross_experiment"
+
+
+def test_get_denied_when_referenced_run_belongs_to_another_user(client, auth_headers, setup_db):
+    """A saved row authored by the current user but referencing another user's
+    run must 404: ownership is checked per run, and no metadata may leak."""
+    from app.auth.jwt import get_password_hash
+
+    db = TestSession()
+    seed = _seed_user_experiment_runs(db)
+
+    other_user = User(
+        id=uuid4(), email="other_run_owner@test.com",
+        password_hash=get_password_hash("pass"), display_name="Other owner",
+    )
+    db.add(other_user)
+    other_exp = Experiment(id=uuid4(), owner_id=other_user.id, title="Theirs", status="draft", visibility="private")
+    db.add(other_exp)
+    other_version = ExperimentVersion(id=uuid4(), experiment_id=other_exp.id, version_number=1, strategy_spec={}, created_by=other_user.id)
+    db.add(other_version)
+    foreign_run = ResearchRun(id=uuid4(), experiment_version_id=other_version.id, engine_version="1.0.0", config_hash="x", status=RunStatus.completed)
+    db.add(foreign_run)
+    db.commit()
+    foreign_run_id = uuid.UUID(str(foreign_run.id))
+
+    saved = SavedComparison(
+        id=uuid4(), author_id=seed["user_id"], experiment_id=seed["experiment_id"],
+        run_a_id=foreign_run_id, run_b_id=seed["run_b_id"], purpose="Leak attempt",
     )
     db.add(saved)
     db.commit()

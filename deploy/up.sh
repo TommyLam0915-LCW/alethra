@@ -48,6 +48,17 @@ echo "==> Running database migrations..."
 docker compose -f "$COMPOSE_FILE" run --rm backend alembic upgrade head
 docker compose -f "$COMPOSE_FILE" run --rm backend alembic current
 
+# A claimed write batch means an executor is still issuing customer writes.
+# Starting the app on top of that would let a second executor replay the batch.
+echo "==> Checking for in-flight customer write batches..."
+if ! docker compose -f "$COMPOSE_FILE" run --rm backend \
+        python scripts/operation_batch.py predeploy; then
+    echo "ERROR: a customer write batch is still claimed; refusing to start services."
+    echo "  Read it back before resending anything:"
+    echo "    docker compose -f $COMPOSE_FILE run --rm backend python scripts/operation_batch.py status --owner-email <owner> --batch-key <key>"
+    exit 1
+fi
+
 echo "==> Starting all services..."
 docker compose -f "$COMPOSE_FILE" up -d
 

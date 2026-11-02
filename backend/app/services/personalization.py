@@ -31,12 +31,14 @@ from sqlalchemy.orm import Session
 
 from app.auth.provenance import HUMAN, event_actor_provenance
 from app.lib.timeutil import utcnow
+from app.models.decision_label import DecisionLabelState
 from app.models.human_decision import HumanDecisionEvent
 from app.models.market_data import MarketDataBar
 from app.models.personalization import (
     PERSONALIZATION_TRAINING_PURPOSE,
     PersonalizationConsent,
 )
+from app.services.decision_labels import latest_labels
 
 CONSENT_VERSION = "personalization-training-v1"
 
@@ -218,28 +220,64 @@ def evaluate_eligibility(
     }
     latest = [event for event in events if event.id not in superseded_ids]
     superseded_count = total_recorded - len(latest)
+    labels = latest_labels(db, owner_id, [event.id for event in latest])
 
-    # A label is "owner confirmed" only when the server recorded a
-    # password-authenticated owner session as its source. Events written
-    # through an API credential are agent output; legacy rows whose writer was
-    # never recorded stay unknown. Neither is silently promoted, and neither is
-    # rewritten: they are reported as an explicit exclusion.
-    owner_confirmed = [
+    # Two independent gates, never inferred from each other or from text:
+    #
+    # 1. The decision was recorded through a password-authenticated owner
+    #    session. An API-key event is agent output and stays agent; a legacy
+    #    row without provenance stays unknown. A rationale that happens to say
+    #    "agent-generated" (or the reverse) is only text and changes nothing.
+    # 2. The owner explicitly confirmed the decision in the review surface,
+    #    and that confirmation revision was itself written through a verified
+    #    owner session. Recording a decision is not confirming it.
+    human_events = [
         event for event in latest if event_actor_provenance(event) == HUMAN
     ]
-    unverified_count = len(latest) - len(owner_confirmed)
+    unverified_count = len(latest) - len(human_events)
+
+    pending_owner_confirmation: List[HumanDecisionEvent] = []
+    excluded_by_owner: List[HumanDecisionEvent] = []
+    unverified_confirmation: List[HumanDecisionEvent] = []
+    owner_confirmed: List[HumanDecisionEvent] = []
+    for event in human_events:
+        label = labels.get(event.id)
+        if label is None:
+            pending_owner_confirmation.append(event)
+        elif label.actor_type != HUMAN:
+            # The revision exists but its writer's channel was never verified.
+            # It is reported, not promoted.
+            unverified_confirmation.append(event)
+        elif label.state is DecisionLabelState.excluded:
+            excluded_by_owner.append(event)
+        else:
+            owner_confirmed.append(event)
 
     consent = get_active_consent(db, owner_id)
     scope_ids = set(_scope_strategy_ids(consent))
 
+    in_scope_candidates: List[HumanDecisionEvent] = []
+    pending_in_scope: List[HumanDecisionEvent] = []
+    excluded_in_scope: List[HumanDecisionEvent] = []
+    unverified_confirmation_in_scope: List[HumanDecisionEvent] = []
     in_scope: List[HumanDecisionEvent] = []
     outside_scope_count = 0
-    for event in owner_confirmed:
+    excluded_ids = {event.id for event in excluded_by_owner}
+    unverified_confirmation_ids = {event.id for event in unverified_confirmation}
+    for event in human_events:
         strategy_id = _as_uuid(event.server_strategy_version_id)
-        if strategy_id is not None and strategy_id in scope_ids:
-            in_scope.append(event)
-        else:
+        if strategy_id is None or strategy_id not in scope_ids:
             outside_scope_count += 1
+            continue
+        in_scope_candidates.append(event)
+        if labels.get(event.id) is None:
+            pending_in_scope.append(event)
+        elif event.id in unverified_confirmation_ids:
+            unverified_confirmation_in_scope.append(event)
+        elif event.id in excluded_ids:
+            excluded_in_scope.append(event)
+        else:
+            in_scope.append(event)
 
     missing_rationale = [
         event for event in in_scope if not (event.rationale or "").strip()
@@ -258,7 +296,9 @@ def evaluate_eligibility(
     coverage_ratio: Optional[float] = (
         covered / considered if considered > 0 else None
     )
-    leaking = _future_leakage_rows(confirmed)
+    # Pending decisions are not in the dataset yet, but a future-dated one is
+    # still a risk the owner must see before confirming it.
+    leaking = _future_leakage_rows(in_scope_candidates)
 
     strategies: List[Dict[str, Any]] = []
     for strategy_id in sorted(
@@ -278,11 +318,17 @@ def evaluate_eligibility(
             for event in confirmed
             if str(_as_uuid(event.server_strategy_version_id)) == strategy_id
         ]
+        strategy_pending = [
+            event
+            for event in pending_owner_confirmation
+            if str(_as_uuid(event.server_strategy_version_id)) == strategy_id
+        ]
         strategies.append(
             {
                 "strategy_version_id": strategy_id,
                 "recorded_decisions": len(strategy_latest),
                 "confirmed_decisions": len(strategy_confirmed),
+                "pending_owner_confirmation": len(strategy_pending),
                 "distinct_sessions": len(
                     {str(event.simulation_session_id) for event in strategy_confirmed}
                 ),
@@ -333,10 +379,20 @@ def evaluate_eligibility(
         reasons.append(
             _reason(
                 "INSUFFICIENT_CONFIRMED_DECISIONS",
-                f"在同意範圍內、具理由且未撤回的決策只有 {len(confirmed)} 筆，"
-                f"未達最低 {MIN_CONFIRMED_DECISIONS} 筆。",
+                f"在同意範圍內、已由你在決策檢視中確認且具理由的決策只有 "
+                f"{len(confirmed)} 筆，未達最低 {MIN_CONFIRMED_DECISIONS} 筆。",
                 len(confirmed),
                 MIN_CONFIRMED_DECISIONS,
+            )
+        )
+    if pending_in_scope:
+        reasons.append(
+            _reason(
+                "OWNER_CONFIRMATION_REQUIRED",
+                f"在同意範圍內有 {len(pending_in_scope)} 筆決策尚未由你在決策檢視中"
+                "確認。記錄決策不等於確認；未確認的決策不會進入訓練集。",
+                len(pending_in_scope),
+                f"owner confirmation for every recorded decision",
             )
         )
     if distinct_sessions < MIN_DISTINCT_SESSIONS:
@@ -383,7 +439,7 @@ def evaluate_eligibility(
         reasons.append(
             _reason(
                 "UNLABELLED_WITHOUT_REASON",
-                f"同意範圍內有 {len(missing_rationale)} 筆決策沒有填寫理由，"
+                f"同意範圍內有 {len(missing_rationale)} 筆已確認決策沒有填寫理由，"
                 "不能作為已確認標籤。",
                 len(missing_rationale),
                 0,
@@ -410,16 +466,14 @@ def evaluate_eligibility(
                 0,
             )
         )
-
-    warnings: List[Dict[str, Any]] = []
-    if unverified_count:
+    if unverified_confirmation:
         warnings.append(
             _reason(
-                "UNVERIFIED_DECISION_PROVENANCE",
-                f"有 {unverified_count} 筆決策的來源不是已驗證的本人密碼登入工作階段"
-                "（API 代理產生或來源未記錄），不會當作本人確認的標籤，"
-                "亦不會被改寫。這是資料來源說明，不是要求你刪除舊記錄。",
-                unverified_count,
+                "UNVERIFIED_CONFIRMATION_PROVENANCE",
+                f"有 {len(unverified_confirmation)} 筆決策的確認修訂並非由已驗證的"
+                "本人密碼登入工作階段寫入（例如較早版本產生的修訂），"
+                "不會當作本人確認，亦不會被改寫。",
+                len(unverified_confirmation),
                 0,
             )
         )
@@ -472,6 +526,7 @@ def evaluate_eligibility(
         "warnings": warnings,
         "requirements": {
             "consent_version": CONSENT_VERSION,
+            "owner_confirmation_required": True,
             "min_confirmed_decisions": MIN_CONFIRMED_DECISIONS,
             "min_distinct_sessions": MIN_DISTINCT_SESSIONS,
             "min_distinct_snapshot_dates": MIN_DISTINCT_SNAPSHOT_DATES,
@@ -486,6 +541,9 @@ def evaluate_eligibility(
                 "superseded_revisions": superseded_count,
                 "unverified_provenance": unverified_count,
                 "outside_consent_scope": outside_scope_count,
+                "pending_owner_confirmation": len(pending_in_scope),
+                "excluded_by_owner": len(excluded_in_scope),
+                "unverified_confirmation": len(unverified_confirmation_in_scope),
                 "missing_reason": len(missing_rationale),
                 "missing_snapshot_context": len(invalid_context),
             },
@@ -502,7 +560,8 @@ def evaluate_eligibility(
         "strategies": strategies,
         "evaluated_at": utcnow().isoformat(),
         "disclaimer_zh": (
-            "個人化訓練資格只依已記錄且經同意的決策判斷；不足時直接拒絕，"
+            "個人化訓練資格只依已記錄、經同意，並由你本人在決策檢視中明確確認的"
+            "決策判斷；記錄決策或理由文字本身都不是確認，不足時直接拒絕，"
             "不以模擬或推測標籤補足。"
         ),
     }
