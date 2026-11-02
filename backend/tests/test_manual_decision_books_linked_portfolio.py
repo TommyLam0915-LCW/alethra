@@ -55,6 +55,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
+from app.engine.backtest import ENGINE_VERSION
 from app.services.order_lifecycle import SETTLEMENT_POLICY_LABEL
 from tests.conftest import TEST_ENGINE, TestSession
 
@@ -577,6 +578,11 @@ class TestDecisionAndExecutionClocksAreSeparate:
         step = [d for d in decision_rows if (d["decision_detail"] or {}).get("manual_fills")]
         assert len(step) == 1
         assert step[0]["snapshot_date"] == B2
+
+        # The market clock and the manual intent are the same engine on one
+        # session; two labels here would make a reader think the book was priced
+        # by two different versions.
+        assert {d["engine_version"] for d in decision_rows} == {ENGINE_VERSION}
 
 
 class TestExecutionMovesBothBooksOnce:

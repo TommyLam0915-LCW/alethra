@@ -162,6 +162,18 @@ def _get_stored_trade_dates(symbol: str, start_date: str, end_date: str, db: Ses
     return [bar.bar_date.isoformat() if hasattr(bar.bar_date, 'isoformat') else str(bar.bar_date) for bar in bars]
 
 
+def _replay_engine_version(session: SimulationSession) -> str:
+    """The engine version that prices this session's decisions.
+
+    Both the market-clock advance and a manual intent are stamped with this so
+    one session never reports two engines. ``simulation_policy_version`` is a
+    separate, session-level field and is not this value.
+    """
+    if _is_intraday_timeframe(session.timeframe):
+        return INTRADAY_ENGINE_VERSION
+    return ENGINE_VERSION
+
+
 def _build_simulator(session: SimulationSession, version: ExperimentVersion) -> ForwardSimulator:
     spec = version.strategy_spec
     return ForwardSimulator(
@@ -170,7 +182,7 @@ def _build_simulator(session: SimulationSession, version: ExperimentVersion) -> 
         commission_rate=spec.get("commission_rate", 0.0),
         slippage_rate=spec.get("slippage_rate", 0.0),
         dataset_cutoff_at=session.data_cutoff_at,
-        engine_version=ENGINE_VERSION,
+        engine_version=_replay_engine_version(session),
     )
 
 
@@ -2128,7 +2140,7 @@ def manual_decision(
         step_number=step_number,
         snapshot_date=cutoff,
         data_cutoff_at=session.data_cutoff_at,
-        engine_version=SIMULATION_ENGINE_VERSION,
+        engine_version=_replay_engine_version(session),
         decision_type=decision_type,
         decision_detail=decision_detail,
         idempotency_key=payload.idempotency_key,
