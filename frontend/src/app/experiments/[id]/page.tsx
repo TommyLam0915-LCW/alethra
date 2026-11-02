@@ -21,6 +21,8 @@ interface Experiment {
   status: string;
   created_at: string;
   current_version_id: string | null;
+  continued_from_experiment_id: string | null;
+  continued_from_version_id: string | null;
   scope: Record<string, any> | null;
 }
 
@@ -146,6 +148,7 @@ export default function ExperimentDetailPage() {
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
   const [locking, setLocking] = useState(false);
+  const [continuingVersionId, setContinuingVersionId] = useState<string | null>(null);
   const [showLockConfirm, setShowLockConfirm] = useState(false);
   const [error, setError] = useState('');
   const [noteText, setNoteText] = useState('');
@@ -269,6 +272,24 @@ export default function ExperimentDetailPage() {
       setError(err.message || 'The strategy could not be locked.');
     } finally {
       setLocking(false);
+    }
+  };
+
+  /**
+   * A revision of a locked experiment is a lineage record and cannot become the
+   * current version, so it cannot be locked or replayed in place. Continuing
+   * copies it into a new draft experiment whose version 1 is lockable, and the
+   * source experiment is left untouched.
+   */
+  const handleContinueVersion = async (versionId: string) => {
+    setContinuingVersionId(versionId);
+    setError('');
+    try {
+      const continuation = await api.experiments.continueVersion(experimentId, versionId);
+      router.push(`/experiments/${continuation.id}`);
+    } catch (err: any) {
+      setError(err.message || 'The research could not be continued in a new experiment.');
+      setContinuingVersionId(null);
     }
   };
 
@@ -562,18 +583,52 @@ export default function ExperimentDetailPage() {
               <> · Reason for change: {versions.find(v => v.id === experiment.current_version_id)?.change_reason}</>
             )}
           </p>
+          {experiment.continued_from_experiment_id && (
+            <p data-testid="exp-lineage-note" style={{ color: 'var(--text-muted)', fontSize: '13px', marginTop: '8px' }}>
+              Continued from{' '}
+              <Link
+                href={`/experiments/${experiment.continued_from_experiment_id}`}
+                style={{ color: 'var(--primary-text)' }}
+              >
+                another experiment
+              </Link>
+              ; the source experiment was not changed.
+            </p>
+          )}
           {showVersions && (
             <div style={{ marginTop: '16px', borderTop: '1px solid var(--border-strong)', paddingTop: '16px' }}>
+              <p style={{ color: 'var(--text-muted)', fontSize: '13px', marginTop: 0, marginBottom: '12px' }}>
+                Continuing a version copies it into a new draft experiment whose first version can be locked,
+                simulated and replayed. A revision of a locked experiment cannot be locked in place, and this
+                experiment is never modified by continuing it.
+              </p>
               {versions.map((v, i) => (
                 <div key={v.id} style={{ padding: '12px', backgroundColor: 'var(--surface-2)', borderRadius: '6px', marginBottom: '8px' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
                     <div>
                       <strong>Version {v.version_number}</strong>
                       {v.change_reason && <span style={{ marginLeft: '8px', color: 'var(--text-secondary)' }}>· {v.change_reason}</span>}
+                      <span style={{ marginLeft: '8px', fontSize: '12px', color: v.locked_at ? 'var(--positive)' : 'var(--text-muted)' }}>
+                        {v.locked_at ? '· locked' : '· not locked'}
+                      </span>
                     </div>
-                    <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
-                      {formatDate(v.created_at)}
-                    </span>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                      <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                        {formatDate(v.created_at)}
+                      </span>
+                      {(v.id !== experiment.current_version_id || isLocked) && (
+                        <button
+                          type="button"
+                          className="btn"
+                          data-testid={`exp-continue-version-${v.version_number}`}
+                          onClick={() => handleContinueVersion(v.id)}
+                          disabled={continuingVersionId !== null}
+                          style={{ backgroundColor: 'var(--surface-3, var(--surface-2))', fontSize: '13px' }}
+                        >
+                          {continuingVersionId === v.id ? 'Continuing…' : 'Continue in new experiment'}
+                        </button>
+                      )}
+                    </div>
                   </div>
                 </div>
               ))}

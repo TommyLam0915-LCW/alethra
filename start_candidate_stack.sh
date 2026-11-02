@@ -199,6 +199,17 @@ export_process_env() {
     export CANDIDATE_PASSWORDLESS_ACCOUNTS
   fi
   export CANDIDATE_PASSWORDLESS_SESSION_MINUTES="$(profile_get CANDIDATE_PASSWORDLESS_SESSION_MINUTES)"
+
+  # Agent candidate screening is an isolated development lane. These are
+  # operator switches only: they make the routes reachable in this local stack,
+  # and the backend still refuses every write without the owner's own consent
+  # row. Nothing here creates consent or a training authorization fixture.
+  AGENT_STRATEGY_SCREENING_ENABLED="$(profile_get AGENT_STRATEGY_SCREENING_ENABLED)"
+  [ "$AGENT_STRATEGY_SCREENING_ENABLED" = "true" ] || AGENT_STRATEGY_SCREENING_ENABLED="false"
+  export AGENT_STRATEGY_SCREENING_ENABLED
+  AGENT_STRATEGY_OWNER_CONSENT_MODE="$(profile_get AGENT_STRATEGY_OWNER_CONSENT_MODE)"
+  [ "$AGENT_STRATEGY_OWNER_CONSENT_MODE" = "true" ] || AGENT_STRATEGY_OWNER_CONSENT_MODE="false"
+  export AGENT_STRATEGY_OWNER_CONSENT_MODE
   # An empty string would fail int parsing in Settings; leaving it unset lets
   # the backend default (30 minutes) apply.
   if [ -z "$CANDIDATE_PASSWORDLESS_SESSION_MINUTES" ]; then

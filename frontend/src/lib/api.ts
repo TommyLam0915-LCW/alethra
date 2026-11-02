@@ -261,6 +261,10 @@ export const api = {
         method: 'POST',
         body: JSON.stringify(data),
       }),
+    continueVersion: (id: string, versionId: string) =>
+      apiFetch(`/api/v1/experiments/${id}/versions/${versionId}/continue`, {
+        method: 'POST',
+      }),
     record: (id: string) => apiFetch(`/api/v1/experiments/${id}/record`),
     export: (id: string) => apiFetch(`/api/v1/experiments/${id}/export`),
     methodReview: (id: string) => apiFetch(`/api/v1/experiments/${id}/method-review`),

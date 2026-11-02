@@ -28,6 +28,7 @@ from app.services.personalization import (
     get_active_consent,
     grant_consent,
     revoke_consent,
+    training_policy,
 )
 
 router = APIRouter(prefix="/ml", tags=["personalization"])
@@ -62,7 +63,10 @@ def list_capabilities(
     _scope_check=Depends(check_api_key_scope("read")),
     db: Session = Depends(get_db),
 ):
-    return {"capabilities": capabilities(db, current_user.id)}
+    return {
+        "capabilities": capabilities(db, current_user.id),
+        "training_policy": training_policy(db, current_user.id),
+    }
 
 
 @router.put("/personalization/consent")

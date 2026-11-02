@@ -1,3 +1,4 @@
+import copy
 from datetime import datetime, timezone
 from typing import List
 from uuid import UUID
@@ -373,7 +374,13 @@ def lock_version(
     if experiment.current_version_id != version.id:
         raise HTTPException(
             status_code=409,
-            detail="Only the experiment's current version can be locked",
+            detail=(
+                "Only the experiment's current version can be locked. A revision "
+                "of a locked experiment is a lineage record and cannot move the "
+                "current pointer; to carry this version's research into a new "
+                "lockable experiment, POST "
+                f"/api/v1/experiments/{experiment_id}/versions/{version_id}/continue"
+            ),
         )
 
     if not lock_data.confirm:
@@ -408,6 +415,140 @@ def lock_version(
         strategy_config_hash=version.strategy_config_hash,
         already_locked=False,
     )
+
+
+@router.post(
+    "/{experiment_id}/versions/{version_id}/continue",
+    response_model=ExperimentResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def continue_research(
+    experiment_id: UUID,
+    version_id: UUID,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Continue one version's research in a new, lockable experiment.
+
+    A locked experiment cannot move ``current_version_id``: replay and forward
+    simulation bind that pointer and require it to be locked. Instead of
+    weakening that contract, the version is copied into a new experiment whose
+    version 1 is current and unlocked, with an explicit lineage pointer back to
+    the source version. The source is never modified.
+
+    The copied approval stamp is cleared: an approval given for the source
+    version is not an approval of the new strategy contract.
+    """
+    source = db.query(Experiment).filter(
+        Experiment.id == experiment_id,
+        Experiment.owner_id == current_user.id,
+    ).first()
+    if not source:
+        raise HTTPException(status_code=404, detail="Experiment not found")
+
+    version = db.query(ExperimentVersion).filter(
+        ExperimentVersion.id == version_id,
+        ExperimentVersion.experiment_id == experiment_id,
+    ).first()
+    if not version:
+        raise HTTPException(status_code=404, detail="Version not found")
+
+    # The new experiment starts unapproved. Dropping the key (rather than
+    # writing False) keeps the copied spec schema-valid: the field is an ISO
+    # timestamp, not a boolean.
+    spec = copy.deepcopy(version.strategy_spec or {})
+    spec.pop("user_approved_at", None)
+
+    suffix = " (continued)"
+    title = source.title
+    if len(title) + len(suffix) > 500:
+        title = title[: 500 - len(suffix)]
+    title = f"{title}{suffix}"
+
+    continuation = Experiment(
+        owner_id=current_user.id,
+        workspace_id=source.workspace_id,
+        title=title,
+        original_idea=source.original_idea,
+        research_type=source.research_type,
+        hypothesis=source.hypothesis,
+        falsification_conditions=source.falsification_conditions,
+        benchmark=source.benchmark,
+        scope=copy.deepcopy(source.scope),
+        status=ExperimentStatus.draft,
+        visibility=source.visibility,
+        continued_from_experiment_id=source.id,
+        continued_from_version_id=version.id,
+    )
+    db.add(continuation)
+    db.flush()
+
+    lineage = {
+        "experiment_id": str(source.id),
+        "version_id": str(version.id),
+        "version_number": version.version_number,
+    }
+    new_version = ExperimentVersion(
+        experiment_id=continuation.id,
+        version_number=1,
+        strategy_spec=spec,
+        assumptions={"continued_from": lineage},
+        change_reason=(
+            f"Continued from experiment {source.id} version {version.version_number}"
+        ),
+        config_hash=compute_config_hash(spec),
+        user_approved_at=None,
+        created_by=current_user.id,
+    )
+    db.add(new_version)
+    db.flush()
+
+    continuation.current_version_id = new_version.id
+    data_cutoff = spec.get("end_date")
+
+    emit_event(
+        db,
+        entity_type="experiment",
+        entity_id=continuation.id,
+        event_type="experiment_created",
+        actor_id=current_user.id,
+        actor_type=request_actor_provenance(request),
+        payload={"title": title, "continued_from": lineage},
+        data_cutoff_at=data_cutoff,
+    )
+    emit_event(
+        db,
+        entity_type="experiment",
+        entity_id=continuation.id,
+        event_type="experiment_continued",
+        actor_id=current_user.id,
+        actor_type=request_actor_provenance(request),
+        payload={
+            **lineage,
+            "source_experiment_id": str(source.id),
+            "source_version_id": str(version.id),
+            "new_version_id": str(new_version.id),
+        },
+        data_cutoff_at=data_cutoff,
+    )
+    emit_event(
+        db,
+        entity_type="experiment",
+        entity_id=continuation.id,
+        event_type="dataset_selected",
+        actor_id=current_user.id,
+        actor_type=request_actor_provenance(request),
+        payload={
+            "asset_ids": spec.get("asset_ids", []),
+            "benchmark_id": spec.get("benchmark_id"),
+        },
+        data_cutoff_at=data_cutoff,
+    )
+
+    db.commit()
+    db.refresh(continuation)
+    return continuation
 
 
 @router.get("/{experiment_id}/versions", response_model=List[ExperimentVersionResponse])

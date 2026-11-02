@@ -75,6 +75,7 @@ const STATUS_LABELS: Record<string, string> = {
 
 export default function PersonalizationPanel() {
   const [capabilities, setCapabilities] = useState<Capability[]>([]);
+  const [trainingPolicy, setTrainingPolicy] = useState<any>(null);
   const [eligibility, setEligibility] = useState<Eligibility | null>(null);
   const [ownedVersions, setOwnedVersions] = useState<OwnedVersion[]>([]);
   const [selected, setSelected] = useState<string[] | null>(null);
@@ -94,6 +95,7 @@ export default function PersonalizationPanel() {
         ]);
         if (cancelled) return;
         setCapabilities(caps.capabilities || []);
+        setTrainingPolicy(caps.training_policy || null);
         setEligibility(elig);
         const owned: OwnedVersion[] = (Array.isArray(experiments) ? experiments : [])
           .filter((exp: { current_version_id?: string | null }) => exp.current_version_id)
@@ -250,6 +252,68 @@ export default function PersonalizationPanel() {
           </div>
         ))}
       </div>
+
+      {trainingPolicy && (
+        <div
+          data-testid="training-policy"
+          style={{
+            marginTop: '18px',
+            padding: '14px',
+            border: '1px solid var(--border)',
+            borderRadius: '8px',
+            background: 'var(--surface-2)',
+          }}
+        >
+          <strong style={{ fontSize: '14px' }}>訓練 lane 政策</strong>
+          <p style={{ margin: '6px 0 0', fontSize: '12px', color: 'var(--text-secondary)' }}>
+            {trainingPolicy.summary_zh}
+          </p>
+          <div style={{ display: 'grid', gap: '8px', marginTop: '10px' }}>
+            {trainingPolicy.lanes.map((lane: any) => (
+              <div
+                key={lane.lane}
+                data-testid={`training-lane-${lane.lane}`}
+                style={{
+                  padding: '10px 12px',
+                  borderRadius: '6px',
+                  border: '1px solid var(--border)',
+                  background: 'var(--surface)',
+                }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px', flexWrap: 'wrap' }}>
+                  <strong style={{ fontSize: '13px' }}>{lane.label_zh}</strong>
+                  <span
+                    style={{
+                      fontSize: '11px',
+                      padding: '1px 8px',
+                      borderRadius: '10px',
+                      border: '1px solid currentColor',
+                      color: 'var(--warning)',
+                    }}
+                  >
+                    發布狀態：{lane.release_status}
+                  </span>
+                </div>
+                <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                  {lane.lane === 'personal_model_release'
+                    ? `需要你本人簽署同意（${lane.consent.version}），並達成 ${lane.requirements.min_confirmed_decisions} 筆已確認決策、${lane.requirements.min_distinct_sessions} 個工作階段、${lane.requirements.min_distinct_snapshot_dates} 個決策時點。門檻沒有因本次更新調低。`
+                    : `以機器候選的反事實結果評估，需 ${lane.requirements.min_screening_candidates} 個候選與 ${lane.requirements.min_split_groups} 個時間分組；同意狀態：${lane.consent.status}。`}
+                </div>
+                {lane.lane === 'agent_candidate_evaluation' && (
+                  <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '4px' }}>
+                    環境允許：{String(lane.authorization.environment_allowed)} · 訓練授權：
+                    {String(lane.authorization.training_granted)} · 快照授權：
+                    {String(lane.authorization.snapshot_granted)}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+          <p style={{ margin: '10px 0 0', fontSize: '12px', color: 'var(--text-muted)' }}>
+            {trainingPolicy.how_to_authorize_zh}
+          </p>
+        </div>
+      )}
 
       <div
         id="personalization-eligibility"

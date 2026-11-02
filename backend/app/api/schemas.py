@@ -145,6 +145,8 @@ class ExperimentResponse(BaseModel):
     status: str
     visibility: str
     current_version_id: Optional[UUID]
+    continued_from_experiment_id: Optional[UUID] = None
+    continued_from_version_id: Optional[UUID] = None
     created_at: datetime
     updated_at: datetime
     latest_run: Optional[LatestRunSummary] = None

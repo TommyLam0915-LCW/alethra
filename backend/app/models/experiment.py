@@ -42,6 +42,14 @@ class Experiment(Base):
     status = Column(SAEnum(ExperimentStatus), default=ExperimentStatus.draft)
     visibility = Column(SAEnum(Visibility), default=Visibility.private)
     current_version_id = Column(UUID(as_uuid=True), ForeignKey("experiment_versions.id"), nullable=True)
+    # Set only when this experiment was created by continuing another one. The
+    # source is never rewritten; these pointers are the lineage evidence.
+    continued_from_experiment_id = Column(
+        UUID(as_uuid=True), ForeignKey("experiments.id", ondelete="SET NULL"), nullable=True
+    )
+    continued_from_version_id = Column(
+        UUID(as_uuid=True), ForeignKey("experiment_versions.id", ondelete="SET NULL"), nullable=True
+    )
     created_at = Column(DateTime, default=utcnow, nullable=False)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 

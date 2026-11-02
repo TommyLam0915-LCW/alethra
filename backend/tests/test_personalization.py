@@ -451,3 +451,89 @@ class TestDatasetIntegrity:
     def test_eligibility_requires_authentication(self, client):
         resp = client.get("/api/v1/ml/personalization/eligibility")
         assert resp.status_code in (401, 403)
+
+
+class TestTrainingPolicyLanes:
+    def test_capabilities_report_two_separate_lanes(self, client, auth_headers):
+        resp = client.get("/api/v1/ml/capabilities", headers=auth_headers)
+        assert resp.status_code == 200, resp.text
+        policy = resp.json()["training_policy"]
+
+        assert policy["policy_version"] == "training-lanes-v1"
+        lanes = {lane["lane"]: lane for lane in policy["lanes"]}
+        assert set(lanes) == {"personal_model_release", "agent_candidate_evaluation"}
+        for lane in lanes.values():
+            assert lane["release_status"] == "NOT_APPROVED"
+            assert lane["model_activation"] == "NOT_APPROVED"
+            assert lane["activation_available"] is False
+            assert lane["consent"]["owner_signed_required"] is True
+
+        release = lanes["personal_model_release"]
+        assert release["data_source"] == "owner_confirmed_human_decisions"
+        assert release["requirements"] == {
+            "min_confirmed_decisions": 200,
+            "min_distinct_sessions": 30,
+            "min_distinct_snapshot_dates": 60,
+            "min_per_action": 30,
+            "min_feature_coverage_ratio": 0.95,
+        }
+        assert policy["release_thresholds_unchanged"] is True
+
+        evaluation = lanes["agent_candidate_evaluation"]
+        assert evaluation["data_source"] == "machine_candidates_with_counterfactual_outcomes"
+        assert evaluation["requirements"]["min_screening_candidates"] == 20
+        assert evaluation["requirements"]["min_split_groups"] == 10
+
+    def test_reading_the_policy_never_creates_consent(self, client, auth_headers):
+        owner_id = _current_user_id()
+
+        client.get("/api/v1/ml/capabilities", headers=auth_headers)
+
+        db = TestSession()
+        try:
+            rows = (
+                db.query(PersonalizationConsent)
+                .filter(PersonalizationConsent.owner_id == owner_id)
+                .count()
+            )
+        finally:
+            db.close()
+        assert rows == 0
+        eligibility = client.get(
+            "/api/v1/ml/personalization/eligibility", headers=auth_headers
+        ).json()
+        assert eligibility["consent"]["granted"] is False
+
+    def test_owner_consent_mode_without_consent_grants_nothing(
+        self, client, auth_headers, monkeypatch
+    ):
+        from types import SimpleNamespace
+        import os
+
+        settings = SimpleNamespace(
+            app_env="development",
+            agent_strategy_screening_enabled=True,
+            database_url=(
+                os.environ.get("ALETHRA_TEST_DB") or "sqlite:///./test.db"
+            ),
+            agent_strategy_test_snapshot_authorization="",
+            agent_strategy_test_training_authorization="",
+            agent_strategy_owner_consent_mode=True,
+        )
+        monkeypatch.setattr(
+            "app.services.agent_strategy.get_settings", lambda: settings
+        )
+
+        resp = client.get("/api/v1/ml/capabilities", headers=auth_headers)
+        assert resp.status_code == 200, resp.text
+        lane = {
+            item["lane"]: item
+            for item in resp.json()["training_policy"]["lanes"]
+        }["agent_candidate_evaluation"]
+
+        # The operator switch alone is not a permission: the environment is
+        # allowed, but no training basis exists without the owner's own row.
+        assert lane["authorization"]["environment_allowed"] is True
+        assert lane["authorization"]["owner_consent_mode"] is True
+        assert lane["authorization"]["training_granted"] is False
+        assert lane["authorization"]["snapshot_granted"] is False

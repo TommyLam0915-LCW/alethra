@@ -680,3 +680,117 @@ def capabilities(db: Session, owner_id: uuid.UUID) -> List[Dict[str, Any]]:
             "surface": "隔離垂直切片 · /api/v1/agent-strategy",
         },
     ]
+
+
+TRAINING_POLICY_VERSION = "training-lanes-v1"
+
+
+def training_policy(db: Session, owner_id: uuid.UUID) -> Dict[str, Any]:
+    """Two training lanes, reported separately and never merged.
+
+    The release lane trains a personal model on the owner's confirmed
+    decisions and keeps the full numeric floor. The evaluation lane screens
+    machine-generated candidates for a locked rule strategy under a different
+    consent; it produces counterfactual evidence, not a released model.
+
+    This function only reports policy and measured authorization. It never
+    creates a consent row, never lowers a threshold, and never turns an
+    environmental switch into owner consent.
+    """
+    from app.services.agent_strategy import (
+        CONSENT_ACCEPTANCE_TEXT_VERSION as AGENT_ACCEPTANCE_TEXT_VERSION,
+        CONSENT_VERSION as AGENT_CONSENT_VERSION,
+        EXECUTION_POLICY_VERSION,
+        MIN_SCREENING_CANDIDATES,
+        MIN_SPLIT_GROUPS,
+        SPLIT_POLICY_VERSION,
+        consent_status as agent_consent_status,
+        snapshot_authorization,
+        training_authorization,
+    )
+
+    agent_consent = agent_consent_status(db, owner_id)
+    agent_consent_active = agent_consent["status"] == "active"
+    agent_training = training_authorization(db, owner_id)
+    agent_snapshot = snapshot_authorization(
+        owner_consent_active=agent_consent_active
+    )
+
+    return {
+        "policy_version": TRAINING_POLICY_VERSION,
+        "summary_zh": (
+            "訓練分兩條互不替代的 lane：發布用個人模型（以你親自確認的人類決策訓練）"
+            "與代理候選評估（以機器候選在明確執行假設下的反事實結果評估）。"
+            "兩者都需要你本人簽署各自用途的同意；任何一層的環境開關都不是同意。"
+        ),
+        "release_thresholds_unchanged": True,
+        "lanes": [
+            {
+                "lane": "personal_model_release",
+                "label_zh": "個人決策模仿（發布用）",
+                "data_source": "owner_confirmed_human_decisions",
+                "consent": {
+                    "version": CONSENT_VERSION,
+                    "owner_signed_required": True,
+                    "password_authenticated_session_required": True,
+                    "scope": "strategy_version_ids",
+                },
+                "requirements": {
+                    "min_confirmed_decisions": MIN_CONFIRMED_DECISIONS,
+                    "min_distinct_sessions": MIN_DISTINCT_SESSIONS,
+                    "min_distinct_snapshot_dates": MIN_DISTINCT_SNAPSHOT_DATES,
+                    "min_per_action": MIN_PER_ACTION,
+                    "min_feature_coverage_ratio": MIN_FEATURE_COVERAGE_RATIO,
+                },
+                "authorization": "owner-signed consent naming strategy versions",
+                "release_status": "NOT_APPROVED",
+                "model_activation": "NOT_APPROVED",
+                "activation_available": False,
+                "why_threshold_not_lowered_zh": (
+                    "這個門檻是為了避免以不足或未確認的樣本冒充個人模型成效。"
+                    "降低數字不會讓資料變多；正確做法是先累積經你確認的決策，"
+                    "或以另一條評估 lane 產生反事實證據，而不是改寫門檻。"
+                ),
+            },
+            {
+                "lane": "agent_candidate_evaluation",
+                "label_zh": "代理候選訊號評估（非發布）",
+                "data_source": "machine_candidates_with_counterfactual_outcomes",
+                "consent": {
+                    "version": AGENT_CONSENT_VERSION,
+                    "acceptance_text_version": AGENT_ACCEPTANCE_TEXT_VERSION,
+                    "owner_signed_required": True,
+                    "status": agent_consent["status"],
+                },
+                "requirements": {
+                    "min_screening_candidates": MIN_SCREENING_CANDIDATES,
+                    "min_split_groups": MIN_SPLIT_GROUPS,
+                    "split_policy": SPLIT_POLICY_VERSION,
+                    "execution_policy": EXECUTION_POLICY_VERSION,
+                },
+                "authorization": {
+                    "training_granted": agent_training["granted"],
+                    "authorization_mode": agent_training["authorization_mode"],
+                    "environment_allowed": agent_training["environment_allowed"],
+                    "owner_consent_mode": agent_training["owner_consent_mode"],
+                    "snapshot_granted": agent_snapshot["granted"],
+                    "snapshot_mode": agent_snapshot["mode"],
+                },
+                "release_status": "NOT_APPROVED",
+                "model_activation": "NOT_APPROVED",
+                "activation_available": False,
+                "scope_zh": (
+                    "只對既有已鎖定規則策略的入場訊號產生反事實結果，"
+                    "不是新策略、不是強化學習、不模仿你的決策，也不會自動下單；"
+                    "結果不代表盈利或市場方向。"
+                ),
+            },
+        ],
+        "how_to_authorize_zh": (
+            "兩條 lane 都只接受你本人在密碼登入工作階段中簽署的同意："
+            "個人化訓練用 PUT /api/v1/ml/personalization/consent，"
+            "代理候選評估用 PUT /api/v1/agent-strategy/consent。"
+            "代理與 API 憑證不能代簽；環境開關只決定程式可否執行，不是同意。"
+        ),
+        "evaluated_at": utcnow().isoformat(),
+    }
