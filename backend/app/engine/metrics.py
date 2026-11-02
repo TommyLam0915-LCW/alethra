@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 
 from app.engine.attribution import TIME_OF_DAY_UNAVAILABLE, day_of_week_breakdown
+from app.engine.fill_math import size_position
 
 
 def compute_max_drawdown(equity_curve: List[float]) -> float:
@@ -127,6 +128,7 @@ def build_benchmark_equity_curve(
     initial_cash: float,
     commission_rate: float = 0.0,
     slippage_rate: float = 0.0,
+    quantity_precision: int = 0,
 ) -> List[float]:
     if benchmark_ohlcv.empty or len(benchmark_ohlcv) < 1:
         return []
@@ -139,7 +141,9 @@ def build_benchmark_equity_curve(
         return []
 
     buy_exec_price = first_open * (1 + slippage_rate)
-    max_shares = int(initial_cash / (buy_exec_price * (1 + commission_rate)))
+    max_shares = size_position(
+        initial_cash, buy_exec_price, commission_rate, quantity_precision
+    )
     if max_shares <= 0:
         return []
 

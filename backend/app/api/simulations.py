@@ -31,6 +31,7 @@ from app.engine.intraday import (
     parse_intraday_config,
 )
 from app.engine.backtest import ENGINE_VERSION, compute_config_hash
+from app.engine.fill_math import round_quantity
 from app.models.paper_portfolio import (
     ConfidenceLevel,
     DecisionRecord,
@@ -302,6 +303,12 @@ def _assert_intraday_granularity(bars: List[Dict[str, Any]], timeframe: str) -> 
         )
 
 
+def _serialized_quantity(value: Any) -> Any:
+    """Whole units as ints; a fractionally traded position keeps its decimals."""
+    numeric = float(value)
+    return int(numeric) if numeric.is_integer() else numeric
+
+
 def _adapt_intraday_txn(
     txn: Dict[str, Any], bar: Dict[str, Any], dataset_cutoff_at: str, timeframe: str
 ) -> StepResult:
@@ -321,7 +328,7 @@ def _adapt_intraday_txn(
         decision_type = "simulated_exit"
 
     close = float(bar["close"])
-    shares_after = int(txn["shares_after"])
+    shares_after = _serialized_quantity(txn["shares_after"])
     cash_after = float(txn["cash_after"])
     exec_price = round(float(txn["execution_price_before_costs"]), 4)
 
@@ -338,7 +345,7 @@ def _adapt_intraday_txn(
     detail = {
         "symbol": txn["symbol"],
         "side": side,
-        "quantity": int(txn["quantity"]),
+        "quantity": _serialized_quantity(txn["quantity"]),
         "observed_price": round(float(txn["observed_price"]), 4),
         "execution_price": exec_price,
         "slippage_amount": txn.get("slippage_amount"),
@@ -810,10 +817,15 @@ def _apply_manual_fills(
             else:
                 simulator.entry_price = price
                 simulator.entry_date = execution_date
-            simulator.shares = int(held + quantity)
+            simulator.shares = round_quantity(
+                held + quantity, simulator.quantity_precision
+            )
             simulator._bought = simulator.shares > 0
         else:
-            simulator.shares = max(0, int(float(simulator.shares) - quantity))
+            remaining = round_quantity(
+                float(simulator.shares) - quantity, simulator.quantity_precision
+            )
+            simulator.shares = remaining if remaining > 0 else 0
             simulator._bought = simulator.shares > 0
             if simulator.shares == 0:
                 simulator.entry_price = None
@@ -924,7 +936,7 @@ def _intraday_book(
     replay: OpeningRangeForwardReplay, *, symbol: str, target_date: str, close: float
 ):
     """The replay's cash, shares and position dict as of the bar just observed."""
-    shares = int(replay.shares)
+    shares = _serialized_quantity(replay.shares)
     cash = round(float(replay.cash), 4)
     position = None
     if shares > 0:

@@ -11,13 +11,13 @@ def generate_transaction(
     execution_date: str,
     symbol: str,
     side: str,
-    quantity: int,
+    quantity: float,
     observed_price: float,
     execution_price: float,
     slippage_rate: float,
     commission_rate: float,
     cash_before: float,
-    shares_after: int,
+    shares_after: float,
     rationale: str,
     exit_reason: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -61,7 +61,7 @@ def _book_exit(
     transactions: List[Dict[str, Any]],
     *,
     symbol: str,
-    quantity: int,
+    quantity: float,
     signal_date: Optional[str],
     execution_date: str,
     reference_price: float,
@@ -101,7 +101,7 @@ def _book_entry(
     transactions: List[Dict[str, Any]],
     *,
     symbol: str,
-    quantity: int,
+    quantity: float,
     signal_date: Optional[str],
     execution_date: str,
     observed_price: float,
@@ -148,6 +148,7 @@ def run_buy_and_hold(
     commission_rate: float,
     slippage_rate: float,
     risk_plan: Optional[Dict[str, Any]] = None,
+    quantity_precision: int = 0,
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
     transactions = []
     warnings = []
@@ -161,9 +162,14 @@ def run_buy_and_hold(
     observed_open = exec_row["open"]
     exec_price = slipped_price(observed_open, BUY, slippage_rate)
 
-    max_shares = size_position(initial_cash, exec_price, commission_rate)
+    max_shares = size_position(
+        initial_cash, exec_price, commission_rate, quantity_precision
+    )
     if max_shares <= 0:
-        warnings.append(f"Insufficient cash to buy 1 share of {symbol} at {exec_price:.2f} (cash: {initial_cash:.2f})")
+        unit = "1 unit" if quantity_precision else "1 share"
+        warnings.append(
+            f"Insufficient cash to buy {unit} of {symbol} at {exec_price:.2f} (cash: {initial_cash:.2f})"
+        )
         return transactions, warnings
 
     cash_after_buy = _book_entry(
@@ -234,6 +240,7 @@ def run_sma_crossover(
     short_window: int,
     long_window: int,
     risk_plan: Optional[Dict[str, Any]] = None,
+    quantity_precision: int = 0,
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
     transactions = []
     warnings = []
@@ -302,7 +309,9 @@ def run_sma_crossover(
 
         if cross_up and shares == 0:
             exec_price = slipped_price(exec_open, BUY, slippage_rate)
-            max_shares = size_position(cash, exec_price, commission_rate)
+            max_shares = size_position(
+                cash, exec_price, commission_rate, quantity_precision
+            )
             if max_shares <= 0:
                 warnings.append(f"Insufficient cash for SMA buy on {exec_date}")
                 continue
@@ -371,6 +380,7 @@ def run_price_change_fixed_hold(
     threshold_pct: float,
     holding_days: int,
     risk_plan: Optional[Dict[str, Any]] = None,
+    quantity_precision: int = 0,
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
     transactions = []
     warnings = []
@@ -441,7 +451,9 @@ def run_price_change_fixed_hold(
             exec_open = opens[i + 1]
             exec_price = slipped_price(exec_open, BUY, slippage_rate)
 
-            max_shares = size_position(cash, exec_price, commission_rate)
+            max_shares = size_position(
+                cash, exec_price, commission_rate, quantity_precision
+            )
             if max_shares <= 0:
                 warnings.append(f"Insufficient cash for price-change buy on {exec_date}")
                 i += 1

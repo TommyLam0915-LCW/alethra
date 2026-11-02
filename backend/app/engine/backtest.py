@@ -16,6 +16,7 @@ from app.engine.strategies import (
 from app.engine.metrics import compute_metrics, build_benchmark_equity_curve, calc_time_in_market
 from app.engine.attribution import annotate_and_attribute
 from app.engine import exit_rules
+from app.engine.fill_math import quantity_precision_for
 from app.engine.intraday import INTRADAY_TIMEFRAMES
 
 ENGINE_VERSION = "1.1.0"
@@ -479,6 +480,9 @@ def run_backtest(
 
     symbol = asset_ids[0]
     ohlcv = ohlcv_data[symbol]
+    # Share markets trade whole units; a registered crypto pair trades at its
+    # own lot decimals, so $10,000 can hold 0.11 BTC instead of being refused.
+    quantity_precision = quantity_precision_for(symbol)
 
     transactions: List[Dict[str, Any]] = []
     strategy_warnings: List[str] = []
@@ -496,6 +500,7 @@ def run_backtest(
             commission_rate=commission_rate,
             slippage_rate=slippage_rate,
             risk_plan=risk_plan,
+            quantity_precision=quantity_precision,
         )
     elif template_type == "sma_crossover":
         sig_params = strategy_spec.get("signal_parameters", {})
@@ -515,6 +520,7 @@ def run_backtest(
             short_window=short_window,
             long_window=long_window,
             risk_plan=risk_plan,
+            quantity_precision=quantity_precision,
         )
     elif template_type == "price_change_fixed_hold":
         sig_params = strategy_spec.get("signal_parameters", {})
@@ -536,6 +542,7 @@ def run_backtest(
             threshold_pct=threshold_pct,
             holding_days=holding_days,
             risk_plan=risk_plan,
+            quantity_precision=quantity_precision,
         )
     else:
         errors.append(f"Unsupported template_type: {template_type}")
@@ -564,7 +571,13 @@ def run_backtest(
     if benchmark_id and benchmark_id in ohlcv_data:
         benchmark_ohlcv = ohlcv_data[benchmark_id]
         benchmark_ohlcv = benchmark_ohlcv[benchmark_ohlcv["date"].dt.strftime("%Y-%m-%d").isin(trading_dates)]
-        benchmark_equity = build_benchmark_equity_curve(benchmark_ohlcv, initial_cash, commission_rate, slippage_rate)
+        benchmark_equity = build_benchmark_equity_curve(
+            benchmark_ohlcv,
+            initial_cash,
+            commission_rate,
+            slippage_rate,
+            quantity_precision_for(benchmark_id),
+        )
     elif benchmark_id:
         warnings.append(f"Benchmark {benchmark_id} unavailable for this date range.")
     final_equity = daily_equity[-1] if daily_equity else initial_cash

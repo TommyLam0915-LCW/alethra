@@ -2,7 +2,14 @@ from typing import Dict, Any, Optional, List
 import pandas as pd
 
 from app.engine import exit_rules
-from app.engine.fill_math import BUY, SELL, fill_economics, size_position, slipped_price
+from app.engine.fill_math import (
+    BUY,
+    SELL,
+    fill_economics,
+    quantity_precision_for,
+    size_position,
+    slipped_price,
+)
 
 SIMULATION_ENGINE_VERSION = "1.0.0"
 
@@ -71,6 +78,7 @@ class ForwardSimulator:
         self.strategy_spec = strategy_spec
         self.template_type = strategy_spec["template_type"]
         self.symbol = strategy_spec["asset_ids"][0]
+        self.quantity_precision = quantity_precision_for(self.symbol)
         self.initial_cash = initial_cash
         self.cash = initial_cash
         self.shares = 0
@@ -111,7 +119,11 @@ class ForwardSimulator:
             return None
         pos: Dict[str, Any] = {
             "symbol": self.symbol,
-            "shares": int(self.shares),
+            "shares": (
+                int(self.shares)
+                if float(self.shares).is_integer()
+                else float(self.shares)
+            ),
             "entry_price": float(self.entry_price) if self.entry_price is not None else None,
             "entry_date": self.entry_date,
         }
@@ -279,7 +291,9 @@ class ForwardSimulator:
 
         if order["side"] == "BUY":
             exec_price = slipped_price(today_open, BUY, self.slippage_rate)
-            max_shares = size_position(self.cash, exec_price, self.commission_rate)
+            max_shares = size_position(
+                self.cash, exec_price, self.commission_rate, self.quantity_precision
+            )
 
             if max_shares <= 0:
                 warnings.append(
@@ -366,7 +380,9 @@ class ForwardSimulator:
             today_open = ohlcv.iloc[-1]["open"]
             today_close = ohlcv.iloc[-1]["close"]
             exec_price = slipped_price(today_open, BUY, self.slippage_rate)
-            max_shares = size_position(self.cash, exec_price, self.commission_rate)
+            max_shares = size_position(
+                self.cash, exec_price, self.commission_rate, self.quantity_precision
+            )
 
             if max_shares <= 0:
                 warnings.append(

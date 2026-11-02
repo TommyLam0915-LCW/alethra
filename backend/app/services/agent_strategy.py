@@ -38,6 +38,7 @@ from sqlalchemy.orm import Session
 
 from app.auth.candidate_access import is_local_database_url
 from app.auth.provenance import UNKNOWN
+from app.engine.fill_math import quantity_precision_for, size_position
 from app.config import (
     AGENT_STRATEGY_TEST_SNAPSHOT_AUTHORIZATION,
     AGENT_STRATEGY_TEST_TRAINING_AUTHORIZATION,
@@ -736,8 +737,11 @@ def collect_candidates(
             execution_feasibility = "execution_failure"
             rejection_reason = "invalid_execution_price"
         else:
-            affordable = int(
-                INITIAL_NOTIONAL / (execution_bar.open * (1 + COMMISSION_RATE))
+            affordable = size_position(
+                INITIAL_NOTIONAL,
+                execution_bar.open,
+                COMMISSION_RATE,
+                quantity_precision_for(instrument),
             )
             if affordable <= 0:
                 execution_feasibility = "insufficient_cash"

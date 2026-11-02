@@ -19,13 +19,16 @@ This module is the only place that decides what a fill costs:
   derived from that same rounded price. Commission is charged on the gross at the
   slipped price, never on the unslipped cost, and slippage is never charged
   twice.
-* ``size_position`` — how many whole shares the cash affords at that price,
-  commission included, so a sizing decision cannot differ from the fill decision.
+* ``size_position`` — how much of the instrument the cash affords at that
+  price, commission included, so a sizing decision cannot differ from the fill
+  decision. Whole units for share markets, the instrument's tradable decimal
+  places for fractionally traded ones (crypto).
 
 Nothing here commits a transaction or touches a database; callers own the
 bookkeeping, and every caller must own its rollback.
 """
 
+from decimal import ROUND_DOWN, Decimal
 from typing import NamedTuple
 
 PRICE_PLACES = 4
@@ -93,7 +96,51 @@ def fill_economics(
     )
 
 
-def size_position(cash: float, execution_price: float, commission_rate: float) -> int:
-    """Whole shares ``cash`` affords at ``execution_price``, commission included."""
-    affordable = float(cash) / (float(execution_price) * (1 + float(commission_rate)))
-    return int(affordable)
+def size_position(
+    cash: float,
+    execution_price: float,
+    commission_rate: float,
+    quantity_precision: int = 0,
+) -> float:
+    """Quantity ``cash`` affords at ``execution_price``, commission included.
+
+    ``quantity_precision`` is the instrument's tradable decimal places; 0 keeps
+    the whole-unit shares that share markets require, and 8 lets a $10,000
+    account buy 0.1136 BTC instead of being told it cannot afford one coin.
+    The affordable amount is floored to that precision, so sizing can never
+    spend more than the cash it was handed.
+    """
+    precision = max(0, int(quantity_precision))
+    unit_cost = Decimal(str(execution_price)) * (
+        1 + Decimal(str(commission_rate))
+    )
+    if unit_cost <= 0:
+        return 0 if precision == 0 else 0.0
+    affordable = Decimal(str(cash)) / unit_cost
+    quantum = Decimal(1).scaleb(-precision)
+    floored = affordable.quantize(quantum, rounding=ROUND_DOWN)
+    return int(floored) if precision == 0 else float(floored)
+
+
+def round_quantity(value: float, quantity_precision: int = 0):
+    """Round a held quantity to the instrument's tradable precision.
+
+    Whole-unit markets return ints so callers keep their existing shape; a
+    fractionally traded pair keeps its decimal places.
+    """
+    precision = max(0, int(quantity_precision))
+    if precision == 0:
+        return int(value)
+    return round(float(value), precision)
+
+
+def quantity_precision_for(symbol: str) -> int:
+    """Tradable decimal places for ``symbol``; whole units when unregistered."""
+    # Imported here so this pure-arithmetic module does not depend on the
+    # instrument catalog at import time.
+    from app.data.crypto_instruments import get_crypto_instrument
+
+    instrument = get_crypto_instrument(symbol)
+    if instrument is None or instrument.quantity_precision is None:
+        return 0
+    return int(instrument.quantity_precision)

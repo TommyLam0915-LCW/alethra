@@ -39,7 +39,14 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 
 from app.engine import exit_rules
-from app.engine.fill_math import BUY, SELL, size_position, slipped_price
+from app.engine.fill_math import (
+    BUY,
+    SELL,
+    quantity_precision_for,
+    round_quantity,
+    size_position,
+    slipped_price,
+)
 from app.engine.strategies import generate_transaction
 
 # Exit vocabulary for the intraday-only reasons. Stop/target/time reuse the
@@ -170,6 +177,7 @@ class OpeningRangeSession:
     ):
         self.symbol = symbol
         self.config = config
+        self.quantity_precision = quantity_precision_for(symbol)
         self.commission_rate = commission_rate
         self.slippage_rate = slippage_rate
         self.risk_plan = exit_rules.plan_from_spec({"risk_parameters": config.risk_parameters})
@@ -241,9 +249,10 @@ class OpeningRangeSession:
             else:
                 self.entry_price = float(price)
                 self.entry_ts = at
-            self.shares = int(held + quantity)
+            self.shares = self._quantity(held + quantity)
         elif side == "SELL":
-            self.shares = max(0, int(float(self.shares) - quantity))
+            remaining = self._quantity(float(self.shares) - quantity)
+            self.shares = remaining if remaining > 0 else self._zero_quantity()
             if self.shares == 0:
                 self.entry_price = None
                 self.entry_ts = None
@@ -336,17 +345,28 @@ class OpeningRangeSession:
         }
 
     # -- entry ------------------------------------------------------------
-    def _size_shares(self, exec_price: float) -> int:
+    def _quantity(self, value: float) -> float:
+        """Round a held quantity to the instrument's tradable precision."""
+        return round_quantity(value, self.quantity_precision)
+
+    def _zero_quantity(self):
+        return 0.0 if self.quantity_precision else 0
+
+    def _size_shares(self, exec_price: float) -> float:
         """Fixed-fractional risk sizing when a stop is declared and resolvable,
-        otherwise the maximum affordable whole shares."""
+        otherwise the maximum affordable quantity at the instrument's precision."""
         stop, _ = exit_rules.resolve_levels(self.risk_plan, exec_price)
         if self.config.risk_per_trade_pct is not None and stop is not None and exec_price > stop:
             risk_cash = self.cash * self.config.risk_per_trade_pct
             per_share_risk = exec_price - stop
-            sized = int(risk_cash / per_share_risk)
-            max_affordable = size_position(self.cash, exec_price, self.commission_rate)
+            sized = self._quantity(risk_cash / per_share_risk)
+            max_affordable = size_position(
+                self.cash, exec_price, self.commission_rate, self.quantity_precision
+            )
             return max(0, min(sized, max_affordable))
-        return size_position(self.cash, exec_price, self.commission_rate)
+        return size_position(
+            self.cash, exec_price, self.commission_rate, self.quantity_precision
+        )
 
     def _fill_pending_entry(self, bar: _Bar) -> List[Dict[str, Any]]:
         order = self._pending_entry
