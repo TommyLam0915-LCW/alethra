@@ -177,6 +177,79 @@ class TestAgentStrategyTestSnapshotAuthorization:
         assert "AGENT_STRATEGY_SCREENING_ENABLED" in str(exc_info.value)
 
 
+class TestAgentStrategyTestTrainingAuthorization:
+    """The training fixture is separate from consent, and is local-only."""
+
+    def test_requires_screening_enabled(self):
+        with pytest.raises(Exception) as exc_info:
+            _fresh_settings(
+                APP_ENV="development",
+                DATABASE_URL="sqlite:///./auth.db",
+                AGENT_STRATEGY_TEST_TRAINING_AUTHORIZATION=(
+                    "test-only-training-fixture-v1"
+                ),
+            )
+        assert "AGENT_STRATEGY_TEST_TRAINING_AUTHORIZATION" in str(exc_info.value)
+
+    def test_rejects_any_other_value(self):
+        with pytest.raises(Exception) as exc_info:
+            _fresh_settings(
+                APP_ENV="development",
+                DATABASE_URL="sqlite:///./auth.db",
+                AGENT_STRATEGY_SCREENING_ENABLED="true",
+                AGENT_STRATEGY_TEST_TRAINING_AUTHORIZATION="owner-consent",
+            )
+        assert "test-only-training-fixture-v1" in str(exc_info.value)
+
+    def test_snapshot_fixture_does_not_grant_training(self):
+        # The two fixtures are independent: authorizing snapshots must not
+        # silently authorize training.
+        s = _fresh_settings(
+            APP_ENV="development",
+            DATABASE_URL="sqlite:///./auth.db",
+            AGENT_STRATEGY_SCREENING_ENABLED="true",
+            AGENT_STRATEGY_TEST_SNAPSHOT_AUTHORIZATION="test-only-fixture-v1",
+        )
+        assert s.agent_strategy_test_training_authorization == ""
+
+    def test_local_development_accepts_the_fixture(self):
+        s = _fresh_settings(
+            APP_ENV="development",
+            DATABASE_URL="sqlite:///./auth.db",
+            AGENT_STRATEGY_SCREENING_ENABLED="true",
+            AGENT_STRATEGY_TEST_TRAINING_AUTHORIZATION=(
+                "test-only-training-fixture-v1"
+            ),
+        )
+        assert (
+            s.agent_strategy_test_training_authorization
+            == "test-only-training-fixture-v1"
+        )
+
+    def test_production_cannot_enable_the_fixture(self):
+        with pytest.raises(Exception) as exc_info:
+            _prod_settings(
+                AGENT_STRATEGY_SCREENING_ENABLED="true",
+                AGENT_STRATEGY_TEST_TRAINING_AUTHORIZATION=(
+                    "test-only-training-fixture-v1"
+                ),
+            )
+        # Screening is refused before the fixture is even considered.
+        assert "AGENT_STRATEGY_SCREENING_ENABLED" in str(exc_info.value)
+
+    def test_remote_database_cannot_enable_the_fixture(self):
+        with pytest.raises(Exception) as exc_info:
+            _fresh_settings(
+                APP_ENV="development",
+                DATABASE_URL="postgresql://db.example.com/test",
+                AGENT_STRATEGY_SCREENING_ENABLED="true",
+                AGENT_STRATEGY_TEST_TRAINING_AUTHORIZATION=(
+                    "test-only-training-fixture-v1"
+                ),
+            )
+        assert "AGENT_STRATEGY_SCREENING_ENABLED" in str(exc_info.value)
+
+
 class TestCorsValidation:
     def test_production_rejects_wildcard_cors(self):
         with pytest.raises(Exception) as exc_info:

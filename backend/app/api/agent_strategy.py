@@ -2,17 +2,18 @@
 
 These routes expose the screening workflow for an existing locked rule
 strategy: collect candidate signals, build an outcome per candidate, report
-eligibility and exclusions, preview a dataset with a chronological split, and
-validate the training/inference contract lineage.
+eligibility and exclusions, preview a dataset with a chronological split,
+freeze a ready snapshot, record the owner's own consent, and run one bounded
+training → artifact → inference chain over a frozen snapshot.
 
-What they deliberately do not do: train a model, activate one, run inference,
-accept a research consent, or modify any paper order, fill or decision. A
-snapshot request without the research consent is recorded as refused and
-returns 409 — the audit record is the honest result, not a training set.
+What they deliberately do not do: activate a model, release it to a customer
+environment, or use real customer data. Training requires both the development
+training fixture and a consent row the authenticated owner recorded for
+themselves; the agent cannot accept consent on the owner's behalf.
 """
 
 import uuid
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
@@ -23,6 +24,12 @@ from app.auth.jwt import get_current_user
 from app.auth.provenance import request_actor_provenance
 from app.config import get_settings
 from app.database import get_db
+from app.ml.agent_strategy_trainer import (
+    get_training_job,
+    list_training_jobs,
+    run_inference,
+    train_from_snapshot,
+)
 from app.models.user import User
 from app.services.agent_strategy import (
     AgentStrategyRefused,
@@ -38,7 +45,10 @@ from app.services.agent_strategy import (
     get_snapshot,
     list_candidates,
     preview_snapshot,
+    record_consent,
+    revoke_consent,
     snapshot_authorization,
+    training_authorization,
     training_contract,
     validate_lineage,
 )
@@ -76,6 +86,29 @@ class LineageValidateRequest(BaseModel):
     )
 
 
+class ConsentAcceptRequest(BaseModel):
+    policy_version: str = Field(min_length=1, max_length=64)
+    acceptance_text_version: str = Field(min_length=1, max_length=64)
+    acknowledgement: str = Field(
+        min_length=1,
+        description="The full acceptance text, echoed back by the owner.",
+    )
+
+
+class ConsentRevokeRequest(BaseModel):
+    reason: Optional[str] = Field(default=None, max_length=64)
+
+
+class TrainingJobRequest(BaseModel):
+    snapshot_id: uuid.UUID
+
+
+class InferenceRequest(BaseModel):
+    features: Dict[str, float] = Field(
+        description="Feature values for one candidate, keyed by feature name."
+    )
+
+
 def require_screening_enabled() -> None:
     """Fail closed for C-slice writes outside an explicitly enabled dev stack."""
     if not get_settings().agent_strategy_screening_enabled:
@@ -107,9 +140,13 @@ def _refusal_http(exc: AgentStrategyRefused) -> HTTPException:
 def get_capability(
     current_user: User = Depends(get_current_user),
     _scope_check=Depends(check_api_key_scope("read")),
+    db: Session = Depends(get_db),
 ):
     settings = get_settings()
     authorization = snapshot_authorization(settings)
+    training_auth = training_authorization(
+        db, current_user.id, settings
+    )
     return {
         "capability": capability(),
         "enabled_in_this_process": settings.agent_strategy_screening_enabled,
@@ -124,12 +161,20 @@ def get_capability(
             "authorization_mode": authorization["mode"],
             "real_owner_consent": False,
             "movable_to_customer_environment": False,
-            "usable_for_training": False,
+            "usable_for_fixture_training": training_auth["granted"],
+            "usable_for_real_training": False,
         },
         "training": {
+            "implementation": "development_fixture_only",
             "real_training": "NOT_APPROVED",
             "model_activation": "NOT_APPROVED",
             "inference": "NOT_APPROVED",
+            "customer_release": "NOT_APPROVED",
+            "activation_available": False,
+            "requires_owner_consent_and_fixture": True,
+            "authorized_in_this_process": training_auth["granted"],
+            "authorization_mode": training_auth["authorization_mode"],
+            "consent_status": training_auth["consent_status"],
         },
     }
 
@@ -143,21 +188,105 @@ def get_consent_policy(
     return {"policy": consent_policy(), "status": consent_status(db, current_user.id)}
 
 
-@router.put("/consent")
+@router.put("/consent", dependencies=[Depends(require_screening_enabled)])
 def put_consent(
+    body: ConsentAcceptRequest,
     current_user: User = Depends(get_current_user),
     _scope_check=Depends(check_api_key_scope("write")),
+    db: Session = Depends(get_db),
 ):
-    # No consent table or acceptance path exists this round. Accepting a
-    # request here would create a permission that no policy check reads.
-    raise HTTPException(
-        status_code=status.HTTP_409_CONFLICT,
-        detail={
-            "code": "agent_strategy_consent_not_configured",
-            "message_zh": "本輪未提供代理策略研究同意介面，亦不接受代 owner 同意。",
-            "persisted": False,
-        },
-    )
+    # ``current_user`` is the only identity that can be recorded; there is no
+    # parameter for an accepting user, so one request cannot consent for
+    # another account. The full text must be echoed back, so a bare boolean is
+    # not enough to create the permission.
+    try:
+        return record_consent(
+            db,
+            current_user.id,
+            policy_version=body.policy_version,
+            acceptance_text_version=body.acceptance_text_version,
+            acknowledgement=body.acknowledgement,
+        )
+    except AgentStrategyRefused as exc:
+        raise _refusal_http(exc)
+
+
+@router.post("/consent/revoke")
+def post_revoke_consent(
+    body: ConsentRevokeRequest,
+    current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope("write")),
+    db: Session = Depends(get_db),
+):
+    # Revocation is deliberately not gated on the screening flag: an owner can
+    # always withdraw a permission that was previously recorded.
+    return revoke_consent(db, current_user.id, reason=body.reason)
+
+
+@router.post(
+    "/training/jobs", dependencies=[Depends(require_screening_enabled)]
+)
+def post_training_job(
+    body: TrainingJobRequest,
+    current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope("write")),
+    db: Session = Depends(get_db),
+):
+    try:
+        return train_from_snapshot(db, current_user.id, body.snapshot_id)
+    except AgentStrategyRefused as exc:
+        raise _refusal_http(exc)
+
+
+@router.get("/training/jobs")
+def get_training_jobs(
+    snapshot_id: Optional[uuid.UUID] = None,
+    current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope("read")),
+    db: Session = Depends(get_db),
+):
+    return list_training_jobs(db, current_user.id, snapshot_id=snapshot_id)
+
+
+@router.get("/training/jobs/{job_id}")
+def get_training_job_by_id(
+    job_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope("read")),
+    db: Session = Depends(get_db),
+):
+    try:
+        return get_training_job(db, current_user.id, job_id)
+    except AgentStrategyRefused as exc:
+        if exc.code == "training_job_not_found":
+            # Same as snapshots: another owner's job is reported as absent.
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"code": exc.code, "message_zh": exc.message_zh},
+            )
+        raise _refusal_http(exc)
+
+
+@router.post(
+    "/training/jobs/{job_id}/inference",
+    dependencies=[Depends(require_screening_enabled)],
+)
+def post_training_inference(
+    job_id: uuid.UUID,
+    body: InferenceRequest,
+    current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope("write")),
+    db: Session = Depends(get_db),
+):
+    try:
+        return run_inference(db, current_user.id, job_id, body.features)
+    except AgentStrategyRefused as exc:
+        if exc.code == "training_job_not_found":
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"code": exc.code, "message_zh": exc.message_zh},
+            )
+        raise _refusal_http(exc)
 
 
 @router.post(

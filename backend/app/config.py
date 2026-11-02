@@ -22,6 +22,11 @@ _MIN_JWT_SECRET_LENGTH = 32
 # refuses it outside a local development process.
 AGENT_STRATEGY_TEST_SNAPSHOT_AUTHORIZATION = "test-only-fixture-v1"
 
+# Same shape for the training/inference chain: a development fixture that lets
+# the chain be exercised on synthetic data. It is not owner consent and the
+# validator refuses it outside a local development process.
+AGENT_STRATEGY_TEST_TRAINING_AUTHORIZATION = "test-only-training-fixture-v1"
+
 _KNOWN_DATA_PROVIDERS = {"demo", "lseg", "twelvedata"}
 _KNOWN_AI_PROVIDERS = {"mock", "openai_compatible"}
 _INTRADAY_INTERVAL_LABELS = {"1min", "5min", "15min", "30min"}
@@ -62,6 +67,9 @@ class Settings(BaseSettings):
     # it is accepted only with screening enabled, APP_ENV=development and a
     # loopback/sqlite database.
     agent_strategy_test_snapshot_authorization: str = ""
+    # The same kind of fixture for training and inference. It never becomes an
+    # owner-consent value and never enables a customer process.
+    agent_strategy_test_training_authorization: str = ""
     # Bounded intraday REST updates. Off by default: enabling it spends real
     # provider quota, and a real request also requires the interval to be
     # listed in intraday_verified_intervals after it was confirmed against the
@@ -115,6 +123,7 @@ class Settings(BaseSettings):
         self._validate_candidate_passwordless()
         self._validate_agent_strategy_screening()
         self._validate_agent_strategy_test_snapshot_authorization()
+        self._validate_agent_strategy_test_training_authorization()
         self._validate_intraday_bounds()
         self._validate_crypto_budget_bounds()
 
@@ -202,31 +211,46 @@ class Settings(BaseSettings):
             )
 
     def _validate_agent_strategy_test_snapshot_authorization(self) -> None:
-        value = (self.agent_strategy_test_snapshot_authorization or "").strip()
+        self._validate_agent_strategy_test_authorization(
+            "AGENT_STRATEGY_TEST_SNAPSHOT_AUTHORIZATION",
+            self.agent_strategy_test_snapshot_authorization,
+            AGENT_STRATEGY_TEST_SNAPSHOT_AUTHORIZATION,
+            "refusing to freeze a dataset against a remote database.",
+        )
+
+    def _validate_agent_strategy_test_training_authorization(self) -> None:
+        self._validate_agent_strategy_test_authorization(
+            "AGENT_STRATEGY_TEST_TRAINING_AUTHORIZATION",
+            self.agent_strategy_test_training_authorization,
+            AGENT_STRATEGY_TEST_TRAINING_AUTHORIZATION,
+            "refusing to train an artifact against a remote database.",
+        )
+
+    def _validate_agent_strategy_test_authorization(
+        self, env_name: str, raw_value: str, fixture: str, remote_reason: str
+    ) -> None:
+        value = (raw_value or "").strip()
         if not value:
             return
-        if value != AGENT_STRATEGY_TEST_SNAPSHOT_AUTHORIZATION:
+        if value != fixture:
             raise ValueError(
-                "AGENT_STRATEGY_TEST_SNAPSHOT_AUTHORIZATION accepts only the "
-                f"development fixture {AGENT_STRATEGY_TEST_SNAPSHOT_AUTHORIZATION!r}; "
+                f"{env_name} accepts only the development fixture {fixture!r}; "
                 "there is no owner-consent value it can impersonate."
             )
         if not self.agent_strategy_screening_enabled:
             raise ValueError(
-                "AGENT_STRATEGY_TEST_SNAPSHOT_AUTHORIZATION requires "
-                "AGENT_STRATEGY_SCREENING_ENABLED=true."
+                f"{env_name} requires AGENT_STRATEGY_SCREENING_ENABLED=true."
             )
         if self.is_production_like or self.app_env != "development":
             raise ValueError(
-                "AGENT_STRATEGY_TEST_SNAPSHOT_AUTHORIZATION is a test fixture and "
-                f"must be off when APP_ENV={self.app_env}; it cannot authorize a "
-                "customer environment."
+                f"{env_name} is a test fixture and must be off when "
+                f"APP_ENV={self.app_env}; it cannot authorize a customer "
+                "environment."
             )
         if not is_local_database_url(self.database_url):
             raise ValueError(
-                "AGENT_STRATEGY_TEST_SNAPSHOT_AUTHORIZATION requires a sqlite or "
-                "loopback DATABASE_URL; refusing to freeze a dataset against a "
-                "remote database."
+                f"{env_name} requires a sqlite or loopback DATABASE_URL; "
+                f"{remote_reason}"
             )
 
     def _validate_intraday_bounds(self) -> None:

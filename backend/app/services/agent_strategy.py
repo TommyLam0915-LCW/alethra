@@ -38,12 +38,17 @@ from sqlalchemy.orm import Session
 
 from app.auth.candidate_access import is_local_database_url
 from app.auth.provenance import UNKNOWN
-from app.config import AGENT_STRATEGY_TEST_SNAPSHOT_AUTHORIZATION, get_settings
+from app.config import (
+    AGENT_STRATEGY_TEST_SNAPSHOT_AUTHORIZATION,
+    AGENT_STRATEGY_TEST_TRAINING_AUTHORIZATION,
+    get_settings,
+)
 from app.lib.timeutil import utcnow as _utcnow
 from app.models.agent_strategy import (
     AgentCandidate,
     AgentCandidateOutcome,
     AgentDatasetSnapshot,
+    AgentStrategyConsent,
 )
 from app.models.experiment import Experiment
 from app.models.experiment_version import ExperimentVersion
@@ -66,6 +71,14 @@ PURPOSE = "agent_strategy_screening"
 CAPABILITY_STATUS = "DEVELOPMENT"
 CAPABILITY_STATUS_LABEL_ZH = "開發中／尚不可在原客戶環境執行"
 CONSENT_VERSION = "agent-strategy-learning-v1"
+# The owner has to accept this exact text, in this version, for themselves.
+CONSENT_ACCEPTANCE_TEXT_VERSION = "agent-strategy-consent-text-v1"
+CONSENT_ACCEPTANCE_TEXT_ZH = (
+    "我確認我是此帳號的持有人，並同意 Alethra 以此用途使用本帳號的"
+    "紙上委託、成交，以及由已鎖定規則策略產生的候選訊號與調整後結果，"
+    "作候選篩選模型的開發與評估。我明白這不是投資建議、不保證利潤、"
+    "不會自動下單或成為已啟用的客戶功能，我可以隨時撤銷。"
+)
 LABEL_DEFINITION_VERSION = "cost-adjusted-net-return-v1"
 # Stored in the snapshot's authorization-basis columns. It says plainly that
 # the dataset was created under the development fixture, not owner consent.
@@ -161,34 +174,270 @@ def consent_policy() -> Dict[str, Any]:
     return {
         "purpose": PURPOSE,
         "consent_version": CONSENT_VERSION,
-        "status": "not_configured",
+        "acceptance_text_version": CONSENT_ACCEPTANCE_TEXT_VERSION,
+        "acceptance_text_zh": CONSENT_ACCEPTANCE_TEXT_ZH,
+        "acceptance_available": True,
+        "acceptance_owner_only": True,
         "fail_closed": True,
-        "reason_code": "AGENT_STRATEGY_CONSENT_NOT_CONFIGURED",
+        "reason_code": "AGENT_STRATEGY_CONSENT_NOT_GRANTED",
         "data_scope_zh": (
             "此帳號擁有的紙上委託、成交，以及由已鎖定規則策略產生的候選訊號。"
             "不包括其他帳號、客戶 WB 或保留研究窗口的資料。"
         ),
         "retention_zh": "直到 owner 撤銷；資料集快照可刪除，拒絕紀錄保留原因。",
-        "revoke_zh": "本輪只提供政策介面，未實作撤銷與刪除動作。",
+        "revoke_zh": "owner 可隨時撤銷；撤銷只影響之後的訓練，已建立的紀錄保留。",
         "output_limits_zh": (
             "只作候選篩選輔助；不建立自主策略、不模仿 owner、不保證利潤、"
             "不自動實盤、不自動重訓。"
         ),
-        "accepted_this_round": False,
         "training_allowed": False,
     }
 
 
 def consent_status(db: Session, owner_id: uuid.UUID) -> Dict[str, Any]:
-    # There is no agent-strategy consent table yet, and no endpoint accepts one.
-    # Returning an explicit not-configured status keeps every dataset path
-    # fail-closed instead of treating silence as permission.
+    """The owner's own consent state, read from the recorded rows.
+
+    Silence is never permission: no row means ``not_configured`` and every
+    training path stays closed.
+    """
+    active = (
+        db.query(AgentStrategyConsent)
+        .filter(
+            AgentStrategyConsent.owner_id == owner_id,
+            AgentStrategyConsent.purpose == PURPOSE,
+            AgentStrategyConsent.status == "active",
+        )
+        .order_by(AgentStrategyConsent.accepted_at.desc())
+        .first()
+    )
+    if active is not None:
+        return {
+            "purpose": PURPOSE,
+            "consent_version": active.policy_version,
+            "status": "active",
+            "fail_closed": False,
+            "reason_code": None,
+            "accepted_at": active.accepted_at.isoformat()
+            if active.accepted_at
+            else None,
+            "accepted_by": "owner",
+            "acceptance_text_version": active.acceptance_text_version,
+            "consent_id": str(active.id),
+            "real_owner_consent": True,
+        }
+
+    revoked = (
+        db.query(AgentStrategyConsent)
+        .filter(
+            AgentStrategyConsent.owner_id == owner_id,
+            AgentStrategyConsent.purpose == PURPOSE,
+            AgentStrategyConsent.status == "revoked",
+        )
+        .order_by(AgentStrategyConsent.revoked_at.desc())
+        .first()
+    )
+    if revoked is not None:
+        return {
+            "purpose": PURPOSE,
+            "consent_version": revoked.policy_version,
+            "status": "revoked",
+            "fail_closed": True,
+            "reason_code": "AGENT_STRATEGY_CONSENT_REVOKED",
+            "accepted_at": revoked.accepted_at.isoformat()
+            if revoked.accepted_at
+            else None,
+            "accepted_by": "owner",
+            "acceptance_text_version": revoked.acceptance_text_version,
+            "revoked_at": revoked.revoked_at.isoformat()
+            if revoked.revoked_at
+            else None,
+            "revoke_reason": revoked.revoke_reason,
+            "real_owner_consent": False,
+        }
+
     return {
         "purpose": PURPOSE,
         "consent_version": CONSENT_VERSION,
         "status": "not_configured",
         "fail_closed": True,
         "reason_code": "AGENT_STRATEGY_CONSENT_NOT_CONFIGURED",
+        "accepted_at": None,
+        "accepted_by": None,
+        "real_owner_consent": False,
+    }
+
+
+def _normalise_acceptance(text: str) -> str:
+    return " ".join((text or "").split())
+
+
+def record_consent(
+    db: Session,
+    owner_id: uuid.UUID,
+    *,
+    policy_version: str,
+    acceptance_text_version: str,
+    acknowledgement: str,
+) -> Dict[str, Any]:
+    """Record that the authenticated owner accepted the policy themselves.
+
+    There is no parameter for an accepting user other than ``owner_id``: the
+    route passes the authenticated user, so a request cannot record consent for
+    somebody else. The exact policy text has to be echoed back, so an accidental
+    ``accept: true`` without reading the text is refused.
+    """
+    if policy_version != CONSENT_VERSION:
+        raise AgentStrategyRefused(
+            "agent_strategy_consent_policy_version_mismatch",
+            "同意政策版本不符，未記錄任何同意。",
+            {"expected": CONSENT_VERSION, "received": policy_version},
+        )
+    if acceptance_text_version != CONSENT_ACCEPTANCE_TEXT_VERSION:
+        raise AgentStrategyRefused(
+            "agent_strategy_consent_text_version_mismatch",
+            "同意文本版本不符，未記錄任何同意。",
+            {
+                "expected": CONSENT_ACCEPTANCE_TEXT_VERSION,
+                "received": acceptance_text_version,
+            },
+        )
+    if _normalise_acceptance(acknowledgement) != _normalise_acceptance(
+        CONSENT_ACCEPTANCE_TEXT_ZH
+    ):
+        raise AgentStrategyRefused(
+            "agent_strategy_consent_acknowledgement_mismatch",
+            "確認文字與政策全文不一致，未記錄任何同意。",
+            {"persisted": False},
+        )
+
+    existing = (
+        db.query(AgentStrategyConsent)
+        .filter(
+            AgentStrategyConsent.owner_id == owner_id,
+            AgentStrategyConsent.purpose == PURPOSE,
+            AgentStrategyConsent.status == "active",
+        )
+        .with_for_update()
+        .first()
+    )
+    # Accepting the same policy and text again is the same decision, not a new
+    # consent: return the live row so repeated clicks do not multiply evidence.
+    if (
+        existing is not None
+        and existing.policy_version == policy_version
+        and existing.acceptance_text_version == acceptance_text_version
+    ):
+        db.rollback()
+        payload = consent_status(db, owner_id)
+        payload["created"] = False
+        payload["deduplicated"] = True
+        return payload
+
+    now = _utcnow()
+    if existing is not None:
+        existing.status = "superseded"
+        existing.superseded_at = now
+
+    row = AgentStrategyConsent(
+        owner_id=owner_id,
+        # Same authenticated user; stored twice so a mismatch is auditable.
+        accepted_by_user_id=owner_id,
+        purpose=PURPOSE,
+        policy_version=policy_version,
+        acceptance_text_version=acceptance_text_version,
+        acknowledgement_json={
+            "text_zh": CONSENT_ACCEPTANCE_TEXT_ZH,
+            "text_version": acceptance_text_version,
+        },
+        status="active",
+        accepted_at=now,
+    )
+    try:
+        db.add(row)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    db.refresh(row)
+    payload = consent_status(db, owner_id)
+    payload["created"] = True
+    payload["deduplicated"] = False
+    payload["consent_id"] = str(row.id)
+    return payload
+
+
+def revoke_consent(
+    db: Session, owner_id: uuid.UUID, *, reason: Optional[str] = None
+) -> Dict[str, Any]:
+    active = (
+        db.query(AgentStrategyConsent)
+        .filter(
+            AgentStrategyConsent.owner_id == owner_id,
+            AgentStrategyConsent.purpose == PURPOSE,
+            AgentStrategyConsent.status == "active",
+        )
+        .with_for_update()
+        .first()
+    )
+    if active is None:
+        return {"revoked": False, "reason": "no_active_consent", **consent_status(db, owner_id)}
+    active.status = "revoked"
+    active.revoked_at = _utcnow()
+    active.revoke_reason = (reason or "owner_revoked")[:64]
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return {"revoked": True, **consent_status(db, owner_id)}
+
+
+def training_authorization(
+    db: Session, owner_id: uuid.UUID, settings=None
+) -> Dict[str, Any]:
+    """Four separate judgments for the training/inference chain.
+
+    The development fixture and the owner's own consent are two different
+    things and both are required here; neither alone is enough.
+    """
+    settings = settings or get_settings()
+    configured = (
+        getattr(settings, "agent_strategy_test_training_authorization", "") or ""
+    ).strip()
+    environment_allowed = (
+        getattr(settings, "app_env", "") == "development"
+        and bool(getattr(settings, "agent_strategy_screening_enabled", False))
+        and is_local_database_url(getattr(settings, "database_url", ""))
+    )
+    fixture_granted = (
+        configured == AGENT_STRATEGY_TEST_TRAINING_AUTHORIZATION
+        and environment_allowed
+    )
+    consent = consent_status(db, owner_id)
+    consent_active = consent["status"] == "active"
+
+    if not consent_active:
+        reason_code = "agent_strategy_consent_not_configured"
+    elif not fixture_granted:
+        reason_code = "agent_strategy_test_training_authorization_not_configured"
+    else:
+        reason_code = None
+
+    return {
+        "purpose": PURPOSE,
+        "environment_allowed": environment_allowed,
+        "fixture_granted": fixture_granted,
+        "authorization_mode": (
+            "test_only_fixture_and_owner_consent" if fixture_granted and consent_active
+            else "none"
+        ),
+        "real_owner_consent": consent_active,
+        "consent_status": consent["status"],
+        "consent_record_id": consent.get("consent_id"),
+        "granted": consent_active and fixture_granted,
+        "reason_code": reason_code,
+        "model_activation": "NOT_APPROVED",
+        "movable_to_customer_environment": False,
     }
 
 
@@ -1191,6 +1440,7 @@ def evaluate_eligibility(
     distinct_dates = {candidate.signal_date for candidate, _ in rows}
     mature_dates = {candidate.signal_date for candidate, _ in eligible_rows}
     consent = consent_status(db, owner_id)
+    authorization = training_authorization(db, owner_id)
 
     reasons: List[Dict[str, Any]] = []
     if not rows:
@@ -1211,14 +1461,24 @@ def evaluate_eligibility(
                 "requirement": ">= 1 mature outcome",
             }
         )
-    reasons.append(
-        {
-            "code": "AGENT_STRATEGY_CONSENT_NOT_CONFIGURED",
-            "message_zh": "未設定代理策略研究用途同意；任何資料集建立都會被拒絕。",
-            "measured": consent["status"],
-            "requirement": "active agent-strategy consent",
-        }
-    )
+    if consent["status"] != "active":
+        reasons.append(
+            {
+                "code": "AGENT_STRATEGY_CONSENT_NOT_CONFIGURED",
+                "message_zh": "未設定代理策略研究用途同意；任何資料集建立都會被拒絕。",
+                "measured": consent["status"],
+                "requirement": "active agent-strategy consent",
+            }
+        )
+    elif not authorization["fixture_granted"]:
+        reasons.append(
+            {
+                "code": "AGENT_STRATEGY_TRAINING_FIXTURE_NOT_CONFIGURED",
+                "message_zh": "尚未設定開發訓練授權；本輪不會訓練或推論。",
+                "measured": authorization["fixture_granted"],
+                "requirement": "AGENT_STRATEGY_TEST_TRAINING_AUTHORIZATION",
+            }
+        )
 
     screening_ready = (
         len(eligible_rows) >= MIN_SCREENING_CANDIDATES
@@ -1238,8 +1498,9 @@ def evaluate_eligibility(
         "reasons": reasons,
         "consent": consent,
         "screening_ready": screening_ready,
-        "training_ready": False,
-        "training_blocked_by": "agent_strategy_consent_not_configured",
+        "training_ready": bool(screening_ready and authorization["granted"]),
+        "training_blocked_by": authorization["reason_code"],
+        "training_authorization": authorization,
         "not_human_quality_evaluation": True,
     }
 
@@ -1570,6 +1831,7 @@ def preview_snapshot(
         for row in dataset_rows
         if row.get("data_cutoff_at")
     )
+    authorization = training_authorization(db, owner_id)
 
     return {
         "strategy_version_id": str(strategy_version_id),
@@ -1577,8 +1839,12 @@ def preview_snapshot(
         "consent": consent_status(db, owner_id),
         "status": "preview",
         "screening_ready": screening_ready,
-        "training_ready": False,
-        "training_blocked_by": "agent_strategy_consent_not_configured",
+        # A preview never authorizes training by itself: both the fixture and
+        # the owner's own consent have to be present, and the snapshot still
+        # has to be created and its checksum verified.
+        "training_ready": bool(screening_ready and authorization["granted"]),
+        "training_blocked_by": authorization["reason_code"],
+        "training_authorization": authorization,
         "feature_schema_version": FEATURE_SCHEMA_VERSION,
         "feature_names": feature_names,
         "rows": dataset_rows,
@@ -1844,6 +2110,27 @@ def training_contract() -> Dict[str, Any]:
             "model_artifact_checksum",
             "inference_policy_version",
         ],
+        # The training chain has more lineage than a single candidate: the
+        # whole frozen snapshot, the job's hyperparameters and its consent.
+        "lineage_required_training": [
+            "snapshot_id",
+            "dataset_checksum",
+            "split_policy_version",
+            "label_definition_version",
+            "training_contract_version",
+            "hyperparameters_hash",
+            "consent_record_id",
+            "model_artifact_checksum",
+            "artifact_metadata_checksum",
+        ],
+        # Code path status, kept apart from the three authorization gates below.
+        "training_chain": {
+            "implementation": "development_fixture_only",
+            "real_data": "NOT_APPROVED",
+            "customer_release": "NOT_APPROVED",
+            "activation": "NOT_APPROVED",
+            "runs_inference_for_customer": False,
+        },
         "real_training": "NOT_APPROVED",
         "model_activation": "NOT_APPROVED",
         "inference": "NOT_APPROVED",
@@ -2118,7 +2405,14 @@ def snapshot_payload(snapshot: AgentDatasetSnapshot) -> Dict[str, Any]:
         "integrity": integrity,
         "failure_reason": snapshot.failure_reason,
         "created_at": snapshot.created_at.isoformat() if snapshot.created_at else None,
-        "usable_for_training": False,
+        # A ready fixture snapshot can feed the development training chain when
+        # the fixture and the owner's consent are both present; it is never a
+        # customer training set and never usable for real training.
+        "usable_for_fixture_training": (
+            snapshot.status == "ready"
+            and integrity.get("checksum_verified") is True
+        ),
+        "usable_for_real_training": False,
     }
 
 

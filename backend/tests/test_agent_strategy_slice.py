@@ -16,9 +16,15 @@ What this slice does, and what these tests pin down:
   * existing paper orders are only classified by a read-only report; no fill,
     commission, cash or provenance value is rewritten
 
-Nothing here trains a model, activates one, runs inference, accepts consent,
-or creates a customer trade.
+The fixture-only training chain *is* exercised here: one model is fit on a
+synthetic frozen snapshot and its artifact lands in a temporary directory. That
+is a development fixture, not a customer release: consent has to be recorded by
+the owner, ``activation_status`` stays ``NOT_APPROVED``, and no customer trade
+is created.
 """
+import json
+import math
+import os
 import uuid
 from datetime import date, datetime, time, timedelta
 
@@ -29,6 +35,8 @@ from app.models.agent_strategy import (
     AgentCandidate,
     AgentCandidateOutcome,
     AgentDatasetSnapshot,
+    AgentStrategyConsent,
+    AgentStrategyTrainingJob,
 )
 from app.models.decision_label import DecisionLabel
 from app.models.human_decision import HumanDecisionEvent
@@ -43,7 +51,10 @@ from app.models.paper_portfolio import (
     PortfolioStatus,
 )
 from app.models.user import User
-from app.config import AGENT_STRATEGY_TEST_SNAPSHOT_AUTHORIZATION
+from app.config import (
+    AGENT_STRATEGY_TEST_SNAPSHOT_AUTHORIZATION,
+    AGENT_STRATEGY_TEST_TRAINING_AUTHORIZATION,
+)
 from app.services.agent_strategy import (
     COMMISSION_RATE,
     EXECUTION_POLICY_VERSION,
@@ -885,16 +896,31 @@ class TestConsentFailClosed:
         assert snapshot.candidate_ids_json == []
         assert snapshot.failure_reason == "agent_strategy_consent_not_configured"
 
-    def test_consent_put_is_refused_and_persists_nothing(self, client, auth_headers):
+    def test_consent_put_without_the_exact_text_persists_nothing(
+        self, client, auth_headers, monkeypatch
+    ):
+        # The accept route is only reachable in an enabled development process;
+        # inside it, a bare confirmation is still not consent: the owner has to
+        # echo the exact acceptance text, and an agent cannot accept for them.
+        _enable_test_snapshot_authorization(monkeypatch)
         resp = client.put(
             "/api/v1/agent-strategy/consent",
             headers=auth_headers,
-            json={"strategy_version_ids": [], "confirm": True},
+            json={
+                "policy_version": "agent-strategy-learning-v1",
+                "acceptance_text_version": "agent-strategy-consent-text-v1",
+                "acknowledgement": "I agree",
+            },
         )
         assert resp.status_code == 409, resp.text
         detail = resp.json()["detail"]
-        assert detail["code"] == "agent_strategy_consent_not_configured"
-        assert detail["persisted"] is False
+        assert detail["code"] == "agent_strategy_consent_acknowledgement_mismatch"
+
+        db = TestSession()
+        try:
+            assert db.query(AgentStrategyConsent).count() == 0
+        finally:
+            db.close()
 
     def test_capability_reports_development_not_a_delivered_feature(
         self, client, auth_headers
@@ -905,13 +931,14 @@ class TestConsentFailClosed:
         assert body["capability"]["status"] == "DEVELOPMENT"
         assert body["capability"]["status_label_zh"] == "開發中／尚不可在原客戶環境執行"
         assert body["enabled_in_this_process"] is False
-        assert body["consent_policy"]["status"] == "not_configured"
+        assert body["consent_policy"]["acceptance_owner_only"] is True
         assert body["consent_policy"]["fail_closed"] is True
-        assert body["training"] == {
-            "real_training": "NOT_APPROVED",
-            "model_activation": "NOT_APPROVED",
-            "inference": "NOT_APPROVED",
-        }
+        assert body["consent_policy"]["training_allowed"] is False
+        assert body["training"]["real_training"] == "NOT_APPROVED"
+        assert body["training"]["model_activation"] == "NOT_APPROVED"
+        assert body["training"]["inference"] == "NOT_APPROVED"
+        assert body["training"]["activation_available"] is False
+        assert body["training"]["authorized_in_this_process"] is False
 
 
 class TestScreeningWriteGate:
@@ -1361,7 +1388,11 @@ def _enable_test_snapshot_authorization(monkeypatch, token=None):
     settings = SimpleNamespace(
         app_env="development",
         agent_strategy_screening_enabled=True,
-        database_url="sqlite:///./test.db",
+        database_url=(
+            os.environ.get("ALETHRA_TEST_DB")
+            or os.environ.get("DATABASE_URL")
+            or "sqlite:///./test.db"
+        ),
         agent_strategy_test_snapshot_authorization=authorization,
     )
     monkeypatch.setattr(
@@ -1425,7 +1456,8 @@ class TestReadySnapshot:
             "authorization_mode": SNAPSHOT_AUTHORIZATION_MODE,
             "real_owner_consent": False,
             "movable_to_customer_environment": False,
-            "usable_for_training": False,
+            "usable_for_fixture_training": False,
+            "usable_for_real_training": False,
         }
 
         resp = client.post(
@@ -1517,7 +1549,8 @@ class TestReadySnapshot:
             "real_owner_consent": False,
             "movable_to_customer_environment": False,
         }
-        assert body["usable_for_training"] is False
+        assert body["usable_for_fixture_training"] is True
+        assert body["usable_for_real_training"] is False
 
         # GET read-back is the same payload, and the row is really persisted.
         read = client.get(
@@ -1923,3 +1956,716 @@ class TestReadySnapshot:
             refused["reason_code"]
             == "AGENT_STRATEGY_TEST_AUTHORIZATION_ENVIRONMENT_REFUSED"
         )
+
+
+# ---------------------------------------------------------------------------
+# Owner consent and the fixture-only training chain
+# ---------------------------------------------------------------------------
+
+
+def _enable_test_training_authorization(
+    monkeypatch, tmp_path, *, training=None, snapshot=None
+):
+    """Install both development fixtures and send artifacts to ``tmp_path``.
+
+    ``training``/``snapshot`` accept an explicit token so a test can prove the
+    chain stays closed when either fixture is absent (``""``).
+    """
+    from types import SimpleNamespace
+
+    snapshot_token = (
+        AGENT_STRATEGY_TEST_SNAPSHOT_AUTHORIZATION if snapshot is None else snapshot
+    )
+    training_token = (
+        AGENT_STRATEGY_TEST_TRAINING_AUTHORIZATION if training is None else training
+    )
+    settings = SimpleNamespace(
+        app_env="development",
+        agent_strategy_screening_enabled=True,
+        database_url=(
+            os.environ.get("ALETHRA_TEST_DB")
+            or os.environ.get("DATABASE_URL")
+            or "sqlite:///./test.db"
+        ),
+        agent_strategy_test_snapshot_authorization=snapshot_token,
+        agent_strategy_test_training_authorization=training_token,
+    )
+    monkeypatch.setattr(
+        "app.services.agent_strategy.get_settings", lambda: settings
+    )
+    monkeypatch.setattr("app.api.agent_strategy.get_settings", lambda: settings)
+    import app.ml.agent_strategy_trainer as trainer
+
+    monkeypatch.setattr(
+        trainer, "AGENT_ARTIFACTS_DIR", str(tmp_path / "agent_artifacts")
+    )
+    return settings
+
+
+def _regime_series(count=180, base=50.0):
+    """A fast cycle riding a slow trend.
+
+    The cycle supplies enough entry signals for the screening minimum; the
+    slow trend makes the fixed-hold forward return change sign across signal
+    dates, so the derived label has both classes in the train split. A
+    constant-period zigzag would end every round trip at the same price and
+    produce a single class.
+    """
+    return [
+        round(base + 6.0 * math.sin(i / 8.0) + float(i % 4), 4)
+        for i in range(count)
+    ]
+
+
+def _ready_fixture_snapshot(client, headers, monkeypatch, tmp_path):
+    """Produce one ready snapshot under both fixtures, with mixed labels."""
+    _enable_test_training_authorization(monkeypatch, tmp_path)
+    _seed_bars(INSTRUMENT, _regime_series(180))
+    version_id = _create_locked_strategy(
+        client, headers, title="Training fixture", window_days=180
+    )
+    body = {"strategy_version_id": str(version_id)}
+    for route in (
+        "/api/v1/agent-strategy/candidates/collect",
+        "/api/v1/agent-strategy/candidates/outcomes",
+    ):
+        resp = client.post(route, headers=headers, json=body)
+        assert resp.status_code == 200, (route, resp.text)
+
+    preview = client.post(
+        "/api/v1/agent-strategy/snapshots/preview", headers=headers, json=body
+    )
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["screening_ready"] is True, (
+        preview.json()["eligibility"]["reasons"],
+        preview.json()["split_manifest"].get("refusal_reason"),
+        {
+            name: len(split["candidate_ids"])
+            for name, split in preview.json()["split_manifest"]["splits"].items()
+        },
+    )
+
+    created = client.post(
+        "/api/v1/agent-strategy/snapshots", headers=headers, json=body
+    )
+    assert created.status_code == 200, created.text
+    snapshot = created.json()
+    assert snapshot["status"] == "ready"
+    return snapshot
+
+
+def _consent_document(client, headers):
+    resp = client.get(
+        "/api/v1/agent-strategy/consent-policy", headers=headers
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()["policy"]
+
+
+def _accept_consent(client, headers):
+    policy = _consent_document(client, headers)
+    return client.put(
+        "/api/v1/agent-strategy/consent",
+        headers=headers,
+        json={
+            "policy_version": policy["consent_version"],
+            "acceptance_text_version": policy["acceptance_text_version"],
+            "acknowledgement": policy["acceptance_text_zh"],
+        },
+    )
+
+
+def _consent_rows(owner_id):
+    db = TestSession()
+    try:
+        return (
+            db.query(AgentStrategyConsent)
+            .filter(AgentStrategyConsent.owner_id == owner_id)
+            .all()
+        )
+    finally:
+        db.close()
+
+
+def _training_job_rows():
+    db = TestSession()
+    try:
+        return db.query(AgentStrategyTrainingJob).all()
+    finally:
+        db.close()
+
+
+def _login_other_owner(client, email="other-agent-owner@alethra.io"):
+    client.post(
+        "/api/auth/register",
+        json={
+            "risk_acknowledged": True,
+            "email": email,
+            "password": "otherpass123",
+            "display_name": "Other Agent Owner",
+            "user_type": "individual",
+        },
+    )
+    login = client.post(
+        "/api/auth/login", json={"email": email, "password": "otherpass123"}
+    )
+    assert login.status_code == 200, login.text
+    return {"Authorization": f"Bearer {login.json()['access_token']}"}
+
+
+class TestOwnerConsent:
+    """Consent is an act of the authenticated owner, never somebody else."""
+
+    def test_owner_records_and_revokes_their_own_consent(
+        self, client, auth_headers, monkeypatch, tmp_path
+    ):
+        _enable_test_training_authorization(monkeypatch, tmp_path)
+        policy = _consent_document(client, auth_headers)
+        assert policy["acceptance_available"] is True
+        assert policy["acceptance_owner_only"] is True
+        assert policy["training_allowed"] is False
+
+        status = client.get(
+            "/api/v1/agent-strategy/consent-policy", headers=auth_headers
+        )
+        assert status.status_code == 200, status.text
+        assert status.json()["status"]["status"] == "not_configured"
+        assert status.json()["status"]["real_owner_consent"] is False
+
+        # A bare acknowledgement that does not echo the policy text records
+        # nothing at all.
+        refused = client.put(
+            "/api/v1/agent-strategy/consent",
+            headers=auth_headers,
+            json={
+                "policy_version": policy["consent_version"],
+                "acceptance_text_version": policy["acceptance_text_version"],
+                "acknowledgement": "I accept",
+            },
+        )
+        assert refused.status_code == 409, refused.text
+        assert (
+            refused.json()["detail"]["code"]
+            == "agent_strategy_consent_acknowledgement_mismatch"
+        )
+        assert _consent_rows(_owner_id()) == []
+
+        accepted = _accept_consent(client, auth_headers)
+        assert accepted.status_code == 200, accepted.text
+        payload = accepted.json()
+        assert payload["status"] == "active"
+        assert payload["real_owner_consent"] is True
+        assert payload["accepted_by"] == "owner"
+        assert payload["created"] is True
+        assert payload["deduplicated"] is False
+        consent_id = payload["consent_id"]
+        assert uuid.UUID(consent_id)
+
+        rows = _consent_rows(_owner_id())
+        assert len(rows) == 1
+        assert rows[0].accepted_by_user_id == rows[0].owner_id
+        assert rows[0].id == uuid.UUID(consent_id)
+        assert rows[0].acknowledgement_json["text_zh"] == policy["acceptance_text_zh"]
+
+        # Accepting the same decision again is the same consent.
+        again = _accept_consent(client, auth_headers)
+        assert again.status_code == 200, again.text
+        assert again.json()["consent_id"] == consent_id
+        assert again.json()["created"] is False
+        assert again.json()["deduplicated"] is True
+        assert len(_consent_rows(_owner_id())) == 1
+
+        revoked = client.post(
+            "/api/v1/agent-strategy/consent/revoke",
+            headers=auth_headers,
+            json={"reason": "owner_test"},
+        )
+        assert revoked.status_code == 200, revoked.text
+        assert revoked.json()["revoked"] is True
+        assert revoked.json()["status"] == "revoked"
+        assert revoked.json()["real_owner_consent"] is False
+
+        second = client.post(
+            "/api/v1/agent-strategy/consent/revoke",
+            headers=auth_headers,
+            json={},
+        )
+        assert second.status_code == 200, second.text
+        assert second.json()["revoked"] is False
+        assert second.json()["reason"] == "no_active_consent"
+
+        # The decision is kept as history; it is not deleted on revoke.
+        rows = _consent_rows(_owner_id())
+        assert len(rows) == 1
+        assert rows[0].status == "revoked"
+        assert rows[0].revoke_reason == "owner_test"
+
+    def test_consent_is_per_owner(self, client, auth_headers, monkeypatch, tmp_path):
+        _enable_test_training_authorization(monkeypatch, tmp_path)
+        accepted = _accept_consent(client, auth_headers)
+        assert accepted.status_code == 200, accepted.text
+
+        other_headers = _login_other_owner(client)
+        other_status = client.get(
+            "/api/v1/agent-strategy/consent-policy", headers=other_headers
+        )
+        assert other_status.status_code == 200, other_status.text
+        assert other_status.json()["status"]["status"] == "not_configured"
+        assert other_status.json()["status"]["real_owner_consent"] is False
+
+    def test_consent_alone_does_not_open_snapshot_creation(
+        self, client, auth_headers, monkeypatch, tmp_path
+    ):
+        # Consent recorded, but the snapshot fixture is absent.
+        _enable_test_training_authorization(monkeypatch, tmp_path, snapshot="")
+        _seed_bars(INSTRUMENT, _regime_series(180))
+        version_id = _create_locked_strategy(
+            client, auth_headers, title="Consent only", window_days=180
+        )
+        body = {"strategy_version_id": str(version_id)}
+        for route in (
+            "/api/v1/agent-strategy/candidates/collect",
+            "/api/v1/agent-strategy/candidates/outcomes",
+        ):
+            resp = client.post(route, headers=auth_headers, json=body)
+            assert resp.status_code == 200, (route, resp.text)
+
+        accepted = _accept_consent(client, auth_headers)
+        assert accepted.status_code == 200, accepted.text
+
+        resp = client.post(
+            "/api/v1/agent-strategy/snapshots", headers=auth_headers, json=body
+        )
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"]["code"] == "agent_strategy_snapshot_not_approved"
+
+        db = TestSession()
+        try:
+            snapshots = (
+                db.query(AgentDatasetSnapshot)
+                .filter(AgentDatasetSnapshot.strategy_version_id == version_id)
+                .all()
+            )
+        finally:
+            db.close()
+        assert snapshots == []
+
+
+class TestFixtureTrainingChain:
+    """Train, verify and score on a synthetic snapshot; never activate."""
+
+    def test_training_requires_owner_consent(
+        self, client, auth_headers, monkeypatch, tmp_path
+    ):
+        snapshot = _ready_fixture_snapshot(
+            client, auth_headers, monkeypatch, tmp_path
+        )
+        resp = client.post(
+            "/api/v1/agent-strategy/training/jobs",
+            headers=auth_headers,
+            json={"snapshot_id": snapshot["id"]},
+        )
+        assert resp.status_code == 409, resp.text
+        detail = resp.json()["detail"]
+        assert detail["code"] == "agent_strategy_training_not_authorized"
+        assert detail["details"]["reason_code"] == "agent_strategy_consent_not_configured"
+        assert detail["details"]["model_activation"] == "NOT_APPROVED"
+        assert _training_job_rows() == []
+
+    def test_training_requires_the_training_fixture(
+        self, client, auth_headers, monkeypatch, tmp_path
+    ):
+        snapshot = _ready_fixture_snapshot(
+            client, auth_headers, monkeypatch, tmp_path
+        )
+        accepted = _accept_consent(client, auth_headers)
+        assert accepted.status_code == 200, accepted.text
+
+        _enable_test_training_authorization(monkeypatch, tmp_path, training="")
+        resp = client.post(
+            "/api/v1/agent-strategy/training/jobs",
+            headers=auth_headers,
+            json={"snapshot_id": snapshot["id"]},
+        )
+        assert resp.status_code == 409, resp.text
+        detail = resp.json()["detail"]
+        assert detail["code"] == "agent_strategy_training_not_authorized"
+        assert (
+            detail["details"]["reason_code"]
+            == "agent_strategy_test_training_authorization_not_configured"
+        )
+        assert detail["details"]["consent_status"] == "active"
+        assert _training_job_rows() == []
+
+    def test_training_writes_an_artifact_and_inference_reverifies_it(
+        self, client, auth_headers, monkeypatch, tmp_path
+    ):
+        snapshot = _ready_fixture_snapshot(
+            client, auth_headers, monkeypatch, tmp_path
+        )
+        consent = _accept_consent(client, auth_headers)
+        assert consent.status_code == 200, consent.text
+        consent_id = consent.json()["consent_id"]
+
+        resp = client.post(
+            "/api/v1/agent-strategy/training/jobs",
+            headers=auth_headers,
+            json={"snapshot_id": snapshot["id"]},
+        )
+        assert resp.status_code == 200, resp.text
+        job = resp.json()
+
+        assert job["status"] == "completed"
+        assert job["created"] is True
+        assert job["deduplicated"] is False
+        assert job["dataset_checksum"] == snapshot["checksum"]
+        assert job["activation_status"] == "NOT_APPROVED"
+        assert job["model_activated"] is False
+        assert job["runs_inference_for_customer"] is False
+        assert job["movable_to_customer_environment"] is False
+        assert len(job["artifact_checksum"]) == 64
+        assert len(job["artifact_metadata_checksum"]) == 64
+        assert job["lineage"]["consent_record_id"] == consent_id
+        assert job["lineage"]["dataset_checksum"] == snapshot["checksum"]
+
+        contract = client.get(
+            "/api/v1/agent-strategy/contract", headers=auth_headers
+        )
+        assert contract.status_code == 200, contract.text
+        contract_body = contract.json()
+        for name in contract_body["lineage_required_training"]:
+            assert job["lineage"][name], name
+        assert contract_body["real_training"] == "NOT_APPROVED"
+        assert contract_body["model_activation"] == "NOT_APPROVED"
+        assert contract_body["inference"] == "NOT_APPROVED"
+        assert contract_body["training_chain"]["runs_inference_for_customer"] is False
+
+        # The metrics describe each split and the frozen test baselines.
+        metrics = job["metrics"]
+        assert metrics["not_a_profit_claim"] is True
+        for segment in ("train", "validation", "test"):
+            assert metrics["segments"][segment]["available"] is True, segment
+            assert metrics["segments"][segment]["n_rows"] > 0, segment
+        assert set(metrics["baselines"]["test"]) == {
+            "take_all",
+            "skip_all",
+            "random_skip_seed_42",
+        }
+        assert job["row_counts"] == {
+            segment: metrics["segments"][segment]["n_rows"]
+            for segment in ("train", "validation", "test")
+        }
+
+        # Artifacts exist on disk under the configured directory.
+        artifact_dir = os.path.dirname(job["artifact_path"])
+        assert artifact_dir.startswith(str(tmp_path))
+        for filename in (
+            "model.joblib",
+            "scaler.joblib",
+            "feature_names.json",
+            "metadata.json",
+        ):
+            assert os.path.isfile(os.path.join(artifact_dir, filename)), filename
+        with open(os.path.join(artifact_dir, "metadata.json")) as fh:
+            metadata = json.load(fh)
+        assert metadata["model_activation"] == "NOT_APPROVED"
+        assert metadata["movable_to_customer_environment"] is False
+        assert metadata["usable_for_customer"] is False
+        assert metadata["artifact_sha256"] == job["artifact_checksum"]
+        assert (
+            metadata["artifact_metadata_checksum"]
+            == job["artifact_metadata_checksum"]
+        )
+
+        # The persisted row and the frozen snapshot are unchanged by training.
+        db = TestSession()
+        try:
+            stored = db.get(AgentStrategyTrainingJob, uuid.UUID(job["job_id"]))
+            assert stored.status == "completed"
+            assert stored.activation_status == "NOT_APPROVED"
+            assert stored.artifact_checksum == job["artifact_checksum"]
+            stored_snapshot = db.get(AgentDatasetSnapshot, uuid.UUID(snapshot["id"]))
+            assert stored_snapshot.checksum == snapshot["checksum"]
+            assert stored_snapshot.rows_json == snapshot["rows"]
+            assert stored_snapshot.status == "ready"
+        finally:
+            db.close()
+
+        # Identical retries return the completed job instead of a copy.
+        repeat = client.post(
+            "/api/v1/agent-strategy/training/jobs",
+            headers=auth_headers,
+            json={"snapshot_id": snapshot["id"]},
+        )
+        assert repeat.status_code == 200, repeat.text
+        assert repeat.json()["job_id"] == job["job_id"]
+        assert repeat.json()["created"] is False
+        assert repeat.json()["deduplicated"] is True
+        assert len(_training_job_rows()) == 1
+
+        listed = client.get(
+            "/api/v1/agent-strategy/training/jobs", headers=auth_headers
+        )
+        assert listed.status_code == 200, listed.text
+        assert listed.json()["count"] == 1
+        assert listed.json()["activation_available"] is False
+        assert listed.json()["model_activation"] == "NOT_APPROVED"
+
+        read = client.get(
+            f"/api/v1/agent-strategy/training/jobs/{job['job_id']}",
+            headers=auth_headers,
+        )
+        assert read.status_code == 200, read.text
+        assert read.json()["job_id"] == job["job_id"]
+
+        # Inference scores one frozen row and re-verifies both checksums.
+        test_ids = set(
+            snapshot["split_manifest"]["splits"]["test"]["candidate_ids"]
+        )
+        row = next(r for r in snapshot["rows"] if r["candidate_id"] in test_ids)
+        features = {
+            name: float(row["features"][name]) for name in snapshot["feature_names"]
+        }
+        inference = client.post(
+            f"/api/v1/agent-strategy/training/jobs/{job['job_id']}/inference",
+            headers=auth_headers,
+            json={"features": features},
+        )
+        assert inference.status_code == 200, inference.text
+        decision = inference.json()
+        assert decision["decision"] in {"take", "skip"}
+        assert 0.0 <= decision["positive_probability"] <= 1.0
+        assert decision["lineage_verified"] is True
+        assert decision["artifact_verified"] is True
+        assert decision["activation_status"] == "NOT_APPROVED"
+        assert decision["model_activated"] is False
+        assert decision["runs_inference_for_customer"] is False
+        assert decision["not_a_recommendation"] is True
+        assert decision["not_a_profit_claim"] is True
+        assert decision["inference_policy_version"] == "snapshot-artifact-verified-v1"
+
+        # Scoring is read-only: no job or snapshot row moved.
+        assert len(_training_job_rows()) == 1
+        db = TestSession()
+        try:
+            stored = db.get(AgentStrategyTrainingJob, uuid.UUID(job["job_id"]))
+            assert stored.metrics_json == metrics
+        finally:
+            db.close()
+
+        missing = client.post(
+            f"/api/v1/agent-strategy/training/jobs/{job['job_id']}/inference",
+            headers=auth_headers,
+            json={"features": {"unknown_feature": 1.0}},
+        )
+        assert missing.status_code == 409, missing.text
+        assert missing.json()["detail"]["code"] == "missing_features"
+
+    def test_revoked_consent_stops_training_and_inference(
+        self, client, auth_headers, monkeypatch, tmp_path
+    ):
+        snapshot = _ready_fixture_snapshot(
+            client, auth_headers, monkeypatch, tmp_path
+        )
+        accepted = _accept_consent(client, auth_headers)
+        assert accepted.status_code == 200, accepted.text
+        trained = client.post(
+            "/api/v1/agent-strategy/training/jobs",
+            headers=auth_headers,
+            json={"snapshot_id": snapshot["id"]},
+        )
+        assert trained.status_code == 200, trained.text
+        job_id = trained.json()["job_id"]
+
+        revoked = client.post(
+            "/api/v1/agent-strategy/consent/revoke",
+            headers=auth_headers,
+            json={"reason": "withdrawn"},
+        )
+        assert revoked.status_code == 200, revoked.text
+        assert revoked.json()["status"] == "revoked"
+
+        retrain = client.post(
+            "/api/v1/agent-strategy/training/jobs",
+            headers=auth_headers,
+            json={"snapshot_id": snapshot["id"]},
+        )
+        assert retrain.status_code == 409, retrain.text
+        assert (
+            retrain.json()["detail"]["details"]["consent_status"] == "revoked"
+        )
+
+        features = {
+            name: float(snapshot["rows"][0]["features"][name])
+            for name in snapshot["feature_names"]
+        }
+        inference = client.post(
+            f"/api/v1/agent-strategy/training/jobs/{job_id}/inference",
+            headers=auth_headers,
+            json={"features": features},
+        )
+        assert inference.status_code == 409, inference.text
+        assert (
+            inference.json()["detail"]["code"]
+            == "agent_strategy_training_not_authorized"
+        )
+
+    def test_tampered_snapshot_refuses_training(
+        self, client, auth_headers, monkeypatch, tmp_path
+    ):
+        snapshot = _ready_fixture_snapshot(
+            client, auth_headers, monkeypatch, tmp_path
+        )
+        accepted = _accept_consent(client, auth_headers)
+        assert accepted.status_code == 200, accepted.text
+
+        db = TestSession()
+        try:
+            stored = db.get(AgentDatasetSnapshot, uuid.UUID(snapshot["id"]))
+            tampered_rows = json.loads(json.dumps(stored.rows_json))
+            tampered_rows[0]["net_return_pct"] = 99.0
+            stored.rows_json = tampered_rows
+            db.commit()
+        finally:
+            db.close()
+
+        resp = client.post(
+            "/api/v1/agent-strategy/training/jobs",
+            headers=auth_headers,
+            json={"snapshot_id": snapshot["id"]},
+        )
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"]["code"] == "snapshot_checksum_mismatch"
+        assert _training_job_rows() == []
+
+    def test_tampered_artifact_refuses_inference(
+        self, client, auth_headers, monkeypatch, tmp_path
+    ):
+        snapshot = _ready_fixture_snapshot(
+            client, auth_headers, monkeypatch, tmp_path
+        )
+        accepted = _accept_consent(client, auth_headers)
+        assert accepted.status_code == 200, accepted.text
+        trained = client.post(
+            "/api/v1/agent-strategy/training/jobs",
+            headers=auth_headers,
+            json={"snapshot_id": snapshot["id"]},
+        )
+        assert trained.status_code == 200, trained.text
+        job = trained.json()
+
+        features = {
+            name: float(snapshot["rows"][0]["features"][name])
+            for name in snapshot["feature_names"]
+        }
+        inference_route = (
+            f"/api/v1/agent-strategy/training/jobs/{job['job_id']}/inference"
+        )
+        artifact_dir = os.path.dirname(job["artifact_path"])
+        metadata_path = os.path.join(artifact_dir, "metadata.json")
+        model_path = os.path.join(artifact_dir, "model.joblib")
+
+        with open(metadata_path) as fh:
+            original_metadata = fh.read()
+        tampered = json.loads(original_metadata)
+        tampered["model_activation"] = "ACTIVE"
+        with open(metadata_path, "w") as fh:
+            json.dump(tampered, fh)
+
+        metadata_refusal = client.post(
+            inference_route, headers=auth_headers, json={"features": features}
+        )
+        assert metadata_refusal.status_code == 409, metadata_refusal.text
+        assert (
+            metadata_refusal.json()["detail"]["code"]
+            == "artifact_metadata_checksum_mismatch"
+        )
+
+        with open(metadata_path, "w") as fh:
+            fh.write(original_metadata)
+
+        with open(model_path, "rb") as fh:
+            original_model = fh.read()
+        with open(model_path, "wb") as fh:
+            fh.write(original_model + b"\x00")
+
+        artifact_refusal = client.post(
+            inference_route, headers=auth_headers, json={"features": features}
+        )
+        assert artifact_refusal.status_code == 409, artifact_refusal.text
+        assert (
+            artifact_refusal.json()["detail"]["code"] == "artifact_checksum_mismatch"
+        )
+
+    def test_other_owner_cannot_read_or_infer_with_the_job(
+        self, client, auth_headers, monkeypatch, tmp_path
+    ):
+        snapshot = _ready_fixture_snapshot(
+            client, auth_headers, monkeypatch, tmp_path
+        )
+        accepted = _accept_consent(client, auth_headers)
+        assert accepted.status_code == 200, accepted.text
+        trained = client.post(
+            "/api/v1/agent-strategy/training/jobs",
+            headers=auth_headers,
+            json={"snapshot_id": snapshot["id"]},
+        )
+        assert trained.status_code == 200, trained.text
+        job_id = trained.json()["job_id"]
+
+        other_headers = _login_other_owner(client)
+        read = client.get(
+            f"/api/v1/agent-strategy/training/jobs/{job_id}",
+            headers=other_headers,
+        )
+        assert read.status_code == 404, read.text
+        assert read.json()["detail"]["code"] == "training_job_not_found"
+
+        # Even with their own consent recorded, another owner cannot train on
+        # this snapshot; it is reported as absent, not as forbidden.
+        other_consent = _accept_consent(client, other_headers)
+        assert other_consent.status_code == 200, other_consent.text
+        train = client.post(
+            "/api/v1/agent-strategy/training/jobs",
+            headers=other_headers,
+            json={"snapshot_id": snapshot["id"]},
+        )
+        assert train.status_code == 409, train.text
+        assert train.json()["detail"]["code"] == "snapshot_not_found"
+
+    def test_capabilities_keep_consent_and_activation_separate(
+        self, client, auth_headers, monkeypatch, tmp_path
+    ):
+        _enable_test_training_authorization(monkeypatch, tmp_path)
+        before = client.get(
+            "/api/v1/agent-strategy/capabilities", headers=auth_headers
+        )
+        assert before.status_code == 200, before.text
+        before_body = before.json()
+        assert before_body["training"]["authorized_in_this_process"] is False
+        assert before_body["training"]["consent_status"] == "not_configured"
+        assert before_body["training"]["activation_available"] is False
+        assert before_body["snapshot_creation"]["usable_for_fixture_training"] is False
+        assert before_body["snapshot_creation"]["usable_for_real_training"] is False
+
+        accepted = _accept_consent(client, auth_headers)
+        assert accepted.status_code == 200, accepted.text
+
+        after = client.get(
+            "/api/v1/agent-strategy/capabilities", headers=auth_headers
+        )
+        assert after.status_code == 200, after.text
+        after_body = after.json()
+        assert after_body["training"]["authorized_in_this_process"] is True
+        assert after_body["training"]["consent_status"] == "active"
+        assert after_body["training"]["authorization_mode"] == (
+            "test_only_fixture_and_owner_consent"
+        )
+        # Authorization to run the fixture chain never becomes an activation.
+        assert after_body["training"]["activation_available"] is False
+        assert after_body["training"]["model_activation"] == "NOT_APPROVED"
+        assert after_body["training"]["real_training"] == "NOT_APPROVED"
+        assert after_body["training"]["inference"] == "NOT_APPROVED"
+        assert after_body["training"]["customer_release"] == "NOT_APPROVED"
+        assert after_body["snapshot_creation"]["usable_for_fixture_training"] is True
+        assert after_body["snapshot_creation"]["usable_for_real_training"] is False

@@ -23,6 +23,7 @@ from tests.conftest import TestSession
 from tests.test_agent_strategy_slice import (
     INSTRUMENT,
     _create_locked_strategy,
+    _enable_test_snapshot_authorization,
     _seed_bars,
     _zigzag,
 )
@@ -383,21 +384,30 @@ class TestAgentStrategyCollectionProvenance:
         finally:
             db.close()
 
-    def test_api_key_collector_creates_agent_candidates(self, client, auth_headers):
+    def test_api_key_collector_creates_agent_candidates(
+        self, client, auth_headers, monkeypatch
+    ):
+        _enable_test_snapshot_authorization(monkeypatch)
         _seed_bars(INSTRUMENT, _zigzag())
         version_id = _create_locked_strategy(client, auth_headers, title="agent-collect")
         candidates = self._collect(client, _api_key_headers("collect-agent"), version_id)
         ids = [c["id"] for c in candidates]
         assert self._stored_actor_types(ids) == {"agent"}
 
-    def test_password_collector_creates_human_candidates(self, client, auth_headers):
+    def test_password_collector_creates_human_candidates(
+        self, client, auth_headers, monkeypatch
+    ):
+        _enable_test_snapshot_authorization(monkeypatch)
         _seed_bars(INSTRUMENT, _zigzag())
         version_id = _create_locked_strategy(client, auth_headers, title="human-collect")
         candidates = self._collect(client, auth_headers, version_id)
         ids = [c["id"] for c in candidates]
         assert self._stored_actor_types(ids) == {"human"}
 
-    def test_unattributed_collector_creates_unknown_candidates(self, client, auth_headers):
+    def test_unattributed_collector_creates_unknown_candidates(
+        self, client, auth_headers, monkeypatch
+    ):
+        _enable_test_snapshot_authorization(monkeypatch)
         _seed_bars(INSTRUMENT, _zigzag())
         version_id = _create_locked_strategy(client, auth_headers, title="unknown-collect")
         candidates = self._collect(client, _minted_token_headers(), version_id)

@@ -197,3 +197,100 @@ class AgentDatasetSnapshot(Base):
         Index("ix_agent_snapshots_version", "strategy_version_id"),
         Index("ix_agent_snapshots_status", "status"),
     )
+
+
+class AgentStrategyConsent(Base):
+    """One row per consent decision the owner made for themselves.
+
+    ``owner_id`` and ``accepted_by_user_id`` are stored separately and the
+    service layer requires them to be the same authenticated user, so a request
+    cannot record consent on someone else's behalf.
+    """
+
+    __tablename__ = "agent_strategy_consents"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    accepted_by_user_id = Column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    )
+    purpose = Column(String(64), nullable=False, default="agent_strategy_screening")
+    policy_version = Column(String(64), nullable=False)
+    acceptance_text_version = Column(String(64), nullable=False)
+    acknowledgement_json = Column(JSONB, nullable=False)
+    # active | superseded | revoked
+    status = Column(String(16), nullable=False, default="active")
+    accepted_at = Column(DateTime, default=utcnow, nullable=False)
+    superseded_at = Column(DateTime, nullable=True)
+    revoked_at = Column(DateTime, nullable=True)
+    revoke_reason = Column(String(64), nullable=True)
+
+    __table_args__ = (
+        # At most one live consent per owner and purpose, enforced by the DB.
+        Index(
+            "uq_agent_strategy_consent_active",
+            "owner_id",
+            "purpose",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+            sqlite_where=text("status = 'active'"),
+        ),
+        Index("ix_agent_strategy_consent_owner", "owner_id"),
+    )
+
+
+class AgentStrategyTrainingJob(Base):
+    """A bounded training run over one frozen dataset snapshot.
+
+    The row keeps the artifact checksum, dataset checksum and every lineage
+    field the training contract requires, so a later inference can prove which
+    exact dataset and artifact produced it. ``activation_status`` never becomes
+    ACTIVE in this slice.
+    """
+
+    __tablename__ = "agent_strategy_training_jobs"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    snapshot_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("agent_dataset_snapshots.id"),
+        nullable=False,
+    )
+    strategy_version_id = Column(
+        UUID(as_uuid=True), ForeignKey("experiment_versions.id"), nullable=False
+    )
+    # completed | failed | refused
+    status = Column(String(16), nullable=False)
+    training_contract_version = Column(String(64), nullable=False)
+    derived_label_version = Column(String(64), nullable=False)
+    dataset_checksum = Column(String(64), nullable=False)
+    hyperparameters_json = Column(JSONB, nullable=False)
+    hyperparameters_hash = Column(String(64), nullable=False)
+    row_counts_json = Column(JSONB, nullable=False)
+    metrics_json = Column(JSONB, nullable=True)
+    lineage_json = Column(JSONB, nullable=False)
+    artifact_path = Column(String(512), nullable=True)
+    artifact_checksum = Column(String(64), nullable=True)
+    artifact_metadata_checksum = Column(String(64), nullable=True)
+    activation_status = Column(
+        String(32), nullable=False, default="NOT_APPROVED"
+    )
+    failure_reason = Column(String(64), nullable=True)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    completed_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        # Identical retries return the completed job instead of a copy.
+        Index(
+            "uq_agent_training_job_completed",
+            "owner_id",
+            "snapshot_id",
+            "hyperparameters_hash",
+            unique=True,
+            postgresql_where=text("status = 'completed'"),
+            sqlite_where=text("status = 'completed'"),
+        ),
+        Index("ix_agent_training_jobs_owner", "owner_id"),
+        Index("ix_agent_training_jobs_snapshot", "snapshot_id"),
+    )
