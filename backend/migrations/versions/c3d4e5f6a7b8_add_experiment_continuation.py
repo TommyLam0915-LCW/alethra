@@ -1,6 +1,6 @@
 """add experiment continuation lineage
 
-Revision ID: b2c3d4e5f6a7
+Revision ID: c3d4e5f6a7b8
 Revises: e7f8a9b0c1d2
 Create Date: 2026-11-02
 
@@ -14,7 +14,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import UUID
 
 
-revision = "b2c3d4e5f6a7"
+revision = "c3d4e5f6a7b8"
 down_revision = "e7f8a9b0c1d2"
 branch_labels = None
 depends_on = None
