@@ -51,12 +51,15 @@ from app.services.agent_strategy import (
     INITIAL_NOTIONAL,
     SLIPPAGE_RATE,
     AgentStrategyRefused,
+    _canonical_checksum,
     build_outcomes,
     build_split_manifest,
+    candidate_outcome_history,
     collect_candidates,
     create_snapshot,
     evaluate_eligibility,
     existing_trade_eligibility,
+    list_candidates,
     preview_snapshot,
     training_contract,
     validate_lineage,
@@ -379,6 +382,14 @@ class TestOutcomes:
             )
             assert outcome is not None
             candidate_id = candidate.id
+            counterfactual_id = outcome.id
+            counterfactual_snapshot = {
+                "entry_price": outcome.entry_price,
+                "exit_price": outcome.exit_price,
+                "net_return_pct": outcome.net_return_pct,
+                "outcome_source": outcome.outcome_source,
+                "version_seq": outcome.version_seq,
+            }
             entry_date = outcome.entry_execution_date
             exit_date = outcome.exit_execution_date
             portfolio = PaperPortfolio(
@@ -407,14 +418,22 @@ class TestOutcomes:
 
         db = TestSession()
         try:
-            observed = (
+            versions = (
                 db.query(AgentCandidateOutcome)
                 .filter(AgentCandidateOutcome.candidate_id == candidate_id)
-                .one()
+                .order_by(AgentCandidateOutcome.version_seq)
+                .all()
             )
+            observed = next(row for row in versions if row.is_current)
+            previous = next(row for row in versions if row.id == counterfactual_id)
         finally:
             db.close()
 
+        # The new selected result is the actual round trip, but the earlier
+        # counterfactual is still present, untouched, with its own version.
+        assert len(versions) == 2
+        assert observed.version_seq == 2
+        assert observed.selection_reason == "observed_round_trip"
         assert observed.outcome_status == "observed"
         assert observed.outcome_source == "paper_fill"
         assert observed.counterfactual is False
@@ -422,6 +441,164 @@ class TestOutcomes:
         assert observed.net_return_pct == pytest.approx(10.0)
         assert observed.gross_return_pct == pytest.approx(10.0)
         assert observed.notes_json["matching"] == "actual_paper_round_trip"
+        assert previous.is_current is False
+        assert previous.superseded_at is not None
+        assert previous.version_seq == counterfactual_snapshot["version_seq"] == 1
+        assert previous.entry_price == counterfactual_snapshot["entry_price"]
+        assert previous.exit_price == counterfactual_snapshot["exit_price"]
+        assert previous.net_return_pct == counterfactual_snapshot["net_return_pct"]
+        assert previous.outcome_source == counterfactual_snapshot["outcome_source"]
+        assert previous.selection_reason == "counterfactual_replay"
+
+        history = candidate_outcome_history(
+            TestSession(), owner_id, candidate_id
+        )
+        assert history["version_count"] == 2
+        assert history["current_outcome_id"] == str(observed.id)
+        assert [row["version_seq"] for row in history["versions"]] == [1, 2]
+
+    def test_rebuilding_outcomes_is_idempotent_and_keeps_one_current_version(
+        self, client, auth_headers
+    ):
+        _seed_bars(INSTRUMENT, _zigzag())
+        version_id = _create_locked_strategy(client, auth_headers)
+        owner_id = _owner_id()
+        collect_candidates(TestSession(), owner_id, version_id)
+        first = build_outcomes(TestSession(), owner_id, version_id)
+        assert first["created"] > 0
+
+        second = build_outcomes(TestSession(), owner_id, version_id)
+
+        assert second["created"] == 0
+        assert second["superseded"] == 0
+        assert second["preserved"] == first["created"]
+        assert second["history_versions"] == first["created"]
+
+        db = TestSession()
+        try:
+            rows = (
+                db.query(AgentCandidateOutcome)
+                .join(
+                    AgentCandidate,
+                    AgentCandidateOutcome.candidate_id == AgentCandidate.id,
+                )
+                .filter(AgentCandidate.strategy_version_id == version_id)
+                .all()
+            )
+        finally:
+            db.close()
+        current_per_candidate = {}
+        for row in rows:
+            if row.is_current:
+                key = str(row.candidate_id)
+                current_per_candidate[key] = current_per_candidate.get(key, 0) + 1
+        # Every candidate has exactly one selected version, never zero or two.
+        assert set(current_per_candidate.values()) == {1}
+        assert len(current_per_candidate) == len(
+            {str(row.candidate_id) for row in rows}
+        )
+
+    def test_an_exit_policy_mismatch_is_evidence_not_a_replacement(
+        self, client, auth_headers
+    ):
+        _seed_bars(INSTRUMENT, _zigzag())
+        version_id = _create_locked_strategy(client, auth_headers)
+        owner_id = _owner_id()
+        collect_candidates(TestSession(), owner_id, version_id)
+        build_outcomes(TestSession(), owner_id, version_id)
+
+        db = TestSession()
+        try:
+            outcome, candidate = (
+                db.query(AgentCandidateOutcome, AgentCandidate)
+                .join(
+                    AgentCandidate,
+                    AgentCandidateOutcome.candidate_id == AgentCandidate.id,
+                )
+                .filter(
+                    AgentCandidate.strategy_version_id == version_id,
+                    AgentCandidateOutcome.outcome_status == "counterfactual",
+                    AgentCandidateOutcome.label_eligible.is_(True),
+                )
+                .order_by(AgentCandidate.signal_date)
+                .first()
+            )
+            assert outcome is not None
+            candidate_id = candidate.id
+            entry_date = outcome.entry_execution_date
+            target_exit_date = outcome.exit_execution_date
+            target_entry_price = outcome.entry_price
+            target_exit_price = outcome.exit_price
+            target_net = outcome.net_return_pct
+            # The owner exits earlier than the declared fixed hold.
+            actual_exit_date = (
+                date.fromisoformat(entry_date) + timedelta(days=2)
+            ).isoformat()
+            assert actual_exit_date != target_exit_date
+            portfolio = PaperPortfolio(
+                owner_id=owner_id,
+                currency="USD",
+                initial_virtual_cash=100000.0,
+                current_virtual_cash=90000.0,
+                status=PortfolioStatus.active,
+            )
+            db.add(portfolio)
+            db.flush()
+            _filled_round_trip_leg(
+                db, portfolio, OrderSide.BUY, entry_date, 100.0, -1000.0, version_id
+            )
+            _filled_round_trip_leg(
+                db, portfolio, OrderSide.SELL, actual_exit_date, 105.0, 1050.0, None
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        build_outcomes(TestSession(), owner_id, version_id)
+
+        db = TestSession()
+        try:
+            versions = (
+                db.query(AgentCandidateOutcome)
+                .filter(AgentCandidateOutcome.candidate_id == candidate_id)
+                .order_by(AgentCandidateOutcome.version_seq)
+                .all()
+            )
+            current = next(row for row in versions if row.is_current)
+            mismatch = next(
+                row
+                for row in versions
+                if row.selection_reason == "exit_policy_mismatch"
+            )
+        finally:
+            db.close()
+
+        # Exactly the frozen target plus the retained evidence. The replay's
+        # descriptive note changing when an observed entry appears must not
+        # mint a duplicate copy of the same result.
+        assert len(versions) == 2
+        # The declared fixed-hold target stays selected and unchanged.
+        assert current.outcome_status == "counterfactual"
+        assert current.outcome_source == "counterfactual_replay"
+        assert current.counterfactual is True
+        assert current.exit_execution_date == target_exit_date
+        assert current.entry_price == target_entry_price
+        assert current.exit_price == target_exit_price
+        assert current.net_return_pct == target_net
+        # The actual round trip is retained as unselected evidence.
+        assert mismatch.is_current is False
+        assert mismatch.outcome_status == "observed"
+        assert mismatch.outcome_source == "paper_fill"
+        assert mismatch.counterfactual is False
+        assert mismatch.label_eligible is False
+        assert mismatch.exclusion_reason == "exit_policy_mismatch"
+        assert mismatch.exit_execution_date == actual_exit_date
+        assert mismatch.net_return_pct == pytest.approx(5.0)
+        assert (
+            mismatch.notes_json["matching"]
+            == "actual_paper_round_trip_exit_policy_mismatch"
+        )
+        assert mismatch.notes_json["target_exit_execution_date"] == target_exit_date
 
 
 def _filled_round_trip_leg(db, portfolio, side, execution_date, price, net, version):
@@ -451,6 +628,137 @@ def _filled_round_trip_leg(db, portfolio, side, execution_date, price, net, vers
     db.add(fill)
     db.flush()
     return order, fill
+
+
+class TestOutcomeEvidenceImmutability:
+    """A frozen record keeps referring to the exact result it consumed."""
+
+    def test_refused_snapshot_is_unchanged_when_an_observed_result_arrives(
+        self, client, auth_headers
+    ):
+        _seed_bars(INSTRUMENT, _zigzag(count=80))
+        version_id = _create_locked_strategy(client, auth_headers)
+        owner_id = _owner_id()
+        collect_candidates(TestSession(), owner_id, version_id)
+        build_outcomes(TestSession(), owner_id, version_id)
+
+        preview_before = preview_snapshot(TestSession(), owner_id, version_id)
+        assert preview_before["rows"], "the fixture must produce label rows"
+        # The frozen record recomputes to the checksum it published.
+        assert (
+            _canonical_checksum(
+                preview_before["rows"], preview_before["label_definition"]
+            )
+            == preview_before["checksum"]
+        )
+        for row in preview_before["rows"]:
+            assert row["outcome_id"]
+            assert row["outcome_version"] >= 1
+            assert row["outcome_selection_reason"]
+
+        with pytest.raises(AgentStrategyRefused) as first_exc:
+            create_snapshot(TestSession(), owner_id, version_id)
+        first_snapshot_id = first_exc.value.details["snapshot_id"]
+
+        target_row = next(
+            row
+            for row in preview_before["rows"]
+            if row["outcome_status"] == "counterfactual"
+        )
+        entry_date = target_row["entry_execution_date"]
+        exit_date = target_row["exit_execution_date"]
+
+        db = TestSession()
+        try:
+            portfolio = PaperPortfolio(
+                owner_id=owner_id,
+                currency="USD",
+                initial_virtual_cash=100000.0,
+                current_virtual_cash=90000.0,
+                status=PortfolioStatus.active,
+            )
+            db.add(portfolio)
+            db.flush()
+            _filled_round_trip_leg(
+                db, portfolio, OrderSide.BUY, entry_date, 100.0, -1000.0, version_id
+            )
+            _filled_round_trip_leg(
+                db, portfolio, OrderSide.SELL, exit_date, 110.0, 1100.0, None
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        build_outcomes(TestSession(), owner_id, version_id)
+
+        db = TestSession()
+        try:
+            frozen = db.get(AgentDatasetSnapshot, uuid.UUID(first_snapshot_id))
+            frozen_state = (
+                frozen.checksum,
+                frozen.rows_json,
+                frozen.candidate_ids_json,
+                frozen.split_manifest_json,
+                frozen.exclusion_breakdown_json,
+                frozen.outcome_distribution_json,
+                frozen.status,
+                frozen.included_count,
+            )
+            # Every referenced version is still stored with the same content.
+            retained = {}
+            for row in preview_before["rows"]:
+                record = db.get(
+                    AgentCandidateOutcome, uuid.UUID(row["outcome_id"])
+                )
+                assert record is not None
+                assert record.version_seq == row["outcome_version"]
+                assert record.selection_reason == row["outcome_selection_reason"]
+                assert record.outcome_status == row["outcome_status"]
+                assert record.outcome_source == row["outcome_source"]
+                assert record.net_return_pct == row["net_return_pct"]
+                assert record.exit_execution_date == row["exit_execution_date"]
+                retained[row["candidate_id"]] = (record.is_current, record.id)
+            observed_current = retained[target_row["candidate_id"]]
+        finally:
+            db.close()
+
+        assert observed_current[0] is False
+
+        # A new snapshot captures the new state without touching the old one.
+        with pytest.raises(AgentStrategyRefused) as second_exc:
+            create_snapshot(TestSession(), owner_id, version_id)
+        second_snapshot_id = second_exc.value.details["snapshot_id"]
+        assert second_snapshot_id != first_snapshot_id
+
+        db = TestSession()
+        try:
+            frozen = db.get(AgentDatasetSnapshot, uuid.UUID(first_snapshot_id))
+            after = (
+                frozen.checksum,
+                frozen.rows_json,
+                frozen.candidate_ids_json,
+                frozen.split_manifest_json,
+                frozen.exclusion_breakdown_json,
+                frozen.outcome_distribution_json,
+                frozen.status,
+                frozen.included_count,
+            )
+            latest = db.get(AgentDatasetSnapshot, uuid.UUID(second_snapshot_id))
+        finally:
+            db.close()
+
+        assert after == frozen_state
+        assert latest.checksum != frozen.checksum
+
+        preview_after = preview_snapshot(TestSession(), owner_id, version_id)
+        refreshed = next(
+            row
+            for row in preview_after["rows"]
+            if row["candidate_id"] == target_row["candidate_id"]
+        )
+        assert refreshed["outcome_version"] == target_row["outcome_version"] + 1
+        assert refreshed["outcome_source"] == "paper_fill"
+        assert refreshed["outcome_status"] == "observed"
 
 
 class TestOutcomeBuckets:
@@ -557,6 +865,7 @@ class TestConsentFailClosed:
         body = resp.json()
         assert body["capability"]["status"] == "DEVELOPMENT"
         assert body["capability"]["status_label_zh"] == "開發中／尚不可在原客戶環境執行"
+        assert body["enabled_in_this_process"] is False
         assert body["consent_policy"]["status"] == "not_configured"
         assert body["consent_policy"]["fail_closed"] is True
         assert body["training"] == {
@@ -564,6 +873,75 @@ class TestConsentFailClosed:
             "model_activation": "NOT_APPROVED",
             "inference": "NOT_APPROVED",
         }
+
+
+class TestScreeningWriteGate:
+    """The C writes are only reachable in an explicitly enabled dev process."""
+
+    _WRITE_ROUTES = (
+        "/api/v1/agent-strategy/candidates/collect",
+        "/api/v1/agent-strategy/candidates/outcomes",
+        "/api/v1/agent-strategy/snapshots/preview",
+        "/api/v1/agent-strategy/snapshots",
+    )
+
+    def test_every_write_route_fails_closed_with_no_side_effects(
+        self, client, auth_headers
+    ):
+        _seed_bars(INSTRUMENT, _zigzag())
+        version_id = _create_locked_strategy(client, auth_headers)
+
+        db = TestSession()
+        try:
+            before = (
+                db.query(AgentCandidate).count(),
+                db.query(AgentCandidateOutcome).count(),
+                db.query(AgentDatasetSnapshot).count(),
+            )
+        finally:
+            db.close()
+        assert before == (0, 0, 0)
+
+        for route in self._WRITE_ROUTES:
+            resp = client.post(
+                route,
+                headers=auth_headers,
+                json={"strategy_version_id": str(version_id)},
+            )
+            assert resp.status_code == 409, (route, resp.text)
+            detail = resp.json()["detail"]
+            assert detail["code"] == "agent_strategy_screening_disabled"
+            assert detail["enabled"] is False
+
+        db = TestSession()
+        try:
+            after = (
+                db.query(AgentCandidate).count(),
+                db.query(AgentCandidateOutcome).count(),
+                db.query(AgentDatasetSnapshot).count(),
+            )
+        finally:
+            db.close()
+        assert after == before
+
+    def test_the_gate_is_the_only_blocker_when_the_process_enables_it(
+        self, client, auth_headers, monkeypatch
+    ):
+        from types import SimpleNamespace
+
+        _seed_bars(INSTRUMENT, _zigzag())
+        version_id = _create_locked_strategy(client, auth_headers)
+        monkeypatch.setattr(
+            "app.api.agent_strategy.get_settings",
+            lambda: SimpleNamespace(agent_strategy_screening_enabled=True),
+        )
+        resp = client.post(
+            "/api/v1/agent-strategy/candidates/collect",
+            headers=auth_headers,
+            json={"strategy_version_id": str(version_id)},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["created"] > 0
 
 
 # ---------------------------------------------------------------------------
@@ -822,6 +1200,72 @@ class TestExistingTradeTraceability:
         )
         assert report["orders"][0]["exclusion_reason"] == "no_strategy_lineage"
         assert report["orders"][0]["lineage_status"] == "not_linked"
+
+    def test_a_shared_execution_date_is_traceability_not_confirmed_linkage(
+        self, client, auth_headers
+    ):
+        _seed_bars(INSTRUMENT, _zigzag())
+        version_id = _create_locked_strategy(client, auth_headers)
+        owner_id = _owner_id()
+        collect_candidates(TestSession(), owner_id, version_id)
+        build_outcomes(TestSession(), owner_id, version_id)
+
+        db = TestSession()
+        try:
+            outcome = (
+                db.query(AgentCandidateOutcome)
+                .join(
+                    AgentCandidate,
+                    AgentCandidateOutcome.candidate_id == AgentCandidate.id,
+                )
+                .filter(
+                    AgentCandidate.strategy_version_id == version_id,
+                    AgentCandidateOutcome.outcome_status == "counterfactual",
+                    AgentCandidateOutcome.label_eligible.is_(True),
+                )
+                .order_by(AgentCandidate.signal_date)
+                .first()
+            )
+            assert outcome is not None
+            entry_date = outcome.entry_execution_date
+            portfolio = PaperPortfolio(
+                owner_id=owner_id,
+                currency="USD",
+                initial_virtual_cash=100000.0,
+                current_virtual_cash=90000.0,
+                status=PortfolioStatus.active,
+            )
+            db.add(portfolio)
+            db.flush()
+            order, _ = _filled_round_trip_leg(
+                db, portfolio, OrderSide.BUY, entry_date, 100.0, -1000.0, version_id
+            )
+            # No functional-test marker, no order/fill id in any outcome.
+            order.rationale = "followed the published rule signal"
+            db.commit()
+            portfolio_id = portfolio.id
+        finally:
+            db.close()
+
+        report = existing_trade_eligibility(
+            TestSession(), owner_id, portfolio_id=portfolio_id
+        )
+        entry = report["orders"][0]
+        assert entry["functional_test"] is False
+        assert entry["lineage_status"] == "date_only_unconfirmed"
+        assert entry["exclusion_reason"] == "unconfirmed_candidate_linkage"
+        assert entry["linkage_evidence"] is None
+        assert entry["candidate_id"] is not None
+        assert entry["outcome_id"] is None
+        assert entry["eligible_for_c_dataset"] is False
+        # Absence of a marker never stands in for a research-purpose check.
+        assert entry["linkage_confirmation"]["candidate_linkage"] == (
+            "date_only_unconfirmed"
+        )
+        assert entry["linkage_confirmation"]["data_source_confirmed"] is False
+        assert entry["linkage_confirmation"]["research_purpose_confirmed"] is False
+        assert entry["linkage_confirmation"]["outcome_policy_confirmed"] is False
+        assert entry["linkage_confirmation"]["authorization_scope_confirmed"] is False
 
 
 def _paper_snapshot(db):

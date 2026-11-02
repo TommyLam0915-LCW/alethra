@@ -65,7 +65,7 @@ FREE_DB_BUILD_MIB=10240   # 10 GiB operational line: below it, no image builds
 # RESUME upgrades a volume seeded at an older head through the backend
 # entrypoint's `alembic upgrade head`, so the head is asserted only AFTER the
 # backend answers /health: reading it earlier would race the upgrade.
-EXPECTED_ALEMBIC_HEAD="y9z0a1b2c3d4"
+EXPECTED_ALEMBIC_HEAD="z0a1b2c3d4e5"
 IDENTITY_FILE="$LOG_DIR/runtime-identity.env"
 RESUME_LOG="$LOG_DIR/resume-check.log"
 
@@ -364,8 +364,8 @@ fresh_runtime() {
   echo "waiting for backend on 127.0.0.1:$BACKEND_PORT (alembic upgrade head runs first)..."
   wait_for_backend
   $COMPOSE logs --no-color backend >"$LOG_DIR/backend-upgrade.log" 2>&1
-  grep -q "Running upgrade x8y9z0a1b2c3 -> y9z0a1b2c3d4" "$LOG_DIR/backend-upgrade.log" \
-    || fail "expected final migration step (x8y9z0a1b2c3 -> y9z0a1b2c3d4) not observed in $LOG_DIR/backend-upgrade.log"
+  grep -q "Running upgrade y9z0a1b2c3d4 -> z0a1b2c3d4e5" "$LOG_DIR/backend-upgrade.log" \
+    || fail "expected final migration step (y9z0a1b2c3d4 -> z0a1b2c3d4e5) not observed in $LOG_DIR/backend-upgrade.log"
   echo "migrations applied to head $EXPECTED_ALEMBIC_HEAD (log: $LOG_DIR/backend-upgrade.log)"
 
   # --- deterministic synthetic seed (guarded to the alethra_e2e database) ---

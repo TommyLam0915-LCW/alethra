@@ -47,6 +47,10 @@ class Settings(BaseSettings):
     candidate_passwordless_mode: bool = False
     candidate_passwordless_accounts: str = ""
     candidate_passwordless_session_minutes: int = 30
+    # Agent candidate screening is a development slice. Off by default so the
+    # routes existing in a customer environment cannot collect candidates,
+    # build outcomes or preview a dataset without a new explicit scope.
+    agent_strategy_screening_enabled: bool = False
     # Bounded intraday REST updates. Off by default: enabling it spends real
     # provider quota, and a real request also requires the interval to be
     # listed in intraday_verified_intervals after it was confirmed against the
@@ -98,6 +102,7 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _validate_production_safety(self) -> "Settings":
         self._validate_candidate_passwordless()
+        self._validate_agent_strategy_screening()
         self._validate_intraday_bounds()
         self._validate_crypto_budget_bounds()
 
@@ -167,6 +172,21 @@ class Settings(BaseSettings):
         if self.crypto_verify_max_requests > 0 and not self.crypto_verify_run_id.strip():
             raise ValueError(
                 "CRYPTO_VERIFY_RUN_ID is required when CRYPTO_VERIFY_MAX_REQUESTS > 0."
+            )
+
+    def _validate_agent_strategy_screening(self) -> None:
+        if not self.agent_strategy_screening_enabled:
+            return
+        if self.is_production_like or self.app_env != "development":
+            raise ValueError(
+                "AGENT_STRATEGY_SCREENING_ENABLED is a local isolated research "
+                f"entry and must be off when APP_ENV={self.app_env}. It is not "
+                "a released customer capability."
+            )
+        if not is_local_database_url(self.database_url):
+            raise ValueError(
+                "AGENT_STRATEGY_SCREENING_ENABLED requires a sqlite or loopback "
+                "DATABASE_URL; refusing to write candidates against a remote DB."
             )
 
     def _validate_intraday_bounds(self) -> None:

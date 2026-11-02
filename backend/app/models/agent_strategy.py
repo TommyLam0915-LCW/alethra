@@ -32,6 +32,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 
@@ -93,8 +94,18 @@ class AgentCandidateOutcome(Base):
         UUID(as_uuid=True),
         ForeignKey("agent_candidates.id"),
         nullable=False,
-        unique=True,
     )
+
+    # An outcome is append-only per candidate: a new evaluation becomes a new
+    # version and the previous version is superseded, never rewritten, so a
+    # frozen snapshot keeps pointing at the exact result it was built from.
+    version_seq = Column(Integer, nullable=False, default=1, server_default="1")
+    is_current = Column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
+    superseded_at = Column(DateTime, nullable=True)
+    # observed_round_trip | counterfactual_replay | exit_policy_mismatch | ...
+    selection_reason = Column(String(64), nullable=True)
 
     # observed | counterfactual | immature | unavailable
     outcome_status = Column(String(16), nullable=False)
@@ -125,6 +136,24 @@ class AgentCandidateOutcome(Base):
     exclusion_reason = Column(String(64), nullable=True)
     notes_json = Column(JSONB, nullable=True)
     evaluated_at = Column(DateTime, default=utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "candidate_id",
+            "version_seq",
+            name="uq_agent_candidate_outcome_version",
+        ),
+        # Exactly one selected result per candidate. A partial unique index
+        # enforces the rule in the database, not only in the service layer.
+        Index(
+            "uq_agent_candidate_outcome_current",
+            "candidate_id",
+            unique=True,
+            postgresql_where=text("is_current"),
+            sqlite_where=text("is_current"),
+        ),
+        Index("ix_agent_candidate_outcome_candidate", "candidate_id"),
+    )
 
 
 class AgentDatasetSnapshot(Base):

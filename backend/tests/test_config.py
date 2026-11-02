@@ -90,6 +90,40 @@ class TestProductionSafety:
         assert s.app_env == "staging"
 
 
+class TestAgentStrategyScreeningGate:
+    def test_production_rejects_enabling_screening(self):
+        with pytest.raises(Exception) as exc_info:
+            _prod_settings(AGENT_STRATEGY_SCREENING_ENABLED="true")
+        assert "AGENT_STRATEGY_SCREENING_ENABLED" in str(exc_info.value)
+
+    def test_staging_rejects_enabling_screening(self):
+        with pytest.raises(Exception) as exc_info:
+            _fresh_settings(
+                APP_ENV="staging",
+                JWT_SECRET_KEY="b" * 48,
+                DATABASE_URL="postgresql://db.example.com/test",
+                AGENT_STRATEGY_SCREENING_ENABLED="true",
+            )
+        assert "AGENT_STRATEGY_SCREENING_ENABLED" in str(exc_info.value)
+
+    def test_remote_database_rejects_enabling_screening(self):
+        with pytest.raises(Exception) as exc_info:
+            _fresh_settings(
+                APP_ENV="development",
+                DATABASE_URL="postgresql://db.example.com/test",
+                AGENT_STRATEGY_SCREENING_ENABLED="true",
+            )
+        assert "AGENT_STRATEGY_SCREENING_ENABLED" in str(exc_info.value)
+
+    def test_local_development_accepts_enabling_screening(self):
+        s = _fresh_settings(
+            APP_ENV="development",
+            DATABASE_URL="postgresql://127.0.0.1:5432/alethra_isolated",
+            AGENT_STRATEGY_SCREENING_ENABLED="true",
+        )
+        assert s.agent_strategy_screening_enabled is True
+
+
 class TestCorsValidation:
     def test_production_rejects_wildcard_cors(self):
         with pytest.raises(Exception) as exc_info:

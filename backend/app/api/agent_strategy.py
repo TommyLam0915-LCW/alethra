@@ -21,11 +21,13 @@ from sqlalchemy.orm import Session
 from app.auth.api_keys import check_api_key_scope
 from app.auth.jwt import get_current_user
 from app.auth.provenance import request_actor_provenance
+from app.config import get_settings
 from app.database import get_db
 from app.models.user import User
 from app.services.agent_strategy import (
     AgentStrategyRefused,
     build_outcomes,
+    candidate_outcome_history,
     capability,
     collect_candidates,
     consent_policy,
@@ -72,6 +74,22 @@ class LineageValidateRequest(BaseModel):
     )
 
 
+def require_screening_enabled() -> None:
+    """Fail closed for C-slice writes outside an explicitly enabled dev stack."""
+    if not get_settings().agent_strategy_screening_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "agent_strategy_screening_disabled",
+                "message_zh": (
+                    "代理候選訊號篩選只在明確啟用的隔離開發環境可用；"
+                    "原客戶環境未開放此用途。"
+                ),
+                "enabled": False,
+            },
+        )
+
+
 def _refusal_http(exc: AgentStrategyRefused) -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_409_CONFLICT,
@@ -90,6 +108,7 @@ def get_capability(
 ):
     return {
         "capability": capability(),
+        "enabled_in_this_process": get_settings().agent_strategy_screening_enabled,
         "consent_policy": consent_policy(),
         "training": {
             "real_training": "NOT_APPROVED",
@@ -125,7 +144,9 @@ def put_consent(
     )
 
 
-@router.post("/candidates/collect")
+@router.post(
+    "/candidates/collect", dependencies=[Depends(require_screening_enabled)]
+)
 def post_collect_candidates(
     body: CollectCandidatesRequest,
     request: Request,
@@ -159,7 +180,22 @@ def get_candidates(
     )
 
 
-@router.post("/candidates/outcomes")
+@router.get("/candidates/{candidate_id}/outcomes")
+def get_candidate_outcome_history(
+    candidate_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope("read")),
+    db: Session = Depends(get_db),
+):
+    try:
+        return candidate_outcome_history(db, current_user.id, candidate_id)
+    except AgentStrategyRefused as exc:
+        raise _refusal_http(exc)
+
+
+@router.post(
+    "/candidates/outcomes", dependencies=[Depends(require_screening_enabled)]
+)
 def post_build_outcomes(
     body: BuildOutcomesRequest,
     current_user: User = Depends(get_current_user),
@@ -191,7 +227,9 @@ def get_eligibility(
     )
 
 
-@router.post("/snapshots/preview")
+@router.post(
+    "/snapshots/preview", dependencies=[Depends(require_screening_enabled)]
+)
 def post_preview_snapshot(
     body: SnapshotRequest,
     current_user: User = Depends(get_current_user),
@@ -207,7 +245,7 @@ def post_preview_snapshot(
         raise _refusal_http(exc)
 
 
-@router.post("/snapshots")
+@router.post("/snapshots", dependencies=[Depends(require_screening_enabled)])
 def post_create_snapshot(
     body: SnapshotRequest,
     current_user: User = Depends(get_current_user),

@@ -33,10 +33,11 @@ from collections import Counter
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from sqlalchemy import or_
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
 from app.auth.provenance import UNKNOWN
+from app.lib.timeutil import utcnow as _utcnow
 from app.models.agent_strategy import (
     AgentCandidate,
     AgentCandidateOutcome,
@@ -93,7 +94,9 @@ EXCLUSION_LABELS_ZH = {
     "functional_test_trade": "功能性測試交易，不作為學習樣本",
     "no_strategy_lineage": "既有紙上交易沒有連結策略版本",
     "no_candidate_lineage": "找不到對應的候選訊號血緣",
+    "unconfirmed_candidate_linkage": "只有共用日期，未確認候選血緣，不可納入研究",
     "non_human_execution": "實際執行不是由已驗證的本人工作階段寫入",
+    "exit_policy_mismatch": "實際出場政策與固定持有目標不一致，僅保留為證據",
     "agent_strategy_consent_not_configured": "尚未設定代理策略研究用途同意",
     "insufficient_time_groups": "時間分組不足，無法建立時間切分",
     "insufficient_post_purge_samples": "gap／purge 後有切分為空",
@@ -506,13 +509,17 @@ def _observed_round_trip(
         return None
     if buy.order.actor_type != "human":
         return None
+    # The first SELL at or after entry is the actual exit candidate. When its
+    # date differs from the fixed-hold target, the actual round trip used a
+    # different exit policy; it is recorded as evidence but must not replace
+    # the declared target automatically.
     sell = (
         base.filter(
             PaperOrder.side == OrderSide.SELL,
-            PaperFill.execution_date == exit_date,
+            PaperFill.execution_date >= entry_date,
             PaperOrder.portfolio_id == buy.order.portfolio_id,
         )
-        .order_by(PaperFill.id)
+        .order_by(PaperFill.execution_date, PaperFill.id)
         .first()
     )
     if sell is None or is_functional_test_order(sell.order, explicit_functional_test_ids):
@@ -520,6 +527,14 @@ def _observed_round_trip(
             "buy": buy,
             "sell": None,
             "note": "observed_entry_without_observed_exit",
+        }
+    if sell.execution_date != exit_date:
+        return {
+            "buy": buy,
+            "sell": sell,
+            "note": "observed_exit_policy_mismatch",
+            "target_exit_date": exit_date,
+            "actual_exit_date": sell.execution_date,
         }
     return {"buy": buy, "sell": sell, "note": None}
 
@@ -537,6 +552,58 @@ def _cost_model() -> Dict[str, Any]:
     }
 
 
+def _str_or_none(value: Any) -> Optional[str]:
+    return str(value) if value is not None else None
+
+
+def _float_or_none(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return round(float(value), 10)
+    except (TypeError, ValueError):
+        return None
+
+
+def _outcome_signature(values: Dict[str, Any]) -> Tuple[Any, ...]:
+    """Content identity of one outcome version, used for idempotent writes.
+
+    Accepts both the persistence payload (``notes_json``) and the serializer
+    payload (``notes``) so the same comparison works on either side.
+    """
+    notes = values.get("notes_json")
+    if notes is None:
+        notes = values.get("notes")
+    return (
+        values.get("outcome_status"),
+        values.get("label_maturity"),
+        bool(values.get("label_eligible")),
+        values.get("outcome_source"),
+        bool(values.get("counterfactual")),
+        _str_or_none(values.get("observed_order_id")),
+        _str_or_none(values.get("observed_fill_id")),
+        values.get("entry_execution_date"),
+        values.get("exit_execution_date"),
+        _float_or_none(values.get("entry_price")),
+        _float_or_none(values.get("exit_price")),
+        _float_or_none(values.get("gross_return_pct")),
+        _float_or_none(values.get("net_return_pct")),
+        values.get("cost_model_version"),
+        values.get("exit_policy"),
+        values.get("exclusion_reason"),
+        json.dumps(notes or {}, sort_keys=True, default=str),
+    )
+
+
+def _outcome_economic_signature(values: Dict[str, Any]) -> Tuple[Any, ...]:
+    """Result identity without descriptive notes, for deduplicating evidence.
+
+    The same declared replay can acquire an extra note when an observed entry
+    appears later; that must not create a second copy of the same result.
+    """
+    return _outcome_signature(values)[:-1]
+
+
 def build_outcomes(
     db: Session,
     owner_id: uuid.UUID,
@@ -545,16 +612,22 @@ def build_outcomes(
     instrument_id: Optional[str] = None,
     explicit_functional_test_ids: Optional[Iterable[str]] = None,
 ) -> Dict[str, Any]:
-    """Build one outcome row per candidate, never overwriting an observed row."""
+    """Append outcome versions; a previously selected result is never rewritten.
+
+    The selected result may change (for example when an actual paper round trip
+    appears), but the earlier version stays in place with its own policy,
+    timestamp and source so a frozen snapshot remains reproducible.
+    """
     version = _get_owned_locked_version(db, owner_id, strategy_version_id)
     rule = _rule_spec(version, instrument_id)
     instruments = (
         [rule["instrument_id"]] if instrument_id else list(version.strategy_spec.get("asset_ids") or [])
     )
     outcomes_created = 0
-    outcomes_updated = 0
+    outcomes_superseded = 0
     outcomes_preserved = 0
-    status_counts: Counter = Counter()
+    preserved_observed = 0
+    now = _utcnow()
 
     for instrument in instruments:
         bars = _load_daily_bars(
@@ -578,17 +651,7 @@ def build_outcomes(
         )
         for candidate in candidates:
             signal_idx = index_by_date.get(candidate.signal_date)
-            existing = (
-                db.query(AgentCandidateOutcome)
-                .filter(AgentCandidateOutcome.candidate_id == candidate.id)
-                .first()
-            )
-            if existing is not None and existing.outcome_status == "observed":
-                outcomes_preserved += 1
-                status_counts[existing.outcome_status] += 1
-                continue
-
-            payload = _outcome_payload_for_candidate(
+            evaluation = _evaluate_candidate(
                 db,
                 owner_id,
                 strategy_version_id,
@@ -597,28 +660,186 @@ def build_outcomes(
                 signal_idx,
                 explicit_functional_test_ids,
             )
-            status_counts[payload["outcome_status"]] += 1
+            selected_payload = evaluation["selected"]
+            selected_reason = evaluation["selected_reason"]
+            additional = list(evaluation["additional"])
 
-            if existing is None:
-                existing = AgentCandidateOutcome(candidate_id=candidate.id, **payload)
-                db.add(existing)
+            versions = (
+                db.query(AgentCandidateOutcome)
+                .filter(AgentCandidateOutcome.candidate_id == candidate.id)
+                .order_by(AgentCandidateOutcome.version_seq)
+                .all()
+            )
+            current = next((row for row in versions if row.is_current), None)
+            # Compare result identity, not descriptive notes: a declared replay
+            # that merely gains an "observed entry exists" note is still the
+            # same result and must not be re-versioned.
+            current_signature = (
+                _outcome_economic_signature(outcome_payload(current)) if current else None
+            )
+            selected_signature = _outcome_economic_signature(selected_payload)
+
+            if (
+                current is not None
+                and current.outcome_status == "observed"
+                and current_signature != selected_signature
+            ):
+                # An observed result is terminal. A later recomputation must
+                # not demote it; keep the evidence as a non-selected version.
+                preserved_observed += 1
+                additional.insert(0, (selected_payload, "not_selected_after_observed"))
+                selected_payload = None
+                selected_reason = None
+            elif current_signature is not None and current_signature == selected_signature:
+                # Recomputing the same evidence must not create a new version.
+                outcomes_preserved += 1
+                if current.selection_reason is None:
+                    current.selection_reason = selected_reason
+                selected_payload = None
+                selected_reason = None
+
+            if selected_payload is not None:
+                if current is not None:
+                    current.is_current = False
+                    current.superseded_at = now
+                    outcomes_superseded += 1
+                    # Flush the demotion before the insert so the partial
+                    # unique index never sees two selected rows.
+                    db.flush()
+                next_seq = max((row.version_seq or 1) for row in versions) + 1 if versions else 1
+                created = AgentCandidateOutcome(
+                    candidate_id=candidate.id,
+                    version_seq=next_seq,
+                    is_current=True,
+                    selection_reason=selected_reason,
+                    **selected_payload,
+                )
+                db.add(created)
+                db.flush()
+                versions.append(created)
                 outcomes_created += 1
-            else:
-                for key, value in payload.items():
-                    setattr(existing, key, value)
-                outcomes_updated += 1
+
+            known = {
+                _outcome_economic_signature(outcome_payload(row)) for row in versions
+            }
+            next_seq = max((row.version_seq or 1) for row in versions) + 1 if versions else 1
+            for payload, reason in additional:
+                signature = _outcome_economic_signature(payload)
+                if signature in known:
+                    continue
+                db.add(
+                    AgentCandidateOutcome(
+                        candidate_id=candidate.id,
+                        version_seq=next_seq,
+                        is_current=False,
+                        superseded_at=now,
+                        selection_reason=reason,
+                        **payload,
+                    )
+                )
+                db.flush()
+                known.add(signature)
+                next_seq += 1
+                outcomes_created += 1
 
     db.commit()
+
+    current_rows = (
+        db.query(AgentCandidate, AgentCandidateOutcome)
+        .join(
+            AgentCandidateOutcome,
+            and_(
+                AgentCandidateOutcome.candidate_id == AgentCandidate.id,
+                AgentCandidateOutcome.is_current.is_(True),
+            ),
+        )
+        .filter(
+            AgentCandidate.owner_id == owner_id,
+            AgentCandidate.strategy_version_id == strategy_version_id,
+        )
+        .all()
+    )
+    status_counts = Counter(outcome.outcome_status for _, outcome in current_rows)
+    history_versions = (
+        db.query(AgentCandidateOutcome)
+        .join(
+            AgentCandidate,
+            AgentCandidateOutcome.candidate_id == AgentCandidate.id,
+        )
+        .filter(
+            AgentCandidate.owner_id == owner_id,
+            AgentCandidate.strategy_version_id == strategy_version_id,
+        )
+        .count()
+    )
     return {
         "strategy_version_id": str(strategy_version_id),
         "created": outcomes_created,
-        "updated": outcomes_updated,
-        "preserved_observed": outcomes_preserved,
+        "updated": outcomes_superseded,
+        "superseded": outcomes_superseded,
+        "preserved": outcomes_preserved,
+        "preserved_observed": preserved_observed,
+        "history_versions": history_versions,
+        "selection_policy": "one_current_version_per_candidate",
         "outcome_distribution": dict(status_counts),
     }
 
 
-def _outcome_payload_for_candidate(
+def _selected(
+    base: Dict[str, Any],
+    status: str,
+    maturity: str,
+    source: str,
+    exclusion: Optional[str],
+    reason: str,
+    **extra: Any,
+) -> Tuple[Dict[str, Any], str]:
+    return (
+        {
+            **base,
+            "outcome_status": status,
+            "label_maturity": maturity,
+            "outcome_source": source,
+            "exclusion_reason": exclusion,
+            **extra,
+        },
+        reason,
+    )
+
+
+def _round_trip_returns(buy: PaperFill, sell: PaperFill) -> Tuple[Optional[float], Optional[float]]:
+    net = None
+    if buy.net_cash_change:
+        net = (
+            (sell.net_cash_change + buy.net_cash_change)
+            / abs(buy.net_cash_change)
+            * 100.0
+        )
+    gross = None
+    if buy.execution_price_before_costs:
+        gross = (
+            sell.execution_price_before_costs / buy.execution_price_before_costs - 1
+        ) * 100.0
+    return gross, net
+
+
+def _replay_prices(
+    entry_bar: MarketDataBar, exit_bar: MarketDataBar
+) -> Optional[Tuple[float, float, float, float]]:
+    if entry_bar.open is None or entry_bar.open <= 0 or exit_bar.close is None:
+        return None
+    entry_price = entry_bar.open * (1 + SLIPPAGE_RATE)
+    exit_price = exit_bar.close * (1 - SLIPPAGE_RATE)
+    gross = (exit_price / entry_price - 1) * 100.0
+    net = (
+        (exit_price * (1 - COMMISSION_RATE))
+        / (entry_price * (1 + COMMISSION_RATE))
+        - 1
+    ) * 100.0
+    return entry_price, exit_price, gross, net
+
+
+def _evaluate_candidate(
     db: Session,
     owner_id: uuid.UUID,
     strategy_version_id: uuid.UUID,
@@ -627,6 +848,13 @@ def _outcome_payload_for_candidate(
     signal_idx: Optional[int],
     explicit_functional_test_ids: Optional[Iterable[str]],
 ) -> Dict[str, Any]:
+    """Evaluate one candidate into a selected result plus retained evidence.
+
+    ``additional`` holds results that are evidence but are not the selected
+    outcome, such as the fixed-hold replay once an exact observed round trip
+    exists, or an observed round trip whose exit policy differs from the
+    declared target.
+    """
     cost_model = _cost_model()
     base = {
         "label_eligible": False,
@@ -646,34 +874,35 @@ def _outcome_payload_for_candidate(
         "notes_json": {},
     }
 
-    if signal_idx is None:
+    def evaluation(payload: Dict[str, Any], reason: str, additional=None) -> Dict[str, Any]:
         return {
-            **base,
-            "outcome_status": "unavailable",
-            "label_maturity": "unavailable",
-            "outcome_source": "none",
-            "exclusion_reason": "no_matching_execution",
+            "selected": payload,
+            "selected_reason": reason,
+            "additional": additional or [],
         }
+
+    if signal_idx is None:
+        payload, reason = _selected(
+            base, "unavailable", "unavailable", "none", "no_matching_execution",
+            "no_matching_execution",
+        )
+        return evaluation(payload, reason)
 
     execution_idx = signal_idx + 1
     exit_idx = execution_idx + HOLD_BARS
     if execution_idx >= len(bars):
-        return {
-            **base,
-            "outcome_status": "immature",
-            "label_maturity": "immature",
-            "outcome_source": "none",
-            "exclusion_reason": "no_execution_bar",
-        }
+        payload, reason = _selected(
+            base, "immature", "immature", "none", "no_execution_bar",
+            "no_execution_bar",
+        )
+        return evaluation(payload, reason)
     if exit_idx >= len(bars):
-        return {
-            **base,
-            "outcome_status": "immature",
-            "label_maturity": "immature",
-            "outcome_source": "none",
-            "exclusion_reason": "label_window_incomplete",
-            "entry_execution_date": bars[execution_idx].bar_date.isoformat(),
-        }
+        payload, reason = _selected(
+            base, "immature", "immature", "none", "label_window_incomplete",
+            "label_window_incomplete",
+            entry_execution_date=bars[execution_idx].bar_date.isoformat(),
+        )
+        return evaluation(payload, reason)
 
     entry_bar = bars[execution_idx]
     exit_bar = bars[exit_idx]
@@ -683,13 +912,15 @@ def _outcome_payload_for_candidate(
     base["exit_execution_date"] = exit_date
 
     if candidate.execution_feasibility != "executable":
-        return {
-            **base,
-            "outcome_status": "unavailable",
-            "label_maturity": "unavailable",
-            "outcome_source": "none",
-            "exclusion_reason": candidate.rejection_reason or candidate.execution_feasibility,
-        }
+        payload, reason = _selected(
+            base,
+            "unavailable",
+            "unavailable",
+            "none",
+            candidate.rejection_reason or candidate.execution_feasibility,
+            "execution_constraint",
+        )
+        return evaluation(payload, reason)
 
     observed = _observed_round_trip(
         db,
@@ -700,25 +931,69 @@ def _outcome_payload_for_candidate(
         exit_date,
         explicit_functional_test_ids,
     )
+    excluded = candidate.rejection_reason if candidate.rejection_reason in FEATURE_EXCLUSIONS else None
+
+    replay = _replay_prices(entry_bar, exit_bar)
+    replay_notes: Dict[str, Any] = {
+        "matching": "counterfactual_replay",
+        "observed_entry_without_exit": bool(observed),
+    }
+    if observed:
+        replay_notes["observed_entry_order_id"] = str(observed["buy"].paper_order_id)
+    if replay is None:
+        replay_payload, replay_reason = _selected(
+            base,
+            "unavailable",
+            "unavailable",
+            "none",
+            "invalid_execution_price",
+            "invalid_execution_price",
+            notes_json=replay_notes,
+        )
+    else:
+        entry_price, exit_price, gross, net = replay
+        replay_payload = {
+            **base,
+            "outcome_status": "counterfactual",
+            "label_maturity": "mature",
+            "outcome_source": "counterfactual_replay",
+            "counterfactual": True,
+            "entry_price": entry_price,
+            "exit_price": exit_price,
+            "gross_return_pct": gross,
+            "net_return_pct": net,
+            "label_eligible": excluded is None and math.isfinite(net),
+            "exclusion_reason": excluded,
+            "notes_json": replay_notes,
+        }
+        replay_reason = "counterfactual_replay"
+
     if observed and observed.get("sell") is not None:
         buy = observed["buy"]
         sell = observed["sell"]
-        net = None
-        if buy.net_cash_change:
-            net = (
-                (sell.net_cash_change + buy.net_cash_change)
-                / abs(buy.net_cash_change)
-                * 100.0
-            )
-        gross = None
-        if buy.execution_price_before_costs:
-            gross = (
-                sell.execution_price_before_costs / buy.execution_price_before_costs - 1
-            ) * 100.0
-        excluded = candidate.rejection_reason if candidate.rejection_reason in FEATURE_EXCLUSIONS else None
-        if excluded is None and net is None:
-            excluded = "invalid_execution_price"
-        return {
+        gross, net = _round_trip_returns(buy, sell)
+        exact_policy = observed.get("note") is None
+        notes = {
+            "exit_fill_id": str(sell.id),
+            "exit_order_id": str(sell.paper_order_id),
+            "matching": (
+                "actual_paper_round_trip"
+                if exact_policy
+                else "actual_paper_round_trip_exit_policy_mismatch"
+            ),
+            "target_exit_execution_date": exit_date,
+            "observed_exit_execution_date": sell.execution_date,
+            "declared_exit_policy": EXIT_POLICY,
+            "declared_hold_bars": HOLD_BARS,
+        }
+        if not exact_policy:
+            notes["holding_policy_version"] = EXECUTION_POLICY_VERSION
+        observed_exclusion = excluded
+        if not exact_policy:
+            observed_exclusion = "exit_policy_mismatch"
+        elif observed_exclusion is None and net is None:
+            observed_exclusion = "invalid_execution_price"
+        observed_payload = {
             **base,
             "outcome_status": "observed",
             "label_maturity": "mature",
@@ -730,54 +1005,34 @@ def _outcome_payload_for_candidate(
             "exit_price": sell.execution_price_before_costs,
             "gross_return_pct": gross,
             "net_return_pct": net,
-            "label_eligible": excluded is None,
-            "exclusion_reason": excluded,
-            "notes_json": {
-                "exit_fill_id": str(sell.id),
-                "exit_order_id": str(sell.paper_order_id),
-                "matching": "actual_paper_round_trip",
-            },
+            "label_eligible": exact_policy and observed_exclusion is None,
+            "exclusion_reason": observed_exclusion,
+            "entry_execution_date": entry_date,
+            "exit_execution_date": sell.execution_date,
+            "notes_json": notes,
         }
+        if exact_policy:
+            return evaluation(
+                observed_payload,
+                "observed_round_trip",
+                additional=[(replay_payload, "counterfactual_not_selected")],
+            )
+        # The actual exit used a different policy. Keep the declared target
+        # selected and retain the actual result as unselected evidence.
+        return evaluation(
+            replay_payload,
+            replay_reason,
+            additional=[(observed_payload, "exit_policy_mismatch")],
+        )
 
-    # No actual round trip. Replay the declared policy deterministically and
-    # label the result counterfactual; never present it as an actual fill.
-    if entry_bar.open is None or entry_bar.open <= 0 or exit_bar.close is None:
-        return {
-            **base,
-            "outcome_status": "unavailable",
-            "label_maturity": "unavailable",
-            "outcome_source": "none",
-            "exclusion_reason": "invalid_execution_price",
-        }
-    entry_price = entry_bar.open * (1 + SLIPPAGE_RATE)
-    exit_price = exit_bar.close * (1 - SLIPPAGE_RATE)
-    gross = (exit_price / entry_price - 1) * 100.0
-    net = (
-        (exit_price * (1 - COMMISSION_RATE))
-        / (entry_price * (1 + COMMISSION_RATE))
-        - 1
-    ) * 100.0
-    excluded = candidate.rejection_reason if candidate.rejection_reason in FEATURE_EXCLUSIONS else None
-    notes: Dict[str, Any] = {
-        "matching": "counterfactual_replay",
-        "observed_entry_without_exit": bool(observed),
-    }
     if observed:
-        notes["observed_entry_order_id"] = str(observed["buy"].paper_order_id)
-    return {
-        **base,
-        "outcome_status": "counterfactual",
-        "label_maturity": "mature",
-        "outcome_source": "counterfactual_replay",
-        "counterfactual": True,
-        "entry_price": entry_price,
-        "exit_price": exit_price,
-        "gross_return_pct": gross,
-        "net_return_pct": net,
-        "label_eligible": excluded is None and math.isfinite(net),
-        "exclusion_reason": excluded,
-        "notes_json": notes,
-    }
+        replay_notes = {
+            **replay_notes,
+            "observed_entry_without_exit": True,
+            "observed_entry_order_id": str(observed["buy"].paper_order_id),
+        }
+        replay_payload["notes_json"] = replay_notes
+    return evaluation(replay_payload, replay_reason)
 
 
 # ---------------------------------------------------------------------------
@@ -795,7 +1050,10 @@ def _candidate_rows(
         db.query(AgentCandidate, AgentCandidateOutcome)
         .outerjoin(
             AgentCandidateOutcome,
-            AgentCandidateOutcome.candidate_id == AgentCandidate.id,
+            and_(
+                AgentCandidateOutcome.candidate_id == AgentCandidate.id,
+                AgentCandidateOutcome.is_current.is_(True),
+            ),
         )
         .filter(
             AgentCandidate.owner_id == owner_id,
@@ -825,6 +1083,40 @@ def list_candidates(
             }
             for candidate, outcome in rows
         ],
+    }
+
+
+def candidate_outcome_history(
+    db: Session, owner_id: uuid.UUID, candidate_id: uuid.UUID
+) -> Dict[str, Any]:
+    """Return every outcome version for one candidate, newest last."""
+    candidate = (
+        db.query(AgentCandidate)
+        .filter(
+            AgentCandidate.id == candidate_id,
+            AgentCandidate.owner_id == owner_id,
+        )
+        .first()
+    )
+    if candidate is None:
+        raise AgentStrategyRefused(
+            "candidate_not_found", "找不到此帳號擁有的候選訊號。"
+        )
+    versions = (
+        db.query(AgentCandidateOutcome)
+        .filter(AgentCandidateOutcome.candidate_id == candidate.id)
+        .order_by(AgentCandidateOutcome.version_seq)
+        .all()
+    )
+    current = next((row for row in versions if row.is_current), None)
+    return {
+        "candidate_id": str(candidate.id),
+        "strategy_version_id": str(candidate.strategy_version_id),
+        "instrument_id": candidate.instrument_id,
+        "signal_date": candidate.signal_date,
+        "version_count": len(versions),
+        "current_outcome_id": str(current.id) if current else None,
+        "versions": [outcome_payload(row) for row in versions],
     }
 
 
@@ -1030,6 +1322,9 @@ def _label_definition() -> Dict[str, Any]:
         "observed_source": "actual_paper_round_trip",
         "unobserved_source": "counterfactual_replay",
         "counterfactual_explicit": True,
+        "outcome_version_policy": "one_selected_version_per_candidate",
+        "history_retained": True,
+        "observed_overrides_target_only_when_exit_policy_matches": True,
         "not_a_prediction_of": [
             "owner 個人決策",
             "市場升跌方向",
@@ -1094,6 +1389,12 @@ def preview_snapshot(
             "feature_bar_date": candidate.feature_bar_date,
             "features": candidate.features_json,
             "execution_policy_version": candidate.execution_policy_version,
+            # A snapshot references the exact outcome version it consumed, so
+            # a later selected result cannot silently change its meaning.
+            "outcome_id": str(outcome.id),
+            "outcome_version": outcome.version_seq,
+            "outcome_selection_reason": outcome.selection_reason,
+            "outcome_cost_model_version": outcome.cost_model_version,
             "outcome_status": outcome.outcome_status,
             "outcome_source": outcome.outcome_source,
             "counterfactual": outcome.counterfactual,
@@ -1320,16 +1621,22 @@ def existing_trade_eligibility(
         functional = is_functional_test_order(order, explicit_functional_test_ids)
         lineage_status = "not_linked"
         candidate_id = None
+        outcome_id = None
+        linkage_evidence = None
         if functional:
             lineage_status = "not_checked_functional_test"
             exclusion = "functional_test_trade"
         else:
+            date_only_match = None
             if linked_version is not None:
                 candidate_query = (
                     db.query(AgentCandidate, AgentCandidateOutcome)
                     .outerjoin(
                         AgentCandidateOutcome,
-                        AgentCandidateOutcome.candidate_id == AgentCandidate.id,
+                        and_(
+                            AgentCandidateOutcome.candidate_id == AgentCandidate.id,
+                            AgentCandidateOutcome.is_current.is_(True),
+                        ),
                     )
                     .filter(
                         AgentCandidate.owner_id == owner_id,
@@ -1337,22 +1644,44 @@ def existing_trade_eligibility(
                         AgentCandidate.instrument_id == order.asset_id,
                     )
                 )
-                match = None
+                fill_id_set = {fill.id for fill in order.fills}
                 for candidate, outcome in candidate_query.all():
-                    if outcome is not None and outcome.entry_execution_date == order.data_cutoff_at:
-                        match = (candidate, outcome)
+                    if outcome is None:
+                        continue
+                    if outcome.observed_order_id == order.id:
+                        lineage_status = "candidate_linked"
+                        candidate_id = str(candidate.id)
+                        outcome_id = str(outcome.id)
+                        linkage_evidence = "outcome_observed_order_id"
                         break
-                if match is not None:
-                    lineage_status = "candidate_linked"
-                    candidate_id = str(match[0].id)
+                    if (
+                        outcome.observed_fill_id is not None
+                        and outcome.observed_fill_id in fill_id_set
+                    ):
+                        lineage_status = "candidate_linked"
+                        candidate_id = str(candidate.id)
+                        outcome_id = str(outcome.id)
+                        linkage_evidence = "outcome_observed_fill_id"
+                        break
+                    if outcome.entry_execution_date == order.data_cutoff_at:
+                        date_only_match = (candidate, outcome)
+                if lineage_status != "candidate_linked" and date_only_match is not None:
+                    # A shared date is traceability, not proof of identity:
+                    # without an order/fill id the linkage stays unconfirmed.
+                    candidate_id = str(date_only_match[0].id)
+                    lineage_status = "date_only_unconfirmed"
 
             if linked_version is None:
                 exclusion = "no_strategy_lineage"
+            elif lineage_status == "date_only_unconfirmed":
+                exclusion = "unconfirmed_candidate_linkage"
             elif lineage_status != "candidate_linked":
                 exclusion = "no_candidate_lineage"
             elif order.actor_type != "human":
                 exclusion = "non_human_execution"
             else:
+                # Even a lineage-confirmed human trade has no confirmed research
+                # purpose, outcome policy or authorization scope this round.
                 exclusion = "agent_strategy_consent_not_configured"
 
         counts[exclusion] += 1
@@ -1373,7 +1702,16 @@ def existing_trade_eligibility(
                 ),
                 "linked_experiment_version_id": str(linked_version) if linked_version else None,
                 "candidate_id": candidate_id,
+                "outcome_id": outcome_id,
                 "lineage_status": lineage_status,
+                "linkage_evidence": linkage_evidence,
+                "linkage_confirmation": {
+                    "candidate_linkage": lineage_status,
+                    "data_source_confirmed": False,
+                    "research_purpose_confirmed": False,
+                    "outcome_policy_confirmed": False,
+                    "authorization_scope_confirmed": False,
+                },
                 "fill_ids": fill_ids,
                 "data_cutoff_at": order.data_cutoff_at,
                 "created_at": order.created_at.isoformat() if order.created_at else None,
@@ -1427,7 +1765,14 @@ def candidate_payload(candidate: AgentCandidate) -> Dict[str, Any]:
 
 def outcome_payload(outcome: AgentCandidateOutcome) -> Dict[str, Any]:
     return {
+        "outcome_id": str(outcome.id),
         "candidate_id": str(outcome.candidate_id),
+        "version_seq": outcome.version_seq,
+        "is_current": outcome.is_current,
+        "selection_reason": outcome.selection_reason,
+        "superseded_at": (
+            outcome.superseded_at.isoformat() if outcome.superseded_at else None
+        ),
         "outcome_status": outcome.outcome_status,
         "label_maturity": outcome.label_maturity,
         "label_eligible": outcome.label_eligible,
