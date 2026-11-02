@@ -74,3 +74,19 @@ class CandidateSessionResponse(BaseModel):
     role: str
     mode_label_zh: str
     user: UserResponse
+
+
+class TrialLoginRequest(BaseModel):
+    """Only the link token. The account is fixed server-side and cannot be named."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    token: str = Field(..., min_length=20, max_length=512)
+
+
+class TrialLoginResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int
+    entry_label: str
+    user: UserResponse

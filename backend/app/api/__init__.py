@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 from app.api.auth import router as auth_router
 from app.api.candidate_session import router as candidate_session_router
+from app.api.trial_session import router as trial_session_router
 from app.api.brand import router as brand_router
 from app.api.demo_assets import router as demo_assets_router
 from app.api.experiments import router as experiments_router
@@ -79,6 +80,7 @@ v1_router.include_router(agent_strategy_router)
 api_router = APIRouter()
 api_router.include_router(auth_router)
 api_router.include_router(candidate_session_router)
+api_router.include_router(trial_session_router)
 api_router.include_router(v1_router)
 
 __all__ = ["api_router"]

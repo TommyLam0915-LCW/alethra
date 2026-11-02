@@ -58,6 +58,13 @@ class Settings(BaseSettings):
     candidate_passwordless_mode: bool = False
     candidate_passwordless_accounts: str = ""
     candidate_passwordless_session_minutes: int = 30
+    # Local owner-trial entry: a single one-time link, exchanged for an ordinary
+    # session of the one account named here. It never replaces password sign-in
+    # for customers and is refused outside local development.
+    trial_passwordless_enabled: bool = False
+    trial_passwordless_email: str = ""
+    trial_passwordless_token_file: str = ""
+    trial_passwordless_session_minutes: int = 720
     # Agent candidate screening is a development slice. Off by default so the
     # routes existing in a customer environment cannot collect candidates,
     # build outcomes or preview a dataset without a new explicit scope.
@@ -125,6 +132,7 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _validate_production_safety(self) -> "Settings":
         self._validate_candidate_passwordless()
+        self._validate_trial_passwordless()
         self._validate_agent_strategy_screening()
         self._validate_agent_strategy_test_snapshot_authorization()
         self._validate_agent_strategy_test_training_authorization()
@@ -329,6 +337,53 @@ class Settings(BaseSettings):
         if not 1 <= self.candidate_passwordless_session_minutes <= 120:
             raise ValueError(
                 "CANDIDATE_PASSWORDLESS_SESSION_MINUTES must be between 1 and 120."
+            )
+
+    def _validate_trial_passwordless(self) -> None:
+        if not self.trial_passwordless_enabled:
+            return
+        if self.is_production_like or self.app_env != "development":
+            raise ValueError(
+                "TRIAL_PASSWORDLESS_ENABLED is a local owner-trial entry and must be off "
+                f"when APP_ENV={self.app_env}. It cannot serve a public deployment."
+            )
+        if (
+            self.jwt_secret_key in _INSECURE_JWT_DEFAULTS
+            or len(self.jwt_secret_key) < _MIN_JWT_SECRET_LENGTH
+        ):
+            raise ValueError(
+                "TRIAL_PASSWORDLESS_ENABLED requires a non-default JWT_SECRET_KEY of at "
+                f"least {_MIN_JWT_SECRET_LENGTH} characters; it issues real sessions."
+            )
+        if not is_local_database_url(self.database_url):
+            raise ValueError(
+                "TRIAL_PASSWORDLESS_ENABLED requires a sqlite or loopback DATABASE_URL; "
+                "refusing to issue sessions against a remote database."
+            )
+        email = (self.trial_passwordless_email or "").strip().lower()
+        if "@" not in email:
+            raise ValueError(
+                "TRIAL_PASSWORDLESS_EMAIL must name the one trial account that the link "
+                "may open."
+            )
+        token_file = (self.trial_passwordless_token_file or "").strip()
+        if not token_file:
+            raise ValueError(
+                "TRIAL_PASSWORDLESS_TOKEN_FILE is required when the link entry is enabled."
+            )
+        if not os.path.isfile(token_file):
+            raise ValueError(
+                "TRIAL_PASSWORDLESS_TOKEN_FILE must already exist before the process starts; "
+                "generate it with the trial link script."
+            )
+        if os.stat(token_file).st_mode & 0o077:
+            raise ValueError(
+                "TRIAL_PASSWORDLESS_TOKEN_FILE must not be readable by group or other; "
+                "chmod it to 0600."
+            )
+        if not 1 <= self.trial_passwordless_session_minutes <= 1440:
+            raise ValueError(
+                "TRIAL_PASSWORDLESS_SESSION_MINUTES must be between 1 and 1440."
             )
 
     model_config = ConfigDict(env_file=".env", env_file_encoding="utf-8")
