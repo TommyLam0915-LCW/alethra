@@ -638,6 +638,11 @@ export const api = {
   },
   cryptoPaper: {
     instruments: () => apiFetch('/api/v1/crypto-paper/instruments'),
+    captureQuote: (params: { instrument_id: string; interval_minutes: number }) =>
+      apiFetch('/api/v1/crypto-paper/quote/capture', {
+        method: 'POST',
+        body: JSON.stringify(params),
+      }),
     quote: (params: {
       instrument_id: string;
       side: string;

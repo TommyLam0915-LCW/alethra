@@ -114,6 +114,8 @@ export default function CryptoPaperPanel({
   const [quote, setQuote] = useState<Record<string, any> | null>(null);
   const [receipt, setReceipt] = useState<Record<string, any> | null>(null);
   const [refusal, setRefusal] = useState<Refusal | null>(null);
+  const [capture, setCapture] = useState<Record<string, any> | null>(null);
+  const [captureRefusal, setCaptureRefusal] = useState<Refusal | null>(null);
   const [busy, setBusy] = useState(false);
   const [summary, setSummary] = useState<{ cash: number; quantity: number; entry: number | null } | null>(
     null,
@@ -156,6 +158,8 @@ export default function CryptoPaperPanel({
     setQuote(null);
     setRefusal(null);
     setReceipt(null);
+    setCapture(null);
+    setCaptureRefusal(null);
   }, [instrumentId, side, quantity, intervalMinutes, portfolioId]);
 
   const loadSummary = useCallback(async (id: string, assetId: string) => {
@@ -197,6 +201,27 @@ export default function CryptoPaperPanel({
       setBusy(false);
     }
   }, [portfolioId, instrumentId, side, quantity, intervalMinutes]);
+
+  // One Kraken REST read under the shared upstream budget. It writes completed
+  // bars only; the forming candle stays excluded, and no order is booked.
+  const captureBars = useCallback(async () => {
+    setBusy(true);
+    setCapture(null);
+    setCaptureRefusal(null);
+    setRefusal(null);
+    try {
+      const data = (await api.cryptoPaper.captureQuote({
+        instrument_id: instrumentId,
+        interval_minutes: intervalMinutes,
+      })) as Record<string, any>;
+      setCapture(data);
+      setQuote(null);
+    } catch (err) {
+      setCaptureRefusal(refusalFrom(err));
+    } finally {
+      setBusy(false);
+    }
+  }, [instrumentId, intervalMinutes]);
 
   const submit = useCallback(async () => {
     if (!portfolioId || !quote) return;
@@ -265,7 +290,9 @@ export default function CryptoPaperPanel({
         An order here fills against the latest completed candle on this page, using the same paper
         ledger as the rest of the product. Slippage and commission are simulated assumptions, not
         your Kraken fee schedule. No order is sent to Kraken and no trading key is read. A market
-        update on this page is a read; only the button below books a simulated fill.
+        update on this page is a read; only the button below books a simulated fill. If the quote
+        window has no completed bar, fetch the latest bars from the venue first — one public read
+        that stores closed candles only.
       </p>
 
       {portfolioError && (
@@ -369,6 +396,16 @@ export default function CryptoPaperPanel({
             <button
               type="button"
               className="ws-range-btn"
+              onClick={() => void captureBars()}
+              disabled={busy || !intervalSupported}
+              data-testid="crypto-paper-capture"
+              title="One public Kraken REST read of the latest completed bars"
+            >
+              {busy && !capture && !quote ? 'Fetching venue bars…' : 'Fetch latest venue bars'}
+            </button>
+            <button
+              type="button"
+              className="ws-range-btn"
               onClick={() => void preview()}
               disabled={busy || !portfolioId || !intervalSupported}
               data-testid="crypto-paper-preview"
@@ -385,6 +422,91 @@ export default function CryptoPaperPanel({
               {busy && quote ? 'Booking…' : 'Place simulated order'}
             </button>
           </div>
+
+          {captureRefusal && (
+            <div
+              role="alert"
+              data-testid="crypto-paper-capture-refusal"
+              style={{
+                border: '1px solid var(--negative)',
+                backgroundColor: 'rgba(226,99,110,0.1)',
+                borderRadius: 6,
+                padding: 12,
+                marginBottom: 16,
+                fontSize: 13,
+              }}
+            >
+              <strong>Venue read refused ({captureRefusal.code}):</strong> {captureRefusal.message}
+            </div>
+          )}
+
+          {capture && capture.status === 'captured' && (
+            <div
+              data-testid="crypto-paper-capture-result"
+              style={{
+                border: '1px solid var(--border-subtle)',
+                borderRadius: 4,
+                padding: 16,
+                marginBottom: 16,
+              }}
+            >
+              <div
+                style={{
+                  display: 'flex',
+                  gap: 8,
+                  flexWrap: 'wrap',
+                  alignItems: 'center',
+                  marginBottom: 8,
+                }}
+              >
+                <strong style={{ fontSize: 13 }}>Venue bars captured</strong>
+                <span
+                  style={{
+                    fontSize: 12,
+                    border: '1px solid var(--border-subtle)',
+                    borderRadius: 999,
+                    padding: '2px 10px',
+                    color: 'var(--warning-text)',
+                  }}
+                >
+                  {capture.data_nature} · read-only
+                </span>
+              </div>
+              <Row label="Bars stored / refreshed">
+                {capture.stored} stored · {capture.updated} refreshed
+              </Row>
+              <Row label="Price source">{capture.price_source}</Row>
+              <Row label="Latest completed bar">
+                {capture.latest_completed_bar
+                  ? `${utcLabel(capture.latest_completed_bar.open_time)} · close ${capture.latest_completed_bar.close}`
+                  : '—'}
+              </Row>
+              <Row label="Forming candle">
+                {capture.forming_excluded ? 'Excluded — still open' : 'None returned'}
+              </Row>
+              <Row label="Quote window">{capture.quote_window_seconds}s</Row>
+              <Row label="Fingerprint">{capture.fingerprint}</Row>
+              <div style={{ marginTop: 10, fontSize: 12, color: 'var(--text-secondary)' }}>
+                Preview a quote to price an order on these bars. Nothing was booked.
+              </div>
+            </div>
+          )}
+
+          {capture && capture.status === 'no_data' && (
+            <div
+              role="alert"
+              data-testid="crypto-paper-capture-result"
+              style={{
+                border: '1px solid var(--warning-text)',
+                borderRadius: 6,
+                padding: 12,
+                marginBottom: 16,
+                fontSize: 13,
+              }}
+            >
+              {capture.message}
+            </div>
+          )}
 
           {refusal && (
             <div
@@ -434,9 +556,11 @@ export default function CryptoPaperPanel({
                 >
                   Simulated · no venue order
                 </span>
-                {quoteIsFixture && (
+                {quote.label && (
                   <span
-                    data-testid="crypto-paper-fixture-label"
+                    data-testid={
+                      quoteIsFixture ? 'crypto-paper-fixture-label' : 'crypto-paper-source-label'
+                    }
                     style={{
                       fontSize: 12,
                       border: '1px solid var(--border-subtle)',
@@ -501,8 +625,13 @@ export default function CryptoPaperPanel({
                 <strong style={{ fontSize: 13 }}>
                   {receipt.created ? 'Simulated fill booked' : 'Existing fill returned (same idempotency key)'}
                 </strong>
-                {receiptIsFixture && (
+                {receipt.label && (
                   <span
+                    data-testid={
+                      receiptIsFixture
+                        ? 'crypto-paper-receipt-fixture-label'
+                        : 'crypto-paper-receipt-source-label'
+                    }
                     style={{
                       fontSize: 12,
                       border: '1px solid var(--border-subtle)',

@@ -17,17 +17,20 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from app.api.crypto_failures import crypto_failure
 from app.auth.api_keys import check_api_key_scope
 from app.auth.jwt import get_current_user
 from app.auth.provenance import request_actor_provenance
 from app.auth.rate_limit import api_key_rate_limit_dependency
-from app.auth.safety import safety_control
+from app.auth.safety import rate_limit, safety_control
 from app.config import get_settings
-from app.data.crypto_instruments import CRYPTO_INSTRUMENTS
+from app.data.crypto_instruments import CRYPTO_INSTRUMENTS, get_crypto_instrument
 from app.models.kill_switch import KillSwitchScope
 from app.models.paper_portfolio import PaperPortfolio
 from app.models.user import User
 from app.database import get_db
+from app.providers.crypto_registry import get_crypto_provider
+from app.providers.kraken_provider import KrakenError
 from app.services.crypto_paper import (
     DEFAULT_PROVIDER_ID,
     DEFAULT_QUOTE_MAX_AGE_SECONDS,
@@ -35,9 +38,11 @@ from app.services.crypto_paper import (
     LEDGER_MIRROR_LABEL,
     CryptoPaperError,
     build_quote,
+    latest_quote_bar,
     receipt_as_dict,
     receipts_csv,
     receipts_for_portfolio,
+    record_quote_bars,
     submit_manual_order,
 )
 from app.services.crypto_paper_fixture import seed_crypto_paper_fixture
@@ -78,6 +83,10 @@ _STATE_CODES = frozenset(
 )
 
 PAPER_INTERVALS = (1, 5)
+# One Kraken request per capture; the returned window is bounded because only
+# the latest bars can ever be inside the quote window.
+CAPTURE_BARS = 60
+LIVE_PRICE_SOURCE = "kraken:public_rest:completed_bars"
 
 
 def _refuse(exc: CryptoPaperError) -> HTTPException:
@@ -131,6 +140,11 @@ class CryptoPaperFixtureRequest(BaseModel):
     interval_minutes: int = Field(default=1, ge=1)
 
 
+class CryptoQuoteCaptureRequest(BaseModel):
+    instrument_id: str
+    interval_minutes: int = Field(default=1, ge=1)
+
+
 @router.get("/instruments")
 def list_crypto_paper_instruments(current_user: User = Depends(get_current_user)):
     """The declared spot instruments this lane can price, with their specs."""
@@ -157,6 +171,100 @@ def list_crypto_paper_instruments(current_user: User = Depends(get_current_user)
             }
             for instrument in CRYPTO_INSTRUMENTS
         ],
+    }
+
+
+@router.post("/quote/capture")
+def capture_live_quote(
+    payload: CryptoQuoteCaptureRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope("write")),
+    _rate_limit=Depends(rate_limit("crypto_quote_capture")),
+):
+    """Fetch the venue's latest completed bars into the quote contract.
+
+    This reads public market data only: no private account, no order, and no
+    synthetic substitute when the venue fails. It exists so a paper order can
+    be priced on a real completed bar instead of the labelled fixture. The
+    shared upstream budget still gates the single Kraken request.
+    """
+    instrument = get_crypto_instrument(payload.instrument_id)
+    if instrument is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "code": "incompatible_instrument",
+                "instrument_id": payload.instrument_id,
+                "declared": [i.instrument_id for i in CRYPTO_INSTRUMENTS],
+            },
+        )
+    if payload.interval_minutes not in PAPER_INTERVALS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "unsupported_interval",
+                "interval_minutes": payload.interval_minutes,
+                "supported": list(PAPER_INTERVALS),
+            },
+        )
+
+    provider = get_crypto_provider()
+    try:
+        series = provider.get_candle_series(
+            payload.instrument_id,
+            interval_minutes=payload.interval_minutes,
+            limit=CAPTURE_BARS,
+        )
+    except KrakenError as exc:
+        raise crypto_failure(exc) from exc
+
+    if not series.completed:
+        return {
+            "status": "no_data",
+            "instrument_id": payload.instrument_id,
+            "interval_minutes": payload.interval_minutes,
+            "message": "The venue returned no completed candles for this request.",
+        }
+
+    counts = record_quote_bars(
+        db,
+        instrument_id=payload.instrument_id,
+        provider_id=provider.provider_id,
+        interval_minutes=payload.interval_minutes,
+        candles=series.completed,
+        price_source=LIVE_PRICE_SOURCE,
+        data_nature="live",
+    )
+    db.commit()
+
+    latest = latest_quote_bar(
+        db,
+        instrument_id=payload.instrument_id,
+        provider_id=provider.provider_id,
+        interval_minutes=payload.interval_minutes,
+    )
+    return {
+        "status": "captured",
+        "instrument_id": payload.instrument_id,
+        "interval_minutes": payload.interval_minutes,
+        "provider_id": provider.provider_id,
+        "data_nature": "live",
+        "price_source": LIVE_PRICE_SOURCE,
+        "quote_window_seconds": DEFAULT_QUOTE_MAX_AGE_SECONDS,
+        # The series separates the open candle before the recorder sees it, so
+        # this is the only place the response can say it was left out.
+        "forming_excluded": series.forming is not None,
+        **counts,
+        "latest_completed_bar": (
+            {
+                "open_time": latest.open_time.isoformat(),
+                "close_time": latest.close_time.isoformat(),
+                "close": str(latest.close),
+            }
+            if latest is not None
+            else None
+        ),
     }
 
 

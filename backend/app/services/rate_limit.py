@@ -18,6 +18,9 @@ RATE_LIMITS = {
     "auth": 20,  # 20 auth attempts per window
     "payment": 10,  # 10 payment intents per window
     "market_data_refresh": 30,  # 30 provider-backfill requests per window
+    # One venue read per request, and the shared upstream budget caps Kraken at
+    # 60/hour overall; this only stops one account from spending it all.
+    "crypto_quote_capture": 30,
     # Intraday reads are served from storage; this caps browser polling, not
     # upstream provider usage (which the refresh service budgets separately).
     "intraday_market_read": 600,

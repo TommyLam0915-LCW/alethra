@@ -78,7 +78,7 @@ Downgrade 會將 `volume` 還原為 NOT NULL，故**不可在有 NULL volume 嘅
 ## 7. 未完成／後續
 
 1. 前端即時圖表同 workspace 接線（需先凍結 UI 方向）。
-2. Paper execution 接線：明確 fill／fee 假設，唔可以「顯示價當成交價」。
+2. Paper execution 接線：明確 fill／fee 假設，唔可以「顯示價當成交價」。（2026-11-02 狀態更新：已完成，見 `crypto-live-paper-pricing-2026-11-02.md`；其餘項目未變。）
 3. WebSocket 斷線重連／補洞（REST 輪詢已具 integrity 層，可重用）。
 4. 對外發布前必須完成：交易所條款核對、多用戶再分發、儲存／下載／回放、模型訓練及衍生資料使用、地區限制。
 5. `s3t4u5v6w7x8` 於 shared runtime 執行（需 owner 另行批准，本輪不做）。
