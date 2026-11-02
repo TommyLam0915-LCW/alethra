@@ -444,6 +444,19 @@ export default function ExperimentDetailPage() {
               {showLockConfirm ? 'Cancel lock' : 'Lock strategy'}
             </button>
           )}
+          {isLocked && experiment.current_version_id && (
+            <button
+              onClick={() => handleContinueVersion(experiment.current_version_id!)}
+              className="btn"
+              data-testid="exp-continue-current"
+              disabled={continuingVersionId !== null}
+              style={{ backgroundColor: 'var(--surface-2)', fontSize: '13px' }}
+            >
+              {continuingVersionId === experiment.current_version_id
+                ? 'Continuing…'
+                : 'Continue in new experiment'}
+            </button>
+          )}
           <button onClick={handleExport} className="btn" style={{ backgroundColor: 'var(--surface-2)', fontSize: '13px' }}>
             Export
           </button>
