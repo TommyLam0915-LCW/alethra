@@ -1,7 +1,7 @@
 # API 契約備註（P3）
 
-更新日期：2026-11-01
-範圍：模擬組合生命週期、429 的實際分類、`workspace_id`、兩組 `model_type`、模型研究匯出鏈、資料來源標示。
+更新日期：2026-11-02
+範圍：模擬組合生命週期、429 的實際分類、`workspace_id`、兩組 `model_type`、模型研究匯出鏈、資料來源標示、實驗續研（FB-20）、訓練 lane 政策。
 
 本文只陳述**現時程式碼實際做出**的行為，並附上來源位置。未實作或未接線之處集中於 §7，不以推測代替。
 
@@ -144,3 +144,50 @@
 - 429 分類表描述現況，未改動任何限流門檻或回應形狀。
 - `workspace_id` 未加授權範圍；改變其語意屬新功能，需另行批准。
 - 匯出無列表端點；新增端點須經批准，不是本次交付的一部分。
+
+---
+
+## 10. 實驗續研（FB-20）與訓練 lane 政策（2026-11-02）
+
+### 10.1 `POST /api/v1/experiments/{experiment_id}/versions/{version_id}/continue`
+
+用途：把任一自有版本的研究內容複製成**新實驗**。鎖定實驗的 `current_version_id` 是 replay／simulation 的綁定，修訂版本不能取代它；續研因此不修改來源實驗，而是建立一個可再鎖定、可回測、可模擬的新實驗。
+
+| 項目 | 實際行為 |
+| --- | --- |
+| 成功 | `201`，回傳 `ExperimentResponse`（新實驗） |
+| 複製 | `strategy_spec`（深拷貝，並移除 `user_approved_at`）、`hypothesis`、`scope`、`visibility`；標題為來源標題 + ` (continued)`（上限 500 字元） |
+| 新版本 | `version_number = 1`、`locked_at = null`；`assumptions.continued_from = {experiment_id, version_id, version_number}` |
+| 血緣欄位 | `experiments.continued_from_experiment_id`、`continued_from_version_id`（可為 NULL，外鍵 `ON DELETE SET NULL`） |
+| 事件 | `experiment_created`、`experiment_continued`、`dataset_selected` |
+| 權限 | 只限實驗擁有者；他人的實驗 → 404 `Experiment not found`，他人的版本 → 404 `Version not found` |
+| 來源 | 來源實驗與版本不被修改 |
+
+回歸：`backend/tests/test_experiment_continuation.py`（7 個測試）。
+
+### 10.2 鎖定非現行版本：409 的可操作指引
+
+`POST /api/v1/experiments/{id}/versions/{version_id}/lock` 仍只接受**現行版本**；修訂版本是血緣記錄，不能移動現行指標。回應維持 `409`，`detail` 保留 “current version” 字樣，並附上續研端點路徑：
+
+```
+Only the experiment's current version can be locked. A revision of a locked
+experiment is a lineage record and cannot move the current pointer; to carry
+this version's research into a new lockable experiment, POST
+/api/v1/experiments/{experiment_id}/versions/{version_id}/continue
+```
+
+前端在鎖定實驗的標題列直接顯示 “Continue in new experiment”，版本歷史每一列亦有同一動作。兩者都只建立新實驗，不會解鎖或改寫來源。
+
+### 10.3 `GET /api/v1/ml/capabilities` 的 `training_policy`
+
+回應新增 `training_policy`（`policy_version = training-lanes-v1`）。兩條 lane 分開報告，皆為 `release_status = NOT_APPROVED`、`activation_available = false`、`release_thresholds_unchanged = true`：
+
+| lane | 用途 | 門檻 | 同意 |
+| --- | --- | --- | --- |
+| `personal_model_release` | 發布用個人模型 | 200 已確認決策／30 工作階段／60 決策時點／每動作 30／特徵覆蓋 0.95 | `personalization-training-v1`，須本人簽署 |
+| `agent_candidate_evaluation` | 代理候選評估（非發布） | 20 候選／10 時序分組；`chronological-grouped-gap-v1`、`next-open-fixed-hold-v1` | `agent-strategy-learning-v1`，須本人簽署 |
+
+- 讀取政策不會建立同意列；`owner_signed_required = true`。
+- `authorization` 只報告實測狀態：2026-11-02 的 candidate 帳號為 `training_granted=false`、`snapshot_granted=false`、`consent.status=not_configured`。
+- 環境開關（`AGENT_STRATEGY_SCREENING_ENABLED`、`AGENT_STRATEGY_OWNER_CONSENT_MODE`）只決定程式能否執行，**不是**同意。
+- 沒有調低任何既有門檻；`docs/personalization-contract.md` §6 的數值不變。

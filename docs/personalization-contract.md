@@ -1,6 +1,6 @@
 # 個人化模型契約（Capability C）
 
-版本：2026-10-29 · 狀態：**尚未建立（NOT_IMPLEMENTED）**
+版本：2026-11-02（修訂見 §10） · 狀態：**已接線**（`/api/v1/ml/capabilities` 回 `AVAILABLE`；訓練、快照與推論端點存在）；模型發布仍為 `NOT_APPROVED`，效果未經證實
 適用範圍：以個別 owner 的已確認決策資料訓練模型。本文件同時是實作契約與資格門檻的依據；程式實作位於
 `backend/app/services/personalization.py`、`backend/app/api/personalization.py`。
 
@@ -120,3 +120,20 @@
 - 個人化 trainer、artifact 版本、推論與消費端 UI。
 - 以市場資料模型或規則檢查代替個人化結果。
 - 為了讓資格通過而生成、補齊或模擬任何決策標籤。
+
+---
+
+## 10. 修訂：訓練 lane 政策（2026-11-02，`training-lanes-v1`）
+
+本節只新增「兩條 lane 分開報告」的表面，**不修改** §3–§7 的標籤、特徵、同意與門檻。
+
+| lane | 用途 | 門檻 | 同意 | 發布狀態 |
+| --- | --- | --- | --- | --- |
+| `personal_model_release` | 發布用個人模型 | 200／30／60／每動作 30／覆蓋 0.95（與 §6 相同） | `personalization-training-v1`，本人簽署、密碼登入工作階段 | `NOT_APPROVED` |
+| `agent_candidate_evaluation` | 代理候選評估（非發布） | 20 候選／10 時序分組 | `agent-strategy-learning-v1`，本人簽署 | `NOT_APPROVED` |
+
+- 回應位置：`GET /api/v1/ml/capabilities` 的 `training_policy`（`policy_version = training-lanes-v1`）；`release_thresholds_unchanged = true`，兩條 lane 都是 `activation_available = false`。
+- 兩條 lane 互不替代：代理候選評估的機器反事實結果不能當作個人化模型的發布資格；反之亦然。
+- 讀取政策不會建立同意列。環境開關（`AGENT_STRATEGY_SCREENING_ENABLED`、`AGENT_STRATEGY_OWNER_CONSENT_MODE`）只決定程式能否執行，不構成同意。
+- `/training` 頁面顯示兩條 lane 的門檻、同意狀態與授權布林值；本輪 candidate 帳號仍為 `consent.status = not_configured`、`training_granted = false`、`snapshot_granted = false`。
+- 沒有以「降低 200 人門檻」換取可訓練性；任何新門檻都必須另立 version 並經 owner 批准。
