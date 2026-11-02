@@ -23,6 +23,7 @@ from app.models.human_decision import (
 )
 from app.models.market_data import MarketDataBar
 from app.models.personalization import PersonalizationConsent
+from app.models.simulation import SimulationSession
 from app.models.user import User
 
 
@@ -71,9 +72,23 @@ def _add_event(
 ):
     db = TestSession()
     try:
+        session_id = session_id or uuid.uuid4()
+        # PostgreSQL enforces the session foreign key that SQLite ignored, so
+        # the fixture has to create the session row it references.
+        if db.get(SimulationSession, session_id) is None:
+            db.add(
+                SimulationSession(
+                    id=session_id,
+                    experiment_version_id=version_id,
+                    owner_id=owner_id,
+                    initial_virtual_cash=100000.0,
+                    data_cutoff_at=cutoff,
+                )
+            )
+            db.flush()
         event = HumanDecisionEvent(
             owner_id=owner_id,
-            simulation_session_id=session_id or uuid.uuid4(),
+            simulation_session_id=session_id,
             idempotency_key=key or str(uuid.uuid4()),
             action=action,
             quantity=10.0 if action != HumanDecisionAction.hold else None,
