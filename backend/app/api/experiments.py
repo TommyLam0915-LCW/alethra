@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from typing import List
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import ValidationError
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -12,6 +12,7 @@ from app.models.experiment_version import ExperimentVersion
 from app.models.audit_event import AuditEvent
 from app.models.research_note import ResearchNote
 from app.auth.jwt import get_current_user
+from app.auth.provenance import request_actor_provenance
 from app.api.schemas import (
     AdHocBacktestResponse,
     AdHocDurableRunHint,
@@ -45,6 +46,7 @@ router = APIRouter(prefix="/experiments", tags=["experiments"])
 @router.post("/", response_model=ExperimentResponse, status_code=status.HTTP_201_CREATED)
 def create_experiment(
     experiment_data: ExperimentCreate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -82,18 +84,21 @@ def create_experiment(
     emit_event(db,
         entity_type="experiment", entity_id=experiment.id,
         event_type="experiment_created", actor_id=current_user.id,
+        actor_type=request_actor_provenance(request),
         payload={"title": experiment_data.title},
         data_cutoff_at=data_cutoff)
 
     emit_event(db,
         entity_type="experiment", entity_id=experiment.id,
         event_type="dataset_selected", actor_id=current_user.id,
+        actor_type=request_actor_provenance(request),
         payload={"asset_ids": spec_dict["asset_ids"], "benchmark_id": spec_dict.get("benchmark_id")},
         data_cutoff_at=data_cutoff)
 
     emit_event(db,
         entity_type="version", entity_id=version.id,
         event_type="strategy_template_selected", actor_id=current_user.id,
+        actor_type=request_actor_provenance(request),
         payload={"template_type": spec_dict["template_type"], "version_number": 1},
         data_cutoff_at=data_cutoff)
 
@@ -178,6 +183,7 @@ def _freeze_version(
     version: ExperimentVersion,
     user: User,
     reason: str | None = None,
+    actor_type: str = "unknown",
 ) -> datetime:
     """Freeze the reviewed contract of one version and record it once.
 
@@ -201,6 +207,7 @@ def _freeze_version(
         entity_id=experiment.id,
         event_type="strategy_locked",
         actor_id=user.id,
+        actor_type=actor_type,
         rules_locked=True,
         payload={
             "locked_at": now.isoformat(),
@@ -216,6 +223,7 @@ def _freeze_version(
 def update_experiment(
     experiment_id: UUID,
     experiment_data: ExperimentUpdate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -246,6 +254,7 @@ def update_experiment(
         emit_event(db,
             entity_type="experiment", entity_id=experiment.id,
             event_type="hypothesis_updated", actor_id=current_user.id,
+            actor_type=request_actor_provenance(request),
             payload={"new_hypothesis": experiment_data.hypothesis})
 
     if experiment_data.falsification_conditions is not None and experiment_data.falsification_conditions != experiment.falsification_conditions:
@@ -253,6 +262,7 @@ def update_experiment(
         emit_event(db,
             entity_type="experiment", entity_id=experiment.id,
             event_type="falsification_condition_added", actor_id=current_user.id,
+            actor_type=request_actor_provenance(request),
             payload={"new_falsification_conditions": experiment_data.falsification_conditions})
 
     if experiment_data.title is not None:
@@ -295,6 +305,7 @@ def update_experiment(
         emit_event(db,
             entity_type="version", entity_id=new_version.id,
             event_type="parameter_changed", actor_id=current_user.id,
+            actor_type=request_actor_provenance(request),
             payload={
                 "change_reason": experiment_data.change_reason,
                 "version_number": new_version.version_number,
@@ -305,6 +316,7 @@ def update_experiment(
         emit_event(db,
             entity_type="version", entity_id=new_version.id,
             event_type="strategy_version_created", actor_id=current_user.id,
+            actor_type=request_actor_provenance(request),
             payload={"version_number": new_version.version_number},
             data_cutoff_at=data_cutoff)
 
@@ -318,7 +330,7 @@ def update_experiment(
         # A version that was already frozen keeps its original lock time and
         # audit event; this path only syncs the experiment-level status.
         if current_version is not None and current_version.locked_at is None:
-            _freeze_version(db, experiment, current_version, current_user)
+            _freeze_version(db, experiment, current_version, current_user, actor_type=request_actor_provenance(request))
 
     experiment.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
     db.commit()
@@ -334,6 +346,7 @@ def lock_version(
     experiment_id: UUID,
     version_id: UUID,
     lock_data: ExperimentLockRequest,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -383,7 +396,7 @@ def lock_version(
             already_locked=True,
         )
 
-    _freeze_version(db, experiment, version, current_user, reason=lock_data.reason)
+    _freeze_version(db, experiment, version, current_user, reason=lock_data.reason, actor_type=request_actor_provenance(request))
     db.commit()
     db.refresh(experiment)
     db.refresh(version)
@@ -511,6 +524,7 @@ def _build_revision_response(
 def create_revision(
     experiment_id: UUID,
     payload: RevisionCreate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -635,6 +649,7 @@ def create_revision(
         entity_id=revision.id,
         event_type="strategy_version_created",
         actor_id=current_user.id,
+        actor_type=request_actor_provenance(request),
         payload={
             "version_number": next_number,
             "revision_of_version_id": str(base.id),
@@ -651,6 +666,7 @@ def create_revision(
         entity_id=revision.id,
         event_type="parameter_changed",
         actor_id=current_user.id,
+        actor_type=request_actor_provenance(request),
         payload={
             "change_reason": payload.change_reason.strip(),
             "expectation": payload.expectation,
@@ -679,6 +695,7 @@ def record_revision_outcome(
     experiment_id: UUID,
     version_id: UUID,
     payload: RevisionOutcomeUpdate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -727,6 +744,7 @@ def record_revision_outcome(
         entity_id=version.id,
         event_type="revision_outcome_recorded",
         actor_id=current_user.id,
+        actor_type=request_actor_provenance(request),
         payload={
             "version_number": version.version_number,
             "met_expectation": payload.met_expectation,
@@ -779,6 +797,7 @@ def get_timeline(
 def create_note(
     experiment_id: UUID,
     note_data: ResearchNoteCreate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -801,6 +820,7 @@ def create_note(
     emit_event(db,
         entity_type="note", entity_id=note.id,
         event_type="research_note_added", actor_id=current_user.id,
+        actor_type=request_actor_provenance(request),
         payload={"experiment_id": str(experiment.id), "version_id": str(note_data.version_id) if note_data.version_id else None})
 
     db.commit()
@@ -854,6 +874,7 @@ def get_experiment_record(
 @router.get("/{experiment_id}/export")
 def export_experiment(
     experiment_id: UUID,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -863,6 +884,7 @@ def export_experiment(
     emit_event(db,
         entity_type="experiment", entity_id=str(experiment.id),
         event_type="export_generated", actor_id=current_user.id,
+        actor_type=request_actor_provenance(request),
         payload={
             "version_count": record["coverage"]["versions"],
             "run_count": record["coverage"]["runs"],

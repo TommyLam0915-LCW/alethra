@@ -1,6 +1,6 @@
 from typing import List, Optional
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.user import User
@@ -8,6 +8,7 @@ from app.models.experiment import Experiment
 from app.models.experiment_version import ExperimentVersion
 from app.models.research_run import ResearchRun, RunStatus
 from app.auth.jwt import get_current_user
+from app.auth.provenance import request_actor_provenance
 from app.api.schemas import (
     ResearchRunResponse,
     VersionDiffResponse,
@@ -29,6 +30,7 @@ router = APIRouter(tags=["runs"])
 @router.post("/versions/{version_id}/runs", response_model=ResearchRunResponse, status_code=status.HTTP_201_CREATED)
 def create_run(
     version_id: UUID,
+    request: Request,
     data_source: str = Query("auto", pattern="^(auto|stored|provider)$"),
     provider_id: Optional[str] = Query(None, max_length=50),
     db: Session = Depends(get_db),
@@ -55,6 +57,7 @@ def create_run(
         experiment=experiment,
         data_source=data_source,
         provider_id=provider_id,
+        actor_type=request_actor_provenance(request),
     )
 
 

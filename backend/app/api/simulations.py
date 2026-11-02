@@ -1,7 +1,7 @@
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.database import get_db
@@ -10,6 +10,7 @@ from app.models.experiment import Experiment
 from app.models.experiment_version import ExperimentVersion, VersionStatus
 from app.models.simulation import SimulationSession, SimulationDecision, SimulationStatus, DecisionType
 from app.auth.jwt import get_current_user
+from app.auth.provenance import request_actor_provenance
 from app.api.schemas import (
     SimulationSessionCreate,
     SimulationSessionResponse,
@@ -46,6 +47,7 @@ from app.models.paper_portfolio import (
     PortfolioStatus,
     PositionStatus,
     RiskCheckStatus,
+    decision_actor_type,
 )
 from app.services import emit_event
 from app.services.order_lifecycle import (
@@ -472,6 +474,7 @@ def list_sessions_for_version(
 def create_simulation(
     version_id: UUID,
     payload: SimulationSessionCreate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -564,6 +567,7 @@ def create_simulation(
         db,
         entity_type="simulation", entity_id=session.id,
         event_type="simulation_created", actor_id=current_user.id,
+        actor_type=request_actor_provenance(request),
         payload={
             "version_id": str(version.id),
             "initial_virtual_cash": payload.initial_virtual_cash,
@@ -1037,7 +1041,12 @@ def _expire_session_pending_orders(
 
 
 def _advance_intraday(
-    db: Session, *, session: SimulationSession, version: ExperimentVersion, current_user: User
+    db: Session,
+    *,
+    session: SimulationSession,
+    version: ExperimentVersion,
+    current_user: User,
+    actor_type: str = "unknown",
 ) -> SimulationAdvanceResponse:
     """Advance an intraday session by exactly one stored bar.
 
@@ -1087,6 +1096,7 @@ def _advance_intraday(
             db,
             entity_type="simulation", entity_id=session.id,
             event_type="simulation_completed", actor_id=current_user.id,
+            actor_type=actor_type,
             payload={"total_decisions": session.total_decisions, "observed_days": session.observed_days},
             rules_locked=True,
             data_cutoff_at=session.data_cutoff_at,
@@ -1225,6 +1235,7 @@ def _advance_intraday(
         db,
         entity_type="simulation", entity_id=session.id,
         event_type="simulation_advanced", actor_id=current_user.id,
+        actor_type=actor_type,
         payload={
             "step_number": step_number,
             "snapshot_date": target_date,
@@ -1268,6 +1279,7 @@ def _record_intraday_decision(
 @router.post("/{session_id}/advance", response_model=SimulationAdvanceResponse)
 def advance_simulation(
     session_id: UUID,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -1307,7 +1319,13 @@ def advance_simulation(
     # timeframe, set at creation, decides which path runs, so "推進一日" is never
     # silently turned into "推進一根".
     if _is_intraday_timeframe(session.timeframe):
-        return _advance_intraday(db, session=session, version=version, current_user=current_user)
+        return _advance_intraday(
+            db,
+            session=session,
+            version=version,
+            current_user=current_user,
+            actor_type=request_actor_provenance(request),
+        )
 
     spec = version.strategy_spec
     symbol = spec["asset_ids"][0]
@@ -1398,6 +1416,7 @@ def advance_simulation(
             db,
             entity_type="simulation", entity_id=session.id,
             event_type="simulation_completed", actor_id=current_user.id,
+            actor_type=request_actor_provenance(request),
             payload={"total_decisions": session.total_decisions, "observed_days": session.observed_days},
             rules_locked=True,
             data_cutoff_at=session.data_cutoff_at,
@@ -1486,6 +1505,7 @@ def advance_simulation(
         db,
         entity_type="simulation", entity_id=session.id,
         event_type="simulation_advanced", actor_id=current_user.id,
+        actor_type=request_actor_provenance(request),
         payload={
             "step_number": step_number,
             "snapshot_date": next_date,
@@ -1569,6 +1589,7 @@ def list_session_orders(
 @router.post("/{session_id}/pause", response_model=SimulationSessionResponse)
 def pause_simulation(
     session_id: UUID,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -1583,6 +1604,7 @@ def pause_simulation(
         db,
         entity_type="simulation", entity_id=session.id,
         event_type="simulation_paused", actor_id=current_user.id,
+        actor_type=request_actor_provenance(request),
         payload={"observed_days": session.observed_days},
         rules_locked=True,
         data_cutoff_at=session.data_cutoff_at,
@@ -1596,6 +1618,7 @@ def pause_simulation(
 @router.post("/{session_id}/resume", response_model=SimulationSessionResponse)
 def resume_simulation(
     session_id: UUID,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -1610,6 +1633,7 @@ def resume_simulation(
         db,
         entity_type="simulation", entity_id=session.id,
         event_type="simulation_resumed", actor_id=current_user.id,
+        actor_type=request_actor_provenance(request),
         payload={"observed_days": session.observed_days},
         rules_locked=True,
         data_cutoff_at=session.data_cutoff_at,
@@ -1623,6 +1647,7 @@ def resume_simulation(
 @router.post("/{session_id}/retire", response_model=SimulationSessionResponse)
 def retire_simulation(
     session_id: UUID,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -1650,6 +1675,7 @@ def retire_simulation(
         db,
         entity_type="simulation", entity_id=session.id,
         event_type="simulation_retired", actor_id=current_user.id,
+        actor_type=request_actor_provenance(request),
         payload={
             "total_decisions": session.total_decisions,
             "observed_days": session.observed_days,
@@ -1702,6 +1728,7 @@ def _submit_manual_order(
     cutoff: str,
     spec: Dict[str, Any],
     actor_id: UUID,
+    actor_type: str = "unknown",
 ):
     """Turn one human intent into a pending order on the account this session settles into.
 
@@ -1874,7 +1901,7 @@ def _submit_manual_order(
         owner_id=portfolio.owner_id,
         paper_portfolio_id=portfolio.id,
         simulation_session_id=session.id,
-        actor_type=PaperDecisionActorType.human,
+        actor_type=decision_actor_type(actor_type),
         decision_type=PaperDecisionType.entry if side is OrderSide.BUY else PaperDecisionType.exit,
         data_cutoff_at=cutoff,
         linked_experiment_version_id=version.id,
@@ -1901,7 +1928,7 @@ def _submit_manual_order(
         rationale=payload.rationale,
         risk_check_status=RiskCheckStatus.passed,
         idempotency_key=payload.idempotency_key,
-        actor_type="human",
+        actor_type=actor_type,
     )
     try:
         submit_pending(db, portfolio=portfolio, decision=decision, order=order, data_cutoff_at=cutoff)
@@ -1962,6 +1989,7 @@ def _submit_manual_order(
 def manual_decision(
     session_id: UUID,
     payload: ManualDecisionRequest,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -2118,6 +2146,7 @@ def manual_decision(
             symbol=symbol,
             cutoff=cutoff,
             spec=spec,
+            actor_type=request_actor_provenance(request),
             actor_id=current_user.id,
         )
 
@@ -2183,6 +2212,7 @@ def manual_decision(
         db,
         entity_type="simulation", entity_id=session.id,
         event_type="manual_decision", actor_id=current_user.id,
+        actor_type=request_actor_provenance(request),
         payload={
             "step_number": step_number,
             "action": action,
@@ -2234,6 +2264,7 @@ def update_decision_reflection(
     session_id: UUID,
     decision_id: UUID,
     payload: ReflectionUpdateRequest,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -2261,6 +2292,7 @@ def update_decision_reflection(
         db,
         entity_type="simulation", entity_id=session.id,
         event_type="reflection_updated", actor_id=current_user.id,
+        actor_type=request_actor_provenance(request),
         payload={
             "decision_id": str(decision.id),
             "step_number": decision.step_number,

@@ -482,7 +482,7 @@ class TestOrderTypeAndExitPaths:
 
 
 class TestPersonalApiProvenance:
-    """§6 — scoped key, revocation, no escalation, actor recorded as api_key."""
+    """§6 — scoped key, revocation, no escalation, actor recorded as agent."""
 
     def _make_key(self, client, headers, scopes):
         resp = client.post(
@@ -493,7 +493,7 @@ class TestPersonalApiProvenance:
         assert resp.status_code == 201, resp.text
         return resp.json()["raw_key"], resp.json()["id"]
 
-    def test_write_key_orders_and_is_recorded_as_api_key(self, client, auth_headers, pg_url):
+    def test_write_key_orders_and_is_recorded_as_agent(self, client, auth_headers, pg_url):
         portfolio_id = _portfolio(client, auth_headers, 10000.0)
         raw_key, _ = self._make_key(client, auth_headers, ["read", "write"])
 
@@ -502,7 +502,8 @@ class TestPersonalApiProvenance:
             idempotency_key="api-1",
         )
         assert resp.status_code == 201, resp.text
-        assert resp.json()["actor_type"] == "api_key"
+        # A verified API key is an agent credential; "api_key" was the legacy label.
+        assert resp.json()["actor_type"] == "agent"
 
         db = TestSession()
         try:
@@ -511,7 +512,7 @@ class TestPersonalApiProvenance:
                 .filter(AuditEvent.event_type == "order_created")
                 .one()
             )
-            assert event.actor_type == "api_key"
+            assert event.actor_type == "agent"
             assert event.data_cutoff_at == "2024-02-13"
             assert event.payload_json["idempotency_key"] == "api-1"
         finally:

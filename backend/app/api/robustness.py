@@ -2,13 +2,14 @@
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
 from app.api.schemas import RobustnessPlanRequest, RobustnessStudyCreate
 from app.auth.api_keys import check_api_key_scope
 from app.auth.entitlements import require_entitlement
 from app.auth.jwt import get_current_user
+from app.auth.provenance import request_actor_provenance
 from app.database import get_db
 from app.lib.timeutil import utcnow
 from app.models.experiment import Experiment
@@ -217,6 +218,7 @@ def get_robustness_study(
 @router.post("/robustness/{study_id}/run")
 def run_robustness_study(
     study_id: UUID,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_entitlement(quota_type="research_run")),
     _scope_check=Depends(check_api_key_scope("write")),
@@ -232,6 +234,7 @@ def run_robustness_study(
             version=version,
             experiment=experiment,
             user=current_user,
+            actor_type=request_actor_provenance(request),
         )
     except RobustnessRefused as exc:
         raise _refused(exc)

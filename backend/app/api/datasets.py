@@ -3,7 +3,7 @@ import os
 from datetime import datetime, date
 from typing import List, Optional
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, Field
 
@@ -11,6 +11,7 @@ from app.database import get_db
 from app.models.user import User
 from app.models.dataset import Dataset, DatasetSnapshot, SourceType
 from app.auth.jwt import get_current_user, require_admin
+from app.auth.provenance import request_actor_provenance
 from app.services import emit_event
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
@@ -110,6 +111,7 @@ class DatasetWithSnapshotsResponse(DatasetResponse):
 @router.post("", response_model=DatasetResponse, status_code=status.HTTP_201_CREATED)
 def create_dataset(
     body: DatasetCreate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
@@ -136,7 +138,7 @@ def create_dataset(
         entity_id=str(dataset.id),
         event_type="dataset_created",
         actor_id=current_user.id,
-        actor_type="human",
+        actor_type=request_actor_provenance(request),
         payload={
             "name": body.name,
             "provider": body.provider,
@@ -208,6 +210,7 @@ def get_dataset(
 def create_dataset_snapshot(
     dataset_id: UUID,
     body: DatasetSnapshotCreate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
@@ -235,7 +238,7 @@ def create_dataset_snapshot(
         entity_id=str(dataset_id),
         event_type="dataset_snapshot_created",
         actor_id=current_user.id,
-        actor_type="human",
+        actor_type=request_actor_provenance(request),
         payload={
             "snapshot_date": body.snapshot_date.isoformat(),
             "data_file_path": data_file_path,

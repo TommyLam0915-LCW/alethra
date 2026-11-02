@@ -61,7 +61,11 @@ FREE_DB_BUILD_MIB=10240   # 10 GiB operational line: below it, no image builds
 # The revision a fresh upgrade ends on, and therefore the revision a volume
 # carrying the seeded schema must report. Kept next to the fresh path's grep so
 # the two cannot drift apart silently.
-EXPECTED_ALEMBIC_HEAD="l6m7n8o9p0q1"
+#
+# RESUME upgrades a volume seeded at an older head through the backend
+# entrypoint's `alembic upgrade head`, so the head is asserted only AFTER the
+# backend answers /health: reading it earlier would race the upgrade.
+EXPECTED_ALEMBIC_HEAD="y9z0a1b2c3d4"
 IDENTITY_FILE="$LOG_DIR/runtime-identity.env"
 RESUME_LOG="$LOG_DIR/resume-check.log"
 
@@ -200,7 +204,6 @@ verify_existing_data() {
   [ "$served" = "$BACKEND_DB" ] || fail "db container $id serves database '$served', this run is configured for '$BACKEND_DB' - not the same runtime"
   head="$(db_sql "$id" "select version_num from alembic_version")" \
     || fail "$BACKEND_DB has no alembic_version row - the schema is not the one this branch upgrades; use --reset"
-  [ "$head" = "$EXPECTED_ALEMBIC_HEAD" ] || fail "alembic head in '$BACKEND_DB' is '$head', expected '$EXPECTED_ALEMBIC_HEAD' - refusing to run specs against a schema this work does not define (use --reset for an explicit rebuild)"
 
   : >"$RESUME_LOG"
   {
@@ -210,7 +213,7 @@ verify_existing_data() {
     echo "backend_container=$backend_id"
     echo "db_volume=$db_volume"
     echo "served_database=$served"
-    echo "alembic_head=$head"
+    echo "alembic_head_observed=$head"
   } >>"$RESUME_LOG"
 
   for table in users experiments simulation_sessions paper_portfolios market_data_metadata market_data_bars; do
@@ -361,8 +364,8 @@ fresh_runtime() {
   echo "waiting for backend on 127.0.0.1:$BACKEND_PORT (alembic upgrade head runs first)..."
   wait_for_backend
   $COMPOSE logs --no-color backend >"$LOG_DIR/backend-upgrade.log" 2>&1
-  grep -q "Running upgrade k5l6m7n8o9p0 -> l6m7n8o9p0q1" "$LOG_DIR/backend-upgrade.log" \
-    || fail "expected intraday migration step not observed in $LOG_DIR/backend-upgrade.log"
+  grep -q "Running upgrade x8y9z0a1b2c3 -> y9z0a1b2c3d4" "$LOG_DIR/backend-upgrade.log" \
+    || fail "expected final migration step (x8y9z0a1b2c3 -> y9z0a1b2c3d4) not observed in $LOG_DIR/backend-upgrade.log"
   echo "migrations applied to head $EXPECTED_ALEMBIC_HEAD (log: $LOG_DIR/backend-upgrade.log)"
 
   # --- deterministic synthetic seed (guarded to the alethra_e2e database) ---
@@ -391,8 +394,9 @@ fresh_runtime() {
 resume_runtime() {
   echo "mode: RESUME (default) - no down, no volume recreate, no image build, no seed, no stop of a running service"
 
-  db_id="$($COMPOSE ps -q db)"
-  backend_id="$($COMPOSE ps -q backend)"
+  # `ps --all`: the containers this mode exists to resume are usually stopped.
+  db_id="$($COMPOSE ps --all -q db)"
+  backend_id="$($COMPOSE ps --all -q backend)"
   [ -n "$db_id" ] || fail "compose project $PROJECT has no db container - there is nothing to resume; run ./start_e2e_research_flow.sh --reset to build one deliberately"
   [ -n "$backend_id" ] || fail "compose project $PROJECT has no backend container - there is nothing to resume; run ./start_e2e_research_flow.sh --reset to build one deliberately"
 
@@ -412,6 +416,15 @@ resume_runtime() {
 
   compare_recorded_identity "$db_id" "$backend_id" "$db_volume"
 
+  # Port ownership must be checked BEFORE a stopped backend is started: once
+  # `docker start` publishes 8099, Docker's port proxy (not a process of this
+  # project) holds the port until uvicorn answers, so a post-start lsof check
+  # would blame our own container. A stopped backend with a listener is foreign.
+  backend_state="$(container_state "$backend_id")"
+  if [ "$backend_state" != "running" ] && lsof -nP -iTCP:"$BACKEND_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+    fail "loopback port $BACKEND_PORT is in use by a process outside compose project $PROJECT - resume will not displace it"
+  fi
+
   # stopped containers start in place; a running one is never restarted
   for pair in "db:$db_id" "backend:$backend_id"; do
     name="${pair%%:*}"; id="${pair#*:}"
@@ -429,12 +442,10 @@ resume_runtime() {
   wait_for_db_health "$db_id"
   verify_existing_data "$db_id" "$db_volume" "$backend_id"
 
-  if ! curl -sf "http://127.0.0.1:$BACKEND_PORT/health" >/dev/null 2>&1; then
-    if lsof -nP -iTCP:"$BACKEND_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
-      fail "loopback port $BACKEND_PORT is in use by a process outside compose project $PROJECT - resume will not displace it"
-    fi
-  fi
   wait_for_backend
+  head_after="$(db_sql "$db_id" "select version_num from alembic_version")"
+  [ "$head_after" = "$EXPECTED_ALEMBIC_HEAD" ] || fail "after the backend entrypoint ran 'alembic upgrade head', '$BACKEND_DB' reports head '$head_after', expected '$EXPECTED_ALEMBIC_HEAD' - refusing to run specs against a schema this work does not define (inspect the backend log; use --reset only for a deliberate rebuild)"
+  echo "alembic_head_after_upgrade=$head_after" >>"$RESUME_LOG"
   echo "backend answering /health on 127.0.0.1:$BACKEND_PORT"
   echo "note: if the backend had to be started, its entrypoint re-ran 'alembic upgrade head' against the EXISTING database (idempotent, no drop/recreate); resume never recreates the volume or reseeds"
 

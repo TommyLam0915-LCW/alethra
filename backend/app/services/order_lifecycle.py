@@ -453,6 +453,7 @@ def cancel_order(
     actor_id: Any,
     reason: Optional[str] = None,
     now: Optional[datetime] = None,
+    actor_type: str = "unknown",
 ) -> PaperOrder:
     """Withdraw an order that has not been executed.
 
@@ -490,6 +491,7 @@ def cancel_order(
         entity_id=portfolio.id,
         event_type="paper_order_cancelled",
         actor_id=actor_id,
+        actor_type=actor_type,
         data_cutoff_at=order.data_cutoff_at,
         payload={
             "order_id": str(order.id),

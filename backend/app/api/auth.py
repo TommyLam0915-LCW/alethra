@@ -1,9 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.user import User
 from app.auth.jwt import get_password_hash, create_access_token, get_current_user
 from app.auth.rate_limit import rate_limit_dependency
+from app.auth.provenance import request_actor_provenance
 from app.auth.schemas import UserCreate, UserResponse, Token, LoginRequest
 from app.services import emit_event
 
@@ -41,6 +42,7 @@ RISK_DISCLOSURE_AS_OF = "2026-11-01"
 )
 def register(
     user_data: UserCreate,
+    request: Request,
     db: Session = Depends(get_db),
     _rate_limit=Depends(
         rate_limit_dependency(
@@ -84,6 +86,7 @@ def register(
         entity_id=str(user.id),
         event_type="risk_disclosure_acknowledged",
         actor_id=user.id,
+        actor_type=request_actor_provenance(request),
         payload={
             "disclosure_path": RISK_DISCLOSURE_PATH,
             "disclosure_as_of_date": RISK_DISCLOSURE_AS_OF,

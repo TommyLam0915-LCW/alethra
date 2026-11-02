@@ -24,6 +24,7 @@ from app.auth.entitlements import (
     settle_reservation,
 )
 from app.auth.jwt import get_current_user
+from app.auth.provenance import request_actor_provenance
 from app.auth.rate_limit import api_key_rate_limit_dependency
 from app.config import get_settings
 from app.database import get_db
@@ -257,6 +258,7 @@ def personal_journey(
 @router.post("/snapshots", status_code=201)
 def create_dataset_snapshot(
     body: SnapshotRequest,
+    request: Request,
     current_user: User = Depends(get_current_user),
     _scope_check=Depends(check_api_key_scope(*WRITE_SCOPES)),
     db: Session = Depends(get_db),
@@ -274,6 +276,7 @@ def create_dataset_snapshot(
         entity_id=str(snapshot.id),
         event_type="personalization_dataset_snapshot_created",
         actor_id=current_user.id,
+        actor_type=request_actor_provenance(request),
         payload={
             "strategy_version_id": str(snapshot.strategy_version_id),
             "consent_id": str(snapshot.consent_id),
@@ -458,6 +461,7 @@ class ActivateRequest(BaseModel):
 @router.post("/models/{version_id}/activate")
 def activate_personal_model(
     version_id: uuid.UUID,
+    request: Request,
     body: Optional[ActivateRequest] = None,
     current_user: User = Depends(get_current_user),
     _scope_check=Depends(check_api_key_scope(*WRITE_SCOPES)),
@@ -495,6 +499,7 @@ def activate_personal_model(
         entity_id=str(record.id),
         event_type="personal_model_active_version_set",
         actor_id=current_user.id,
+        actor_type=request_actor_provenance(request),
         payload={
             "from_version_id": str(previous) if previous else None,
             "to_version_id": str(version.id),
@@ -804,6 +809,7 @@ def personal_model_comparability(
 @router.post("/models/comparisons")
 def create_personal_model_comparison(
     body: ComparisonRequest,
+    request: Request,
     current_user: User = Depends(get_current_user),
     _scope_check=Depends(check_api_key_scope(*WRITE_SCOPES)),
     db: Session = Depends(get_db),
@@ -856,6 +862,7 @@ def create_personal_model_comparison(
             ra,
             rb,
             operation_key=body.operation_key,
+            actor_type=request_actor_provenance(request),
         )
     except ComparisonRefused as exc:
         # The reservation was never committed; rolling back releases it and
@@ -986,6 +993,7 @@ def get_personal_comparison(
 def select_personal_model(
     version_id: uuid.UUID,
     body: SelectionRequest,
+    request: Request,
     current_user: User = Depends(get_current_user),
     _scope_check=Depends(check_api_key_scope(*WRITE_SCOPES)),
     db: Session = Depends(get_db),
@@ -1025,6 +1033,7 @@ def select_personal_model(
         entity_id=str(record.id),
         event_type="personal_model_version_selected",
         actor_id=current_user.id,
+        actor_type=request_actor_provenance(request),
         payload={
             "from_version_id": str(previous) if previous else None,
             "to_version_id": str(version.id),
@@ -1063,6 +1072,7 @@ def select_personal_model(
 def rollback_personal_model(
     record_id: uuid.UUID,
     body: RollbackRequest,
+    request: Request,
     current_user: User = Depends(get_current_user),
     _scope_check=Depends(check_api_key_scope(*WRITE_SCOPES)),
     db: Session = Depends(get_db),
@@ -1091,6 +1101,7 @@ def rollback_personal_model(
         entity_id=str(record.id),
         event_type="personal_model_version_rolled_back",
         actor_id=current_user.id,
+        actor_type=request_actor_provenance(request),
         payload={
             "from_version_id": str(current) if current else None,
             "to_version_id": str(target.id),

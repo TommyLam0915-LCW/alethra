@@ -53,6 +53,9 @@ export const ACTOR_LABELS: Record<string, string> = {
   human: 'You',
   ai_draft: 'AI draft',
   human_approved_ai_draft: 'You (approved AI draft)',
+  agent: 'API client',
+  unknown: 'Unverified source',
+  // Legacy rows written before the provenance repair keep this value.
   api_key: 'API client',
   engine: 'Strategy engine',
   user: 'You',

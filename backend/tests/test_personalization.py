@@ -168,15 +168,34 @@ class TestEligibilityRefusal:
         assert body["consent"]["granted"] is False
         assert all(reason["message_zh"] for reason in body["reasons"])
 
-    def test_capabilities_keep_the_three_classes_separate(self, client, auth_headers):
+    def test_capabilities_are_named_by_task_and_kept_separate(self, client, auth_headers):
         resp = client.get("/api/v1/ml/capabilities", headers=auth_headers)
         assert resp.status_code == 200, resp.text
         caps = {item["key"]: item for item in resp.json()["capabilities"]}
 
-        assert set(caps) == {"market_model", "rule_check", "personalization"}
+        assert set(caps) == {
+            "market_model",
+            "rule_check",
+            "personalization",
+            "agent_candidate_screening",
+        }
+        labels = {item["label_zh"] for item in caps.values()}
+        assert labels == {
+            "市場方向預測",
+            "策略規則／風控檢查",
+            "個人決策模仿",
+            "代理候選訊號篩選",
+        }
         assert caps["market_model"]["status"] == "AVAILABLE"
         assert caps["rule_check"]["status"] == "AVAILABLE"
         assert caps["personalization"]["status"] == "AVAILABLE"
+        # Screening is an isolated slice; it must never be advertised as a
+        # delivered capability in the customer environment.
+        assert caps["agent_candidate_screening"]["status"] == "DEVELOPMENT"
+        assert (
+            caps["agent_candidate_screening"]["status_label_zh"]
+            == "開發中／尚不可在原客戶環境執行"
+        )
 
     def test_future_snapshot_blocks_dataset(self, client, auth_headers):
         owner_id = _current_user_id()

@@ -8,6 +8,7 @@ interface Capability {
   key: string;
   label_zh: string;
   status: string;
+  status_label_zh?: string;
   description_zh: string;
   surface: string;
 }
@@ -69,6 +70,7 @@ interface Eligibility {
 
 const STATUS_LABELS: Record<string, string> = {
   AVAILABLE: '已提供',
+  DEVELOPMENT: '開發中／尚不可在原客戶環境執行',
 };
 
 export default function PersonalizationPanel() {
@@ -203,7 +205,8 @@ export default function PersonalizationPanel() {
         <div>
           <h2 style={{ margin: 0, fontSize: '18px' }}>能力分類與個人化</h2>
           <p style={{ color: 'var(--text-secondary)', margin: '6px 0 0', fontSize: '13px' }}>
-            三個能力分開標示。本區只提供訓練資格檢查與同意範圍；決策覆核、建立專屬模型與推論在下方「個人策略學習」。
+            四個能力按任務分開標示。本區只提供訓練資格檢查與同意範圍；決策覆核、建立專屬模型與推論在下方「個人策略學習」。
+            代理候選訊號篩選仍在隔離開發，未在原客戶環境提供。
           </p>
         </div>
       </div>
@@ -237,7 +240,7 @@ export default function PersonalizationPanel() {
                   color: cap.status === 'AVAILABLE' ? 'var(--positive)' : 'var(--warning)',
                 }}
               >
-                {STATUS_LABELS[cap.status] || cap.status}
+                {STATUS_LABELS[cap.status] || cap.status_label_zh || cap.status}
               </div>
             </div>
             <div style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>

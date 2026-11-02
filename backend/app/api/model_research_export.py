@@ -5,12 +5,13 @@ import uuid
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.auth.jwt import get_current_user
+from app.auth.provenance import request_actor_provenance
 from app.lib.error_safety import safe_error_message
 from app.models.user import User
 from app.models.model_research import (
@@ -546,6 +547,7 @@ def _build_limitations_md(card: Optional[ModelCard]) -> str:
 def create_export(
     record_id: uuid.UUID,
     body: ModelResearchExportCreate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -589,6 +591,7 @@ def create_export(
             entity_id=export.id,
             event_type="export_generated",
             actor_id=current_user.id,
+            actor_type=request_actor_provenance(request),
             payload={
                 "record_id": str(record.id),
                 "version_id": str(version.id),

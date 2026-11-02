@@ -619,11 +619,25 @@ def revoke_consent(db: Session, owner_id: uuid.UUID) -> int:
 
 
 def capabilities(db: Session, owner_id: uuid.UUID) -> List[Dict[str, Any]]:
-    """The three capability classes, labelled by what is actually delivered."""
+    """Four capability classes, labelled by the task each one performs.
+
+    The labels name the task (market direction, rule/risk check, personal
+    decision mimicry, agent candidate screening) instead of letter codes, so a
+    reader cannot mistake one task for another. The screening entry points at
+    the isolated slice and reports its own development status; it does not
+    claim that screening is available in the customer environment.
+    """
+    # Imported here because agent_strategy reaches this module through
+    # personal_dataset; a module-level import would be circular.
+    from app.services.agent_strategy import (
+        CAPABILITY_STATUS as AGENT_SCREENING_STATUS,
+        CAPABILITY_STATUS_LABEL_ZH as AGENT_SCREENING_STATUS_LABEL_ZH,
+    )
+
     return [
         {
             "key": "market_model",
-            "label_zh": "市場資料模型（A）",
+            "label_zh": "市場方向預測",
             "status": "AVAILABLE",
             "description_zh": (
                 "以 OHLCV 技術特徵預測指定市場目標（次日漲跌方向）。"
@@ -633,7 +647,7 @@ def capabilities(db: Session, owner_id: uuid.UUID) -> List[Dict[str, Any]]:
         },
         {
             "key": "rule_check",
-            "label_zh": "策略規則檢查（B）",
+            "label_zh": "策略規則／風控檢查",
             "status": "AVAILABLE",
             "description_zh": (
                 "以已保存的規則檢查操作是否符合計劃（例如風控與掛單規則）。"
@@ -643,13 +657,26 @@ def capabilities(db: Session, owner_id: uuid.UUID) -> List[Dict[str, Any]]:
         },
         {
             "key": "personalization",
-            "label_zh": "個人化模型（C）",
+            "label_zh": "個人決策模仿",
             "status": CAPABILITY_STATUS,
             "description_zh": (
                 "以明確同意、可追溯的個人決策資料訓練，學習該用戶在特定策略下的"
-                "決策偏好。資料不足時直接拒絕，不以 A 或 B 冒充；"
+                "決策偏好。資料不足時直接拒絕，不以其他能力冒充；"
                 "推論結果只描述決策選擇，不是市場方向或投資建議。"
             ),
             "surface": "本頁 · 個人化訓練資格與個人策略學習",
+        },
+        {
+            "key": "agent_candidate_screening",
+            "label_zh": "代理候選訊號篩選",
+            "status": AGENT_SCREENING_STATUS,
+            "status_label_zh": AGENT_SCREENING_STATUS_LABEL_ZH,
+            "description_zh": (
+                "對既有規則策略的入場訊號，在明確的執行、出場與成本假設下"
+                "判斷該訊號是否值得採用（取用／跳過輔助）。"
+                "不是強化學習、不自動建立策略、不模仿用戶，也不保證盈利；"
+                "未成交候選只提供反事實結果，未成熟標籤保持未成熟。"
+            ),
+            "surface": "隔離垂直切片 · /api/v1/agent-strategy",
         },
     ]

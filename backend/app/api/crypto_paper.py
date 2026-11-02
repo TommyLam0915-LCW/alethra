@@ -13,12 +13,13 @@ positions stay in one ledger.
 from typing import Optional, Union
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.auth.api_keys import check_api_key_scope
 from app.auth.jwt import get_current_user
+from app.auth.provenance import request_actor_provenance
 from app.auth.rate_limit import api_key_rate_limit_dependency
 from app.auth.safety import safety_control
 from app.config import get_settings
@@ -189,6 +190,7 @@ def preview_crypto_paper_quote(
 def submit_crypto_paper_order(
     portfolio_id: UUID,
     payload: CryptoPaperOrderRequest,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     _scope_check=Depends(check_api_key_scope("write")),
@@ -204,6 +206,7 @@ def submit_crypto_paper_order(
             side=payload.side,
             quantity=payload.quantity,
             actor_id=current_user.id,
+            actor_type=request_actor_provenance(request),
             idempotency_key=payload.idempotency_key,
             rationale=payload.rationale,
             expected_outcome=payload.expected_outcome,

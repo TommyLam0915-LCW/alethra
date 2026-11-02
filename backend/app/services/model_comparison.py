@@ -1420,6 +1420,7 @@ def evaluate_pair(
     record_b: ModelResearchRecord,
     *,
     operation_key: Optional[str] = None,
+    actor_type: str = "unknown",
 ) -> Dict[str, Any]:
     """Compare two versions and persist the result. No quota handling here."""
     if version_a.id == version_b.id:
@@ -1605,6 +1606,7 @@ def evaluate_pair(
         entity_id=str(record_a.id),
         event_type="personal_model_comparison_created",
         actor_id=owner_id,
+        actor_type=actor_type,
         payload={
             "comparison_run_id": str(run_id),
             "version_a_id": str(version_a.id),

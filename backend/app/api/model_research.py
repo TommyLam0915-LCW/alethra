@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from typing import List, Optional
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.user import User
@@ -18,6 +18,7 @@ from app.models.model_research import (
     ModelCard,
 )
 from app.auth.jwt import get_current_user
+from app.auth.provenance import request_actor_provenance
 from app.api.schemas import (
     ModelResearchRecordCreate,
     ModelResearchRecordUpdate,
@@ -108,6 +109,7 @@ def _insert_model_version(
     record: ModelResearchRecord,
     current_user: User,
     *,
+    actor_type: str = "unknown",
     model_type: str,
     model_specification_json: dict,
     linked_experiment_version_ids: Optional[List[UUID]] = None,
@@ -138,6 +140,7 @@ def _insert_model_version(
         payload["source"] = source
     emit_event(
         db,
+        actor_type=actor_type,
         entity_type="model_version",
         entity_id=version.id,
         event_type="model_version_created",
@@ -153,6 +156,7 @@ def _insert_model_version(
 @router.post("", response_model=ModelResearchRecordResponse, status_code=status.HTTP_201_CREATED)
 def create_model_research_record(
     payload: ModelResearchRecordCreate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -170,6 +174,7 @@ def create_model_research_record(
 
     emit_event(
         db,
+        actor_type=request_actor_provenance(request),
         entity_type="model_research_record",
         entity_id=record.id,
         event_type="model_research_created",
@@ -207,6 +212,7 @@ def get_model_research_record(
 def update_model_research_record(
     record_id: UUID,
     payload: ModelResearchRecordUpdate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -234,6 +240,7 @@ def update_model_research_record(
     if payload.status:
         emit_event(
             db,
+            actor_type=request_actor_provenance(request),
             entity_type="model_research_record",
             entity_id=record.id,
             event_type="model_research_status_changed",
@@ -257,6 +264,7 @@ def update_model_research_record(
 def create_model_version(
     record_id: UUID,
     payload: ModelVersionCreate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -267,6 +275,7 @@ def create_model_version(
         db,
         record,
         current_user,
+        actor_type=request_actor_provenance(request),
         model_type=payload.model_type,
         model_specification_json=payload.model_specification_json,
         linked_experiment_version_ids=payload.linked_experiment_version_ids,
@@ -296,6 +305,7 @@ def create_model_version(
 def create_model_version_from_strategy(
     record_id: UUID,
     payload: ModelVersionFromStrategy,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -336,6 +346,7 @@ def create_model_version_from_strategy(
         db,
         record,
         current_user,
+        actor_type=request_actor_provenance(request),
         model_type=payload.model_type,
         model_specification_json=model_specification_json,
         linked_experiment_version_ids=[source.id],
@@ -454,6 +465,7 @@ def get_model_version(
 def set_active_model_version(
     record_id: UUID,
     payload: ActiveVersionSet,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -485,6 +497,7 @@ def set_active_model_version(
 
     emit_event(
         db,
+        actor_type=request_actor_provenance(request),
         entity_type="model_research_record",
         entity_id=record.id,
         event_type="model_active_version_set",
@@ -507,6 +520,7 @@ def set_active_model_version(
 def rollback_model_version(
     record_id: UUID,
     payload: ModelVersionRollback,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -549,6 +563,7 @@ def rollback_model_version(
 
     emit_event(
         db,
+        actor_type=request_actor_provenance(request),
         entity_type="model_research_record",
         entity_id=record.id,
         event_type="model_version_rolled_back",
@@ -574,6 +589,7 @@ def rollback_model_version(
 def lock_model_version(
     record_id: UUID,
     version_id: UUID,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -594,6 +610,7 @@ def lock_model_version(
 
     emit_event(
         db,
+        actor_type=request_actor_provenance(request),
         entity_type="model_version",
         entity_id=version.id,
         event_type="model_version_locked",
@@ -614,6 +631,7 @@ def revoke_model_version(
     record_id: UUID,
     version_id: UUID,
     reason: str,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -637,6 +655,7 @@ def revoke_model_version(
 
     emit_event(
         db,
+        actor_type=request_actor_provenance(request),
         entity_type="model_version",
         entity_id=version.id,
         event_type="model_version_revoked",
@@ -664,6 +683,7 @@ def revoke_model_version(
 def create_model_evaluation(
     record_id: UUID,
     payload: ModelEvaluationCreate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -694,6 +714,7 @@ def create_model_evaluation(
 
     emit_event(
         db,
+        actor_type=request_actor_provenance(request),
         entity_type="model_evaluation",
         entity_id=evaluation.id,
         event_type="model_evaluation_created",
@@ -736,6 +757,7 @@ memory_router = APIRouter(prefix="/personal-memory", tags=["personal-memory"])
 )
 def create_personal_memory(
     payload: PersonalResearchMemoryCreate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -757,6 +779,7 @@ def create_personal_memory(
 
     emit_event(
         db,
+        actor_type=request_actor_provenance(request),
         entity_type="personal_research_memory",
         entity_id=memory.id,
         event_type="memory_created",
@@ -812,6 +835,7 @@ def get_personal_memory(
 def confirm_personal_memory(
     memory_id: UUID,
     payload: PersonalResearchMemoryConfirm,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -831,6 +855,7 @@ def confirm_personal_memory(
 
     emit_event(
         db,
+        actor_type=request_actor_provenance(request),
         entity_type="personal_research_memory",
         entity_id=memory.id,
         event_type=event_type,
@@ -849,6 +874,7 @@ def confirm_personal_memory(
 )
 def deactivate_personal_memory(
     memory_id: UUID,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -863,6 +889,7 @@ def deactivate_personal_memory(
 
     emit_event(
         db,
+        actor_type=request_actor_provenance(request),
         entity_type="personal_research_memory",
         entity_id=memory.id,
         event_type="memory_deactivated",
@@ -879,6 +906,7 @@ def deactivate_personal_memory(
 def set_training_opt_in(
     memory_id: UUID,
     opt_in: bool,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -899,6 +927,7 @@ def set_training_opt_in(
 
     emit_event(
         db,
+        actor_type=request_actor_provenance(request),
         entity_type="personal_research_memory",
         entity_id=memory.id,
         event_type="training_opt_in_changed",
@@ -940,6 +969,7 @@ card_router = APIRouter(prefix="/model-cards", tags=["model-cards"])
 )
 def create_model_card(
     payload: ModelCardCreate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -975,6 +1005,7 @@ def create_model_card(
 
     emit_event(
         db,
+        actor_type=request_actor_provenance(request),
         entity_type="model_card",
         entity_id=card.id,
         event_type="model_card_created",

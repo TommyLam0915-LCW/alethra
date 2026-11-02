@@ -737,7 +737,7 @@ export default function PaperPortfolioDetailPage() {
                         <span data-testid="pp-order-cutoff" style={{ display: 'block', fontSize: '0.6875rem', color: 'var(--text-muted)' }}>
                           {o.actor_type === 'system'
                             ? 'Replay date'
-                            : o.actor_type === 'api_key'
+                            : o.actor_type === 'agent' || o.actor_type === 'api_key'
                               ? 'Pricing date'
                               : 'Decision cut-off'}{' '}
                           {o.data_cutoff_at}

@@ -74,6 +74,7 @@ def execute_backtest_run(
     data_source: str = "auto",
     provider_id: Optional[str] = None,
     event_payload: Optional[Dict[str, Any]] = None,
+    actor_type: str = "unknown",
 ) -> ResearchRun:
     """Run one backtest, billed against the user's research_run quota.
 
@@ -109,6 +110,7 @@ def execute_backtest_run(
         entity_id=run.id,
         event_type="research_run_started",
         actor_id=user.id,
+        actor_type=actor_type,
         payload=started_payload,
         rules_locked=is_locked,
         data_cutoff_at=data_cutoff,
@@ -168,6 +170,7 @@ def execute_backtest_run(
             entity_id=run.id,
             event_type="research_run_completed",
             actor_id=user.id,
+            actor_type=actor_type,
             payload={
                 "total_return_pct": result["metrics"].get("total_return_pct"),
                 "total_trades": result["metrics"].get("total_trades"),
@@ -207,6 +210,7 @@ def execute_backtest_run(
             entity_id=run.id,
             event_type="research_run_failed",
             actor_id=user.id,
+            actor_type=actor_type,
             payload={"error": _run_failure_detail(e)},
             rules_locked=is_locked,
             data_cutoff_at=data_cutoff,

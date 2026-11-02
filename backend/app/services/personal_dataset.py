@@ -287,14 +287,20 @@ def features_as_of(
     as_of_date: str,
     *,
     as_of_instant: Optional[datetime] = None,
+    provider_id: Optional[str] = None,
 ) -> Tuple[Optional[Dict[str, float]], Optional[List[str]], Optional[str], Optional[str]]:
     """Public wrapper: features visible at a decision instant or date.
 
     ``as_of_instant`` is the server-recorded decision instant. Without it the
     decision is read conservatively as happening at the start of ``as_of_date``.
+    ``provider_id`` binds one stored provider when the caller already knows it.
     """
     return _features_as_of(
-        db, instrument_id, as_of_date, as_of_instant=as_of_instant
+        db,
+        instrument_id,
+        as_of_date,
+        as_of_instant=as_of_instant,
+        provider_id=provider_id,
     )
 
 

@@ -49,13 +49,13 @@ from app.models.paper_portfolio import (
     OrderSide,
     OrderStatus,
     OrderType,
-    PaperDecisionActorType,
     PaperDecisionType,
     PaperFill,
     PaperOrder,
     PaperPortfolio,
     PortfolioStatus,
     RiskCheckStatus,
+    decision_actor_type,
 )
 from app.services import emit_event
 from app.services.crypto_series import Candle
@@ -752,7 +752,7 @@ def submit_manual_order(
     expected_timeframe_days: Optional[int] = None,
     self_reported_confidence: str = ConfidenceLevel.not_provided.value,
     falsification_condition: Optional[str] = None,
-    actor_type: str = "human",
+    actor_type: str = "unknown",
     provider_id: str = DEFAULT_PROVIDER_ID,
     now: Optional[datetime] = None,
     max_age_seconds: int = DEFAULT_QUOTE_MAX_AGE_SECONDS,
@@ -837,11 +837,7 @@ def submit_manual_order(
     decision = DecisionRecord(
         owner_id=actor_id,
         paper_portfolio_id=portfolio.id,
-        actor_type=(
-            PaperDecisionActorType.human
-            if actor_type == "human"
-            else PaperDecisionActorType.system
-        ),
+        actor_type=decision_actor_type(actor_type),
         decision_type=(
             PaperDecisionType.entry
             if quote.side == OrderSide.BUY.value

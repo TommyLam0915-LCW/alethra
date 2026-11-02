@@ -121,6 +121,11 @@ from app.models.robustness import (
     ATTEMPT_STATUSES,
 )
 from app.models.operation_batch import OperationBatch, BATCH_STATUSES
+from app.models.agent_strategy import (
+    AgentCandidate,
+    AgentCandidateOutcome,
+    AgentDatasetSnapshot,
+)
 
 __all__ = [
     "User",
@@ -245,4 +250,7 @@ __all__ = [
     "ATTEMPT_STATUSES",
     "OperationBatch",
     "BATCH_STATUSES",
+    "AgentCandidate",
+    "AgentCandidateOutcome",
+    "AgentDatasetSnapshot",
 ]

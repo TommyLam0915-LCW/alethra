@@ -604,6 +604,7 @@ def _run_cell(
     experiment: Experiment,
     user: User,
     cell: Dict[str, Any],
+    actor_type: str = "unknown",
 ) -> RobustnessAttempt:
     attempt = _reusable_attempt(db, study, cell["cell_key"])
     if attempt is not None and attempt.status == "completed":
@@ -645,6 +646,7 @@ def _run_cell(
             version=version,
             experiment=experiment,
             strategy_spec=cell["spec"],
+            actor_type=actor_type,
             event_payload={
                 "robustness_study_id": str(study.id),
                 "cell_key": cell["cell_key"],
@@ -710,6 +712,7 @@ def _execute_walk_forward(
     version: ExperimentVersion,
     experiment: Experiment,
     user: User,
+    actor_type: str = "unknown",
 ) -> None:
     plan_cells = (study.plan or {}).get("cells") or []
     fold_ids = []
@@ -742,6 +745,7 @@ def _execute_walk_forward(
                 experiment=experiment,
                 user=user,
                 cell=cell,
+                actor_type=actor_type,
             )
             if attempt.status == "completed" and isinstance(
                 (attempt.metrics or {}).get("total_return_pct"), (int, float)
@@ -799,6 +803,7 @@ def _execute_walk_forward(
             experiment=experiment,
             user=user,
             cell=cell,
+            actor_type=actor_type,
         )
 
 
@@ -908,6 +913,7 @@ def execute_study(
     version: ExperimentVersion,
     experiment: Experiment,
     user: User,
+    actor_type: str = "unknown",
 ) -> RobustnessStudy:
     if study.status == "completed":
         return study
@@ -932,6 +938,7 @@ def execute_study(
         entity_id=experiment.id,
         event_type="robustness_study_started",
         actor_id=user.id,
+        actor_type=actor_type,
         payload={
             "study_id": str(study.id),
             "kind": study.kind,
@@ -950,6 +957,7 @@ def execute_study(
                 version=version,
                 experiment=experiment,
                 user=user,
+                actor_type=actor_type,
             )
         else:
             for cell in plan_cells:
@@ -963,6 +971,7 @@ def execute_study(
                     experiment=experiment,
                     user=user,
                     cell=cell,
+                    actor_type=actor_type,
                 )
     except QuotaExhausted:
         quota_stopped = True
@@ -1009,6 +1018,7 @@ def execute_study(
             else "robustness_study_stopped"
         ),
         actor_id=user.id,
+        actor_type=actor_type,
         payload={
             "study_id": str(study.id),
             "kind": study.kind,

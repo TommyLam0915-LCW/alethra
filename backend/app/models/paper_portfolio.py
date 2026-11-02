@@ -45,9 +45,23 @@ class RiskCheckStatus(str, enum.Enum):
 
 class PaperDecisionActorType(str, enum.Enum):
     human = "human"
+    agent = "agent"
     ai_draft = "ai_draft"
     human_approved_ai_draft = "human_approved_ai_draft"
     system = "system"
+    unknown = "unknown"
+
+
+def decision_actor_type(provenance: str) -> PaperDecisionActorType:
+    """Map a verified credential channel onto the stored decision actor.
+
+    The request body never decides this. ``system`` is reserved for rows a
+    background executor writes, so an unverified channel is ``unknown``.
+    """
+    return {
+        "human": PaperDecisionActorType.human,
+        "agent": PaperDecisionActorType.agent,
+    }.get(provenance, PaperDecisionActorType.unknown)
 
 
 class PaperDecisionType(str, enum.Enum):
@@ -142,7 +156,7 @@ class PaperOrder(Base):
     # shared policy, so an order cannot be labelled passed by omission.
     risk_check_status = Column(SAEnum(RiskCheckStatus), nullable=True)
     idempotency_key = Column(String(128), nullable=True)
-    actor_type = Column(String(20), nullable=False, default="human")
+    actor_type = Column(String(20), nullable=False, default="unknown")
 
     __table_args__ = (
         Index(

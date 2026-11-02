@@ -6,7 +6,7 @@ const FRONTEND_BASE = process.env.E2E_FRONTEND_BASE ?? 'http://localhost:3099';
 
 export default defineConfig({
   testDir: './e2e',
-  testMatch: /unified-research-flow\.spec\.ts/,
+  testMatch: /(unified-research-flow|cross-experiment-comparison)\.spec\.ts/,
   fullyParallel: false,
   workers: 1,
   retries: 0,

@@ -41,7 +41,7 @@ def emit_event(
     entity_id: str,
     event_type: str,
     actor_id: Optional[uuid.UUID] = None,
-    actor_type: str = "human",
+    actor_type: str = "unknown",
     payload: Optional[Dict[str, Any]] = None,
     rules_locked: bool = False,
     data_cutoff_at: Optional[str] = None,

@@ -145,9 +145,15 @@ test.describe('unified research flow', () => {
     const completedRows = historyCard(page)
       .locator('[data-testid^="run-row-"]')
       .filter({ hasText: 'Completed' });
-    await expect(completedRows, 'seed must provide comparable completed runs').toHaveCount(3);
+    // A resumed disposable runtime can carry completed runs added after the
+    // seed; the flow needs two to compare and one more to prove the cap.
+    await expect(completedRows, 'need two runs to compare and a third to prove the cap').not.toHaveCount(0);
+    expect(
+      await completedRows.count(),
+      'need two runs to compare and a third to prove the cap'
+    ).toBeGreaterThanOrEqual(3);
     const comparable: string[] = [];
-    for (let index = 0; index < (await completedRows.count()); index += 1) {
+    for (let index = 0; index < 3; index += 1) {
       const testId = await completedRows.nth(index).getAttribute('data-testid');
       comparable.push((testId ?? '').replace('run-row-', ''));
     }

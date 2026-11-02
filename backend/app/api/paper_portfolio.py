@@ -27,11 +27,13 @@ from app.models.paper_portfolio import (
     OutcomeStatus,
     OutcomeEvaluation,
     HypothesisStatus,
+    decision_actor_type,
 )
 from app.auth.jwt import get_current_user
 from app.auth.api_keys import check_api_key_scope
 from app.auth.rate_limit import api_key_rate_limit_dependency
 from app.auth.safety import safety_control
+from app.auth.provenance import request_actor_provenance
 from app.config import get_settings
 from app.models.kill_switch import KillSwitchScope
 from app.models.market_data import MarketDataBar
@@ -473,6 +475,7 @@ def _simulate_fill(
 @router.post("", response_model=PaperPortfolioResponse, status_code=status.HTTP_201_CREATED)
 def create_portfolio(
     payload: PaperPortfolioCreate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     _scope_check=Depends(check_api_key_scope("write")),
@@ -505,6 +508,7 @@ def create_portfolio(
         db,
         entity_type="paper_portfolio", entity_id=portfolio.id,
         event_type="portfolio_created", actor_id=current_user.id,
+        actor_type=request_actor_provenance(request),
         payload={"initial_virtual_cash": payload.initial_virtual_cash},
     )
 
@@ -604,8 +608,7 @@ def create_order(
             ),
         )
 
-    scopes = getattr(request.state, "api_key_scopes", None)
-    actor_type = "api_key" if scopes is not None else "human"
+    actor_type = request_actor_provenance(request)
 
     # Serialize cash/position changes for this portfolio before evaluating limits.
     portfolio = _lock_portfolio(portfolio_id, db, current_user)
@@ -693,9 +696,7 @@ def create_order(
     decision = DecisionRecord(
         owner_id=current_user.id,
         paper_portfolio_id=portfolio.id,
-        actor_type=(
-            PaperDecisionActorType.human if actor_type == "human" else PaperDecisionActorType.system
-        ),
+        actor_type=decision_actor_type(actor_type),
         decision_type=PaperDecisionType.entry if payload.side == "BUY" else PaperDecisionType.exit,
         rationale=payload.rationale,
         expected_outcome=payload.expected_outcome,
@@ -851,6 +852,7 @@ def _order_lifecycle_view(db: Session, portfolio: PaperPortfolio, order: PaperOr
 def cancel_order_route(
     portfolio_id: UUID,
     order_id: UUID,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     _scope_check=Depends(check_api_key_scope("write")),
@@ -876,6 +878,7 @@ def cancel_order_route(
             order=order,
             actor_id=current_user.id,
             reason="user_cancelled",
+            actor_type=request_actor_provenance(request),
         )
     except LifecycleError as exc:
         raise HTTPException(status_code=400, detail=exc.message)
@@ -892,6 +895,7 @@ def cancel_order_route(
 def create_decision(
     portfolio_id: UUID,
     payload: DecisionRecordCreate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     _scope_check=Depends(check_api_key_scope("write")),
@@ -904,11 +908,16 @@ def create_decision(
         if not payload.expected_outcome:
             raise HTTPException(status_code=400, detail="Expected outcome required for entry/exit decisions")
 
+    # The verified credential channel decides the actor. The body's actor_type is
+    # accepted for client compatibility but only recorded as a declaration, so a
+    # caller cannot label an agent-written row as a human decision.
+    actor_type = request_actor_provenance(request)
+
     decision = DecisionRecord(
         owner_id=current_user.id,
         paper_portfolio_id=portfolio.id,
         simulation_session_id=payload.simulation_session_id,
-        actor_type=PaperDecisionActorType(payload.actor_type),
+        actor_type=decision_actor_type(actor_type),
         decision_type=PaperDecisionType(payload.decision_type),
         linked_experiment_version_id=payload.linked_experiment_version_id,
         rationale=payload.rationale,
@@ -926,9 +935,11 @@ def create_decision(
         db,
         entity_type="decision_record", entity_id=decision.id,
         event_type="decision_recorded", actor_id=current_user.id,
+        actor_type=actor_type,
         payload={
             "decision_type": payload.decision_type,
-            "actor_type": payload.actor_type,
+            "actor_type": actor_type,
+            "client_declared_actor_type": payload.actor_type,
         },
     )
 
@@ -964,10 +975,12 @@ def create_outcome_evaluation(
     portfolio_id: UUID,
     decision_id: UUID,
     payload: OutcomeEvaluationCreate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     _scope_check=Depends(check_api_key_scope("write")),
 ):
+    actor_type = request_actor_provenance(request)
     portfolio = _get_portfolio_with_ownership(portfolio_id, db, current_user)
 
     decision = db.query(DecisionRecord).filter(
@@ -1002,7 +1015,11 @@ def create_outcome_evaluation(
         db,
         entity_type="decision_record", entity_id=decision.id,
         event_type="outcome_evaluated", actor_id=current_user.id,
-        payload={"hypothesis_status": payload.hypothesis_status},
+        actor_type=actor_type,
+        payload={
+            "hypothesis_status": payload.hypothesis_status,
+            "actor_type": actor_type,
+        },
     )
 
     db.commit()
@@ -1018,16 +1035,18 @@ def create_outcome_evaluation(
 def create_override_request(
     portfolio_id: UUID,
     payload: OverrideRequestCreate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     _scope_check=Depends(check_api_key_scope("write")),
 ):
     portfolio = _get_portfolio_with_ownership(portfolio_id, db, current_user)
+    actor_type = request_actor_provenance(request)
 
     decision = DecisionRecord(
         owner_id=current_user.id,
         paper_portfolio_id=portfolio.id,
-        actor_type=PaperDecisionActorType.human,
+        actor_type=decision_actor_type(actor_type),
         decision_type=PaperDecisionType.override_request,
         rationale=f"Original: {payload.original_rationale}\nOverride reason: {payload.override_reason}",
         expected_outcome=payload.expected_outcome,
@@ -1044,7 +1063,8 @@ def create_override_request(
         db,
         entity_type="decision_record", entity_id=decision.id,
         event_type="override_requested", actor_id=current_user.id,
-        payload={"outside_locked_strategy": True},
+        actor_type=actor_type,
+        payload={"outside_locked_strategy": True, "actor_type": actor_type},
         rules_locked=True,
     )
 
@@ -1067,6 +1087,7 @@ def create_override_request(
 )
 def pause_portfolio(
     portfolio_id: UUID,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     _scope_check=Depends(check_api_key_scope("write")),
@@ -1082,6 +1103,7 @@ def pause_portfolio(
         db,
         entity_type="paper_portfolio", entity_id=portfolio.id,
         event_type="portfolio_paused", actor_id=current_user.id,
+        actor_type=request_actor_provenance(request),
     )
 
     db.commit()
@@ -1101,6 +1123,7 @@ def pause_portfolio(
 )
 def resume_portfolio(
     portfolio_id: UUID,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     _scope_check=Depends(check_api_key_scope("write")),
@@ -1116,6 +1139,7 @@ def resume_portfolio(
         db,
         entity_type="paper_portfolio", entity_id=portfolio.id,
         event_type="portfolio_resumed", actor_id=current_user.id,
+        actor_type=request_actor_provenance(request),
     )
 
     db.commit()
@@ -1139,6 +1163,7 @@ def resume_portfolio(
 )
 def retire_portfolio(
     portfolio_id: UUID,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     _scope_check=Depends(check_api_key_scope("write")),
@@ -1155,6 +1180,7 @@ def retire_portfolio(
         db,
         entity_type="paper_portfolio", entity_id=portfolio.id,
         event_type="portfolio_retired", actor_id=current_user.id,
+        actor_type=request_actor_provenance(request),
         payload={"final_cash": portfolio.current_virtual_cash},
     )
 

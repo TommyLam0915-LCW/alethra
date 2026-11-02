@@ -14,7 +14,7 @@ class AuditEvent(Base):
     entity_id = Column(String(36), nullable=False)
     event_type = Column(String(50), nullable=False)
     actor_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
-    actor_type = Column(String(10), nullable=False, default="human")
+    actor_type = Column(String(10), nullable=False, default="unknown")
     payload_json = Column(JSONB, nullable=True)
     recorded_before_outcome = Column(Boolean, nullable=False, default=True)
     rules_locked = Column(Boolean, nullable=False, default=False)
