@@ -226,6 +226,21 @@ def _daily_bars_visible_by(
     ]
 
 
+def _effective_volume(bar) -> Optional[float]:
+    """Bar volume as a float, whichever column the venue uses.
+
+    Equity bars carry whole shares in ``volume``; crypto rows leave it NULL and
+    store the fractional amount in ``volume_decimal``. Reading only ``volume``
+    made every crypto row look volume-less, and the feature matrix discards a
+    row with any missing feature.
+    """
+    if bar.volume is not None:
+        return float(bar.volume)
+    if bar.volume_decimal is not None:
+        return float(bar.volume_decimal)
+    return None
+
+
 def _features_as_of(
     db: Session,
     instrument_id: str,
@@ -258,7 +273,7 @@ def _features_as_of(
             "high": bar.high,
             "low": bar.low,
             "close": bar.close,
-            "volume": bar.volume,
+            "volume": _effective_volume(bar),
         }
         for bar in stored
     ]

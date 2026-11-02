@@ -131,6 +131,56 @@ def _zigzag(levels=7, count=40, base=50.0):
     return [base + float(i % levels) for i in range(count)]
 
 
+def _seed_crypto_bars(instrument: str, count: int = 40, start: date = START) -> list:
+    """Crypto rows carry fractional volume in ``volume_decimal``, not ``volume``."""
+    from decimal import Decimal
+
+    db = TestSession()
+    days = []
+    try:
+        for i in range(count):
+            day = start + timedelta(days=i)
+            days.append(day)
+            close = 100.0 + float(i % 7)
+            db.add(
+                MarketDataBar(
+                    instrument_id=instrument,
+                    provider_id="kraken",
+                    bar_date=day,
+                    bar_timestamp=datetime.combine(day, time.min),
+                    open=close,
+                    high=close + 1.0,
+                    low=close - 1.0,
+                    close=close,
+                    volume=None,
+                    volume_decimal=Decimal(f"{1000 + i}.5"),
+                )
+            )
+        db.commit()
+    finally:
+        db.close()
+    return days
+
+
+def test_crypto_decimal_volume_still_feeds_features():
+    """A crypto bar's fractional volume is a feature input, not a missing value."""
+    instrument = "CRYPTO:KRAKEN:TEST-USD"
+    days = _seed_crypto_bars(instrument)
+
+    db = TestSession()
+    try:
+        features, names, feature_bar_date, exclusion = features_as_of(
+            db, instrument, days[-1].isoformat(), provider_id="kraken"
+        )
+    finally:
+        db.close()
+
+    assert exclusion is None
+    assert features and names and feature_bar_date
+    assert "volume_ratio_5" in names
+    assert all(isinstance(value, float) for value in features.values())
+
+
 def _create_locked_strategy(
     client, headers, instrument=INSTRUMENT, title="Screening", window_days=80
 ):
