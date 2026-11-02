@@ -61,6 +61,7 @@ from app.services.agent_strategy import (
     existing_trade_eligibility,
     list_candidates,
     preview_snapshot,
+    snapshot_payload,
     training_contract,
     validate_lineage,
 )
@@ -694,16 +695,9 @@ class TestOutcomeEvidenceImmutability:
         db = TestSession()
         try:
             frozen = db.get(AgentDatasetSnapshot, uuid.UUID(first_snapshot_id))
-            frozen_state = (
-                frozen.checksum,
-                frozen.rows_json,
-                frozen.candidate_ids_json,
-                frozen.split_manifest_json,
-                frozen.exclusion_breakdown_json,
-                frozen.outcome_distribution_json,
-                frozen.status,
-                frozen.included_count,
-            )
+            # Every persisted field, not only the checksum, is part of the
+            # frozen record.
+            frozen_state = snapshot_payload(frozen)
             # Every referenced version is still stored with the same content.
             retained = {}
             for row in preview_before["rows"]:
@@ -733,22 +727,14 @@ class TestOutcomeEvidenceImmutability:
         db = TestSession()
         try:
             frozen = db.get(AgentDatasetSnapshot, uuid.UUID(first_snapshot_id))
-            after = (
-                frozen.checksum,
-                frozen.rows_json,
-                frozen.candidate_ids_json,
-                frozen.split_manifest_json,
-                frozen.exclusion_breakdown_json,
-                frozen.outcome_distribution_json,
-                frozen.status,
-                frozen.included_count,
-            )
+            after = snapshot_payload(frozen)
             latest = db.get(AgentDatasetSnapshot, uuid.UUID(second_snapshot_id))
+            latest_checksum = latest.checksum
         finally:
             db.close()
 
         assert after == frozen_state
-        assert latest.checksum != frozen.checksum
+        assert latest_checksum != frozen_state["checksum"]
 
         preview_after = preview_snapshot(TestSession(), owner_id, version_id)
         refreshed = next(
@@ -759,6 +745,49 @@ class TestOutcomeEvidenceImmutability:
         assert refreshed["outcome_version"] == target_row["outcome_version"] + 1
         assert refreshed["outcome_source"] == "paper_fill"
         assert refreshed["outcome_status"] == "observed"
+
+    def test_active_consent_alone_cannot_persist_a_ready_snapshot(
+        self, client, auth_headers, monkeypatch
+    ):
+        """There is no ready-snapshot path to freeze this round.
+
+        The only persisted snapshot is the refused audit row. Stubbing the
+        consent lookup to "active" must still refuse, because the ready branch
+        is not implemented; otherwise a test could claim immutability of a
+        dataset the product never writes.
+        """
+        _seed_bars(INSTRUMENT, _zigzag(count=80))
+        version_id = _create_locked_strategy(client, auth_headers)
+        owner_id = _owner_id()
+        collect_candidates(TestSession(), owner_id, version_id)
+        build_outcomes(TestSession(), owner_id, version_id)
+
+        monkeypatch.setattr(
+            "app.services.agent_strategy.consent_status",
+            lambda db, owner_id: {
+                "purpose": "agent_strategy_screening",
+                "consent_version": "agent-strategy-learning-v1",
+                "status": "active",
+                "fail_closed": False,
+            },
+        )
+
+        db = TestSession()
+        try:
+            before = db.query(AgentDatasetSnapshot).count()
+        finally:
+            db.close()
+
+        with pytest.raises(AgentStrategyRefused) as exc:
+            create_snapshot(TestSession(), owner_id, version_id)
+
+        assert exc.value.code == "agent_strategy_snapshot_not_approved"
+        db = TestSession()
+        try:
+            after = db.query(AgentDatasetSnapshot).count()
+        finally:
+            db.close()
+        assert after == before
 
 
 class TestOutcomeBuckets:
