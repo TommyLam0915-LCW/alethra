@@ -114,6 +114,12 @@ class ResearchTrade:
     exit_reason: str
     bars_held: int
     cash_after: Decimal
+    fold: Optional[int] = None
+    # Best and worst price excursion during the hold, as a percentage of the
+    # executed entry price. MFE answers "how much of the move was available",
+    # MAE answers "how much heat the position took before it closed".
+    mfe_pct: Optional[Decimal] = None
+    mae_pct: Optional[Decimal] = None
 
 
 # -- indicator preparation --------------------------------------------------
@@ -355,6 +361,84 @@ def _rate(value: Decimal) -> str:
     return format(value.quantize(RATE_QUANT), "f")
 
 
+def _pct(value: Optional[Decimal]) -> Optional[str]:
+    if value is None:
+        return None
+    return format(value.quantize(Decimal("0.0001")), "f")
+
+
+EXIT_REASON_TEXT = {
+    "target": (
+        "停利目標成交：價格走到 ATR 目標。",
+        "Target reached: price moved to the ATR-scaled target.",
+    ),
+    "target_gap": (
+        "跳空越過停利目標：以開盤價成交，實際獲利大於目標距離。",
+        "Gapped through the target: filled at the open, so the gain exceeds the target distance.",
+    ),
+    "stop": (
+        "停損觸發：價格走到 ATR 停損。",
+        "Stop reached: price moved to the ATR-scaled stop.",
+    ),
+    "stop_gap": (
+        "跳空越過停損：以開盤價成交，虧損大於停損距離。",
+        "Gapped through the stop: filled at the open, so the loss exceeds the stop distance.",
+    ),
+    "time_stop": (
+        "時間停損：持有上限內未達目標或停損，以收盤價平倉。",
+        "Time stop: neither target nor stop was reached before the holding limit, so the position closed at that bar's close.",
+    ),
+}
+
+
+def describe_trade(trade: ResearchTrade) -> dict:
+    """Turn one trade into a reviewable earn/loss explanation.
+
+    The reason is mechanical, not interpretive: it names the exit rule that
+    fired, the money split between gross, fees and slippage, and how much of
+    the move was available (MFE) versus how much heat the position took (MAE).
+    """
+    if trade.net_pnl > 0:
+        outcome = "win"
+    elif trade.net_pnl < 0:
+        outcome = "loss"
+    else:
+        outcome = "flat"
+    reason_zh, reason_en = EXIT_REASON_TEXT.get(
+        trade.exit_reason,
+        (f"出場（{trade.exit_reason}）。", f"Exit ({trade.exit_reason})."),
+    )
+    total_cost = (trade.commission + trade.slippage_cost).quantize(MONEY_QUANT)
+    excursion_zh = ""
+    excursion_en = ""
+    if trade.mfe_pct is not None and trade.mae_pct is not None:
+        excursion_zh = f"最大有利幅度 {_pct(trade.mfe_pct)}%，最大不利幅度 {_pct(trade.mae_pct)}%。"
+        excursion_en = (
+            f"Max favourable excursion {_pct(trade.mfe_pct)}%, "
+            f"max adverse excursion {_pct(trade.mae_pct)}%."
+        )
+    cost_zh = (
+        f"毛利 {_money(trade.gross_pnl)}，手續費 {_money(trade.commission)}，"
+        f"滑價 {_money(trade.slippage_cost)}，淨額 {_money(trade.net_pnl)}。"
+    )
+    cost_en = (
+        f"Gross {_money(trade.gross_pnl)}, commission {_money(trade.commission)}, "
+        f"slippage {_money(trade.slippage_cost)}, net {_money(trade.net_pnl)}."
+    )
+    cost_ratio_pct: Optional[Decimal] = None
+    if trade.gross_pnl != 0:
+        cost_ratio_pct = (total_cost / abs(trade.gross_pnl) * Decimal(100)).quantize(
+            Decimal("0.0001")
+        )
+    return {
+        "outcome": outcome,
+        "pnl_reason_zh": f"{reason_zh}持有 {trade.bars_held} 根。{cost_zh}{excursion_zh}",
+        "pnl_reason_en": f"{reason_en} Held {trade.bars_held} bars. {cost_en}{excursion_en}",
+        "total_cost": _money(total_cost),
+        "cost_ratio_pct": _pct(cost_ratio_pct),
+    }
+
+
 def _exec_entry(mid: Decimal, direction: int, slippage: Decimal) -> Decimal:
     return mid * (Decimal(1) + slippage) if direction > 0 else mid * (Decimal(1) - slippage)
 
@@ -373,6 +457,7 @@ def _simulate_range(
     end_index: int,
     *,
     cash: Optional[Decimal] = None,
+    fold: Optional[int] = None,
 ) -> Tuple[List[ResearchTrade], Dict[str, int]]:
     """Simulate one rule/exit pair over [start_index, end_index] inclusive.
 
@@ -461,6 +546,19 @@ def _simulate_range(
         slippage_cost = quantity * abs(entry_price - entry_mid) + quantity * abs(exit_price - exit_mid)
         net = (gross - commission).quantize(MONEY_QUANT)
         cash = (cash + net).quantize(MONEY_QUANT)
+
+        hold = bars[entry_index : exit_index + 1]
+        if direction > 0:
+            best = max(bar.high for bar in hold)
+            worst = min(bar.low for bar in hold)
+            mfe_pct = ((best - entry_price) / entry_price * Decimal(100)).quantize(Decimal("0.0001"))
+            mae_pct = ((worst - entry_price) / entry_price * Decimal(100)).quantize(Decimal("0.0001"))
+        else:
+            best = min(bar.low for bar in hold)
+            worst = max(bar.high for bar in hold)
+            mfe_pct = ((entry_price - best) / entry_price * Decimal(100)).quantize(Decimal("0.0001"))
+            mae_pct = ((entry_price - worst) / entry_price * Decimal(100)).quantize(Decimal("0.0001"))
+
         trades.append(
             ResearchTrade(
                 rule_id=rule.rule_id,
@@ -481,6 +579,9 @@ def _simulate_range(
                 exit_reason=exit_reason,
                 bars_held=exit_index - entry_index + 1,
                 cash_after=cash,
+                fold=fold,
+                mfe_pct=mfe_pct,
+                mae_pct=mae_pct,
             )
         )
         index = exit_index + 1
@@ -677,7 +778,7 @@ def run_study(
         exit_config = EXIT_BY_ID[selected["exit_id"]]
         fold_start_cash = oos_cash
         trades, stats = _simulate_range(
-            bars, ind, rule, exit_config, settings, start, end, cash=fold_start_cash
+            bars, ind, rule, exit_config, settings, start, end, cash=fold_start_cash, fold=number
         )
         out_of_sample.extend(trades)
         if trades:
@@ -825,9 +926,13 @@ def run_study(
     if include_trades:
         payload["out_of_sample_trades"] = [
             {
+                "fold": trade.fold,
                 "rule_id": trade.rule_id,
+                "rule_label_zh": RULE_BY_ID[trade.rule_id].label_zh,
                 "exit_id": trade.exit_id,
+                "exit_label_zh": EXIT_BY_ID[trade.exit_id].label_zh,
                 "direction": "long" if trade.direction > 0 else "short",
+                "signal_time": bars[trade.signal_index].open_time.isoformat(),
                 "entry_time": trade.entry_time.isoformat(),
                 "exit_time": trade.exit_time.isoformat(),
                 "entry_price": _money(trade.entry_price),
@@ -839,6 +944,10 @@ def run_study(
                 "net_pnl": _money(trade.net_pnl),
                 "exit_reason": trade.exit_reason,
                 "bars_held": trade.bars_held,
+                "cash_after": _money(trade.cash_after),
+                "mfe_pct": _pct(trade.mfe_pct),
+                "mae_pct": _pct(trade.mae_pct),
+                **describe_trade(trade),
             }
             for trade in out_of_sample
         ]
@@ -854,6 +963,7 @@ __all__ = [
     "ResearchRule",
     "ResearchSettings",
     "ResearchTrade",
+    "describe_trade",
     "fold_bounds",
     "prepare_indicators",
     "run_study",

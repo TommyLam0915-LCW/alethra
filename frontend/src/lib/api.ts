@@ -696,6 +696,47 @@ export const api = {
         method: 'POST',
         body: JSON.stringify(params),
       }),
+    // Ad-hoc preview: returns the same study but writes no durable record.
+    research: (params: {
+      instrument_id: string;
+      interval_minutes: number;
+      folds?: number;
+      starting_cash?: string;
+      notional_per_trade?: string;
+      include_trades?: boolean;
+    }) =>
+      apiFetch('/api/v1/strategy-lab/research', {
+        method: 'POST',
+        body: JSON.stringify(params),
+      }),
+    // Run and keep the study, its exact bars and every out-of-sample trade.
+    researchRun: (params: {
+      instrument_id: string;
+      interval_minutes: number;
+      folds?: number;
+      starting_cash?: string;
+      notional_per_trade?: string;
+    }) =>
+      apiFetch('/api/v1/strategy-lab/research/runs', {
+        method: 'POST',
+        body: JSON.stringify(params),
+      }),
+    researchRuns: (params?: { instrument_id?: string; interval_minutes?: number; limit?: number }) => {
+      const qs = new URLSearchParams();
+      if (params?.instrument_id) qs.set('instrument_id', params.instrument_id);
+      if (params?.interval_minutes) qs.set('interval_minutes', String(params.interval_minutes));
+      if (params?.limit) qs.set('limit', String(params.limit));
+      const query = qs.toString();
+      return apiFetch(`/api/v1/strategy-lab/research/runs${query ? `?${query}` : ''}`);
+    },
+    researchRunDetail: (runId: string, includeBars = false) =>
+      apiFetch(
+        `/api/v1/strategy-lab/research/runs/${encodeURIComponent(runId)}?include_bars=${includeBars}`,
+      ),
+    researchRunTradesCsv: (runId: string) =>
+      apiFetchText(
+        `/api/v1/strategy-lab/research/runs/${encodeURIComponent(runId)}/trades.csv`,
+      ),
   },
   instruments: {
     list: (market?: string, assetType?: string, q?: string, limit?: number) => {

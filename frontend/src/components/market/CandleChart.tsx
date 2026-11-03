@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   CandlestickSeries,
   ColorType,
@@ -8,10 +8,14 @@ import {
   HistogramSeries,
   LineStyle,
   createChart,
+  createSeriesMarkers,
   type CandlestickData,
   type HistogramData,
   type IChartApi,
   type ISeriesApi,
+  type ISeriesMarkersPluginApi,
+  type SeriesMarker,
+  type Time,
   type UTCTimestamp,
 } from 'lightweight-charts';
 import { chartTime, planChartUpdate } from '@/lib/intradayBars';
@@ -27,6 +31,18 @@ export interface CandleChartRow {
   is_final: boolean;
 }
 
+/**
+ * A buy/sell annotation anchored at a bar's UTC open time. Markers never
+ * change the candles; they only draw the record the customer can review.
+ */
+export interface ChartMarker {
+  time: string;
+  position: 'aboveBar' | 'belowBar' | 'inBar';
+  color: string;
+  shape: 'arrowUp' | 'arrowDown' | 'circle' | 'square';
+  text?: string;
+}
+
 interface Props {
   /** Ascending, de-duplicated rows; the forming row is flagged `is_final: false`. */
   rows: CandleChartRow[];
@@ -37,6 +53,8 @@ interface Props {
   emptyDetail: string;
   /** Prefix for `-chart`, `-chart-canvas`, `-chart-empty`, `-back-to-latest`. */
   testIdPrefix: string;
+  /** Buy/sell annotations; only times that land on a rendered bar are drawn. */
+  markers?: ChartMarker[];
 }
 
 const UP = '#36C7A0';
@@ -88,13 +106,18 @@ export default function CandleChart({
   emptyTitle,
   emptyDetail,
   testIdPrefix,
+  markers,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const volumeRef = useRef<ISeriesApi<'Histogram'> | null>(null);
+  const markersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
   const appliedTimesRef = useRef<number[]>([]);
   const identityRef = useRef<string>('');
+  // Number of markers the plugin was actually given, not what the caller asked
+  // for; the two differ when a marker's bar is outside the rendered series.
+  const [appliedMarkerCount, setAppliedMarkerCount] = useState(0);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -137,6 +160,7 @@ export default function CandleChart({
     chartRef.current = chart;
     candleRef.current = candles;
     volumeRef.current = volume;
+    markersRef.current = createSeriesMarkers(candles, []);
 
     const observer = new ResizeObserver((entries) => {
       const entry = entries[0];
@@ -155,6 +179,7 @@ export default function CandleChart({
       chartRef.current = null;
       candleRef.current = null;
       volumeRef.current = null;
+      markersRef.current = null;
       appliedTimesRef.current = [];
       identityRef.current = '';
     };
@@ -219,6 +244,35 @@ export default function CandleChart({
     identityRef.current = identityKey;
   }, [rows, identityKey]);
 
+  useEffect(() => {
+    const plugin = markersRef.current;
+    if (!plugin) return;
+
+    // A marker outside the rendered window would invent a bar that is not on
+    // screen, so only times that resolve to a visible candle are drawn.
+    const barTimes = new Set<number>();
+    for (const row of rows) {
+      const time = chartTime(row.open_time);
+      if (time !== null) barTimes.add(time);
+    }
+
+    const prepared: SeriesMarker<Time>[] = [];
+    for (const marker of markers ?? []) {
+      const time = chartTime(marker.time);
+      if (time === null || !barTimes.has(time)) continue;
+      prepared.push({
+        time: time as UTCTimestamp,
+        position: marker.position,
+        color: marker.color,
+        shape: marker.shape,
+        text: marker.text,
+      });
+    }
+    prepared.sort((a, b) => (a.time as number) - (b.time as number));
+    plugin.setMarkers(prepared);
+    setAppliedMarkerCount(prepared.length);
+  }, [markers, rows, identityKey]);
+
   const scrollToLatest = useCallback(() => {
     const chart = chartRef.current;
     if (!chart) return;
@@ -239,6 +293,7 @@ export default function CandleChart({
         minHeight: 320,
       }}
       data-testid={`${testIdPrefix}-chart`}
+      data-marker-count={appliedMarkerCount}
     >
       <div className="ws-chart-toolbar">
         <span className="ws-muted">{timeAxisNote}</span>

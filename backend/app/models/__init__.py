@@ -128,6 +128,7 @@ from app.models.agent_strategy import (
     AgentStrategyConsent,
     AgentStrategyTrainingJob,
 )
+from app.models.strategy_study import StrategyStudyRun, StrategyStudyTrade
 
 __all__ = [
     "User",
@@ -257,4 +258,6 @@ __all__ = [
     "AgentDatasetSnapshot",
     "AgentStrategyConsent",
     "AgentStrategyTrainingJob",
+    "StrategyStudyRun",
+    "StrategyStudyTrade",
 ]

@@ -410,3 +410,177 @@ def test_research_rejects_notional_above_starting_cash(client, auth_headers):
         json={"starting_cash": "500", "notional_per_trade": "1000"},
     )
     assert response.status_code == 422
+
+
+# -- durable records --------------------------------------------------------
+
+
+def _second_user_headers(client):
+    registration = {
+        "risk_acknowledged": True,
+        "email": "other@alethra.io",
+        "password": "otherpass123",
+        "display_name": "Other User",
+        "user_type": "individual",
+    }
+    client.post("/api/auth/register", json=registration)
+    login = client.post(
+        "/api/auth/login",
+        json={"email": registration["email"], "password": registration["password"]},
+    )
+    return {"Authorization": f"Bearer {login.json()['access_token']}"}
+
+
+def test_durable_research_run_stores_every_trade_and_exports_csv(client, auth_headers):
+    _install({1440: _ohlc_rows(1440)})
+
+    response = client.post(
+        "/api/v1/strategy-lab/research/runs",
+        headers=auth_headers,
+        json={"interval_minutes": 1440, "folds": 3},
+    )
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["lane"] == "strategy_research_simulated"
+    assert body["simulated"] is True
+    assert body["orders_supported"] is False
+    assert body["bar_count"] == 720
+    assert body["dataset_fingerprint"]
+    assert body["dataset_integrity_ok"] is True
+    assert body["trade_count"] == len(body["trades"])
+    assert body["trades"], "the synthetic oscillating series should produce trades"
+
+    running = Decimal(body["settings"]["starting_cash"])
+    for trade in body["trades"]:
+        for field in (
+            "signal_time",
+            "entry_time",
+            "exit_time",
+            "entry_price",
+            "exit_price",
+            "quantity",
+            "gross_pnl",
+            "commission",
+            "slippage_cost",
+            "total_cost",
+            "net_pnl",
+            "cash_after",
+            "bars_held",
+            "mfe_pct",
+            "mae_pct",
+            "pnl_reason_en",
+            "pnl_reason_zh",
+        ):
+            assert trade[field] is not None, field
+        assert trade["outcome"] in ("win", "loss", "flat")
+        assert trade["direction"] in ("long", "short")
+        assert trade["exit_reason"] in (
+            "target",
+            "target_gap",
+            "stop",
+            "stop_gap",
+            "time_stop",
+        )
+        running += Decimal(trade["net_pnl"])
+        assert Decimal(trade["cash_after"]) == running
+
+    run_id = body["id"]
+
+    listing = client.get(
+        "/api/v1/strategy-lab/research/runs",
+        headers=auth_headers,
+        params={"instrument_id": INSTRUMENT, "interval_minutes": 1440},
+    )
+    assert listing.status_code == 200
+    records = listing.json()["records"]
+    assert [record["id"] for record in records] == [run_id]
+    assert "trades" not in records[0]
+
+    detail = client.get(
+        f"/api/v1/strategy-lab/research/runs/{run_id}",
+        headers=auth_headers,
+        params={"include_bars": "true"},
+    )
+    assert detail.status_code == 200
+    stored = detail.json()
+    assert len(stored["bars"]) == 720
+    assert stored["bars"][0]["open_time"].endswith("+00:00")
+    assert stored["trades"] == body["trades"]
+
+    export = client.get(
+        f"/api/v1/strategy-lab/research/runs/{run_id}/trades.csv",
+        headers=auth_headers,
+    )
+    assert export.status_code == 200
+    assert export.headers["content-type"].startswith("text/csv")
+    rows = export.text.splitlines()
+    assert rows[0].startswith("trade_index,fold,direction,rule_id")
+    assert len(rows) == 1 + body["trade_count"]
+    assert export.headers["content-disposition"].startswith("attachment;")
+
+
+def test_durable_research_record_is_owner_scoped(client, auth_headers):
+    _install({1440: _ohlc_rows(1440)})
+    created = client.post(
+        "/api/v1/strategy-lab/research/runs",
+        headers=auth_headers,
+        json={"interval_minutes": 1440, "folds": 3},
+    )
+    assert created.status_code == 201, created.text
+    run_id = created.json()["id"]
+
+    other_headers = _second_user_headers(client)
+    assert (
+        client.get(
+            f"/api/v1/strategy-lab/research/runs/{run_id}", headers=other_headers
+        ).status_code
+        == 404
+    )
+    assert (
+        client.get(
+            f"/api/v1/strategy-lab/research/runs/{run_id}/trades.csv",
+            headers=other_headers,
+        ).status_code
+        == 404
+    )
+    other_list = client.get(
+        "/api/v1/strategy-lab/research/runs", headers=other_headers
+    )
+    assert other_list.status_code == 200
+    assert other_list.json()["records"] == []
+
+
+def test_durable_research_refusal_writes_nothing(client, auth_headers):
+    _install({1440: _ohlc_rows(1440, count=60)})
+
+    refused = client.post(
+        "/api/v1/strategy-lab/research/runs",
+        headers=auth_headers,
+        json={"interval_minutes": 1440},
+    )
+    assert refused.status_code == 409
+    assert refused.json()["detail"]["reason"] == "insufficient_dataset"
+
+    listing = client.get("/api/v1/strategy-lab/research/runs", headers=auth_headers)
+    assert listing.status_code == 200
+    assert listing.json()["records"] == []
+
+
+def test_durable_research_requires_authentication(client):
+    response = client.post(
+        "/api/v1/strategy-lab/research/runs", json={"interval_minutes": 1440}
+    )
+    assert response.status_code == 401
+
+
+def test_trade_csv_neutralizes_formula_cells():
+    from app.services.strategy_study_store import _csv_cell
+
+    assert _csv_cell("=SUM(A1)") == "'=SUM(A1)"
+    assert _csv_cell("+123") == "'+123"
+    assert _csv_cell("-123") == "'-123"
+    assert _csv_cell("@cmd") == "'@cmd"
+    assert _csv_cell(Decimal("-1.25")) == "-1.25"
+    assert _csv_cell(None) == ""
+    assert _csv_cell(True) == "true"

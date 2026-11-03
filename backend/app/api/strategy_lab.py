@@ -2,22 +2,33 @@
 
 Read-only with respect to the platform's books: a run fetches public venue
 candles, computes in memory and returns the result. It writes no portfolio row,
-send no order and touches no payment state. The only external calls are the
+sends no order and touches no payment state. The only external calls are the
 bounded Kraken OHLC reads, and they use the same shared upstream budget as the
 other crypto routes.
+
+The durable research routes additionally store the study, its exact completed
+bars and every out-of-sample buy/sell so the owner can review, export and
+re-check the simulation later. A stored study is evidence of what the engine
+did, never a claim that the strategy is profitable.
 """
 
 from __future__ import annotations
 
+import logging
 from decimal import Decimal
-from typing import List, Optional
+from typing import List, Optional, Tuple
+from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field, model_validator
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
 
 from app.api.crypto_failures import crypto_failure
 from app.auth.jwt import get_current_user
+from app.auth.safety import rate_limit
 from app.data.crypto_instruments import CRYPTO_INSTRUMENTS, get_crypto_instrument
+from app.database import get_db
 from app.models.user import User
 from app.providers.crypto_registry import get_crypto_provider
 from app.providers.kraken_provider import KRAKEN_INTERVALS, KrakenError
@@ -43,8 +54,19 @@ from app.services.strategy_research import (
     ResearchSettings,
     run_study,
 )
+from app.services.strategy_study_store import (
+    get_study,
+    list_studies,
+    persist_study,
+    run_detail,
+    run_summary,
+    trades_csv,
+)
+
 
 router = APIRouter(prefix="/strategy-lab", tags=["strategy-lab"])
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_INSTRUMENT_ID = "CRYPTO:KRAKEN:BTC-USD"
 BAR_LIMIT = 720
@@ -90,6 +112,20 @@ def _require_instrument(instrument_id: str):
             },
         )
     return instrument
+
+
+def _instrument_payload(instrument) -> dict:
+    return {
+        "instrument_id": instrument.instrument_id,
+        "exchange": instrument.exchange.value,
+        "pair": instrument.symbol.replace("-", "/"),
+        "base_asset": instrument.base_asset,
+        "quote_asset": instrument.quote_asset,
+        "price_precision": instrument.price_precision,
+        "quantity_precision": instrument.quantity_precision,
+        "read_only": True,
+        "orders_supported": False,
+    }
 
 
 class StrategyResearchRequest(BaseModel):
@@ -184,30 +220,17 @@ def strategy_lab_run(
     except StrategyLabError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.as_dict())
 
-    result["instrument"] = {
-        "instrument_id": instrument.instrument_id,
-        "exchange": instrument.exchange.value,
-        "pair": instrument.symbol.replace("-", "/"),
-        "base_asset": instrument.base_asset,
-        "quote_asset": instrument.quote_asset,
-        "price_precision": instrument.price_precision,
-        "quantity_precision": instrument.quantity_precision,
-        "read_only": True,
-        "orders_supported": False,
-    }
+    result["instrument"] = _instrument_payload(instrument)
     return result
 
 
-@router.post("/research")
-def strategy_lab_research(
-    payload: StrategyResearchRequest,
-    current_user: User = Depends(get_current_user),
-):
-    """Cost-aware multi-bar study with walk-forward out-of-sample selection.
+def _research_study(
+    payload: StrategyResearchRequest, *, include_trades: bool
+) -> Tuple[dict, List[LabBar], dict]:
+    """Fetch one interval, run the study and attach its provenance.
 
-    One venue read supplies one interval; the study then runs entirely in
-    memory. Rule/exit selection for each fold reads only the folds before it,
-    and the in-sample grid is returned only as a comparison, never as evidence.
+    The same path serves the ad-hoc preview and the durable record so both
+    describe the same engine over the same completed bars.
     """
     instrument = _require_instrument(payload.instrument_id)
 
@@ -267,7 +290,7 @@ def strategy_lab_research(
                 slippage_rate=payload.slippage_rate,
             ),
             folds=payload.folds,
-            include_trades=payload.include_trades,
+            include_trades=include_trades,
         )
     except ValueError as exc:
         raise HTTPException(
@@ -276,7 +299,7 @@ def strategy_lab_research(
         )
 
     data_nature = provider.get_data_quality(payload.instrument_id).get("data_nature", "unknown")
-    result["dataset"] = {
+    dataset = {
         "instrument_id": payload.instrument_id,
         "interval_minutes": payload.interval_minutes,
         "provider_id": provider.provider_id,
@@ -292,15 +315,130 @@ def strategy_lab_research(
         "is_stale": series.is_stale,
         "source": "venue_completed_bars",
     }
-    result["instrument"] = {
-        "instrument_id": instrument.instrument_id,
-        "exchange": instrument.exchange.value,
-        "pair": instrument.symbol.replace("-", "/"),
-        "base_asset": instrument.base_asset,
-        "quote_asset": instrument.quote_asset,
-        "price_precision": instrument.price_precision,
-        "quantity_precision": instrument.quantity_precision,
-        "read_only": True,
-        "orders_supported": False,
-    }
+    result["dataset"] = dataset
+    result["instrument"] = _instrument_payload(instrument)
+    return result, bars, dataset
+
+
+@router.post("/research")
+def strategy_lab_research(
+    payload: StrategyResearchRequest,
+    current_user: User = Depends(get_current_user),
+    _rate_limit=Depends(rate_limit("strategy_research")),
+):
+    """Cost-aware multi-bar study with walk-forward out-of-sample selection.
+
+    One venue read supplies one interval; the study then runs entirely in
+    memory. Rule/exit selection for each fold reads only the folds before it,
+    and the in-sample grid is returned only as a comparison, never as evidence.
+    This preview writes nothing; use ``/research/runs`` to keep the record.
+    """
+    result, _bars, _dataset = _research_study(
+        payload, include_trades=payload.include_trades
+    )
     return result
+
+
+@router.post(
+    "/research/runs",
+    status_code=status.HTTP_201_CREATED,
+)
+def strategy_research_run_create(
+    payload: StrategyResearchRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    _rate_limit=Depends(rate_limit("strategy_research")),
+):
+    """Run the study and store it with every out-of-sample buy/sell.
+
+    The stored bars are the exact completed bars the engine read, so the run
+    can be re-checked after the venue's rolling window has moved past it.
+    """
+    result, bars, dataset = _research_study(payload, include_trades=True)
+    try:
+        run = persist_study(
+            db,
+            user_id=current_user.id,
+            result=result,
+            bars=bars,
+            dataset=dataset,
+        )
+    except SQLAlchemyError:
+        logger.exception("strategy study could not be stored")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "reason": "study_store_unavailable",
+                "message": (
+                    "The study ran but could not be stored, so no durable record "
+                    "was created. Check that the database schema is current."
+                ),
+            },
+        )
+    return run_detail(run)
+
+
+@router.get("/research/runs")
+def strategy_research_run_list(
+    instrument_id: Optional[str] = Query(default=None),
+    interval_minutes: Optional[int] = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """The caller's stored studies, newest first."""
+    runs = list_studies(
+        db,
+        user_id=current_user.id,
+        limit=limit,
+        instrument_id=instrument_id,
+        interval_minutes=interval_minutes,
+    )
+    return {
+        "lane": "strategy_research_simulated",
+        "simulated": True,
+        "orders_supported": False,
+        "records": [run_summary(run) for run in runs],
+    }
+
+
+def _require_owned_study(db: Session, user: User, run_id: UUID):
+    run = get_study(db, user_id=user.id, run_id=run_id)
+    if run is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"reason": "study_run_not_found", "run_id": str(run_id)},
+        )
+    return run
+
+
+@router.get("/research/runs/{run_id}")
+def strategy_research_run_detail(
+    run_id: UUID,
+    include_bars: bool = Query(default=False),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """One stored study with its per-trade record.
+
+    ``include_bars=true`` also returns the exact bars the engine read, which is
+    what an external backtest needs to reproduce the run.
+    """
+    run = _require_owned_study(db, current_user, run_id)
+    return run_detail(run, include_bars=include_bars)
+
+
+@router.get("/research/runs/{run_id}/trades.csv")
+def strategy_research_run_trades_csv(
+    run_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Owner-authorized CSV export of the run's out-of-sample trades."""
+    run = _require_owned_study(db, current_user, run_id)
+    filename = f"strategy-study-{run.id}-trades.csv"
+    return Response(
+        content=trades_csv(run),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

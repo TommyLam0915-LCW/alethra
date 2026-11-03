@@ -4,9 +4,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import AppShell from '@/components/shell/AppShell';
-import CandleChart, { type CandleChartRow } from '@/components/market/CandleChart';
+import CandleChart, {
+  type CandleChartRow,
+  type ChartMarker,
+} from '@/components/market/CandleChart';
 import CryptoPaperPanel from '@/components/market/CryptoPaperPanel';
 import StrategyLabPanel from '@/components/market/StrategyLabPanel';
+import StrategyResearchPanel from '@/components/market/StrategyResearchPanel';
 import { ApiError, api } from '@/lib/api';
 import { formatDateTime } from '@/lib/format';
 import {
@@ -111,6 +115,7 @@ export default function CryptoMarketPage() {
   const [hidden, setHidden] = useState(false);
   const [barEvent, setBarEvent] = useState<BarEvent | null>(null);
   const [budgetFrozen, setBudgetFrozen] = useState(false);
+  const [researchMarkers, setResearchMarkers] = useState<ChartMarker[]>([]);
 
   const requestRef = useRef(0);
   const activeKeyRef = useRef('');
@@ -271,6 +276,11 @@ export default function CryptoMarketPage() {
       is_final: candle.is_final,
     }));
   }, [payload]);
+
+  const chartIntervalMinutes = useMemo(
+    () => overview?.intervals.find((option) => option.label === interval)?.minutes ?? 0,
+    [overview, interval],
+  );
 
   const connectionState: CryptoConnectionState =
     hidden || paused
@@ -679,6 +689,7 @@ export default function CryptoMarketPage() {
                   emptyTitle="No candles to show yet"
                   emptyDetail="The venue returned no completed or forming candles; the chart is never filled with simulated prices."
                   testIdPrefix="crypto"
+                  markers={researchMarkers}
                 />
               </div>
               <div style={{ marginTop: 12, fontSize: 12, color: 'var(--text-secondary)' }}>
@@ -721,6 +732,16 @@ export default function CryptoMarketPage() {
           <StrategyLabPanel
             instrumentId={instrumentId}
             instrumentLabel={instrument?.pair ?? 'BTC/USD'}
+          />
+        )}
+
+        {instrumentId && (
+          <StrategyResearchPanel
+            instrumentId={instrumentId}
+            instrumentLabel={instrument?.pair ?? 'BTC/USD'}
+            chartIntervalMinutes={chartIntervalMinutes}
+            chartIntervalLabel={interval}
+            onMarkersChange={setResearchMarkers}
           />
         )}
       </div>
