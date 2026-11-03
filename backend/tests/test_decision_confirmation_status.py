@@ -228,6 +228,7 @@ def test_agent_decision_stays_pending_and_marker_text_does_not_confirm(
     assert body["confirmation_status"] == "pending_owner_confirmation"
     assert body["confirmed_by"] is None
     assert body["confirmation_provenance"] is None
+    assert body["owner_verified"] is False
 
     _grant_consent(client, auth_headers, version_id)
     eligibility = _eligibility(client, auth_headers)
@@ -261,6 +262,7 @@ def test_human_recording_needs_an_explicit_owner_confirmation(client, auth_heade
     assert recorded.json()["actor_type"] == "human"
     assert recorded.json()["confirmation_status"] == "pending_owner_confirmation"
     assert recorded.json()["confirmed_by"] is None
+    assert recorded.json()["owner_verified"] is False
 
     _grant_consent(client, auth_headers, version_id)
     before = _eligibility(client, auth_headers)
@@ -285,6 +287,7 @@ def test_human_recording_needs_an_explicit_owner_confirmation(client, auth_heade
     assert detail["confirmation_status"] == "confirmed"
     assert detail["confirmed_by"] == str(owner_id)
     assert detail["confirmation_provenance"] == "human"
+    assert detail["owner_verified"] is True
     assert detail["confirmation_label_id"] == confirmed.json()["id"]
     assert detail["confirmed_at"] is not None
 
@@ -303,6 +306,13 @@ def test_confirmation_written_by_a_non_human_channel_is_not_counted(
     event_id = _add_human_event(owner_id, version_uuid)
     _add_label(owner_id, event_id, actor_type="agent")
     _grant_consent(client, auth_headers, version_id)
+
+    detail = client.get(
+        f"/api/v1/human-decisions/{event_id}", headers=auth_headers
+    ).json()
+    assert detail["confirmation_status"] == "confirmed"
+    assert detail["confirmation_provenance"] == "agent"
+    assert detail["owner_verified"] is False
 
     eligibility = _eligibility(client, auth_headers)
     assert eligibility["status"] == "NOT_ELIGIBLE"
@@ -366,3 +376,9 @@ def test_owner_exclusion_is_reported_but_never_training_data(client, auth_header
     assert review["summary"]["excluded"] == 1
     assert review["decisions"][0]["confirmation_status"] == "excluded"
     assert review["decisions"][0]["usable_for_training"] is False
+
+    detail = client.get(
+        f"/api/v1/human-decisions/{event_id}", headers=auth_headers
+    ).json()
+    assert detail["confirmation_status"] == "excluded"
+    assert detail["owner_verified"] is False

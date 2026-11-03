@@ -128,6 +128,7 @@ def _event_to_response(
         confirmed_at=confirmation["confirmed_at"],
         confirmation_label_id=confirmation["label_id"],
         confirmation_provenance=confirmation["provenance"],
+        owner_verified=confirmation["owner_verified"],
         created_at=event.created_at,
         updated_at=event.updated_at,
     )

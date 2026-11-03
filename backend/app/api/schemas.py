@@ -1541,6 +1541,10 @@ class HumanDecisionResponse(BaseModel):
     confirmed_at: Optional[datetime] = None
     confirmation_label_id: Optional[UUID] = None
     confirmation_provenance: Optional[str] = None
+    # True only when the review label was written through a password-authenticated
+    # session. A label from an agent or unknown channel is reported but never
+    # promoted to an owner confirmation.
+    owner_verified: bool = False
     execution_status: str
     supersedes_event_id: Optional[UUID]
     metadata_json: Optional[Dict[str, Any]]
