@@ -404,3 +404,46 @@ Not customer-verifiable, and not claimed as fixed:
 The customer's `research_run` is 5/5 with 0 remaining after their own authorized study;
 `ai_usage` is 0/10. We did not spend quota, and any further robustness study needs a
 monthly limit change from the owner.
+
+## 14. Owner-approved trial allowance (2026-11-03)
+
+The customer could not continue: `research_run` was 5/5 with 0 remaining, which is the
+free-tier default (`FREE_PLAN_ENTITLEMENT`) because the account had no entitlement row.
+The owner approved raising the monthly limit to a suitable amount.
+
+| | before | after |
+|---|---|---|
+| account | `alethra-customer-t1-20261031@example.com` (`e96b7532-4033-4120-90fa-0b403f9e053a`), `is_admin: false` | same |
+| entitlement row | none → source `free_plan` | `f5853876-ef35-4c20-b59b-e8acf7f721e9`, `granted_by` = `candidate.owner@example.com` (`71c23aea-1d91-5d91-947c-595f2a7e13b8`) |
+| `research_run_limit` | 5 (free tier) | 20 |
+| `ai_usage_limit` | 10 (free tier) | 10 (unchanged) |
+| `export_limit` | 2 (free tier) | 2 (unchanged) |
+| `forward_simulation_limit` | 3 (free tier) | 3 (unchanged) |
+| support tier / expiry | none / none | standard / none |
+
+20 is a trial allowance between the free tier (5) and the paid starter tier (50); only
+`research_run` changes, so no other capability moves.
+
+Verified through the product's own read paths (`app.auth.entitlements.get_quota_status`,
+`app.services.billing.check_quota`) on the candidate database:
+
+```
+research_run: limit 20, used 5, reserved 0, remaining 15, source entitlement,
+              entitlement_active true, support_tier standard
+ai_usage:     limit 10, used 0, reserved 0, remaining 10
+check_quota(research_run_limit, monthly): allowed true, used 5, limit 20, remaining 15
+```
+
+No admin account exists on this database, so the admin grant route
+(`POST /api/v1/pilot/entitlements`) was not used. The row was inserted with the same
+shape that route creates, by `.local/candidate/probes/grant_trial_entitlement.py`
+(untracked). No counters, reservations, runs or audit rows were modified; deleting the
+row restores the free tier exactly.
+
+Consequence for FB-24: the 429 text is reachable only when `remaining` is below the
+study cost. With 15 remaining the customer will not hit it on the next study; if they
+want to observe it immediately, the allowance can be reset to `used + 1` (6) on request,
+which makes the next create refuse before any charge.
+
+§13.4 records the state before this change; this section supersedes it from the same
+day.
