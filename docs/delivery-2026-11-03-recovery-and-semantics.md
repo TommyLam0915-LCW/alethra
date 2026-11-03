@@ -447,3 +447,129 @@ which makes the next create refuse before any charge.
 
 §13.4 records the state before this change; this section supersedes it from the same
 day.
+
+## 15. Open boundary items executed on the internal probe account (2026-11-03)
+
+The owner approved working through the items §13.2 left open. They were executed on the
+internal probe account (`candidate.owner@example.com`,
+`71c23aea-1d91-5d91-947c-595f2a7e13b8`, `is_admin: false`) through the product's own
+HTTP paths, authenticated by the loopback-only candidate-session endpoint. The customer
+account and its quota were not used, no customer session was impersonated, and no admin
+token was minted. ④ is not probed; §15.4 says why.
+
+### 15.1 The deployment changed, and the commit is named
+
+The process serving these probes reports:
+
+| field | before (served since fd32728) | now |
+|---|---|---|
+| `code_commit` | `991127985d76e2f978d28eea059f4035aeda142e` | `6ee6b610f2339a354fc7fdb0a5964d82d932c8c3` |
+| `code_dirty` | false | false |
+| `openapi_sha256` | `4a3409438d50738db4bca82faa9bb164bc8fe28ff6cac36f602bc7152da3a256` | `01ebcef6e853b11bc42d6ee4a8ca1f30ba42f99d375d987e53effae4cf9d2124` |
+| `openapi_canonical_sha256` | `d08ba3e7…` | `f30b3f036cd54a9b4f96a94c67701369fca00ebe0923c1e55cd1c035c61a27cb` |
+| paths / operations | 239 / 281 | 239 / 281 (unchanged) |
+| `alembic_revision` | `d5f6a7b8c9d0` | `d5f6a7b8c9d0` |
+
+This is exactly the case the customer raised: the same 239 paths and 281 operations,
+a different served document, because one response field was added. The deployment id is
+the pair *(fingerprint, `code_commit`)*; `6ee6b61` is the commit the customer can build
+and diff.
+
+### 15.2 What changed: `owner_verified` on the decision readback
+
+`GET /api/v1/human-decisions/{id}` reported `confirmation_status: "confirmed"` for a
+label whose writing channel was `unknown`, while `GET /api/v1/decision-review` reported
+`confirmed: 0, unverified_provenance: 205` for the same 205 rows. Both were reading the
+same stored label; only the readback omitted the provenance judgement.
+
+The response now carries `owner_verified`, computed with the same rule the review bucket
+uses (`status == confirmed and provenance == human`). Stored status, stored labels and
+history are unchanged; a non-human label is still reported, never promoted.
+
+```
+GET /api/v1/human-decisions/33fe0f9b-d6c3-5b35-acef-2f140fb0e367
+actor_type: unknown, confirmation_status: confirmed,
+confirmation_provenance: unknown, confirmed_by: 71c23aea-…, owner_verified: false
+```
+
+`backend/tests/test_decision_confirmation_status.py` covers pending, owner-confirmed,
+agent-provenance and owner-excluded paths; 5 passed on SQLite.
+
+### 15.3 What each open item now shows
+
+| item | request | observed | status |
+|---|---|---|---|
+| ① 3-bar floor | `POST /experiments/0dab6af7…/robustness/plan` for `buy_and_hold` version `ef32d5b6…` | 200; `required_bars: 3`; rule "3 bars: the engine's minimum slice length for a template that declares no numeric warm-up. This is a planning floor, not a signal look-back." | closed |
+| ② `data_source=auto` | `POST /versions/ef32d5b6…/runs?data_source=auto` | 201, `completed`; `result_json.data_source_used: stored`; checksum `54a2cc16…` identical to both earlier stored runs; warning "Data source: stored/cached data (kraken)." | closed |
+| ③ read-only dataset identity | `GET /runs/b73223d2…`, `/runs/compare`, `/market/crypto/stored` | run: engine `1.1.0`, config_hash `b589e15b…`, dataset_checksum `54a2cc16…`, dataset_snapshot_id `null`; compare: `same_experiment: true`, `fair_comparison: false`, dimensions dataset `differ`, period/costs/engine/spec_source `match`; crypto: 720 stored Kraken bars, `data_nature: live` | closed on this account |
+| ④ open position without a mark | not probed | no ordinary customer path: orders are refused without a price, and marks read bars at or before the session cursor, which only moves forward. Reaching the branch needs a data-state change that conflicts with the no-market-data-deletion rule. | test-level only, see §15.4 |
+| ⑥ `engine_version` coexistence | batch run `b73223d2…`; new replay session `99ecbd86…` (version `a96d06a6…`, provider `demo`), one `POST /advance` | batch: `engine_version 1.1.0`. Replay: `SimulationDecision 4eed9f8b…`, step 1, snapshot `2024-01-02`, `engine_version: "1.1.0"`, `decision_type: simulated_entry`. The session's own `simulation_policy_version: "1.0.0"` is a separate session-level field, not the pricing engine. | closed |
+| ⑦ actor / source / confirmation | `POST /human-decisions` on session `385006bd…` through the passwordless owner channel | 201; `actor_type: unknown`, `confirmation_status: pending_owner_confirmation`, `confirmed_by: null`, `owner_verified: false`; `/decision-review` then `206 total, 0 confirmed, 206 unverified_provenance` | closed, see §15.5 |
+| FB-24 429 | `POST /experiments/a21c0d7f…/robustness` at `remaining: 0` | 429 `insufficient_quota`: `required: 1`, `authorizations_required: 1`, `required_backtests: 2`, `remaining: 0`, `used: 5`, `limit: 5`, `check_url: /api/v1/usage/quota?quota_type=research_run_limit&period=monthly`; message "This plan needs 1 research-run authorization but only 0 remain … The whole study of 2 backtests is charged as this one unit, not per backtest." No charge occurred (quota stayed 5/5). | closed |
+
+Two adjacent facts worth keeping with ①: the locked `buy_and_hold` version on US:AAPL
+(`a96d06a6…`) is refused by the planner before the warm-up rule is reached —
+`robustness_refused`: "US:AAPL has more than one data provider in this period (demo,
+synthetic). A robustness study must bind a single provider, otherwise slices would mix
+two price series." That refusal is correct and separate from the 3-bar floor; the floor
+was observed on a template with no numeric warm-up that binds one provider.
+
+### 15.4 The verifiable / not-verifiable boundary, restated
+
+Verifiable from the response alone, now demonstrated:
+
+- the warm-up planning floor and its rule text (①);
+- `data_source` resolution and the recorded `data_source_used` (②);
+- run identity: engine, config hash, dataset checksum, snapshot id, and comparison
+  dimensions including `fair_comparison` (③);
+- the replay engine stamp on a booked `SimulationDecision`, next to a batch run (⑥);
+- `actor_type`, `confirmation_provenance` and `owner_verified` as separate fields (⑦).
+
+Not verifiable, by design, and not claimed:
+
+- ④: there is no ordinary customer path to an open position without a mark. The branch
+  is covered at test level (`backend/tests/test_paper_portfolio_valuation.py` asserts
+  `unpriced_assets` and the null unrealised figure); producing it on a live account
+  would require deleting or rewriting market data, which is forbidden.
+- ③ per-record strategy-lab identity: the probe owner has 0 strategy-lab records, so the
+  per-record detail path is route-documented but was not read on a record. Reading it
+  needs the account that owns such a record.
+
+Requires the customer's own act (not an agent step):
+
+- ⑦ confirmation: a decision becomes `owner_verified: true` only when the account owner
+  writes a review label through a password-authenticated session:
+  `POST /api/v1/decision-review/{event_id}/labels` with `{"state": "confirmed"}`. An
+  agent credential is refused with 403; a passwordless/token channel records `unknown`
+  provenance and stays unverified. That single act was deliberately left to the owner.
+
+### 15.5 State ledger for this round
+
+Probe account (`71c23aea…`):
+
+| counter / artifact | before | after |
+|---|---|---|
+| `research_run` | 4/5, remaining 1 | 5/5, remaining 0 (the ② `auto` run) |
+| `forward_simulation` | 0/3 | 0/3 (session creation is not charged) |
+| `ai_usage` / `export` | 4/10, 0/2 | unchanged |
+| new run | — | `5854faa8-66fe-4a34-b70d-8a1657ca6fc4` (`stored`) |
+| new decision event | — | `6b905895-ebdf-4c05-9f0d-06a37207d025` (`unknown`, pending) |
+| new replay session + decision | — | `99ecbd86-c11d-4be1-89b8-3a4526090106`, `4eed9f8b-56e9-491c-9b1a-df54017fd008` |
+
+Customer account: untouched — `research_run` remains 5/20 with 15 remaining (§14).
+No market data was deleted, no version was unlocked, no migration revision was stamped,
+and no historical run, decision or audit row was rewritten. The 205 seeded decisions keep
+their stored status; only the readback gained a field.
+
+The pointer to the probe's last research-run unit is now spent, so the next robustness
+create on this account also returns the FB-24 429 until the owner changes the limit.
+
+### 15.6 Where the raw evidence lives
+
+All untracked, under `.local/candidate/probes/`:
+
+- `inventory-20261103T163708+0800.json` — account inventory before the batch;
+- `round7-20261103T164109+0800.json` — ③, ⑦, ②, FB-24 capture and quota after each;
+- `round7-supplement-20261103T164128+0800.json` — ① on BTC, AAPL provider refusal,
+  seeded-decision readback, auto-run detail;
+- `round7-replay-engine-20261103T164254+0800.json` — ⑥ session, advance, decision readback.
