@@ -9,8 +9,10 @@ Provides:
 import hashlib
 import json
 import logging
+import subprocess
 import time
 import weakref
+from pathlib import Path
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -88,6 +90,44 @@ _HTTP_METHODS = frozenset(
     {"get", "put", "post", "delete", "options", "head", "patch", "trace"}
 )
 _IDENTITY_CACHE: "weakref.WeakKeyDictionary[object, dict]" = weakref.WeakKeyDictionary()
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _code_identity() -> dict:
+    """The code this process runs, because a fingerprint is not a build id.
+
+    Two builds can share an OpenAPI document while returning different field
+    values, so the served hash alone cannot say which one is live. ``null``
+    means the checkout is not a git worktree (or git is unavailable), not that
+    the tree is clean.
+    """
+    try:
+        commit = subprocess.run(
+            ["git", "-C", str(_REPO_ROOT), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        status = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(_REPO_ROOT),
+                "status",
+                "--porcelain",
+                "--untracked-files=no",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {"code_commit": None, "code_dirty": None}
+    commit_sha = commit.stdout.strip()
+    if commit.returncode != 0 or not commit_sha:
+        return {"code_commit": None, "code_dirty": None}
+    dirty = bool(status.stdout.strip()) if status.returncode == 0 else None
+    return {"code_commit": commit_sha, "code_dirty": dirty}
 
 
 def _api_identity(app) -> dict:
@@ -113,6 +153,7 @@ def _api_identity(app) -> dict:
             "operations": sum(
                 1 for item in paths.values() for method in item if method in _HTTP_METHODS
             ),
+            **_code_identity(),
         }
         _IDENTITY_CACHE[app] = cached
     return cached

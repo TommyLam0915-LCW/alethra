@@ -85,3 +85,10 @@ class TestReadinessIdentity:
         assert identity["paths"] > 0
         assert identity["operations"] >= identity["paths"]
         assert "alembic_revision" in identity
+        # A fingerprint is not a build id: two builds can share the document
+        # while returning different values. The code commit says which one ran.
+        commit = identity["code_commit"]
+        assert commit is None or (len(commit) == 40 and all(c in "0123456789abcdef" for c in commit))
+        assert identity["code_dirty"] in (True, False, None)
+        if commit is not None:
+            assert identity["code_dirty"] is not None
