@@ -2,13 +2,17 @@
 
 Provides:
   GET /health       -- liveness probe (basic, no dependency checks)
-  GET /health/ready -- readiness probe (verifies DB, schema and Redis)
+  GET /health/ready -- readiness probe (verifies DB, schema and Redis, and
+                       reports the running API contract identity)
 """
 
+import hashlib
+import json
 import logging
 import time
+import weakref
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
@@ -80,6 +84,40 @@ def _check_redis() -> dict:
         return {"status": "unavailable", "error": "connection failed"}
 
 
+_HTTP_METHODS = frozenset(
+    {"get", "put", "post", "delete", "options", "head", "patch", "trace"}
+)
+_IDENTITY_CACHE: "weakref.WeakKeyDictionary[object, dict]" = weakref.WeakKeyDictionary()
+
+
+def _api_identity(app) -> dict:
+    """The served OpenAPI document's identity, computed once per process.
+
+    ``info.version`` stays 1.0.0 because changing it changes the document the
+    customer anchors on, so the fingerprint itself is the version marker. The
+    raw hash is over the exact bytes ``/openapi.json`` serves (compact,
+    ``ensure_ascii=False``); the canonical hash sorts keys and uses compact
+    separators so it is stable across serializers.
+    """
+    cached = _IDENTITY_CACHE.get(app)
+    if cached is None:
+        spec = app.openapi()
+        served = json.dumps(spec, ensure_ascii=False, separators=(",", ":"))
+        canonical = json.dumps(spec, sort_keys=True, separators=(",", ":"))
+        paths = spec.get("paths", {})
+        cached = {
+            "info_version": spec.get("info", {}).get("version"),
+            "openapi_sha256": hashlib.sha256(served.encode()).hexdigest(),
+            "openapi_canonical_sha256": hashlib.sha256(canonical.encode()).hexdigest(),
+            "paths": len(paths),
+            "operations": sum(
+                1 for item in paths.values() for method in item if method in _HTTP_METHODS
+            ),
+        }
+        _IDENTITY_CACHE[app] = cached
+    return cached
+
+
 @router.get("/health")
 def health():
     """Liveness probe -- always returns healthy if the process is running."""
@@ -87,7 +125,7 @@ def health():
 
 
 @router.get("/health/ready")
-def readiness():
+def readiness(request: Request):
     """Readiness probe -- verifies downstream dependency connectivity.
 
     Returns 200 only when all critical dependencies are reachable and the
@@ -114,6 +152,10 @@ def readiness():
             "database": db_check,
             "schema": schema_check,
             "redis": redis_check,
+        },
+        "identity": {
+            **_api_identity(request.app),
+            "alembic_revision": schema_check.get("alembic_revision"),
         },
     }
     return JSONResponse(content=body, status_code=200 if overall_ok else 503)

@@ -1,5 +1,7 @@
 """Tests for health check endpoints."""
 
+import hashlib
+
 import pytest
 from unittest.mock import patch
 from fastapi.testclient import TestClient
@@ -65,3 +67,21 @@ class TestHealthReadiness:
             data = resp.json()
             assert data["status"] == "not_ready"
             assert data["checks"]["redis"]["status"] == "unavailable"
+
+
+class TestReadinessIdentity:
+    """The readiness payload carries the identity of the served contract."""
+
+    def test_identity_hashes_the_exact_served_openapi_bytes(self, client):
+        with patch("app.api.health._check_database", return_value={"status": "connected", "latency_ms": 1.0}), \
+             patch("app.api.health._check_redis", return_value={"status": "not_configured"}):
+            ready = client.get("/health/ready")
+        identity = ready.json()["identity"]
+        served = client.get("/openapi.json").content
+        assert identity["openapi_sha256"] == hashlib.sha256(served).hexdigest()
+        assert len(identity["openapi_canonical_sha256"]) == 64
+        assert identity["openapi_canonical_sha256"] != identity["openapi_sha256"]
+        assert identity["info_version"] == "1.0.0"
+        assert identity["paths"] > 0
+        assert identity["operations"] >= identity["paths"]
+        assert "alembic_revision" in identity

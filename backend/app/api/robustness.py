@@ -25,6 +25,7 @@ from app.models.quota import QuotaReservation
 from app.models.robustness import RobustnessAttempt, RobustnessStudy
 from app.models.user import User
 from app.services.robustness import (
+    QUOTA_CHECK_PATH,
     RobustnessRefused,
     build_plan,
     execute_study,
@@ -34,8 +35,6 @@ from app.services.robustness import (
 )
 
 router = APIRouter(tags=["robustness"])
-
-QUOTA_CHECK_PATH = "/api/v1/usage/quota?quota_type=research_run_limit&period=monthly"
 
 
 def _owned_experiment(db: Session, experiment_id: UUID, user: User) -> Experiment:

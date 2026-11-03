@@ -206,6 +206,12 @@ class TestPlan:
         assert plan["quota"]["authorizations_required"] == 1
         assert plan["quota"]["estimated_attempts"] == 9
         assert plan["quota"]["sufficient"] is True
+        # The executable usage check is present at plan level, not only in the
+        # 429 a customer may never be able to trigger.
+        assert plan["quota"]["check_url"] == (
+            "/api/v1/usage/quota?quota_type=research_run_limit&period=monthly"
+        )
+        assert plan["reachability"]["check_url"] == plan["quota"]["check_url"]
         assert plan["ready"] is True
         assert plan["required_bars_rule"]
 
@@ -683,6 +689,10 @@ class TestQuotaAndOwnership:
         assert plan.json()["quota"]["authorizations_required"] == 1
         assert plan.json()["quota"]["estimated_attempts"] == 9
         assert plan.json()["quota"]["sufficient"] is False
+        assert plan.json()["quota"]["check_url"] == (
+            "/api/v1/usage/quota?quota_type=research_run_limit&period=monthly"
+        )
+        assert plan.json()["reachability"]["check_url"] == plan.json()["quota"]["check_url"]
         assert plan.json()["ready"] is False
         # A zero monthly limit is a permanent block, not a transient shortage:
         # waiting for usage to reset cannot make this study startable.

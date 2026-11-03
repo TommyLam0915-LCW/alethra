@@ -33,6 +33,10 @@ from app.services.research_runs import execute_backtest_run
 MAX_ATTEMPTS_DEFAULT = 12
 MAX_ATTEMPTS_HARD = 24
 
+# The plan and the 429 carry the same executable object, so usage can be
+# checked from either surface without being told to "go look at a page".
+QUOTA_CHECK_PATH = "/api/v1/usage/quota?quota_type=research_run_limit&period=monthly"
+
 DEFAULT_CONFIG: Dict[str, Any] = {
     "slices": 3,
     "folds": 2,
@@ -231,6 +235,7 @@ def reachability(quota: Dict[str, Any], required: int = 1) -> Dict[str, Any]:
         "entitlement_active": entitlement_active,
         "permanently_unreachable": reason is not None,
         "reason": reason,
+        "check_url": QUOTA_CHECK_PATH,
     }
 
 
@@ -658,6 +663,7 @@ def build_plan(
             "sufficient": sufficient,
             "permanently_unreachable": reach["permanently_unreachable"],
             "limit_block_reason": reach["reason"],
+            "check_url": reach["check_url"],
         },
         "ready": sufficient and entitlement_active,
     }
