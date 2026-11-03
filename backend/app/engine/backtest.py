@@ -398,6 +398,14 @@ def run_backtest(
                 data_source_used = "mixed"
             elif from_storage:
                 data_source_used = "stored"
+                # Nothing was fetched, so provider_name is still unset here.
+                # Name the stored dataset instead of leaving the provenance
+                # warning with empty parentheses.
+                stored_names = sorted({
+                    pid for pids in stored_provider_ids.values() for pid in pids
+                })
+                provider_name = ", ".join(stored_names) if stored_names else "Stored"
+                feed_mode = "cached"
             else:
                 data_source_used = "provider"
         else:

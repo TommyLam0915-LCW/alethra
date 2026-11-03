@@ -15,12 +15,13 @@ from app.engine.backtest import run_backtest, _stored_bars_to_dataframe
 
 class FakeStoredBar:
     """Mimics MarketDataBar model attributes used by _stored_bars_to_dataframe."""
-    def __init__(self, bar_date, open, high, low, close):
+    def __init__(self, bar_date, open, high, low, close, provider_id=None):
         self.bar_date = bar_date
         self.open = open
         self.high = high
         self.low = low
         self.close = close
+        self.provider_id = provider_id
 
 
 class TestStoredBarsToDataframe:
@@ -106,6 +107,24 @@ class TestBacktestWithStoredData:
         assert result["feed_mode"] == "cached"
         assert result["dataset_checksum"] is not None
         assert len(result["transactions"]) > 0
+
+    @patch("app.services.market_data_storage.MarketDataStorage")
+    def test_auto_with_all_bars_stored_names_the_stored_provider(self, MockStorage):
+        """A stored-only auto run must not report an empty data source label."""
+        bars = self._make_bars()
+        for bar in bars:
+            bar.provider_id = "kraken"
+        spec = self._make_strategy_spec(asset_id="CRYPTO:KRAKEN:BTC-USD")
+        db = MagicMock()
+        MockStorage.return_value.get_bars.return_value = bars
+
+        result = run_backtest(spec, db_session=db, data_source="auto")
+
+        assert result["run_status"] == "completed"
+        assert result["data_source_used"] == "stored"
+        assert result["data_provider"] == "kraken"
+        assert result["feed_mode"] == "cached"
+        assert "Data source: stored/cached data (kraken)." in result["warnings"]
 
     @patch("app.services.market_data_storage.MarketDataStorage")
     def test_auto_data_source_falls_back_to_provider(self, MockStorage):

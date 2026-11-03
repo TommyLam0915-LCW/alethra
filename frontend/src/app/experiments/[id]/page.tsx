@@ -405,6 +405,12 @@ export default function ExperimentDetailPage() {
 
   const latestRun = runs.find(r => r.status === 'completed');
   const currentVersion = versions.find((v) => v.id === experiment.current_version_id) ?? null;
+  // Crypto instruments are priced from venue bars stored on this server, so the
+  // page must not call every backtest "sample data".
+  const isVenueDataExperiment = Array.isArray(currentVersion?.strategy_spec?.asset_ids)
+    && currentVersion.strategy_spec.asset_ids.some(
+      (id: unknown) => typeof id === 'string' && id.startsWith('CRYPTO:')
+    );
   const isLocked = experiment.status === 'locked';
   // An experiment can carry the locked status while its current version has no
   // lock stamp (legacy rows). Replay needs the version stamp, so offer the lock
@@ -689,7 +695,9 @@ export default function ExperimentDetailPage() {
             </p>
             <p style={{ color: 'var(--text-muted)', fontSize: '14px' }}>
               Use the button above to start testing your hypothesis.<br />
-              Backtests run on historical sample data; results are for research only.
+              {isVenueDataExperiment
+                ? 'Backtests read the completed venue bars stored on this server; results are for research only.'
+                : 'Backtests run on historical sample data; results are for research only.'}
             </p>
           </div>
         ) : (
@@ -809,8 +817,18 @@ export default function ExperimentDetailPage() {
             )}
 
             <div style={{ marginTop: '16px', padding: '12px', backgroundColor: 'rgba(245,158,11,0.14)', borderRadius: '6px', fontSize: '14px' }}>
-              <strong>Note:</strong> These results come from historical sample data and do not predict future
-              performance. Alethra is a research tool, not investment advice.
+              {isVenueDataExperiment ? (
+                <>
+                  <strong>Note:</strong> These results come from venue bars already stored on this server — internal
+                  research and simulated fills only, not cleared for external redistribution. They do not predict
+                  future performance. Alethra is a research tool, not investment advice.
+                </>
+              ) : (
+                <>
+                  <strong>Note:</strong> These results come from historical sample data and do not predict future
+                  performance. Alethra is a research tool, not investment advice.
+                </>
+              )}
             </div>
           </div>
         )}
@@ -951,8 +969,10 @@ export default function ExperimentDetailPage() {
 
             <div style={{ marginTop: '16px', padding: '12px', backgroundColor: 'var(--surface-2)', borderRadius: '6px', fontSize: '13px', color: 'var(--text-muted)' }}>
               <strong>Disclaimer:</strong> The method review is a deterministic rule check, not investment advice. A
-              PASS does not mean the strategy is profitable or suitable for live trading. This system uses sample
-              data, not live market data.
+              PASS does not mean the strategy is profitable or suitable for live trading.{' '}
+              {isVenueDataExperiment
+                ? 'This experiment priced venue bars stored on this server; the method review does not verify their quality.'
+                : 'This system uses sample data, not live market data.'}
             </div>
           </div>
         )}

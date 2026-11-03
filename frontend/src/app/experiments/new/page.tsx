@@ -122,6 +122,7 @@ function NewExperimentForm() {
   const [error, setError] = useState('');
 
   const [instruments, setInstruments] = useState<InstrumentOption[]>([]);
+  const [cryptoInstruments, setCryptoInstruments] = useState<InstrumentOption[]>([]);
   const [assetTab, setAssetTab] = useState<'real' | 'demo'>('real');
 
   const [draft, setDraft] = useState<ResearchDraft | null>(null);
@@ -139,6 +140,12 @@ function NewExperimentForm() {
   useEffect(() => {
     api.instruments.list().then((data: any) => {
       setInstruments(data.instruments || []);
+    }).catch(() => {});
+    // Crypto pairs are listed only under market=CRYPTO: the shared catalog is
+    // the equity bar feed, and mixing a live venue series into it would put
+    // the synthetic-data disclaimer over real prices.
+    api.instruments.list('CRYPTO').then((data: any) => {
+      setCryptoInstruments(data.instruments || []);
     }).catch(() => {});
   }, []);
 
@@ -297,10 +304,18 @@ function NewExperimentForm() {
     <div className="container" style={{ maxWidth: '800px', paddingTop: '40px', paddingBottom: '40px' }}>
       <h1 style={{ marginBottom: '30px' }}>{brand.ui.experiment.createTitle}</h1>
 
-      <div className="disclaimer">
-        <strong>Heads-up:</strong> this workspace backtests on sample data. Results are for research only and do not
-        represent real market performance.
-      </div>
+      {assetId.startsWith('CRYPTO:') ? (
+        <div className="disclaimer" data-testid="exp-data-nature-note">
+          <strong>Heads-up:</strong> you selected a venue data instrument. This backtest reads the completed Kraken
+          public spot bars already stored on this server — internal research and simulated fills only, not cleared for
+          external redistribution. Results are not live trading and do not represent an executable market outcome.
+        </div>
+      ) : (
+        <div className="disclaimer">
+          <strong>Heads-up:</strong> this workspace backtests on sample data. Results are for research only and do not
+          represent real market performance.
+        </div>
+      )}
 
       {draftLoading && (
         <div className="alert alert-info" style={{ marginBottom: '20px', fontSize: '13px' }}>
@@ -415,7 +430,7 @@ function NewExperimentForm() {
             <label htmlFor="exp-asset">Asset *</label>
             <div style={{ display: 'flex', gap: '8px', marginBottom: '8px' }}>
               <button type="button" className={assetTab === 'real' ? 'btn btn-primary' : 'btn btn-secondary'} aria-pressed={assetTab === 'real'} style={{ fontSize: '12px', padding: '4px 12px' }} onClick={() => setAssetTab('real')}>
-                Real instruments (US/HK)
+                Real instruments (US/HK/crypto)
               </button>
               <button type="button" className={assetTab === 'demo' ? 'btn btn-primary' : 'btn btn-secondary'} aria-pressed={assetTab === 'demo'} style={{ fontSize: '12px', padding: '4px 12px' }} onClick={() => setAssetTab('demo')}>
                 Sample instruments
@@ -454,6 +469,13 @@ function NewExperimentForm() {
                       <option key={i.instrument_id} value={i.instrument_id}>{i.instrument_id} — {i.name}</option>
                     ))}
                   </optgroup>
+                  {cryptoInstruments.length > 0 && (
+                    <optgroup label="Crypto spot (Kraken, live public data)">
+                      {cryptoInstruments.map(i => (
+                        <option key={i.instrument_id} value={i.instrument_id}>{i.instrument_id} — {i.name}</option>
+                      ))}
+                    </optgroup>
+                  )}
                 </>
               ) : (
                 DEMO_ASSETS.filter(a => a !== 'DEMO-BENCHMARK').map(a => (
@@ -524,9 +546,11 @@ function NewExperimentForm() {
             {coverageLoaded ? (
               <>
                 Data coverage for {assetId}: the server stores bars from {coverage?.stored_start ?? 'UNKNOWN'} to{' '}
-                {coverage?.stored_end ?? 'UNKNOWN'} ({coverage?.stored_bars ?? 0} bars); the provider declares it can
-                supply {coverage?.available_start ?? 'UNKNOWN'} to {coverage?.available_end ?? 'UNKNOWN'}. Backtests,
-                replays and fills only read stored bars, so the dates default to that stored range.
+                {coverage?.stored_end ?? 'UNKNOWN'} ({coverage?.stored_bars ?? 0} bars);{' '}
+                {coverage?.available_start && coverage?.available_end
+                  ? `the provider declares it can supply ${coverage.available_start} to ${coverage.available_end}.`
+                  : 'the provider does not declare a historical window (availability UNKNOWN), so only the stored bars are usable.'}{' '}
+                Backtests, replays and fills only read stored bars, so the dates default to that stored range.
               </>
             ) : (
               <>
@@ -536,6 +560,14 @@ function NewExperimentForm() {
               </>
             )}
           </p>
+
+          {assetId.startsWith('CRYPTO:') && (
+            <div className="alert alert-warning" data-testid="exp-crypto-note" style={{ fontSize: '13px', marginBottom: '16px' }}>
+              Kraken public spot data — internal research and simulated fills only, not cleared for external
+              redistribution. Backtests read the daily bars already stored on this server; to add newer bars, use
+              &ldquo;Fetch latest venue bars&rdquo; on the crypto market page.
+            </div>
+          )}
 
           {coverageLoaded && (coverage?.stored_bars ?? 0) === 0 && (
             <div className="alert alert-warning" data-testid="exp-coverage-empty" style={{ fontSize: '13px', marginBottom: '16px' }}>

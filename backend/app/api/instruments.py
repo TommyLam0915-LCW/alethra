@@ -21,6 +21,11 @@ from app.services.price_view import (
     stored_bar_view,
     validate_timeframe,
 )
+from app.data.crypto_instruments import (
+    CRYPTO_INSTRUMENTS,
+    get_crypto_instrument,
+    get_kraken_pair,
+)
 from app.data.real_instruments import (
     ALL_REAL_INSTRUMENTS,
     get_instrument_by_id,
@@ -270,9 +275,11 @@ def list_instruments(
     if market:
         try:
             m = Market(market.upper())
-            instruments = [i for i in instruments if i.market == m]
         except ValueError:
-            raise HTTPException(400, f"Unknown market: {market}. Use US or HK.")
+            raise HTTPException(400, f"Unknown market: {market}. Use US, HK or CRYPTO.")
+        if m is Market.CRYPTO:
+            return _crypto_catalog(asset_type=asset_type, q=q, limit=limit)
+        instruments = [i for i in instruments if i.market == m]
 
     if asset_type:
         asset_type_upper = asset_type.upper()
@@ -330,6 +337,9 @@ def get_instrument(instrument_id: str, db: Session = Depends(get_db)):
     """
     inst = get_instrument_by_id(instrument_id)
     if inst is None:
+        crypto = get_crypto_instrument(instrument_id)
+        if crypto is not None:
+            return _crypto_instrument_detail(crypto, db)
         raise HTTPException(404, f"Instrument not found: {instrument_id}")
 
     provider = get_data_provider()
@@ -823,6 +833,205 @@ def get_market(market_code: str):
             }
             for i in instruments
         ],
+    }
+
+
+CRYPTO_REDISTRIBUTION = "NOT_CLEARED_FOR_EXTERNAL_REDISTRIBUTION"
+CRYPTO_TERMS_NOTE_ZH = (
+    "Kraken 公開行情只供本機／內部研究及模擬交易使用，未經核對不得對外重新分發。"
+)
+CRYPTO_AVAILABILITY_NOTE = (
+    "The venue serves only its most recent ~720 candles per interval; older "
+    "history cannot be paged, so the provider declares no historical window."
+)
+
+
+def _crypto_instrument_payload(instrument) -> dict:
+    mapping = get_kraken_pair(instrument.instrument_id)
+    return {
+        "instrument_id": instrument.instrument_id,
+        "symbol": instrument.symbol,
+        "name": instrument.name,
+        "market": instrument.market.value,
+        "exchange": instrument.exchange.value,
+        "asset_type": instrument.asset_type.value,
+        "currency": instrument.currency.value,
+        "timezone": instrument.timezone,
+        "lot_size": None,
+        "lot_size_verified": False,
+        "price_precision": instrument.price_precision,
+        "quantity_precision": instrument.quantity_precision,
+        "min_quantity": (
+            format(instrument.min_quantity, "f") if instrument.min_quantity is not None else None
+        ),
+        "min_notional": (
+            format(instrument.min_notional, "f") if instrument.min_notional is not None else None
+        ),
+        "provider_mappings": (
+            [
+                {
+                    "provider_id": mapping.provider_id,
+                    "provider_symbol": mapping.provider_symbol,
+                    "provider_exchange": mapping.provider_exchange,
+                    "metadata": mapping.metadata,
+                }
+            ]
+            if mapping
+            else []
+        ),
+        "data_window": {
+            "timeframe": "1d",
+            "available_start": None,
+            "available_end": None,
+            "availability_source": "unknown",
+            "availability_note": CRYPTO_AVAILABILITY_NOTE,
+        },
+    }
+
+
+def _crypto_catalog(
+    asset_type: Optional[str],
+    q: Optional[str],
+    limit: Optional[int],
+) -> dict:
+    """Crypto pairs are listed only when explicitly asked for.
+
+    Every other catalog reader (the market-data page, the training picker)
+    expects an equity bar feed and one synthetic-data disclaimer. Appending
+    crypto to their default list would put a live venue series behind that
+    label, so this lane requires ``market=CRYPTO``.
+    """
+    instruments = list(CRYPTO_INSTRUMENTS)
+    if asset_type:
+        wanted = asset_type.upper()
+        instruments = [i for i in instruments if i.asset_type.value == wanted]
+    if q:
+        needle = q.lower()
+        instruments = [
+            i for i in instruments
+            if needle in i.symbol.lower() or needle in i.name.lower()
+        ]
+    if limit is not None:
+        instruments = instruments[:limit]
+
+    return {
+        "instruments": [_crypto_instrument_payload(i) for i in instruments],
+        "total": len(instruments),
+        "data_available": True,
+        "data_status": {
+            "state": "venue_public_data",
+            "provider_id": "kraken",
+            "provider_name": "Kraken",
+            "feed_mode": "public_market_data_only",
+            "detail": "Live public spot data; stored daily bars back research runs.",
+        },
+        "provider": "Kraken",
+        "provider_id": "kraken",
+        "redistribution": CRYPTO_REDISTRIBUTION,
+        "data_disclaimer": (
+            "Live public venue data (Kraken). Internal research and simulated "
+            "fills only — not cleared for external redistribution."
+        ),
+        "data_disclaimer_zh": (
+            "Kraken 公開即時行情，只供內部研究及模擬成交，未經核可不得對外重新分發。"
+        ),
+    }
+
+
+def _crypto_coverage(instrument_id: str, db: Session) -> dict:
+    storage = MarketDataStorage(db)
+    metadata = storage.get_metadata(instrument_id, "kraken")
+    datasets = [
+        {
+            "provider_id": m.provider_id,
+            "data_nature": m.data_nature,
+            "bar_count": m.total_bars or 0,
+            "first_bar_date": m.first_bar_date.isoformat() if m.first_bar_date else None,
+            "last_bar_date": m.last_bar_date.isoformat() if m.last_bar_date else None,
+        }
+        for m in storage.get_all_metadata(instrument_id)
+    ]
+    return {
+        "timeframe": "1d",
+        "provider_id": "kraken",
+        "available_start": None,
+        "available_end": None,
+        "availability_source": "unknown",
+        "availability_note": CRYPTO_AVAILABILITY_NOTE,
+        "stored_start": (
+            metadata.first_bar_date.isoformat() if metadata and metadata.first_bar_date else None
+        ),
+        "stored_end": (
+            metadata.last_bar_date.isoformat() if metadata and metadata.last_bar_date else None
+        ),
+        "stored_bars": metadata.total_bars if metadata else 0,
+        "stored_rows_total": sum(d["bar_count"] for d in datasets),
+        "stored_datasets": datasets,
+    }
+
+
+def _crypto_instrument_detail(instrument, db: Session) -> dict:
+    """One crypto pair as the research form reads it: identity + stored bars.
+
+    The equity detail route asks the configured equity provider for a latest
+    bar; doing that here would answer about a different lane. This branch only
+    reads what storage already holds and says so.
+    """
+    storage = MarketDataStorage(db)
+    rows = sorted(
+        storage.get_bars(instrument_id=instrument.instrument_id, provider_id="kraken"),
+        key=lambda r: r.bar_timestamp,
+    )
+    latest = rows[-1] if rows else None
+    metadata = storage.get_metadata(instrument.instrument_id, "kraken")
+    coverage = _crypto_coverage(instrument.instrument_id, db)
+    payload = _crypto_instrument_payload(instrument)
+    return {
+        **payload,
+        "lane": "crypto_live_research",
+        "read_only": True,
+        "orders_supported": False,
+        "data_source": "Kraken",
+        "feed_mode": "public_market_data_only",
+        "latest_bar": (
+            {
+                "date": latest.bar_timestamp.date().isoformat(),
+                "open": latest.open,
+                "high": latest.high,
+                "low": latest.low,
+                "close": latest.close,
+                "volume": (
+                    format(latest.volume_decimal, "f")
+                    if latest.volume_decimal is not None
+                    else None
+                ),
+                "source": "storage",
+                "stored_at": latest.fetched_at.isoformat() if latest.fetched_at else None,
+            }
+            if latest
+            else None
+        ),
+        "data_quality": {
+            "data_nature": metadata.data_nature if metadata else None,
+            "timezone": instrument.timezone,
+            "currency": instrument.currency.value,
+            "last_bar_date": (
+                metadata.last_bar_date.isoformat()
+                if metadata and metadata.last_bar_date
+                else None
+            ),
+            "total_bars": metadata.total_bars if metadata else 0,
+            "last_success_at": (
+                metadata.last_success_at.isoformat()
+                if metadata and metadata.last_success_at
+                else None
+            ),
+            "redistribution": CRYPTO_REDISTRIBUTION,
+            "note_zh": CRYPTO_TERMS_NOTE_ZH,
+        },
+        "data_coverage": coverage,
+        "redistribution": CRYPTO_REDISTRIBUTION,
+        "note_zh": CRYPTO_TERMS_NOTE_ZH,
     }
 
 
