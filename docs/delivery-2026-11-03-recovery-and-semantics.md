@@ -344,3 +344,63 @@ and the OpenAPI document itself is unchanged: paths `239`, operations `281`, raw
 Code commit: `7277c66` (both changes). Verify with
 `test_health.py::TestReadinessIdentity` (the identity hash equals `sha256` of the served
 `/openapi.json` bytes) and the `check_url` assertions in `test_robustness_studies.py`.
+
+## 13. Build identity, and what the customer can verify
+
+### 13.1 A fingerprint is not a build id
+
+Two builds can serve the same OpenAPI document while returning different values:
+`f61f9f4` (`quota.required: 1`) and `df69adb` (`quota.required == len(cells)`) share
+the 2026-11-03 fingerprint. The customer cannot tell them apart from the quartet, so
+the quartet must never be presented as "this is the build".
+
+`GET /health/ready` → `identity` now also returns:
+
+- `code_commit`: `git rev-parse HEAD` of the checkout the process runs from;
+- `code_dirty`: whether tracked files differ from that commit (`--untracked-files=no`);
+- both computed once per process; `null` means "not a git worktree / git unavailable",
+  not "clean".
+
+The deployment id is therefore the pair *(fingerprint, code_commit)*; the fingerprint
+only says whether the contract changed. Every deployment note must name the commit.
+The code build in this deployment is `4df288b`; the docs commit only adds this text.
+
+### 13.2 Boundary confirmed with the customer (2026-11-03, seventh message)
+
+Verified by the customer themselves (`is_admin:false`, real writes where stated):
+
+- plan cost/billing: `quota.required == cells` 2/5/8/9, `authorizations_required: 1`,
+  `required_backtests` equal to cells, `reachability.required: 1`;
+- billing is charged on run, not on create: `POST …/robustness` → 201 `not_charged`
+  (`charge_on_next_run: true`), `POST …/run` → `charged`, `research_run` 4→5 for nine
+  backtests; an invalid `request_id` returns 422 `uuid_parsing` **before** any charge;
+  `max_attempts: 4` against a plan of 8 still returns the unchanged 400;
+- `strategy-lab/research` and `…/research/runs`: `research_run`/`ai_usage` 0/0, data
+  `provider kraken`, `data_nature live`, `source venue_completed_bars`, 720 daily bars.
+
+Not customer-verifiable, and not claimed as fixed:
+
+| item | status | reason |
+|---|---|---|
+| FB-24 429 text itself | reachable now (`remaining 0` → create refuses before charge), but not yet observed by the customer | they asked to keep it open until seen |
+| ④ no bar ⇒ null | test-level only | no ordinary customer path; orders are refused without a price |
+| ① other templates ⇒ 3-bar floor | depends on a locked version of a template with no numeric warm-up | whether such a version exists in the account is unverified |
+| ⑥ `engine_version` coexistence | needs both a batch run and a simulation/replay artifact in one account | no simulation artifact asserted this round |
+| ⑦ actor/source vs confirmation | `actor_type`/source are readable; confirmation needs an explicit owner review action | no confirmation act performed |
+| upstream Kraken budget (60/hour, 400/day; 20/hour/account) | server-side only | no customer-readable counter; remains our self-report |
+| FB-19 | not ours | still in the customer's queue |
+| ② `data_source=auto`, ③ read-only dataset identity | not exercised this round | marked unverified |
+
+### 13.3 Customer tooling notes (their side, confirmed against source)
+
+- `GET /api/v1/strategy-lab/research/runs` returns the list under `records`, not `runs`
+  (`strategy_lab.py:401`).
+- The research preview's `bars` is a count (`strategy_lab.py:278,307`); the bar list is
+  under `bars` only when `?include_bars=true` is passed to the run detail endpoint
+  (`strategy_lab.py:418-428`). Same word, different shape.
+
+### 13.4 Quota state
+
+The customer's `research_run` is 5/5 with 0 remaining after their own authorized study;
+`ai_usage` is 0/10. We did not spend quota, and any further robustness study needs a
+monthly limit change from the owner.
