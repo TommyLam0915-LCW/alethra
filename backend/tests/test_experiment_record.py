@@ -491,11 +491,15 @@ class TestDecisionReview:
         }
         assert "觀望，等待突破確認。" in rationales
 
-        # The record-only intent lane is kept separate from replay decisions.
-        assert record["coverage"]["human_decisions"] == 1
-        assert len(session_entry["human_decisions"]) == 1
-        assert session_entry["human_decisions"][0]["action"] == "hold"
-        assert (
-            session_entry["human_decisions"][0]["rationale"]
-            == "記錄一筆只作研究用途的意向。"
-        )
+        # Both decision paths land on one ledger: the replay submission (now
+        # also recorded as a decision event) and the explicit record-only intent.
+        assert record["coverage"]["human_decisions"] == 2
+        assert len(session_entry["human_decisions"]) == 2
+        by_rationale = {
+            item["rationale"]: item for item in session_entry["human_decisions"]
+        }
+        intent_entry = by_rationale["記錄一筆只作研究用途的意向。"]
+        assert intent_entry["action"] == "hold"
+        replay_entry = by_rationale["觀望，等待突破確認。"]
+        assert replay_entry["action"] == "hold"
+        assert replay_entry["server_snapshot_date"]

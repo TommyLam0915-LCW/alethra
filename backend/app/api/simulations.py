@@ -11,6 +11,12 @@ from app.models.experiment_version import ExperimentVersion, VersionStatus
 from app.models.simulation import SimulationSession, SimulationDecision, SimulationStatus, DecisionType
 from app.auth.jwt import get_current_user
 from app.auth.provenance import request_actor_provenance
+from app.models.human_decision import (
+    HumanDecisionAction,
+    HumanDecisionEvent,
+    HumanDecisionExecutionStatus,
+)
+from app.api.human_decisions import _derive_server_context
 from app.api.schemas import (
     SimulationSessionCreate,
     SimulationSessionResponse,
@@ -2071,6 +2077,32 @@ def manual_decision(
             execution=existing_detail.get('execution'),
         )
 
+    # The replay decision also becomes a training-label candidate on the
+    # human-decision ledger, in the same transaction. A key already used by a
+    # different ledger event is a conflict rather than a silent relabel.
+    recorded_action = HumanDecisionAction(payload.action.lower())
+    recorded_quantity = None if recorded_action == HumanDecisionAction.hold else payload.quantity
+    existing_event = db.query(HumanDecisionEvent).filter(
+        HumanDecisionEvent.owner_id == current_user.id,
+        HumanDecisionEvent.simulation_session_id == session.id,
+        HumanDecisionEvent.idempotency_key == payload.idempotency_key,
+    ).first()
+    if existing_event is not None:
+        if (
+            existing_event.action != recorded_action
+            or existing_event.quantity != recorded_quantity
+            or (existing_event.rationale or None) != (payload.rationale or None)
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Idempotency key conflict: a different human-decision event "
+                    "already uses this key"
+                ),
+            )
+
+    actor_type = request_actor_provenance(request)
+
     # For NEW decisions: check mutable session state
     if session.status not in (SimulationStatus.pending, SimulationStatus.active):
         raise HTTPException(status_code=400, detail=f"Cannot make decisions on '{getattr(session.status, 'value', session.status)}' session")
@@ -2158,7 +2190,7 @@ def manual_decision(
             symbol=symbol,
             cutoff=cutoff,
             spec=spec,
-            actor_type=request_actor_provenance(request),
+            actor_type=actor_type,
             actor_id=current_user.id,
         )
 
@@ -2220,11 +2252,40 @@ def manual_decision(
 
     db.refresh(session)
 
+    human_event: Optional[HumanDecisionEvent] = None
+    if existing_event is None:
+        ctx = _derive_server_context(session, db)
+        event_metadata: Dict[str, Any] = {
+            "source": "manual_decision",
+            "simulation_step_number": step_number,
+        }
+        if payload.reflection:
+            event_metadata["reflection"] = payload.reflection
+        human_event = HumanDecisionEvent(
+            owner_id=current_user.id,
+            simulation_session_id=session.id,
+            idempotency_key=payload.idempotency_key,
+            action=recorded_action,
+            quantity=recorded_quantity,
+            rationale=payload.rationale,
+            server_strategy_version_id=ctx["strategy_version_id"],
+            server_instrument_id=ctx["instrument_id"],
+            server_step_number=ctx["step_number"],
+            server_snapshot_date=ctx["snapshot_date"],
+            server_data_cutoff_at=ctx["data_cutoff_at"],
+            decision_instant=ctx["decision_instant"],
+            execution_status=HumanDecisionExecutionStatus.record_only,
+            metadata_json=event_metadata,
+            supersedes_event_id=None,
+            actor_type=actor_type,
+        )
+        db.add(human_event)
+
     emit_event(
         db,
         entity_type="simulation", entity_id=session.id,
         event_type="manual_decision", actor_id=current_user.id,
-        actor_type=request_actor_provenance(request),
+        actor_type=actor_type,
         payload={
             "step_number": step_number,
             "action": action,
@@ -2243,6 +2304,25 @@ def manual_decision(
     )
 
     try:
+        db.flush()
+        if human_event is not None:
+            emit_event(
+                db,
+                entity_type="human_decision",
+                entity_id=str(human_event.id),
+                event_type="human_decision_created",
+                actor_id=current_user.id,
+                actor_type=actor_type,
+                payload={
+                    "action": action,
+                    "quantity": recorded_quantity,
+                    "idempotency_key": payload.idempotency_key,
+                    "simulation_session_id": str(session.id),
+                    "source": "manual_decision",
+                    "actor_type": actor_type,
+                },
+                data_cutoff_at=session.data_cutoff_at,
+            )
         db.commit()
     except IntegrityError:
         # Two requests carrying one idempotency key can both clear the read-side
