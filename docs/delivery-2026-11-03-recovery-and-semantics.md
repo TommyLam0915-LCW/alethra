@@ -473,7 +473,9 @@ The process serving these probes reports:
 This is exactly the case the customer raised: the same 239 paths and 281 operations,
 a different served document, because one response field was added. The deployment id is
 the pair *(fingerprint, `code_commit`)*; `6ee6b61` is the commit the customer can build
-and diff.
+and diff. The docs commit that adds this section changes no code, so the served identity
+stays `6ee6b61` and `code_dirty` stays false; the docs-only commit is named in the
+repository, not in the runtime identity.
 
 ### 15.2 What changed: `owner_verified` on the decision readback
 
