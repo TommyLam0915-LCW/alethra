@@ -289,3 +289,58 @@ The revision response computes `is_current` as `experiment.current_version_id ==
 version.id`. A new revision becomes current only when the experiment is not locked and
 the base version is not locked. With a locked current base the pointer stays put; with
 an unlocked non-current base it moves. That is the intended semantics, not two rules.
+
+## 12. Reachability text at plan level, and contract identity in the product
+
+### 12.1 The executable usage object is now on the plan
+
+FB-24 originally asked for a directly executable usage check. With one authorization
+per study, the 429 is only reachable when fewer than one unit remains, so a customer
+who still has a unit cannot exercise it. The same object is now part of the dry run:
+
+- `plan["quota"]["check_url"]` and `plan["reachability"]["check_url"]` both equal
+  `/api/v1/usage/quota?quota_type=research_run_limit&period=monthly`;
+- the plan also carries the numbers the check returns — `limit`, `unlimited`,
+  `entitlement_active`, `required_backtests`, `authorizations_required`,
+  `permanently_unreachable`, `limit_block_reason`;
+- the 429 detail keeps `check_url` and the same fields, so neither surface is "go look
+  at a page".
+
+Zero-write evidence (`.local/candidate/probes/plan-matrix-20261103T160527+0800.json`,
+experiment `a21c0d7f-db25-437b-b152-434d2ef0c9b3`, version `9355a68a-…`):
+
+| kind | cells | quota.required | authorizations_required | ready | sufficient | check_url |
+|---|---|---|---|---|---|---|
+| period_slices (slices=2) | 2 | 2 | 1 | true | true | present |
+| parameter_sensitivity | 5 | 5 | 1 | true | true | present |
+| walk_forward (folds=2) | 8 | 8 | 1 | true | true | present |
+| cost_scenarios | 9 | 9 | 1 | true | true | present |
+
+Usage before and after: `used 4 / limit 5 / remaining 1 / reserved 0`, unchanged.
+
+### 12.2 Contract identity is served by the product
+
+`GET /health/ready` now returns an `identity` block beside `checks`:
+
+```json
+{"identity": {
+  "info_version": "1.0.0",
+  "openapi_sha256": "4a340943…",
+  "openapi_canonical_sha256": "d08ba3e7…",
+  "paths": 239,
+  "operations": 281,
+  "alembic_revision": "d5f6a7b8c9d0"
+}}
+```
+
+`info.version` stays `1.0.0`, so the fingerprint is the version marker. The raw hash is
+over the exact bytes `/openapi.json` serves (compact, `ensure_ascii=False`); the
+canonical hash sorts keys and uses compact separators, which is the definition that
+reproduces the 2026-11-03 anchor. The values are computed once per process and cached,
+and the OpenAPI document itself is unchanged: paths `239`, operations `281`, raw
+`4a3409438d50738db4bca82faa9bb164bc8fe28ff6cac36f602bc7152da3a256`, canonical
+`d08ba3e7e58fca422e48782cdfd785ed3ec974c2dbc566f2969334330bf5f952`.
+
+Code commit: `7277c66` (both changes). Verify with
+`test_health.py::TestReadinessIdentity` (the identity hash equals `sha256` of the served
+`/openapi.json` bytes) and the `check_url` assertions in `test_robustness_studies.py`.
