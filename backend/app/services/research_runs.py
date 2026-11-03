@@ -75,6 +75,7 @@ def execute_backtest_run(
     provider_id: Optional[str] = None,
     event_payload: Optional[Dict[str, Any]] = None,
     actor_type: str = "unknown",
+    charge_quota: bool = True,
 ) -> ResearchRun:
     """Run one backtest, billed against the user's research_run quota.
 
@@ -82,6 +83,10 @@ def execute_backtest_run(
     (a study cell changes costs, parameters or the period). The run row stays
     bound to the source version and records the hash of the spec actually used,
     so a variant can never be mistaken for the published version.
+
+    ``charge_quota=False`` keeps the run rows and evidence intact but leaves
+    billing to the caller. Robustness studies use it because a whole study is
+    charged as one authorization unit, not one unit per backtest.
     """
     spec = strategy_spec if strategy_spec is not None else version.strategy_spec
     config_hash = compute_config_hash(spec)
@@ -116,7 +121,9 @@ def execute_backtest_run(
         data_cutoff_at=data_cutoff,
     )
 
-    reservation = reserve_quota(db, user.id, "research_run")
+    reservation = (
+        reserve_quota(db, user.id, "research_run") if charge_quota else None
+    )
 
     try:
         run.status = RunStatus.running
@@ -162,7 +169,8 @@ def execute_backtest_run(
         }
         run.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
-        settle_reservation(db, reservation.id)
+        if reservation is not None:
+            settle_reservation(db, reservation.id)
 
         emit_event(
             db,
@@ -198,7 +206,8 @@ def execute_backtest_run(
 
     except Exception as e:
         logger.exception("Research run failed")
-        release_reservation(db, reservation.id)
+        if reservation is not None:
+            release_reservation(db, reservation.id)
 
         run.status = RunStatus.failed
         run.error_details = _run_failure_detail(e)

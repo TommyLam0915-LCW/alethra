@@ -150,17 +150,19 @@ test.describe('robustness study journey', () => {
     journey.versionsBefore = versions.length;
   });
 
-  test('a plan priced above the remaining quota is refused before any run', async () => {
+  test('a nine-cell plan fits inside one authorization unit', async () => {
     await panel(page).waitFor({ timeout: 30000 });
     await page.getByTestId('robustness-kind').selectOption('cost_scenarios');
     await page.getByTestId('robustness-plan').click();
 
     const quota = page.getByTestId('robustness-quota');
     await expect(quota).toBeVisible({ timeout: 30000 });
-    // The cost grid is 3 × 3 = 9 cells; the free plan has fewer runs left.
-    await expect(page.getByTestId('robustness-estimated')).toContainText('estimated 9 attempts');
-    await expect(quota).toContainText('Quota is insufficient');
-    await expect(page.getByTestId('robustness-start')).toBeDisabled();
+    // The cost grid is 3 × 3 = 9 backtests, charged as one research-run unit,
+    // so the free plan's remaining units can start it.
+    await expect(page.getByTestId('robustness-estimated')).toContainText('estimated 9 backtests');
+    await expect(quota).toContainText('1 research-run authorization');
+    await expect(quota).toContainText('Quota is sufficient');
+    await expect(page.getByTestId('robustness-start')).toBeEnabled();
 
     const runs = await apiGet<Array<{ id: string }>>(
       page,
@@ -176,7 +178,8 @@ test.describe('robustness study journey', () => {
     await page.getByTestId('robustness-plan').click();
 
     const estimated = page.getByTestId('robustness-estimated');
-    await expect(estimated).toContainText('estimated 3 attempts');
+    await expect(estimated).toContainText('estimated 3 backtests');
+    await expect(estimated).toContainText('1 research-run authorization');
     await expect(page.getByTestId('robustness-quota')).toContainText('Quota is sufficient');
     await expect(page.getByTestId('robustness-plan-preview')).toContainText(
       'stored market data'

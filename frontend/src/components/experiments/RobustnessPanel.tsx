@@ -49,7 +49,10 @@ interface Plan {
     bars: number;
   };
   required_bars: number;
+  required_bars_rule?: string;
   estimated_attempts: number;
+  estimated_backtests?: number;
+  authorization_required?: number;
   max_attempts: number;
   config: Record<string, number>;
   cells: PlanCell[];
@@ -57,6 +60,7 @@ interface Plan {
   disclosures: string[];
   quota: {
     required: number;
+    estimated_attempts?: number;
     sufficient: boolean;
     unlimited?: boolean;
     limit?: number | null;
@@ -113,6 +117,14 @@ interface Aggregate {
     | null;
 }
 
+interface ReplayableCell {
+  cell_key: string;
+  label: string | null;
+  role: string | null;
+  period_start: string | null;
+  period_end: string | null;
+}
+
 interface Study {
   id: string;
   version_id: string;
@@ -121,6 +133,16 @@ interface Study {
   config: Record<string, number>;
   plan: Plan;
   aggregate: Aggregate;
+  authorization?: {
+    unit: string;
+    required: number;
+    estimated_attempts: number;
+    state: string;
+    charge_on_next_run: boolean;
+    reservation_id: string | null;
+    replayable_cells: ReplayableCell[];
+  };
+  replayable_cells?: ReplayableCell[];
   error_details: string | null;
   created_at: string | null;
   started_at: string | null;
@@ -326,15 +348,18 @@ export default function RobustnessPanel({
       >
         <h3 style={{ margin: 0 }}>Advanced studies and robustness</h3>
         <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
-          Each attempt is a real backtest and counts toward the research run quota
+          Each attempt is a real backtest; the whole study uses one research-run
+          authorization
         </span>
       </div>
 
       <p style={{ color: 'var(--text-secondary)', fontSize: '13px', marginTop: 0 }}>
-        Preview the plan first (number of attempts, data calendar, whether quota is
-        sufficient), then create and run it. A study does not modify the strategy
-        version. Every attempt is listed, including failed and skipped ones, and the
-        best single result is not treated as overall robustness.
+        Preview the plan first (number of attempts, data calendar, whether one
+        authorization unit is available), then create and run it. The whole study is
+        charged as one research-run unit when it starts; finishing a partial study
+        does not charge again. A study does not modify the strategy version. Every
+        attempt is listed, including failed and skipped ones, and the best single
+        result is not treated as overall robustness.
       </p>
 
       <div
@@ -497,9 +522,15 @@ export default function RobustnessPanel({
         >
           <div style={{ fontSize: '13px', marginBottom: '8px' }} data-testid="robustness-estimated">
             <strong>{KIND_LABEL[plan.kind] ?? plan.kind}</strong> · v{plan.version_number} ·{' '}
-            estimated <strong>{plan.estimated_attempts}</strong> attempts (cap{' '}
-            {plan.max_attempts}) · each slice needs at least {plan.required_bars} trading
-            days
+            estimated <strong>{plan.estimated_attempts}</strong> backtests (cap{' '}
+            {plan.max_attempts}) under <strong>{plan.authorization_required ?? 1}</strong>{' '}
+            research-run authorization · each slice needs at least {plan.required_bars}{' '}
+            trading days
+            {plan.required_bars_rule ? (
+              <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '2px' }}>
+                Warm-up rule: {plan.required_bars_rule}
+              </div>
+            ) : null}
           </div>
           <div style={{ fontSize: '13px', color: 'var(--text-muted)', marginBottom: '8px' }}>
             Data calendar:{' '}
@@ -513,7 +544,8 @@ export default function RobustnessPanel({
             {plan.calendar.providers.join(', ') || '—'}
           </div>
           <div style={{ fontSize: '13px', marginBottom: '8px' }} data-testid="robustness-quota">
-            Quota: this plan needs {plan.quota.required} runs
+            Quota: this study uses {plan.quota.required} research-run authorization for{' '}
+            {plan.quota.estimated_attempts ?? plan.estimated_attempts} backtests
             {plan.quota.unlimited
               ? '; the current plan is unlimited.'
               : `; used ${plan.quota.used ?? '—'} / limit ${plan.quota.limit ?? '—'}, ${
@@ -634,6 +666,40 @@ export default function RobustnessPanel({
               )}
             </div>
           </div>
+
+          {selected.authorization && (
+            <div
+              data-testid="robustness-authorization"
+              style={{
+                fontSize: '12px',
+                color: 'var(--text-secondary)',
+                margin: '0 0 10px',
+                padding: '8px 10px',
+                backgroundColor: 'var(--surface-2)',
+                borderRadius: '6px',
+              }}
+            >
+              Authorization: {selected.authorization.required} research-run unit for{' '}
+              {selected.authorization.estimated_attempts} backtests ·{' '}
+              {selected.authorization.state === 'charged'
+                ? 'already charged; re-running or finishing is free'
+                : selected.authorization.state === 'closed'
+                ? 'study closed without being charged'
+                : 'not charged yet; the unit is taken when the study starts'}
+              .
+              <div style={{ marginTop: '4px' }} data-testid="robustness-replayable">
+                {selected.replayable_cells && selected.replayable_cells.length > 0 ? (
+                  <>
+                    A run would execute {selected.replayable_cells.length} cell
+                    {selected.replayable_cells.length === 1 ? '' : 's'} that are not yet
+                    completed: {selected.replayable_cells.map((c) => c.label ?? c.cell_key).join(' · ')}
+                  </>
+                ) : (
+                  'No cells remain to run; every planned cell is completed.'
+                )}
+              </div>
+            </div>
+          )}
 
           {selected.attempts.length === 0 ? (
             <p style={{ fontSize: '13px', color: 'var(--text-muted)', margin: '0 0 12px' }}>

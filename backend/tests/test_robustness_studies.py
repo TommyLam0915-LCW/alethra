@@ -191,11 +191,17 @@ class TestPlan:
         joined = " ".join(plan["disclosures"])
         assert "the best single result is not used to stand in for" in joined
         assert "Built-in synthetic demo data (not real market prices)" in joined
+        assert "the whole study is one research-run unit" in joined
 
-        # Free plan has 5 research runs; a 9-cell study must say so up front.
-        assert plan["quota"]["sufficient"] is False
-        assert plan["quota"]["required"] == 9
-        assert plan["ready"] is False
+        # Nine backtests, but one authorization unit: the free plan's five
+        # units can start this study, and the plan says so before any run.
+        assert plan["authorization_required"] == 1
+        assert plan["estimated_backtests"] == 9
+        assert plan["quota"]["required"] == 1
+        assert plan["quota"]["estimated_attempts"] == 9
+        assert plan["quota"]["sufficient"] is True
+        assert plan["ready"] is True
+        assert plan["required_bars_rule"]
 
     def test_parameter_sensitivity_changes_one_parameter_at_a_time(
         self, client, auth_headers
@@ -297,7 +303,15 @@ class TestExecution:
         assert set(a["run_id"] for a in detail["attempts"]) == (
             _research_run_ids() - runs_before
         )
-        assert _quota_used() == used_before + 9
+        # Nine real research runs, one authorization unit.
+        assert _quota_used() == used_before + 1
+        assert detail["authorization"]["unit"] == "study"
+        assert detail["authorization"]["required"] == 1
+        assert detail["authorization"]["estimated_attempts"] == 9
+        assert detail["authorization"]["state"] == "charged"
+        assert detail["authorization"]["charge_on_next_run"] is False
+        assert detail["authorization"]["reservation_id"]
+        assert detail["replayable_cells"] == []
 
         # Same dataset, different costs: checksum must be identical everywhere.
         assert len({a["dataset_checksum"] for a in detail["attempts"]}) == 1
@@ -481,7 +495,8 @@ class TestExecution:
         assert len(detail["attempts"]) == 3
         refilled = next(a for a in detail["attempts"] if a["cell_key"] == broken_cell)
         assert refilled["status"] == "completed"
-        assert _quota_used() == used_before + 1
+        # Finishing a study that already holds its authorization is free.
+        assert _quota_used() == used_before
 
     def test_cancel_before_run_blocks_execution(self, client, auth_headers):
         _grant_research_runs(100)
@@ -582,22 +597,153 @@ class TestExecution:
 
 
 class TestQuotaAndOwnership:
-    def test_insufficient_quota_refuses_before_any_run(self, client, auth_headers):
+    def test_one_remaining_unit_starts_a_nine_cell_study(self, client, auth_headers):
+        """The headline complaint: 5 units, a 9-cell study, nothing could start."""
+        _grant_research_runs(1)
         exp = _create_experiment(client, auth_headers)
+        used_before = _quota_used()
+
+        plan = _plan(
+            client, auth_headers, exp["id"], exp["current_version_id"], "cost_scenarios"
+        )
+        assert plan.status_code == 200, plan.text
+        assert plan.json()["quota"]["remaining"] == 1
+        assert plan.json()["ready"] is True
+
+        created = _create_study(
+            client, auth_headers, exp["id"], exp["current_version_id"], "cost_scenarios"
+        )
+        assert created.status_code == 201, created.text
+        study = created.json()
+        assert study["authorization"]["charge_on_next_run"] is True
+        assert len(study["replayable_cells"]) == 9
+
+        ran = _run(client, auth_headers, study["id"])
+        assert ran.status_code == 200, ran.text
+        assert ran.json()["status"] == "completed"
+        assert len(ran.json()["attempts"]) == 9
+        assert _quota_used() == used_before + 1
+
+    def test_insufficient_quota_refuses_before_any_run(self, client, auth_headers):
+        _grant_research_runs(0)
+        exp = _create_experiment(client, auth_headers)
+        plan = _plan(
+            client, auth_headers, exp["id"], exp["current_version_id"], "cost_scenarios"
+        )
+        assert plan.status_code == 200, plan.text
+        assert plan.json()["authorization_required"] == 1
+        assert plan.json()["quota"]["required"] == 1
+        assert plan.json()["quota"]["estimated_attempts"] == 9
+        assert plan.json()["quota"]["sufficient"] is False
+        assert plan.json()["ready"] is False
+
         resp = _create_study(
             client, auth_headers, exp["id"], exp["current_version_id"], "cost_scenarios"
         )
         assert resp.status_code == 429, resp.text
         detail = resp.json()["detail"]
         assert detail["error"] == "insufficient_quota"
-        assert detail["required"] == 9
-        assert detail["remaining"] == 5
+        assert detail["unit"] == "study"
+        assert detail["required"] == 1
+        assert detail["estimated_attempts"] == 9
+        assert detail["remaining"] == 0
+        assert detail["check_url"] == (
+            "/api/v1/usage/quota?quota_type=research_run_limit&period=monthly"
+        )
+        assert "GET /api/v1/usage/quota" in detail["message"]
         assert "the study did not start" in detail["message"]
 
         listed = client.get(
             f"/api/v1/experiments/{exp['id']}/robustness", headers=auth_headers
         ).json()
         assert listed == []
+
+    def test_refused_execution_releases_the_authorization(
+        self, client, auth_headers, monkeypatch
+    ):
+        """A charge is released, not kept, when no cell produced evidence."""
+        from app.api import robustness as robustness_api
+        from app.services.robustness import RobustnessRefused
+
+        _grant_research_runs(5)
+        exp = _create_experiment(client, auth_headers)
+        created = _create_study(
+            client, auth_headers, exp["id"], exp["current_version_id"], "period_slices"
+        )
+        assert created.status_code == 201, created.text
+        study_id = created.json()["id"]
+        used_before = _quota_used()
+
+        def _refuse(*args, **kwargs):
+            raise RobustnessRefused("simulated refusal before any cell ran")
+
+        monkeypatch.setattr(robustness_api, "execute_study", _refuse)
+        refused = _run(client, auth_headers, study_id)
+        assert refused.status_code == 400, refused.text
+        assert refused.json()["detail"]["error"] == "robustness_refused"
+        assert _quota_used() == used_before
+
+        from app.models.robustness import RobustnessStudy
+
+        db = TestSession()
+        try:
+            study = (
+                db.query(RobustnessStudy)
+                .filter(RobustnessStudy.id == _uid(study_id))
+                .first()
+            )
+            assert study.authorization_reservation_id is None
+        finally:
+            db.close()
+
+        monkeypatch.undo()
+        retried = _run(client, auth_headers, study_id)
+        assert retried.status_code == 200, retried.text
+        assert retried.json()["status"] == "completed"
+        assert _quota_used() == used_before + 1
+
+    def test_concurrent_run_of_a_held_study_is_refused(self, client, auth_headers):
+        """An in-flight claim means another request is executing those cells."""
+        import uuid as _uuid
+
+        from app.models.quota import QuotaReservation
+        from app.models.robustness import RobustnessStudy
+        from app.lib.timeutil import utcnow
+
+        _grant_research_runs(5)
+        exp = _create_experiment(client, auth_headers)
+        created = _create_study(
+            client, auth_headers, exp["id"], exp["current_version_id"], "period_slices"
+        )
+        assert created.status_code == 201, created.text
+        study_id = created.json()["id"]
+        used_before = _quota_used()
+
+        db = TestSession()
+        try:
+            reservation = QuotaReservation(
+                id=_uuid.uuid4(),
+                user_id=_user_id(),
+                quota_type="research_run",
+                amount=1,
+                status="reserved",
+                created_at=utcnow(),
+            )
+            db.add(reservation)
+            study = (
+                db.query(RobustnessStudy)
+                .filter(RobustnessStudy.id == _uid(study_id))
+                .first()
+            )
+            study.authorization_reservation_id = reservation.id
+            db.commit()
+        finally:
+            db.close()
+
+        blocked = _run(client, auth_headers, study_id)
+        assert blocked.status_code == 409, blocked.text
+        assert blocked.json()["detail"]["error"] == "study_running"
+        assert _quota_used() == used_before
 
     def test_foreign_users_cannot_plan_read_or_run(self, client, auth_headers):
         _grant_research_runs(100)

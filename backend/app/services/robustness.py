@@ -81,12 +81,6 @@ class RobustnessRefused(Exception):
         super().__init__("; ".join(self.reasons))
 
 
-class QuotaExhausted(Exception):
-    def __init__(self, detail):
-        self.detail = detail
-        super().__init__("research_run quota exhausted")
-
-
 # ── Data calendar ────────────────────────────────────────────────────────────
 
 def _calendar(db: Session, spec: Dict[str, Any]) -> Dict[str, Any]:
@@ -181,6 +175,29 @@ def _required_bars(spec: Dict[str, Any]) -> int:
         holding = int(params.get("holding_days") or 5)
         return lookback + min(holding, 5) + 1
     return 3
+
+
+def _required_bars_rule(spec: Dict[str, Any]) -> str:
+    """The warm-up rule itself, so the number is not the only explanation."""
+    template = spec.get("template_type")
+    params = spec.get("signal_parameters") or {}
+    if template == "sma_crossover":
+        long_window = int(params.get("long_window") or 20)
+        return (
+            f"SMA crossover: long_window ({long_window}) + 1 bars, because the signal "
+            "engine evaluates its first crossover at index long_window + 1."
+        )
+    if template == "price_change_fixed_hold":
+        lookback = int(params.get("lookback_days") or 5)
+        holding = int(params.get("holding_days") or 5)
+        return (
+            f"Fixed-hold price change: lookback_days ({lookback}) + min(holding_days, 5) "
+            f"({min(holding, 5)}) + 1 bars. The planning rule counts at most five holding "
+            "days, so a longer holding period can still be open at the end of a slice."
+        )
+    return (
+        "3 bars: the engine's minimum for templates that declare no numeric warm-up."
+    )
 
 
 # ── Cell builders ────────────────────────────────────────────────────────────
@@ -538,12 +555,24 @@ def build_plan(
     quota = get_quota_status(db, user.id, "research_run")
     unlimited = bool(quota.get("unlimited"))
     remaining = quota.get("remaining")
-    sufficient = unlimited or (remaining is not None and remaining >= estimated)
+    # A study is authorized as one unit: the plan can contain many backtests,
+    # but starting it consumes a single research-run authorization. Counting
+    # one unit per cell made studies larger than the remaining allowance
+    # impossible to start, even when one authorization was still available.
+    authorization_required = 1
+    sufficient = unlimited or (
+        remaining is not None and remaining >= authorization_required
+    )
     # An expired or disabled entitlement cannot start the study even when units
     # remain, so the dry run must not report it as startable.
     entitlement_active = bool(quota.get("entitlement_active", True))
 
     disclosures = _disclosures(kind, calendar, merged)
+    disclosures.append(
+        f"Authorization: the whole study is one research-run unit. It runs "
+        f"{estimated} backtests under a single authorization, charged when the "
+        "study starts; continuing a study that already started does not charge again."
+    )
     requested = (spec.get("start_date"), spec.get("end_date"))
     effective = (calendar["dates"][0], calendar["dates"][-1])
     if requested != effective:
@@ -570,13 +599,21 @@ def build_plan(
             "bars": len(calendar["dates"]),
         },
         "required_bars": _required_bars(spec),
+        "required_bars_rule": _required_bars_rule(spec),
         "estimated_attempts": estimated,
+        "estimated_backtests": estimated,
+        "authorization_required": authorization_required,
         "max_attempts": max_attempts,
         "config": merged,
         "cells": cells,
         "selection_rule": SELECTION_RULES[kind],
         "disclosures": disclosures,
-        "quota": {**quota, "required": estimated, "sufficient": sufficient},
+        "quota": {
+            **quota,
+            "required": authorization_required,
+            "estimated_attempts": estimated,
+            "sufficient": sufficient,
+        },
         "ready": sufficient and entitlement_active,
     }
 
@@ -639,33 +676,20 @@ def _run_cell(
     # instead of an invisible attempt.
     db.commit()
 
-    try:
-        run = execute_backtest_run(
-            db,
-            user=user,
-            version=version,
-            experiment=experiment,
-            strategy_spec=cell["spec"],
-            actor_type=actor_type,
-            event_payload={
-                "robustness_study_id": str(study.id),
-                "cell_key": cell["cell_key"],
-            },
-        )
-    except Exception as exc:
-        status_code = getattr(exc, "status_code", None)
-        if status_code == 429:
-            # The reservation never happened; drop the pending run row and the
-            # started event that were flushed before the quota check.
-            db.rollback()
-            fresh = db.query(RobustnessAttempt).filter(RobustnessAttempt.id == attempt.id).first()
-            if fresh is not None:
-                fresh.status = "skipped"
-                fresh.error_details = "The research run quota ran out, so this attempt was not run."
-                fresh.completed_at = utcnow()
-                db.commit()
-            raise QuotaExhausted(getattr(exc, "detail", None))
-        raise
+    run = execute_backtest_run(
+        db,
+        user=user,
+        version=version,
+        experiment=experiment,
+        strategy_spec=cell["spec"],
+        actor_type=actor_type,
+        event_payload={
+            "robustness_study_id": str(study.id),
+            "cell_key": cell["cell_key"],
+        },
+        # The whole study was authorized as one unit before execution.
+        charge_quota=False,
+    )
 
     attempt.run_id = run.id
     attempt.status = "completed" if run.status == RunStatus.completed else "failed"
@@ -948,33 +972,29 @@ def execute_study(
     )
     db.commit()
 
-    quota_stopped = False
-    try:
-        if study.kind == "walk_forward":
-            _execute_walk_forward(
+    if study.kind == "walk_forward":
+        _execute_walk_forward(
+            db,
+            study=study,
+            version=version,
+            experiment=experiment,
+            user=user,
+            actor_type=actor_type,
+        )
+    else:
+        for cell in plan_cells:
+            db.refresh(study)
+            if study.status == "cancelled":
+                break
+            _run_cell(
                 db,
                 study=study,
                 version=version,
                 experiment=experiment,
                 user=user,
+                cell=cell,
                 actor_type=actor_type,
             )
-        else:
-            for cell in plan_cells:
-                db.refresh(study)
-                if study.status == "cancelled":
-                    break
-                _run_cell(
-                    db,
-                    study=study,
-                    version=version,
-                    experiment=experiment,
-                    user=user,
-                    cell=cell,
-                    actor_type=actor_type,
-                )
-    except QuotaExhausted:
-        quota_stopped = True
 
     db.refresh(study)
     attempts = (
@@ -988,11 +1008,6 @@ def execute_study(
     if study.status == "cancelled":
         study.cancelled_at = study.cancelled_at or utcnow()
         final_status = "cancelled"
-    elif quota_stopped:
-        final_status = "partial"
-        study.error_details = (
-            "The research run quota ran out, so the remaining attempts were not run. Completed results are kept; you can resume once quota is restored."
-        )
     elif len(attempts) < len(plan_cells) or unresolved:
         final_status = "partial"
         if not study.error_details:
@@ -1033,6 +1048,53 @@ def execute_study(
     return study
 
 
+def study_authorization(
+    study: RobustnessStudy, attempts: List[RobustnessAttempt]
+) -> Dict[str, Any]:
+    """One study, one authorization unit — and which cells a run would retry.
+
+    A study is charged when it first executes, not per cell. The claim column
+    is the authoritative signal; for a study created by an older build the
+    evidence itself (any attempt that produced a research run) is used so it
+    is never re-charged.
+    """
+    plan_cells = (study.plan or {}).get("cells") or []
+    completed_keys = {a.cell_key for a in attempts if a.status == "completed"}
+    replayable = [
+        {
+            "cell_key": cell["cell_key"],
+            "label": cell.get("label"),
+            "role": cell.get("role"),
+            "period_start": cell.get("period_start"),
+            "period_end": cell.get("period_end"),
+        }
+        for cell in plan_cells
+        if cell["cell_key"] not in completed_keys
+    ]
+    reservation_id = getattr(study, "authorization_reservation_id", None)
+    charged = reservation_id is not None or any(
+        attempt.run_id is not None for attempt in attempts
+    )
+    charge_on_next_run = (
+        not charged and study.status not in ("completed", "cancelled") and bool(plan_cells)
+    )
+    if charged:
+        state = "charged"
+    elif study.status == "cancelled":
+        state = "closed"
+    else:
+        state = "not_charged"
+    return {
+        "unit": "study",
+        "required": 1,
+        "estimated_attempts": len(plan_cells),
+        "state": state,
+        "charge_on_next_run": charge_on_next_run,
+        "reservation_id": str(reservation_id) if reservation_id else None,
+        "replayable_cells": replayable,
+    }
+
+
 def attempt_payload(attempt: RobustnessAttempt) -> Dict[str, Any]:
     return {
         "id": str(attempt.id),
@@ -1053,6 +1115,7 @@ def attempt_payload(attempt: RobustnessAttempt) -> Dict[str, Any]:
 
 
 def study_payload(study: RobustnessStudy, attempts: List[RobustnessAttempt]) -> Dict[str, Any]:
+    authorization = study_authorization(study, attempts)
     return {
         "id": str(study.id),
         "experiment_id": str(study.experiment_id),
@@ -1062,6 +1125,8 @@ def study_payload(study: RobustnessStudy, attempts: List[RobustnessAttempt]) -> 
         "config": study.config,
         "plan": study.plan,
         "aggregate": compute_aggregate(study, attempts),
+        "authorization": authorization,
+        "replayable_cells": authorization["replayable_cells"],
         "error_details": study.error_details,
         "created_at": study.created_at.isoformat() if study.created_at else None,
         "started_at": study.started_at.isoformat() if study.started_at else None,

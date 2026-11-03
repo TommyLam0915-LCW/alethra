@@ -41,6 +41,14 @@ class RobustnessStudy(Base):
     plan = Column(JSONB, nullable=False)
     aggregate = Column(JSONB, nullable=True)
     error_details = Column(Text, nullable=True)
+    # Set once, atomically, when a study first takes its single research-run
+    # authorization. Keeping the id after settlement links the charge to the
+    # study; clearing it on release lets a retry charge again.
+    authorization_reservation_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("quota_reservations.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     created_at = Column(DateTime, default=utcnow, nullable=False)
     started_at = Column(DateTime, nullable=True)
     completed_at = Column(DateTime, nullable=True)
