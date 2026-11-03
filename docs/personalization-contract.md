@@ -170,3 +170,21 @@
   日內為該 bar 收盤。不得使用 wall clock。
 - 既有閘門不變：需要已連結的 paper portfolio、已鎖定版本與已觀察工作階段；未觀察的工作階段不寫事件。
 - 此修訂不會建立同意，也不會把任何既有的 `unknown` 列改寫成 `human`；candidate DB 既有的 205 筆維持原樣。
+
+---
+
+## 12. 修訂：擴張視窗參考評估（2026-11-03，`personal-trainer-v2`）
+
+本節只新增「同一批已確認決策的另一種評估輸出」，**不修改** §3–§7 的標籤、特徵、同意與門檻。
+
+- trainer 在既有的 `chronological_holdout` 之外，對同一批已確認決策另算一組 expanding-window（walk-forward）參考分數；
+  該區塊固定 `advisory_only = true`、`not_a_release_gate = true`、`primary_evaluation = "chronological_holdout"`。
+- 每折都重新 fit scaler 與 estimator，只用該折之前的資料；訓練與測試之間保留 1 個完整 `decision_instant` 群組作 gap，
+  群組永不切開；測試區塊依時間排序且互不重疊，不會被重複計為獨立證據。
+- 輸出位置：model version 的 `walk_forward`、evaluation 的 `metrics_json.walk_forward`；內容包括
+  `n_folds`、每折 `accuracy`／`macro_f1`／`baseline_accuracy`、`mean_accuracy`、`std_accuracy`、`baseline_mean_accuracy`。
+  `/training` 的模型版本列顯示「擴張視窗參考（N 折，非發布門檻）」與對應基線。
+- 發布資格仍只看 §6 的 200／30／60／每動作 30／覆蓋 0.95 與留出結果；walk-forward 分數不會放寬、取代或觸發任何門檻。
+- 決策群組不足時回 `available = false` 並附 `unavailable_reason`（`insufficient_decision_groups`／`folds_too_small`），
+  訓練本身仍以留出切分為準，不會因此被誤判為「資料不足」。
+- 本修訂沒有執行任何真實個人化訓練或推論；上述評估只在離線測試的合成資料列上驗證，不構成真實資料成果。

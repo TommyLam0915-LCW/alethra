@@ -52,7 +52,7 @@ PERSONAL_PURPOSE_ZH = (
     "以 owner 親自確認的決策訓練專屬模型，估計此 owner 在指定策略下會選擇的動作。"
     "不是市場方向預測，也不是交易建議。"
 )
-ENGINE_VERSION = "personal-trainer-v1"
+ENGINE_VERSION = "personal-trainer-v2"
 
 
 def _active_consent_covers(db: Session, owner_id: uuid.UUID, strategy_version_id: uuid.UUID) -> bool:
@@ -250,6 +250,7 @@ def execute_personal_training(db: Session, job_id: uuid.UUID) -> TrainingJob:
                 "feature_names": result["feature_names"],
                 "n_rows": result["n_rows"],
                 "split": result["split"],
+                "walk_forward": result.get("walk_forward"),
                 "baseline": result.get("baseline"),
                 "warnings": result["warnings"],
                 "reload_verified": result["reload_verified"],
@@ -271,12 +272,14 @@ def execute_personal_training(db: Session, job_id: uuid.UUID) -> TrainingJob:
                 model_research_record_id=record.id,
                 evaluation_type=EvaluationType.historical,
                 result_summary=(
-                    "時間序列留出評估（chronological hold-out）。"
+                    "時間序列留出評估（chronological hold-out），另附擴張視窗"
+                    "（walk-forward）參考分數；參考分數不取代留出結果，也不用於任何門檻。"
                     "分數只反映模仿本人已確認決策的能力，不代表回報或市場方向。"
                 ),
                 metrics_json={
                     "metrics": result["metrics"],
                     "split": result["split"],
+                    "walk_forward": result.get("walk_forward"),
                     "baseline": result["metrics"].get("baseline_test"),
                     "warnings": result["warnings"],
                     "n_rows": result["n_rows"],

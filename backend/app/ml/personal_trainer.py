@@ -11,6 +11,9 @@ Evaluation semantics kept explicit in the artifact:
   labelled ``chronological_holdout`` — not a fixed-strategy period study;
 * the split is group-aware: rows sharing one decision instant stay whole in
   one segment, so a simultaneous decision is never half-train, half-test;
+* an advisory expanding-window (walk-forward) re-evaluation is reported next
+  to the hold-out, refitting scaler and estimator per fold with one whole
+  decision group as a gap; it never replaces the hold-out and no gate reads it;
 * hyper-parameters are fixed per model type, so no per-fold selection is
   claimed (``selection_source`` says so);
 * the label is the action recorded at decision time, so no forward-looking
@@ -55,6 +58,14 @@ MIN_VAL_ROWS = 2
 MIN_TEST_ROWS = 2
 SMALL_TEST_THRESHOLD = 30
 SMALL_CLASS_SUPPORT = 5
+
+# Walk-forward is an advisory re-evaluation, not the published gate. It keeps
+# one whole decision-instant group as a gap so the boundary between training
+# and test is never adjacent, and it refits the scaler and estimator per fold.
+WALK_FORWARD_GAP_GROUPS = 1
+WALK_FORWARD_INITIAL_TRAIN_RATIO = 0.5
+WALK_FORWARD_MAX_FOLDS = 4
+WALK_FORWARD_MIN_TEST_ROWS = 2
 
 
 class PersonalTrainingRefused(ValueError):
@@ -201,6 +212,169 @@ def grouped_temporal_split(
     )
 
 
+def walk_forward_folds(
+    group_sizes: List[int],
+    *,
+    gap_groups: int = WALK_FORWARD_GAP_GROUPS,
+    initial_train_ratio: float = WALK_FORWARD_INITIAL_TRAIN_RATIO,
+    max_folds: int = WALK_FORWARD_MAX_FOLDS,
+) -> List[Dict[str, int]]:
+    """Expanding-window folds over whole, oldest-first decision groups.
+
+    Each fold trains on every group older than its test block and tests on the
+    next contiguous block. ``gap_groups`` whole groups sit between the last
+    training group and the first test group; a group is never split. Test
+    blocks are ordered and disjoint, so no window is counted twice.
+    """
+    total_groups = len(group_sizes)
+    if total_groups < 3:
+        return []
+    initial_train = max(2, int(total_groups * initial_train_ratio))
+    if initial_train + gap_groups >= total_groups:
+        return []
+    block = max(1, (total_groups - initial_train) // max_folds)
+
+    bounds: List[int] = []
+    cursor = 0
+    for size in group_sizes:
+        bounds.append(cursor)
+        cursor += size
+
+    def _row_range(first_group: int, last_group: int) -> Tuple[int, int]:
+        return bounds[first_group], bounds[last_group] + group_sizes[last_group]
+
+    folds: List[Dict[str, int]] = []
+    train_end_group = initial_train - 1
+    while len(folds) < max_folds:
+        test_start_group = train_end_group + 1 + gap_groups
+        if test_start_group >= total_groups:
+            break
+        test_end_group = min(total_groups - 1, test_start_group + block - 1)
+        train_start, train_end = _row_range(0, train_end_group)
+        test_start, test_end = _row_range(test_start_group, test_end_group)
+        folds.append(
+            {
+                "fold": len(folds) + 1,
+                "train_group_start": 0,
+                "train_group_end": train_end_group,
+                "test_group_start": test_start_group,
+                "test_group_end": test_end_group,
+                "train_row_start": train_start,
+                "train_row_end": train_end,
+                "test_row_start": test_start,
+                "test_row_end": test_end,
+            }
+        )
+        train_end_group = test_end_group
+    return folds
+
+
+def _walk_forward_evaluation(
+    ordered: List[dict],
+    X: np.ndarray,
+    y: np.ndarray,
+    labels: List[str],
+    group_sizes: List[int],
+    model_type: str,
+) -> Dict[str, Any]:
+    """Advisory expanding-window evaluation.
+
+    It is reported next to the published chronological hold-out, never in place
+    of it: the hold-out still decides what the owner sees as the model's test
+    score, and no threshold reads this block.
+    """
+    report: Dict[str, Any] = {
+        "kind": "expanding_window",
+        "primary_evaluation": "chronological_holdout",
+        "advisory_only": True,
+        "not_a_release_gate": True,
+        "gap_groups": WALK_FORWARD_GAP_GROUPS,
+        "available": False,
+        "n_folds": 0,
+        "folds": [],
+        "mean_accuracy": None,
+        "std_accuracy": None,
+        "mean_macro_f1": None,
+        "baseline_mean_accuracy": None,
+    }
+    folds = walk_forward_folds(group_sizes)
+    if not folds:
+        report["unavailable_reason"] = "insufficient_decision_groups"
+        return report
+
+    results: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, Any]] = []
+    for fold in folds:
+        train_idx = list(range(fold["train_row_start"], fold["train_row_end"]))
+        test_idx = list(range(fold["test_row_start"], fold["test_row_end"]))
+        if len(train_idx) < MIN_TRAIN_ROWS or len(test_idx) < WALK_FORWARD_MIN_TEST_ROWS:
+            skipped.append({"fold": fold["fold"], "reason": "segment_too_small"})
+            continue
+        if len(set(y[train_idx].tolist())) < 2:
+            skipped.append({"fold": fold["fold"], "reason": "single_class_train_segment"})
+            continue
+
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X[train_idx])
+        X_test_scaled = scaler.transform(X[test_idx])
+        model = (
+            DummyClassifier(strategy="most_frequent")
+            if model_type == "baseline"
+            else LogisticRegression(max_iter=1000, random_state=42)
+        )
+        model.fit(X_train_scaled, y[train_idx])
+        predictions = model.predict(X_test_scaled)
+        metrics = _class_metrics(y[test_idx], predictions, labels)
+
+        baseline = DummyClassifier(strategy="most_frequent")
+        baseline.fit(X_train_scaled, y[train_idx])
+        baseline_metrics = _class_metrics(
+            y[test_idx], baseline.predict(X_test_scaled), labels
+        )
+
+        results.append(
+            {
+                "fold": fold["fold"],
+                "train_rows": len(train_idx),
+                "test_rows": len(test_idx),
+                "train_groups": fold["train_group_end"] - fold["train_group_start"] + 1,
+                "test_groups": fold["test_group_end"] - fold["test_group_start"] + 1,
+                "train_end_decision_instant": ordered[train_idx[-1]].get("decision_instant"),
+                "test_start_decision_instant": ordered[test_idx[0]].get("decision_instant"),
+                "test_end_decision_instant": ordered[test_idx[-1]].get("decision_instant"),
+                "accuracy": metrics["accuracy"],
+                "macro_f1": metrics["macro_f1"],
+                "baseline_accuracy": baseline_metrics["accuracy"],
+                "class_distribution": metrics["class_distribution"],
+                "insufficient": False,
+                "insufficient_reasons": [],
+            }
+        )
+
+    if not results:
+        report["unavailable_reason"] = "folds_too_small"
+        report["skipped_folds"] = skipped
+        return report
+
+    accuracies = [row["accuracy"] for row in results]
+    f1_values = [row["macro_f1"] for row in results]
+    baseline_values = [row["baseline_accuracy"] for row in results]
+    report.update(
+        {
+            "available": True,
+            "n_folds": len(results),
+            "folds": results,
+            "mean_accuracy": round(float(np.mean(accuracies)), 4),
+            "std_accuracy": round(float(np.std(accuracies)), 4),
+            "mean_macro_f1": round(float(np.mean(f1_values)), 4),
+            "baseline_mean_accuracy": round(float(np.mean(baseline_values)), 4),
+        }
+    )
+    if skipped:
+        report["skipped_folds"] = skipped
+    return report
+
+
 def train_personal_model(
     rows: List[dict],
     feature_names: List[str],
@@ -334,6 +508,15 @@ def train_personal_model(
     if "mixed" in nature_values:
         warnings.append("mixed_market_features")
 
+    walk_forward = _walk_forward_evaluation(
+        ordered, X, y, labels, group_sizes, model_type
+    )
+    if (
+        walk_forward["available"]
+        and walk_forward["mean_accuracy"] < walk_forward["baseline_mean_accuracy"]
+    ):
+        warnings.append("walk_forward_below_baseline")
+
     model_id = uuid.uuid4().hex
     model_dir = _safe_personal_dir(model_id)
     os.makedirs(model_dir, exist_ok=True)
@@ -410,6 +593,7 @@ def train_personal_model(
             "test": test_metrics,
             "baseline_test": baseline_test,
         },
+        "walk_forward": walk_forward,
         "warnings": warnings,
         "market_data_nature": market_data_nature or {},
         "wording_zh": PERSONAL_WORDING_ZH,
@@ -456,6 +640,7 @@ def train_personal_model(
         "n_rows": len(ordered),
         "split": metadata["split"],
         "metrics": metadata["metrics"],
+        "walk_forward": walk_forward,
         "baseline": metadata["baseline"],
         "warnings": warnings,
         "market_data_nature": market_data_nature or {},

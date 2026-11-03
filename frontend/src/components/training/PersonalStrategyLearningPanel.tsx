@@ -119,6 +119,13 @@ interface PersonalModel {
       metrics?: Record<string, { accuracy?: number; macro_f1?: number }>;
       baseline?: { accuracy?: number } | null;
       split?: unknown;
+      walk_forward?: {
+        available?: boolean;
+        n_folds?: number;
+        mean_accuracy?: number | null;
+        mean_macro_f1?: number | null;
+        baseline_mean_accuracy?: number | null;
+      } | null;
       warnings?: string[];
       n_rows?: number;
     };
@@ -460,6 +467,7 @@ const WARNING_LABELS: Record<string, string> = {
   missing_class_in_test: '測試集缺少部分類別',
   synthetic_market_features: '市場特徵來自合成資料（工程驗證用）',
   mixed_market_features: '市場特徵混合真實與合成資料',
+  walk_forward_below_baseline: '擴張視窗參考分數低於基線（僅供參考，不影響發布）',
 };
 
 const PURPOSE_LABELS: Record<string, string> = {
@@ -2114,6 +2122,19 @@ export default function PersonalStrategyLearningPanel() {
                         {model.split?.test?.size ?? '—'} · 選擇來源{' '}
                         {model.split?.selection_source ?? '—'}
                       </div>
+                      {(() => {
+                        const wf = model.evaluation?.metrics?.walk_forward;
+                        if (!wf?.available) return null;
+                        return (
+                          <div
+                            data-testid={`pl-model-walk-forward-${model.model_version_id}`}
+                            style={{ marginTop: '4px', color: 'var(--text-muted)' }}
+                          >
+                            擴張視窗參考（{wf.n_folds ?? '—'} 折，非發布門檻）：平均準確率{' '}
+                            {formatScore(wf.mean_accuracy)} · 基線 {formatScore(wf.baseline_mean_accuracy)}
+                          </div>
+                        );
+                      })()}
                       {model.evaluation?.result_summary && (
                         <div style={{ marginTop: '4px', color: 'var(--text-secondary)' }}>
                           {model.evaluation.result_summary}
