@@ -52,7 +52,9 @@ interface Plan {
   required_bars_rule?: string;
   estimated_attempts: number;
   estimated_backtests?: number;
+  required_backtests?: number;
   authorization_required?: number;
+  authorizations_required?: number;
   max_attempts: number;
   config: Record<string, number>;
   cells: PlanCell[];
@@ -68,6 +70,8 @@ interface Plan {
   };
   quota: {
     required: number;
+    required_backtests?: number;
+    authorizations_required?: number;
     estimated_attempts?: number;
     sufficient: boolean;
     unlimited?: boolean;
@@ -554,8 +558,12 @@ export default function RobustnessPanel({
             {plan.calendar.providers.join(', ') || '—'}
           </div>
           <div style={{ fontSize: '13px', marginBottom: '8px' }} data-testid="robustness-quota">
-            Quota: this study uses {plan.quota.required} research-run authorization for{' '}
-            {plan.quota.estimated_attempts ?? plan.estimated_attempts} backtests
+            Quota: this study uses {plan.quota.authorizations_required ?? 1} research-run
+            authorization for{' '}
+            {plan.quota.required_backtests ??
+              plan.quota.estimated_attempts ??
+              plan.estimated_attempts}{' '}
+            backtests
             {plan.quota.unlimited
               ? '; the current plan is unlimited.'
               : `; used ${plan.quota.used ?? '—'} / limit ${plan.quota.limit ?? '—'}, ${

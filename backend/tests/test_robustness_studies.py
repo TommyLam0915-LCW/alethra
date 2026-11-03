@@ -196,8 +196,14 @@ class TestPlan:
         # Nine backtests, but one authorization unit: the free plan's five
         # units can start this study, and the plan says so before any run.
         assert plan["authorization_required"] == 1
+        assert plan["authorizations_required"] == 1
         assert plan["estimated_backtests"] == 9
-        assert plan["quota"]["required"] == 1
+        assert plan["required_backtests"] == 9
+        # Cost stays visible: quota.required is the backtest count, while the
+        # billing unit is reported separately.
+        assert plan["quota"]["required"] == len(plan["cells"]) == 9
+        assert plan["quota"]["required_backtests"] == 9
+        assert plan["quota"]["authorizations_required"] == 1
         assert plan["quota"]["estimated_attempts"] == 9
         assert plan["quota"]["sufficient"] is True
         assert plan["ready"] is True
@@ -670,7 +676,11 @@ class TestQuotaAndOwnership:
         )
         assert plan.status_code == 200, plan.text
         assert plan.json()["authorization_required"] == 1
-        assert plan.json()["quota"]["required"] == 1
+        assert plan.json()["authorizations_required"] == 1
+        assert plan.json()["required_backtests"] == 9
+        assert plan.json()["quota"]["required"] == len(plan.json()["cells"]) == 9
+        assert plan.json()["quota"]["required_backtests"] == 9
+        assert plan.json()["quota"]["authorizations_required"] == 1
         assert plan.json()["quota"]["estimated_attempts"] == 9
         assert plan.json()["quota"]["sufficient"] is False
         assert plan.json()["ready"] is False
@@ -688,6 +698,8 @@ class TestQuotaAndOwnership:
         assert detail["error"] == "insufficient_quota"
         assert detail["unit"] == "study"
         assert detail["required"] == 1
+        assert detail["authorizations_required"] == 1
+        assert detail["required_backtests"] == 9
         assert detail["estimated_attempts"] == 9
         assert detail["remaining"] == 0
         assert detail["permanently_unreachable"] is True

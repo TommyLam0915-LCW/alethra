@@ -637,7 +637,9 @@ def build_plan(
         "required_bars_rule": _required_bars_rule(spec),
         "estimated_attempts": estimated,
         "estimated_backtests": estimated,
+        "required_backtests": estimated,
         "authorization_required": authorization_required,
+        "authorizations_required": authorization_required,
         "max_attempts": max_attempts,
         "config": merged,
         "cells": cells,
@@ -646,7 +648,12 @@ def build_plan(
         "reachability": reach,
         "quota": {
             **quota,
-            "required": authorization_required,
+            # ``required`` keeps its original meaning: the backtests this study
+            # will run. The billing unit is a separate field so the cost is not
+            # erased by the one-authorization-per-study rule.
+            "required": estimated,
+            "required_backtests": estimated,
+            "authorizations_required": authorization_required,
             "estimated_attempts": estimated,
             "sufficient": sufficient,
             "permanently_unreachable": reach["permanently_unreachable"],
@@ -1125,6 +1132,8 @@ def study_authorization(
     return {
         "unit": "study",
         "required": 1,
+        "authorizations_required": 1,
+        "required_backtests": len(plan_cells),
         "estimated_attempts": len(plan_cells),
         "state": state,
         "charge_on_next_run": charge_on_next_run,

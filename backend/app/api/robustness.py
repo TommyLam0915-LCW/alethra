@@ -98,7 +98,9 @@ def _refused(exc: RobustnessRefused) -> HTTPException:
 
 def _insufficient_quota(quota: dict, estimated_attempts: int) -> HTTPException:
     remaining = quota.get("remaining")
-    required = quota.get("required", 1)
+    # ``quota.required`` is the backtest count; the billing unit is
+    # ``authorizations_required`` (one per study).
+    required = quota.get("authorizations_required", 1)
     unit = "authorization" if required == 1 else "authorizations"
     reach = reachability(quota, required)
     if quota.get("entitlement_active") is False:
@@ -119,6 +121,8 @@ def _insufficient_quota(quota: dict, estimated_attempts: int) -> HTTPException:
             "quota_type": "research_run",
             "unit": "study",
             "required": required,
+            "authorizations_required": required,
+            "required_backtests": estimated_attempts,
             "estimated_attempts": estimated_attempts,
             "remaining": remaining,
             "used": quota.get("used"),
