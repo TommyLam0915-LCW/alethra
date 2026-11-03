@@ -28,6 +28,7 @@ from app.services.robustness import (
     RobustnessRefused,
     build_plan,
     execute_study,
+    reachability,
     study_authorization,
     study_payload,
 )
@@ -97,24 +98,39 @@ def _refused(exc: RobustnessRefused) -> HTTPException:
 
 def _insufficient_quota(quota: dict, estimated_attempts: int) -> HTTPException:
     remaining = quota.get("remaining")
+    required = quota.get("required", 1)
+    unit = "authorization" if required == 1 else "authorizations"
+    reach = reachability(quota, required)
+    if quota.get("entitlement_active") is False:
+        opening = (
+            f"This plan needs {required} research-run {unit} but the entitlement is "
+            "expired or disabled, so the study did not start."
+        )
+    else:
+        opening = (
+            f"This plan needs {required} research-run {unit} but only {remaining} remain, "
+            "so the study did not start."
+        )
+    permanence = f"{reach['reason']} " if reach["permanently_unreachable"] else ""
     return HTTPException(
         status_code=status.HTTP_429_TOO_MANY_REQUESTS,
         detail={
             "error": "insufficient_quota",
             "quota_type": "research_run",
             "unit": "study",
-            "required": 1,
+            "required": required,
             "estimated_attempts": estimated_attempts,
             "remaining": remaining,
             "used": quota.get("used"),
             "limit": quota.get("limit"),
             "source": quota.get("source"),
+            "permanently_unreachable": reach["permanently_unreachable"],
+            "limit_block_reason": reach["reason"],
             "check_url": QUOTA_CHECK_PATH,
             "message": (
-                f"This study needs 1 research-run authorization for its "
-                f"{estimated_attempts} backtests, and {remaining} remain, so the study "
-                "did not start. The whole study is one unit; it is not charged per "
-                f"backtest. Check used versus limit at GET {QUOTA_CHECK_PATH}."
+                f"{opening} The whole study of {estimated_attempts} backtests is charged as "
+                f"this one unit, not per backtest. {permanence}"
+                f"Check used versus limit at GET {QUOTA_CHECK_PATH}."
             ),
         },
     )

@@ -178,7 +178,7 @@ def _required_bars(spec: Dict[str, Any]) -> int:
 
 
 def _required_bars_rule(spec: Dict[str, Any]) -> str:
-    """The warm-up rule itself, so the number is not the only explanation."""
+    """The planning rule behind ``required_bars``, so the number is explainable."""
     template = spec.get("template_type")
     params = spec.get("signal_parameters") or {}
     if template == "sma_crossover":
@@ -196,8 +196,42 @@ def _required_bars_rule(spec: Dict[str, Any]) -> str:
             "days, so a longer holding period can still be open at the end of a slice."
         )
     return (
-        "3 bars: the engine's minimum for templates that declare no numeric warm-up."
+        "3 bars: the engine's minimum slice length for a template that declares no "
+        "numeric warm-up. This is a planning floor, not a signal look-back."
     )
+
+
+def reachability(quota: Dict[str, Any], required: int = 1) -> Dict[str, Any]:
+    """Whether the current plan can ever grant this study, independent of usage.
+
+    ``remaining`` is transient: units left this month. ``limit`` is the plan's
+    ceiling, so ``limit < required`` means no amount of waiting or reducing
+    attempts will let this study start while that limit stays in force.
+    """
+    limit = quota.get("limit")
+    unlimited = bool(quota.get("unlimited"))
+    entitlement_active = bool(quota.get("entitlement_active", True))
+    reason: Optional[str] = None
+    if not entitlement_active:
+        reason = (
+            "The entitlement is expired or disabled, so this study cannot start "
+            "while it stays inactive, regardless of remaining units."
+        )
+    elif not unlimited and limit is not None and limit < required:
+        unit = "authorization" if required == 1 else "authorizations"
+        reason = (
+            f"This study needs {required} research-run {unit}, but the current monthly "
+            f"limit is {limit}, so it can never start while this plan is in force. "
+            "Raise the monthly limit (or switch plan) to make it reachable."
+        )
+    return {
+        "required": required,
+        "limit": limit,
+        "unlimited": unlimited,
+        "entitlement_active": entitlement_active,
+        "permanently_unreachable": reason is not None,
+        "reason": reason,
+    }
 
 
 # ── Cell builders ────────────────────────────────────────────────────────────
@@ -262,8 +296,8 @@ def _period_cells(spec: Dict[str, Any], dates: List[str], slices: int) -> List[D
     if total < slices * need:
         raise RobustnessRefused(
             f"The period has {total} trading days; with {slices} slices each slice needs at "
-            f"least {need} days (the signal warm-up this strategy requires), so no slice could "
-            "produce a signal. Use fewer slices or a longer period."
+            f"least {need} days of planning warm-up ({_required_bars_rule(spec)}), so no slice "
+            "could produce a signal. Use fewer slices or a longer period."
         )
     base = total // slices
     remainder = total % slices
@@ -566,6 +600,7 @@ def build_plan(
     # An expired or disabled entitlement cannot start the study even when units
     # remain, so the dry run must not report it as startable.
     entitlement_active = bool(quota.get("entitlement_active", True))
+    reach = reachability(quota, authorization_required)
 
     disclosures = _disclosures(kind, calendar, merged)
     disclosures.append(
@@ -608,11 +643,14 @@ def build_plan(
         "cells": cells,
         "selection_rule": SELECTION_RULES[kind],
         "disclosures": disclosures,
+        "reachability": reach,
         "quota": {
             **quota,
             "required": authorization_required,
             "estimated_attempts": estimated,
             "sufficient": sufficient,
+            "permanently_unreachable": reach["permanently_unreachable"],
+            "limit_block_reason": reach["reason"],
         },
         "ready": sufficient and entitlement_active,
     }

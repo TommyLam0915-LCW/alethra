@@ -1199,6 +1199,8 @@ def retire_portfolio(
 JOURNAL_COLUMNS = [
     "record_type",
     "record_classification",
+    "order_state",
+    "position_status",
     "portfolio_id",
     "currency",
     "order_id",
@@ -1258,6 +1260,8 @@ _FILL_ONLY_COLUMNS = [
 JOURNAL_COLUMN_SEMANTICS = {
     "record_type": "'fill' = an executed fill; 'order' = an order that never filled (pending/cancelled/rejected).",
     "record_classification": "'closed' when the order reached a terminal status (filled/cancelled/rejected); 'open' while the order is still pending.",
+    "order_state": "'pending' while the order can still execute; 'terminal' once it is filled, cancelled or rejected. This describes the order, not the position.",
+    "position_status": "'open' or 'closed' for the portfolio's position in this row's asset at export time; empty when no position row exists. A terminal order can still leave its position open, and a closed position does not rewrite the order's history.",
     "currency": "ISO-4217 code that applies to every monetary column in the row (the portfolio currency).",
     "data_cutoff_at": "Calendar date YYYY-MM-DD, no timezone: the replay/pricing cut-off, not an instant.",
     "execution_date": "Calendar date YYYY-MM-DD, no timezone: the simulated trade date of the fill.",
@@ -1332,11 +1336,25 @@ def _journal_rows(
 ) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     provider_id = _portfolio_dataset_provider(db, portfolio)
+    positions = (
+        db.query(PaperPosition)
+        .filter(PaperPosition.portfolio_id == portfolio.id)
+        .all()
+    )
+    position_status: Dict[str, str] = {}
+    for position in positions:
+        status = getattr(position.status, "value", position.status)
+        # Prefer a live position: a later BUY can create a new open row while
+        # an older closed row for the same asset is kept as history.
+        if position_status.get(position.asset_id) != PositionStatus.open.value:
+            position_status[position.asset_id] = status
     for order in orders:
         decision = decision_map.get(order.decision_id) if order.decision_id else None
         classification = "open" if order.status == OrderStatus.pending else "closed"
         base = {
             "record_classification": classification,
+            "order_state": "pending" if order.status == OrderStatus.pending else "terminal",
+            "position_status": position_status.get(order.asset_id),
             "portfolio_id": str(portfolio.id),
             "currency": portfolio.currency,
             "order_id": str(order.id),

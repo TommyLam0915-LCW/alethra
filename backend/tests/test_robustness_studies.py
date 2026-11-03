@@ -203,6 +203,44 @@ class TestPlan:
         assert plan["ready"] is True
         assert plan["required_bars_rule"]
 
+        # The free plan grants five authorizations, and one unit starts this
+        # study, so the plan must not label it permanently unreachable.
+        assert plan["reachability"]["required"] == 1
+        assert plan["reachability"]["limit"] == 5
+        assert plan["reachability"]["permanently_unreachable"] is False
+        assert plan["reachability"]["reason"] is None
+        assert plan["quota"]["permanently_unreachable"] is False
+        assert plan["quota"]["limit_block_reason"] is None
+
+    def test_required_bars_follows_long_window(self, client, auth_headers):
+        exp = _create_experiment(client, auth_headers, spec=SMA_SPEC)
+        resp = _plan(
+            client, auth_headers, exp["id"], exp["current_version_id"], "cost_scenarios"
+        )
+        assert resp.status_code == 200, resp.text
+        plan = resp.json()
+        assert plan["required_bars"] == 21  # long_window 20 + 1
+        assert "long_window (20) + 1" in plan["required_bars_rule"]
+
+    def test_required_bars_clamps_holding_days_at_five(self, client, auth_headers):
+        spec = {
+            **BUY_HOLD_SPEC,
+            "template_type": "price_change_fixed_hold",
+            "signal_parameters": {
+                "lookback_days": 3,
+                "threshold_pct": 0.05,
+                "holding_days": 8,
+            },
+        }
+        exp = _create_experiment(client, auth_headers, spec=spec)
+        resp = _plan(
+            client, auth_headers, exp["id"], exp["current_version_id"], "cost_scenarios"
+        )
+        assert resp.status_code == 200, resp.text
+        plan = resp.json()
+        assert plan["required_bars"] == 9  # 3 + min(8, 5) + 1
+        assert "min(holding_days, 5) (5)" in plan["required_bars_rule"]
+
     def test_parameter_sensitivity_changes_one_parameter_at_a_time(
         self, client, auth_headers
     ):
@@ -636,6 +674,11 @@ class TestQuotaAndOwnership:
         assert plan.json()["quota"]["estimated_attempts"] == 9
         assert plan.json()["quota"]["sufficient"] is False
         assert plan.json()["ready"] is False
+        # A zero monthly limit is a permanent block, not a transient shortage:
+        # waiting for usage to reset cannot make this study startable.
+        assert plan.json()["reachability"]["permanently_unreachable"] is True
+        assert plan.json()["quota"]["permanently_unreachable"] is True
+        assert "monthly limit is 0" in plan.json()["reachability"]["reason"]
 
         resp = _create_study(
             client, auth_headers, exp["id"], exp["current_version_id"], "cost_scenarios"
@@ -647,11 +690,18 @@ class TestQuotaAndOwnership:
         assert detail["required"] == 1
         assert detail["estimated_attempts"] == 9
         assert detail["remaining"] == 0
+        assert detail["permanently_unreachable"] is True
+        assert "monthly limit is 0" in detail["limit_block_reason"]
         assert detail["check_url"] == (
             "/api/v1/usage/quota?quota_type=research_run_limit&period=monthly"
         )
-        assert "GET /api/v1/usage/quota" in detail["message"]
+        # Both numbers stay in the sentence; the executable GET is appended,
+        # not substituted for either number.
+        assert "This plan needs 1 research-run authorization" in detail["message"]
+        assert "but only 0 remain" in detail["message"]
         assert "the study did not start" in detail["message"]
+        assert "GET /api/v1/usage/quota" in detail["message"]
+        assert "monthly limit is 0" in detail["message"]
 
         listed = client.get(
             f"/api/v1/experiments/{exp['id']}/robustness", headers=auth_headers

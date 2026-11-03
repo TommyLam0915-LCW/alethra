@@ -123,6 +123,10 @@ def test_csv_per_column_values_for_a_fill(client, auth_headers):
     row = fills[0]
 
     assert row["record_classification"] == "closed"
+    # Two different facts on the same row: the order is finished, while the
+    # position it opened is still open.
+    assert row["order_state"] == "terminal"
+    assert row["position_status"] == "open"
     assert row["portfolio_id"] == pid
     assert row["currency"] == "USD"
     assert row["asset_id"] == "DEMO-ALPHA"
@@ -236,6 +240,12 @@ def test_pending_order_classifies_as_open_and_filled_as_closed():
     assert by_status["pending"]["record_classification"] == "open"
     assert by_status["filled"]["record_classification"] == "closed"
     assert by_status["cancelled"]["record_classification"] == "closed"
+    assert by_status["pending"]["order_state"] == "pending"
+    assert by_status["filled"]["order_state"] == "terminal"
+    assert by_status["cancelled"]["order_state"] == "terminal"
+    # The SimpleNamespace portfolio has no position rows, so position status is
+    # unknown (empty), not guessed as closed.
+    assert all(r["position_status"] is None for r in rows)
     # An order with no fills still appears, typed as 'order', so nothing vanishes.
     assert all(r["record_type"] == "order" for r in rows)
     # No fills and no bound dataset ⇒ settlement is unknown, not an invented date.
@@ -257,6 +267,8 @@ def test_json_format_returns_records_and_semantics(client, auth_headers):
     assert body["columns"] == JOURNAL_COLUMNS
     assert body["row_count"] == len(body["records"]) >= 1
     assert "column_semantics" in body and "_formula_guard" in body["column_semantics"]
+    assert "order_state" in body["column_semantics"]
+    assert "position_status" in body["column_semantics"]
     assert any(r["record_type"] == "fill" for r in body["records"])
 
 

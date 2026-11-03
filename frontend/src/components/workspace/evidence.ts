@@ -103,6 +103,8 @@ export interface OrderRow {
 export interface JournalRecord {
   record_type: string;
   record_classification: string;
+  order_state: string;
+  position_status: string | null;
   portfolio_id: string;
   currency: string;
   order_id: string;

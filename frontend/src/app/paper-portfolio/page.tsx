@@ -30,6 +30,8 @@ interface Portfolio {
 interface JournalRow {
   record_type: string;
   record_classification: string;
+  order_state: string;
+  position_status: string | null;
   portfolio_id: string;
   currency: string;
   asset_id: string;

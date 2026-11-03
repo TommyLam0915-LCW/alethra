@@ -58,6 +58,14 @@ interface Plan {
   cells: PlanCell[];
   selection_rule: string;
   disclosures: string[];
+  reachability?: {
+    required: number;
+    limit: number | null;
+    unlimited: boolean;
+    entitlement_active: boolean;
+    permanently_unreachable: boolean;
+    reason: string | null;
+  };
   quota: {
     required: number;
     estimated_attempts?: number;
@@ -66,6 +74,8 @@ interface Plan {
     limit?: number | null;
     used?: number | null;
     remaining?: number | null;
+    permanently_unreachable?: boolean;
+    limit_block_reason?: string | null;
   };
   ready: boolean;
 }
@@ -556,11 +566,17 @@ export default function RobustnessPanel({
                 {' '}
                 Quota is sufficient, so you can create the study.
               </span>
+            ) : plan.reachability?.permanently_unreachable ? (
+              <span style={{ color: 'var(--negative)' }} data-testid="robustness-permanent-block">
+                {' '}
+                Permanently unreachable under the current plan: {plan.reachability.reason}
+              </span>
             ) : (
               <span style={{ color: 'var(--negative)' }}>
                 {' '}
-                Quota is insufficient; the backend will refuse to create the study and no
-                backtest will run.
+                Quota is insufficient right now; the backend will refuse to create the study
+                and no backtest will run. The monthly allowance may reset, or the plan limit
+                may be raised.
               </span>
             )}
           </div>
