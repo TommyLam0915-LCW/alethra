@@ -6,6 +6,7 @@ import { useRouter } from 'next/navigation';
 import AppShell from '@/components/shell/AppShell';
 import CandleChart, { type CandleChartRow } from '@/components/market/CandleChart';
 import CryptoPaperPanel from '@/components/market/CryptoPaperPanel';
+import StrategyLabPanel from '@/components/market/StrategyLabPanel';
 import { ApiError, api } from '@/lib/api';
 import { formatDateTime } from '@/lib/format';
 import {
@@ -713,6 +714,13 @@ export default function CryptoMarketPage() {
             pricePrecision={payload?.instrument.price_precision}
             intervalLabel={interval}
             intervals={intervalOptions}
+          />
+        )}
+
+        {instrumentId && (
+          <StrategyLabPanel
+            instrumentId={instrumentId}
+            instrumentLabel={instrument?.pair ?? 'BTC/USD'}
           />
         )}
       </div>

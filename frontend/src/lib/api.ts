@@ -683,6 +683,20 @@ export const api = {
         body: JSON.stringify({ interval_minutes: intervalMinutes }),
       }),
   },
+  strategyLab: {
+    plan: () => apiFetch('/api/v1/strategy-lab/plan'),
+    run: (params: {
+      instrument_id: string;
+      trades_per_strategy: number;
+      starting_cash?: string;
+      notional_per_trade?: string;
+      strategy_ids?: string[];
+    }) =>
+      apiFetch('/api/v1/strategy-lab/run', {
+        method: 'POST',
+        body: JSON.stringify(params),
+      }),
+  },
   instruments: {
     list: (market?: string, assetType?: string, q?: string, limit?: number) => {
       const qs = new URLSearchParams();
