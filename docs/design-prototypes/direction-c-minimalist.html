@@ -1,0 +1,1328 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=1440">
+<title>方向 C：Minimalist Research Tool — Prototype</title>
+<style>
+/* ===== RESET & TOKENS ===== */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #fafafa;
+  --bg-surface: #ffffff;
+  --bg-hover: #f5f5f5;
+  --border: #e5e5e5;
+  --text-primary: #171717;
+  --text-secondary: #737373;
+  --text-tertiary: #a3a3a3;
+  --accent: #171717;
+  --accent-link: #2563eb;
+  --green: #16a34a;
+  --red: #dc2626;
+  --green-bg: #f0fdf4;
+  --red-bg: #fef2f2;
+  --radius: 6px;
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', sans-serif;
+  --font-mono: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+}
+
+body {
+  font-family: var(--font-sans);
+  background: var(--bg);
+  color: var(--text-primary);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ===== PROTOTYPE CHROME ===== */
+.proto-banner {
+  background: #171717;
+  padding: 12px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.proto-banner h1 {
+  font-size: 14px;
+  font-weight: 500;
+  color: #fff;
+  letter-spacing: 0.3px;
+}
+.proto-banner span {
+  font-size: 12px;
+  color: #737373;
+}
+
+.proto-section {
+  padding: 64px 48px;
+  border-bottom: 1px solid var(--border);
+}
+.proto-section-label {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  margin-bottom: 32px;
+}
+
+/* ===== LOGIN ===== */
+.login-frame {
+  width: 480px;
+  margin: 0 auto;
+  padding: 64px 48px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.login-brand {
+  text-align: center;
+  margin-bottom: 48px;
+}
+.login-brand-mark {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: -0.3px;
+  margin-bottom: 8px;
+}
+.login-brand-tagline {
+  font-size: 14px;
+  color: var(--text-secondary);
+}
+.login-form-title {
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: 24px;
+}
+.login-field {
+  margin-bottom: 16px;
+}
+.login-label {
+  display: block;
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+.login-input {
+  width: 100%;
+  height: 40px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0 12px;
+  color: var(--text-primary);
+  font-size: 14px;
+  outline: none;
+}
+.login-input:focus {
+  border-color: var(--accent);
+}
+.login-input::placeholder {
+  color: var(--text-tertiary);
+}
+.login-submit {
+  width: 100%;
+  height: 40px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius);
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  margin-top: 8px;
+}
+.login-switch {
+  text-align: center;
+  margin-top: 20px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.login-switch a {
+  color: var(--accent-link);
+  text-decoration: none;
+}
+.login-footer {
+  text-align: center;
+  margin-top: 32px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+
+/* ===== SHARED NAV ===== */
+.min-nav {
+  display: flex;
+  align-items: center;
+  padding: 0 48px;
+  height: 56px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-surface);
+}
+.min-nav-brand {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: -0.3px;
+  margin-right: 40px;
+}
+.min-nav-links {
+  display: flex;
+  gap: 0;
+}
+.min-nav-link {
+  padding: 16px 16px;
+  font-size: 14px;
+  color: var(--text-secondary);
+  text-decoration: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  font-weight: 400;
+}
+.min-nav-link:hover {
+  color: var(--text-primary);
+}
+.min-nav-link.active {
+  color: var(--text-primary);
+  border-bottom-color: var(--text-primary);
+  font-weight: 500;
+}
+.min-nav-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.min-nav-link-btn {
+  font-size: 13px;
+  color: var(--text-secondary);
+  text-decoration: none;
+}
+.min-nav-link-btn:hover {
+  color: var(--text-primary);
+}
+
+/* ===== RESEARCH PAGE ===== */
+.research-frame {
+  width: 720px;
+  margin: 0 auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.research-content {
+  padding: 48px;
+}
+.research-header {
+  margin-bottom: 40px;
+}
+.research-title {
+  font-size: 28px;
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: -0.5px;
+  margin-bottom: 8px;
+}
+.research-desc {
+  font-size: 15px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+.research-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 32px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--border);
+}
+.research-create {
+  font-size: 14px;
+  color: var(--accent-link);
+  text-decoration: none;
+  font-weight: 500;
+}
+.research-count {
+  font-size: 13px;
+  color: var(--text-tertiary);
+}
+
+/* Minimal list */
+.min-exp-list {
+  list-style: none;
+}
+.min-exp-item {
+  padding: 20px 0;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: flex-start;
+  gap: 20px;
+  text-decoration: none;
+  color: inherit;
+}
+.min-exp-item:last-child {
+  border-bottom: none;
+}
+.min-exp-body {
+  flex: 1;
+}
+.min-exp-title {
+  font-size: 16px;
+  font-weight: 500;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+.min-exp-meta {
+  font-size: 13px;
+  color: var(--text-tertiary);
+}
+.min-exp-right {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-shrink: 0;
+}
+.min-exp-status {
+  font-size: 12px;
+  color: var(--text-secondary);
+  padding: 2px 10px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.min-exp-status.exploring {
+  color: var(--accent-link);
+  border-color: #bfdbfe;
+  background: #eff6ff;
+}
+.min-exp-status.locked {
+  color: var(--green);
+  border-color: #bbf7d0;
+  background: var(--green-bg);
+}
+.min-exp-arrow {
+  color: var(--text-tertiary);
+  font-size: 14px;
+}
+
+/* Summary strip */
+.min-summary {
+  display: flex;
+  gap: 32px;
+  padding: 20px 0;
+  margin-bottom: 24px;
+  border-bottom: 1px solid var(--border);
+}
+.min-summary-item {}
+.min-summary-label {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 2px;
+}
+.min-summary-value {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: -0.3px;
+}
+.min-summary-value.green { color: var(--green); }
+.min-summary-note {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  margin-top: 2px;
+}
+
+/* ===== WORKSPACE ===== */
+.workspace-frame {
+  width: 1100px;
+  height: 680px;
+  margin: 0 auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.ws-min-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+/* Left sidebar - very clean */
+.ws-sidebar {
+  width: 200px;
+  border-right: 1px solid var(--border);
+  background: var(--bg-surface);
+  display: flex;
+  flex-direction: column;
+}
+.ws-sidebar-section {
+  padding: 16px;
+  border-bottom: 1px solid var(--border);
+}
+.ws-sidebar-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  margin-bottom: 10px;
+}
+.ws-sidebar-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 8px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  border-radius: 4px;
+  cursor: pointer;
+  margin-bottom: 2px;
+}
+.ws-sidebar-item:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.ws-sidebar-item.active {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  font-weight: 500;
+}
+.ws-sidebar-price {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.ws-sidebar-change {
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.ws-sidebar-change.up { color: var(--green); }
+.ws-sidebar-change.down { color: var(--red); }
+
+/* Center - lots of whitespace */
+.ws-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--bg);
+}
+.ws-header-min {
+  padding: 24px 32px 16px;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+}
+.ws-symbol-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+.ws-symbol {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.3px;
+}
+.ws-company {
+  font-size: 14px;
+  color: var(--text-secondary);
+}
+.ws-market-tag {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  margin-left: auto;
+}
+.ws-price-row {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+.ws-price {
+  font-family: var(--font-mono);
+  font-size: 28px;
+  font-weight: 600;
+  letter-spacing: -0.5px;
+}
+.ws-change {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  color: var(--green);
+}
+.ws-change-label {
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+
+/* Chart - minimal */
+.ws-chart-min {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+}
+.ws-chart-inner {
+  text-align: center;
+}
+.ws-chart-candle {
+  display: flex;
+  align-items: flex-end;
+  gap: 5px;
+  height: 120px;
+  margin-bottom: 20px;
+  justify-content: center;
+}
+.ws-candle-bar {
+  width: 8px;
+  border-radius: 2px;
+  opacity: 0.5;
+}
+.ws-candle-bar.up { background: var(--green); }
+.ws-candle-bar.down { background: var(--red); }
+.ws-chart-caption {
+  font-size: 13px;
+  color: var(--text-tertiary);
+}
+
+/* Replay - subtle */
+.ws-replay-min {
+  padding: 10px 32px;
+  background: var(--bg-surface);
+  border-top: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.ws-replay-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--green);
+}
+.ws-replay-time {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  color: var(--text-primary);
+}
+.ws-replay-label {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+/* Right - research notes */
+.ws-notes {
+  width: 280px;
+  border-left: 1px solid var(--border);
+  background: var(--bg-surface);
+  display: flex;
+  flex-direction: column;
+}
+.ws-notes-header {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.ws-notes-content {
+  flex: 1;
+  padding: 20px;
+  overflow-y: auto;
+}
+.ws-note-block {
+  margin-bottom: 24px;
+}
+.ws-note-label {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 8px;
+}
+.ws-note-text {
+  font-size: 13px;
+  color: var(--text-primary);
+  line-height: 1.6;
+}
+.ws-note-stat {
+  display: flex;
+  justify-content: space-between;
+  padding: 6px 0;
+  font-size: 13px;
+  border-bottom: 1px solid var(--border);
+}
+.ws-note-stat:last-child { border-bottom: none; }
+.ws-note-stat .label { color: var(--text-secondary); }
+.ws-note-stat .value { font-family: var(--font-mono); font-weight: 500; }
+.ws-note-stat .value.green { color: var(--green); }
+.ws-note-stat .value.red { color: var(--red); }
+.ws-note-card {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
+  margin-top: 8px;
+}
+.ws-note-card-title {
+  font-size: 12px;
+  font-weight: 500;
+  margin-bottom: 4px;
+}
+.ws-note-card-detail {
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+/* ===== PORTFOLIO ===== */
+.portfolio-frame {
+  width: 720px;
+  margin: 0 auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.portfolio-content {
+  padding: 48px;
+}
+.portfolio-title {
+  font-size: 28px;
+  font-weight: 600;
+  letter-spacing: -0.5px;
+  margin-bottom: 8px;
+}
+.portfolio-desc {
+  font-size: 15px;
+  color: var(--text-secondary);
+  margin-bottom: 32px;
+}
+.portfolio-summary-min {
+  display: flex;
+  gap: 40px;
+  padding: 20px 0;
+  margin-bottom: 24px;
+  border-bottom: 1px solid var(--border);
+}
+.port-sum-item {}
+.port-sum-label {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 2px;
+}
+.port-sum-value {
+  font-family: var(--font-mono);
+  font-size: 20px;
+  font-weight: 600;
+}
+.port-sum-value.green { color: var(--green); }
+
+.min-pos-list {
+  list-style: none;
+}
+.min-pos-item {
+  padding: 16px 0;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+}
+.min-pos-item:last-child { border-bottom: none; }
+.min-pos-name {
+  font-size: 15px;
+  font-weight: 500;
+  width: 80px;
+}
+.min-pos-detail {
+  flex: 1;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.min-pos-pnl {
+  text-align: right;
+}
+.min-pos-pnl-value {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 500;
+}
+.min-pos-pnl-pct {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+/* ===== MOBILE ===== */
+.mobile-row {
+  display: flex;
+  gap: 40px;
+  justify-content: center;
+}
+.mobile-frame {
+  width: 375px;
+  height: 720px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.m-status-bar {
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  font-weight: 500;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-surface);
+}
+.m-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px;
+}
+.m-bottom-nav {
+  height: 52px;
+  background: var(--bg-surface);
+  border-top: 1px solid var(--border);
+  display: flex;
+}
+.m-nav-item {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  color: var(--text-tertiary);
+  gap: 2px;
+}
+.m-nav-item.active {
+  color: var(--text-primary);
+}
+.m-nav-dot {
+  width: 16px;
+  height: 2px;
+  border-radius: 1px;
+  background: currentColor;
+  opacity: 0.3;
+}
+.m-nav-item.active .m-nav-dot {
+  opacity: 0.8;
+}
+
+/* Mobile research */
+.m-title {
+  font-size: 24px;
+  font-weight: 600;
+  letter-spacing: -0.3px;
+  margin-bottom: 6px;
+}
+.m-desc {
+  font-size: 14px;
+  color: var(--text-secondary);
+  margin-bottom: 24px;
+}
+.m-create-link {
+  display: block;
+  font-size: 14px;
+  color: var(--accent-link);
+  text-decoration: none;
+  margin-bottom: 20px;
+  font-weight: 500;
+}
+.m-summary-row {
+  display: flex;
+  gap: 24px;
+  padding: 16px 0;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+}
+.m-summary-item {}
+.m-summary-label {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.m-summary-value {
+  font-size: 18px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+}
+.m-exp-item {
+  padding: 16px 0;
+  border-bottom: 1px solid var(--border);
+}
+.m-exp-item:last-child { border-bottom: none; }
+.m-exp-name {
+  font-size: 15px;
+  font-weight: 500;
+  margin-bottom: 4px;
+}
+.m-exp-info {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.m-exp-date {
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+.m-exp-tag {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+}
+.m-exp-tag.exploring {
+  color: var(--accent-link);
+  border-color: #bfdbfe;
+  background: #eff6ff;
+}
+.m-exp-tag.locked {
+  color: var(--green);
+  border-color: #bbf7d0;
+  background: var(--green-bg);
+}
+
+/* Mobile workspace */
+.m-ws-symbol {
+  font-size: 20px;
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+.m-ws-company {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-bottom: 12px;
+}
+.m-ws-price {
+  font-family: var(--font-mono);
+  font-size: 24px;
+  font-weight: 600;
+  letter-spacing: -0.3px;
+}
+.m-ws-change {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--green);
+  margin-left: 8px;
+}
+.m-ws-chart {
+  height: 180px;
+  margin: 20px 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.m-ws-chart-inner {
+  text-align: center;
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+.m-ws-candle {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 70px;
+  margin-bottom: 10px;
+  justify-content: center;
+}
+.m-ws-candle-bar {
+  width: 6px;
+  border-radius: 1px;
+  opacity: 0.5;
+}
+.m-ws-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 16px;
+}
+.m-ws-buy, .m-ws-sell {
+  flex: 1;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 14px;
+  font-weight: 500;
+  background: var(--bg-surface);
+  cursor: pointer;
+}
+.m-ws-buy {
+  border-color: var(--green); color: var(--green); }
+.m-ws-sell { border-color: var(--red); color: var(--red); }
+
+/* Mobile login */
+.m-login-frame {
+  display: flex;
+  flex-direction: column;
+}
+.m-login-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 32px;
+}
+.m-login-brand {
+  text-align: center;
+  margin-bottom: 40px;
+}
+.m-login-brand-mark {
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.m-login-brand-tag {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+</style>
+</head>
+<body>
+
+<!-- PROTOTYPE BANNER -->
+<div class="proto-banner">
+  <h1>PROTOTYPE — 方向 C：Minimalist Research Tool</h1>
+  <span>Not implemented — Visual review only — 2026-10-27</span>
+</div>
+
+<!-- ==================== LOGIN ==================== -->
+<div class="proto-section">
+  <div class="proto-section-label">LOGIN — DESKTOP · CENTERED CARD · 480PX</div>
+  <div class="login-frame">
+    <div class="login-brand">
+      <div class="login-brand-mark">Alethra</div>
+      <div class="login-brand-tagline">投資想法，值得被認真檢驗。</div>
+    </div>
+    <div class="login-form-title">登入</div>
+    <div class="login-field">
+      <label class="login-label">電子郵件</label>
+      <input class="login-input" placeholder="your@email.com" readonly>
+    </div>
+    <div class="login-field">
+      <label class="login-label">密碼</label>
+      <input class="login-input" type="password" placeholder="至少 8 個字元" readonly>
+    </div>
+    <button class="login-submit">登入</button>
+    <div class="login-switch">沒有帳號？<a href="#">建立帳號</a></div>
+    <div class="login-footer">研究與模擬交易平台 · 不涉及真實資金</div>
+  </div>
+</div>
+
+<!-- ==================== LOGIN MOBILE ==================== -->
+<div class="proto-section">
+  <div class="proto-section-label">LOGIN — MOBILE 375×720</div>
+  <div class="mobile-row">
+    <div class="mobile-frame m-login-frame">
+      <div class="m-login-content">
+        <div class="m-login-brand">
+          <div class="m-login-brand-mark">Alethra</div>
+          <div class="m-login-brand-tag">投資想法，值得被認真檢驗。</div>
+        </div>
+        <div class="login-form-title">登入</div>
+        <div class="login-field">
+          <label class="login-label">電子郵件</label>
+          <input class="login-input" placeholder="your@email.com" readonly>
+        </div>
+        <div class="login-field">
+          <label class="login-label">密碼</label>
+          <input class="login-input" type="password" placeholder="至少 8 個字元" readonly>
+        </div>
+        <button class="login-submit">登入</button>
+        <div class="login-switch">沒有帳號？<a href="#">建立帳號</a></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== RESEARCH PAGE ==================== -->
+<div class="proto-section">
+  <div class="proto-section-label">RESEARCH PAGE — DESKTOP · 720PX CONTENT WIDTH · PROSE LAYOUT</div>
+  <div class="research-frame">
+    <div class="min-nav">
+      <span class="min-nav-brand">Alethra</span>
+      <nav class="min-nav-links">
+        <a class="min-nav-link" href="#">工作台</a>
+        <a class="min-nav-link active" href="#">策略</a>
+        <a class="min-nav-link" href="#">組合</a>
+        <a class="min-nav-link" href="#">紀錄</a>
+      </nav>
+      <div class="min-nav-right">
+        <a class="min-nav-link-btn" href="#">登出</a>
+      </div>
+    </div>
+    <div class="research-content">
+      <div class="research-header">
+        <div class="research-title">策略與實驗</div>
+        <div class="research-desc">你的研究假設、回測結果與策略版本，都在這裡管理。</div>
+      </div>
+
+      <div class="min-summary">
+        <div class="min-summary-item">
+          <div class="min-summary-label">實驗</div>
+          <div class="min-summary-value">12</div>
+        </div>
+        <div class="min-summary-item">
+          <div class="min-summary-label">勝率</div>
+          <div class="min-summary-value green">62.5%</div>
+          <div class="min-summary-note">4 個已鎖定實驗</div>
+        </div>
+        <div class="min-summary-item">
+          <div class="min-summary-label">模擬收益</div>
+          <div class="min-summary-value green">+18.3%</div>
+        </div>
+      </div>
+
+      <div class="research-actions">
+        <a href="#" class="research-create">+ 建立新實驗</a>
+        <span class="research-count">12 個實驗</span>
+      </div>
+
+      <ul class="min-exp-list">
+        <li class="min-exp-item">
+          <div class="min-exp-body">
+            <div class="min-exp-title">AAPL 均線突破策略</div>
+            <div class="min-exp-meta">建於 2026-10-15 · 最後活動 10-24</div>
+          </div>
+          <div class="min-exp-right">
+            <span class="min-exp-status locked">已鎖定</span>
+            <span class="min-exp-arrow">→</span>
+          </div>
+        </li>
+        <li class="min-exp-item">
+          <div class="min-exp-body">
+            <div class="min-exp-title">TSLA 波動率分析</div>
+            <div class="min-exp-meta">建於 2026-10-18 · 最後活動 10-25</div>
+          </div>
+          <div class="min-exp-right">
+            <span class="min-exp-status exploring">探索中</span>
+            <span class="min-exp-arrow">→</span>
+          </div>
+        </li>
+        <li class="min-exp-item">
+          <div class="min-exp-body">
+            <div class="min-exp-title">NVDA 動能策略回測</div>
+            <div class="min-exp-meta">建於 2026-10-20</div>
+          </div>
+          <div class="min-exp-right">
+            <span class="min-exp-status">草稿</span>
+            <span class="min-exp-arrow">→</span>
+          </div>
+        </li>
+        <li class="min-exp-item">
+          <div class="min-exp-body">
+            <div class="min-exp-title">騰訊 (0700.HK) 長線研究</div>
+            <div class="min-exp-meta">建於 2026-09-05 · 最後活動 10-22</div>
+          </div>
+          <div class="min-exp-right">
+            <span class="min-exp-status locked">已鎖定</span>
+            <span class="min-exp-arrow">→</span>
+          </div>
+        </li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== RESEARCH MOBILE ==================== -->
+<div class="proto-section">
+  <div class="proto-section-label">RESEARCH PAGE — MOBILE 375×720</div>
+  <div class="mobile-row">
+    <div class="mobile-frame">
+      <div class="m-status-bar">策略</div>
+      <div class="m-content">
+        <div class="m-title">策略與實驗</div>
+        <div class="m-desc">你的研究假設與回測結果</div>
+        <a href="#" class="m-create-link">+ 建立新實驗</a>
+        <div class="m-summary-row">
+          <div class="m-summary-item">
+            <div class="m-summary-label">實驗</div>
+            <div class="m-summary-value">12</div>
+          </div>
+          <div class="m-summary-item">
+            <div class="m-summary-label">勝率</div>
+            <div class="m-summary-value" style="color:var(--green)">62.5%</div>
+          </div>
+          <div class="m-summary-item">
+            <div class="m-summary-label">收益</div>
+            <div class="m-summary-value" style="color:var(--green)">+18.3%</div>
+          </div>
+        </div>
+        <div class="m-exp-item">
+          <div class="m-exp-name">AAPL 均線突破策略</div>
+          <div class="m-exp-info">
+            <span class="m-exp-date">10-24</span>
+            <span class="m-exp-tag locked">已鎖定</span>
+          </div>
+        </div>
+        <div class="m-exp-item">
+          <div class="m-exp-name">TSLA 波動率分析</div>
+          <div class="m-exp-info">
+            <span class="m-exp-date">10-25</span>
+            <span class="m-exp-tag exploring">探索中</span>
+          </div>
+        </div>
+        <div class="m-exp-item">
+          <div class="m-exp-name">NVDA 動能策略回測</div>
+          <div class="m-exp-info">
+            <span class="m-exp-date">10-20</span>
+            <span class="m-exp-tag">草稿</span>
+          </div>
+        </div>
+        <div class="m-exp-item">
+          <div class="m-exp-name">騰訊 (0700.HK) 長線研究</div>
+          <div class="m-exp-info">
+            <span class="m-exp-date">10-22</span>
+            <span class="m-exp-tag locked">已鎖定</span>
+          </div>
+        </div>
+      </div>
+      <div class="m-bottom-nav">
+        <div class="m-nav-item active">
+          <div class="m-nav-dot"></div>
+          策略
+        </div>
+        <div class="m-nav-item">
+          <div class="m-nav-dot"></div>
+          工作台
+        </div>
+        <div class="m-nav-item">
+          <div class="m-nav-dot"></div>
+          組合
+        </div>
+        <div class="m-nav-item">
+          <div class="m-nav-dot"></div>
+          設定
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== WORKSPACE ==================== -->
+<div class="proto-section">
+  <div class="proto-section-label">WORKSPACE — DESKTOP 1100×680 · CLEAN THREE-COLUMN</div>
+  <div class="workspace-frame">
+    <div class="min-nav" style="height:48px;">
+      <span class="min-nav-brand">Alethra</span>
+      <nav class="min-nav-links">
+        <a class="min-nav-link active" href="#">工作台</a>
+        <a class="min-nav-link" href="#">策略</a>
+        <a class="min-nav-link" href="#">組合</a>
+        <a class="min-nav-link" href="#">紀錄</a>
+      </nav>
+      <div class="min-nav-right">
+        <a class="min-nav-link-btn" href="#">登出</a>
+      </div>
+    </div>
+    <div class="ws-min-body">
+      <!-- Sidebar: watchlist -->
+      <div class="ws-sidebar">
+        <div class="ws-sidebar-section">
+          <div class="ws-sidebar-label">觀察名單</div>
+          <div class="ws-sidebar-item active">
+            <span>AAPL</span>
+            <span class="ws-sidebar-change up">+1.24%</span>
+          </div>
+          <div class="ws-sidebar-item">
+            <span>TSLA</span>
+            <span class="ws-sidebar-change down">-0.83%</span>
+          </div>
+          <div class="ws-sidebar-item">
+            <span>NVDA</span>
+            <span class="ws-sidebar-change up">+2.15%</span>
+          </div>
+          <div class="ws-sidebar-item">
+            <span>0700.HK</span>
+            <span class="ws-sidebar-change up">+0.54%</span>
+          </div>
+          <div class="ws-sidebar-item">
+            <span>BTC</span>
+            <span class="ws-sidebar-change down">-1.02%</span>
+          </div>
+        </div>
+        <div class="ws-sidebar-section" style="border-bottom:none;flex:1;">
+          <div class="ws-sidebar-label">實驗</div>
+          <div class="ws-sidebar-item">
+            <span style="font-size:12px;">AAPL 均線突破</span>
+          </div>
+          <div class="ws-sidebar-item">
+            <span style="font-size:12px;">TSLA 波動率</span>
+          </div>
+        </div>
+      </div>
+      <!-- Main: chart -->
+      <div class="ws-main">
+        <div class="ws-header-min">
+          <div class="ws-symbol-row">
+            <span class="ws-symbol">AAPL</span>
+            <span class="ws-company">Apple Inc.</span>
+            <span class="ws-market-tag">NASDAQ</span>
+          </div>
+          <div class="ws-price-row">
+            <span class="ws-price">198.11</span>
+            <span class="ws-change">+2.43 (+1.24%)</span>
+          </div>
+        </div>
+        <div class="ws-chart-min">
+          <div class="ws-chart-inner">
+            <div class="ws-chart-candle">
+              <div class="ws-candle-bar up" style="height:48px"></div>
+              <div class="ws-candle-bar up" style="height:55px"></div>
+              <div class="ws-candle-bar down" style="height:40px"></div>
+              <div class="ws-candle-bar up" style="height:62px"></div>
+              <div class="ws-candle-bar up" style="height:75px"></div>
+              <div class="ws-candle-bar down" style="height:52px"></div>
+              <div class="ws-candle-bar up" style="height:68px"></div>
+              <div class="ws-candle-bar up" style="height:85px"></div>
+              <div class="ws-candle-bar down" style="height:45px"></div>
+              <div class="ws-candle-bar up" style="height:72px"></div>
+              <div class="ws-candle-bar up" style="height:92px"></div>
+              <div class="ws-candle-bar down" style="height:50px"></div>
+              <div class="ws-candle-bar up" style="height:78px"></div>
+              <div class="ws-candle-bar up" style="height:100px"></div>
+              <div class="ws-candle-bar down" style="height:58px"></div>
+              <div class="ws-candle-bar up" style="height:108px"></div>
+              <div class="ws-candle-bar up" style="height:118px"></div>
+              <div class="ws-candle-bar down" style="height:65px"></div>
+              <div class="ws-candle-bar up" style="height:82px"></div>
+              <div class="ws-candle-bar up" style="height:125px"></div>
+            </div>
+            <div class="ws-chart-caption">K 線圖表</div>
+          </div>
+        </div>
+        <div class="ws-replay-min">
+          <span class="ws-replay-dot"></span>
+          <span>回放中</span>
+          <span class="ws-replay-time">2026-10-24 14:35</span>
+          <span class="ws-replay-label">模擬交易 · 1D</span>
+        </div>
+      </div>
+      <!-- Right: research notes -->
+      <div class="ws-notes">
+        <div class="ws-notes-header">研究筆記</div>
+        <div class="ws-notes-content">
+          <div class="ws-note-block">
+            <div class="ws-note-label">策略</div>
+            <div class="ws-note-text">SMA 交叉 (5/20)<br>回測區間：2025-01 → 2026-10</div>
+          </div>
+          <div class="ws-note-block">
+            <div class="ws-note-label">證據</div>
+            <div class="ws-note-stat">
+              <span class="label">勝率</span>
+              <span class="value green">68.2%</span>
+            </div>
+            <div class="ws-note-stat">
+              <span class="label">收益</span>
+              <span class="value green">+12.5%</span>
+            </div>
+            <div class="ws-note-stat">
+              <span class="label">最大回撤</span>
+              <span class="value red">-8.3%</span>
+            </div>
+            <div class="ws-note-stat">
+              <span class="label">交易次數</span>
+              <span class="value">47</span>
+            </div>
+          </div>
+          <div class="ws-note-block">
+            <div class="ws-note-label">筆記</div>
+            <div class="ws-note-card">
+              <div class="ws-note-card-title">觀察</div>
+              <div class="ws-note-card-detail">均線交叉信號在盤整期間表現較差，考慮加入成交量過濾條件。</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== PORTFOLIO ==================== -->
+<div class="proto-section">
+  <div class="proto-section-label">PORTFOLIO — DESKTOP · 720PX PROSE WIDTH</div>
+  <div class="portfolio-frame">
+    <div class="min-nav">
+      <span class="min-nav-brand">Alethra</span>
+      <nav class="min-nav-links">
+        <a class="min-nav-link" href="#">工作台</a>
+        <a class="min-nav-link" href="#">策略</a>
+        <a class="min-nav-link active" href="#">組合</a>
+        <a class="min-nav-link" href="#">紀錄</a>
+      </nav>
+      <div class="min-nav-right">
+        <a class="min-nav-link-btn" href="#">登出</a>
+      </div>
+    </div>
+    <div class="portfolio-content">
+      <div class="portfolio-title">模擬投資組合</div>
+      <div class="portfolio-desc">基於研究實驗的虛擬持倉。</div>
+      <div class="portfolio-summary-min">
+        <div class="port-sum-item">
+          <div class="port-sum-label">總資產</div>
+          <div class="port-sum-value">$118,342</div>
+        </div>
+        <div class="port-sum-item">
+          <div class="port-sum-label">今日盈虧</div>
+          <div class="port-sum-value" style="color:var(--green)">+$1,245</div>
+        </div>
+        <div class="port-sum-item">
+          <div class="port-sum-label">總收益率</div>
+          <div class="port-sum-value green">+18.34%</div>
+        </div>
+      </div>
+      <ul class="min-pos-list">
+        <li class="min-pos-item">
+          <span class="min-pos-name">AAPL</span>
+          <span class="min-pos-detail">200 股 · 均價 $185.40 · 現價 $198.11</span>
+          <div class="min-pos-pnl">
+            <div class="min-pos-pnl-value" style="color:var(--green)">+$2,542</div>
+            <div class="min-pos-pnl-pct" style="color:var(--green)">+6.85%</div>
+          </div>
+        </li>
+        <li class="min-pos-item">
+          <span class="min-pos-name">TSLA</span>
+          <span class="min-pos-detail">100 股 · 均價 $252.30 · 現價 $248.50</span>
+          <div class="min-pos-pnl">
+            <div class="min-pos-pnl-value" style="color:var(--red)">-$380</div>
+            <div class="min-pos-pnl-pct" style="color:var(--red)">-1.51%</div>
+          </div>
+        </li>
+        <li class="min-pos-item">
+          <span class="min-pos-name">NVDA</span>
+          <span class="min-pos-detail">300 股 · 均價 $128.75 · 現價 $142.30</span>
+          <div class="min-pos-pnl">
+            <div class="min-pos-pnl-value" style="color:var(--green)">+$4,065</div>
+            <div class="min-pos-pnl-pct" style="color:var(--green)">+10.52%</div>
+          </div>
+        </li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<div style="padding:64px;text-align:center;color:var(--text-tertiary);font-size:12px;">
+  PROTOTYPE — Direction C: Minimalist Research Tool — Not Implemented<br>
+  Light · Prose-width content · Minimal chrome · Note-based research panel · Clean typography
+</div>
+
+</body>
+</html>

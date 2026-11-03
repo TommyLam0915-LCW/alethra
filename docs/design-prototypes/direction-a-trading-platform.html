@@ -1,0 +1,1203 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=1440">
+<title>方向 A：Trading Platform Standard — Prototype</title>
+<style>
+/* ===== RESET & TOKENS ===== */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg-base: #0b0e11;
+  --bg-surface: #1e2329;
+  --bg-surface-2: #2b3139;
+  --bg-surface-3: #363c45;
+  --border: #2b3139;
+  --border-strong: #474d57;
+  --text-primary: #eaecef;
+  --text-secondary: #848e9c;
+  --text-tertiary: #5e6673;
+  --accent: #f0b90b;
+  --accent-hover: #d4a50a;
+  --green: #0ecb81;
+  --red: #f6465d;
+  --green-bg: rgba(14,203,129,0.1);
+  --red-bg: rgba(246,70,93,0.1);
+  --radius: 4px;
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+}
+
+body {
+  font-family: var(--font-sans);
+  background: #060809;
+  color: var(--text-primary);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ===== PROTOTYPE CHROME ===== */
+.proto-banner {
+  background: #1a1a2e;
+  border-bottom: 2px solid var(--accent);
+  padding: 12px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.proto-banner h1 {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--accent);
+  letter-spacing: 0.5px;
+}
+.proto-banner span {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.proto-section {
+  padding: 48px;
+  border-bottom: 1px solid #1a1a1a;
+}
+.proto-section-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  margin-bottom: 24px;
+}
+
+/* ===== LOGIN PAGE ===== */
+.login-frame {
+  width: 1024px;
+  height: 640px;
+  margin: 0 auto;
+  display: flex;
+  border-radius: var(--radius);
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.login-brand {
+  width: 50%;
+  background: linear-gradient(135deg, #0b0e11 0%, #1a1e25 100%);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 64px;
+  position: relative;
+  overflow: hidden;
+}
+.login-brand::before {
+  content: '';
+  position: absolute;
+  top: -50%;
+  right: -50%;
+  width: 100%;
+  height: 100%;
+  background: radial-gradient(circle, rgba(240,185,11,0.06) 0%, transparent 70%);
+}
+.login-brand-mark {
+  font-size: 32px;
+  font-weight: 700;
+  color: var(--accent);
+  letter-spacing: 2px;
+  margin-bottom: 16px;
+}
+.login-brand-heading {
+  font-size: 36px;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.3;
+  margin-bottom: 12px;
+}
+.login-brand-tagline {
+  font-size: 15px;
+  color: var(--text-secondary);
+}
+.login-form-side {
+  width: 50%;
+  background: var(--bg-surface);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 48px;
+}
+.login-form-inner {
+  width: 100%;
+  max-width: 340px;
+}
+.login-form-title {
+  font-size: 22px;
+  font-weight: 600;
+  margin-bottom: 32px;
+}
+.login-field {
+  margin-bottom: 20px;
+}
+.login-label {
+  display: block;
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+  font-weight: 500;
+}
+.login-input {
+  width: 100%;
+  height: 44px;
+  background: var(--bg-base);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  padding: 0 14px;
+  color: var(--text-primary);
+  font-size: 14px;
+  outline: none;
+}
+.login-input:focus {
+  border-color: var(--accent);
+}
+.login-input::placeholder {
+  color: var(--text-tertiary);
+}
+.login-submit {
+  width: 100%;
+  height: 44px;
+  background: var(--accent);
+  color: #0b0e11;
+  border: none;
+  border-radius: var(--radius);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  margin-top: 8px;
+}
+.login-switch {
+  text-align: center;
+  margin-top: 20px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.login-switch a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+/* ===== RESEARCH PAGE ===== */
+.research-frame {
+  width: 1200px;
+  margin: 0 auto;
+  background: var(--bg-base);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+/* Top app bar */
+.app-bar {
+  height: 48px;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  padding: 0 20px;
+  gap: 24px;
+}
+.app-bar-brand {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--accent);
+  letter-spacing: 1px;
+}
+.app-nav {
+  display: flex;
+  gap: 4px;
+  margin-left: 16px;
+}
+.app-nav-link {
+  padding: 6px 14px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  text-decoration: none;
+  border-radius: var(--radius);
+  font-weight: 500;
+}
+.app-nav-link.active {
+  color: var(--text-primary);
+  background: var(--bg-surface-2);
+}
+.app-bar-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.app-bar-btn {
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: none;
+  border: 1px solid var(--border-strong);
+  padding: 5px 12px;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+/* Market ticker bar */
+.ticker-bar {
+  height: 36px;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  padding: 0 20px;
+  gap: 24px;
+  overflow: hidden;
+}
+.ticker-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+  font-size: 12px;
+}
+.ticker-symbol {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.ticker-price {
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+}
+.ticker-change {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 2px;
+}
+.ticker-change.up {
+  color: var(--green);
+  background: var(--green-bg);
+}
+.ticker-change.down {
+  color: var(--red);
+  background: var(--red-bg);
+}
+
+/* Research content */
+.research-content {
+  padding: 24px;
+}
+.research-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+.research-title {
+  font-size: 18px;
+  font-weight: 600;
+}
+.research-primary-action {
+  display: inline-block;
+  padding: 8px 20px;
+  background: var(--accent);
+  color: #0b0e11;
+  border-radius: var(--radius);
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+/* Stats row */
+.stats-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-bottom: 20px;
+}
+.stat-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+}
+.stat-label {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 6px;
+}
+.stat-value {
+  font-family: var(--font-mono);
+  font-size: 24px;
+  font-weight: 700;
+}
+.stat-value.green { color: var(--green); }
+.stat-value.accent { color: var(--accent); }
+
+/* Filter tabs */
+.filter-tabs {
+  display: flex;
+  gap: 2px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+}
+.filter-tab {
+  padding: 8px 16px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  background: none;
+  border: none;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  font-weight: 500;
+}
+.filter-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+.filter-tab .count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-tertiary);
+  margin-left: 4px;
+}
+
+/* Experiment table */
+.exp-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.exp-table th {
+  text-align: left;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.exp-table td {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+.exp-table tr:hover td {
+  background: var(--bg-surface);
+}
+.exp-name {
+  font-weight: 500;
+  color: var(--text-primary);
+}
+.exp-meta {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  margin-top: 3px;
+}
+.exp-status {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 2px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+.exp-status.draft { color: var(--text-secondary); background: var(--bg-surface-2); }
+.exp-status.exploring { color: var(--accent); background: rgba(240,185,11,0.12); }
+.exp-status.locked { color: var(--green); background: var(--green-bg); }
+.exp-metric {
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+.exp-metric.green { color: var(--green); }
+.exp-metric.red { color: var(--red); }
+.exp-action-link {
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+/* ===== WORKSPACE PAGE ===== */
+.workspace-frame {
+  width: 1200px;
+  height: 700px;
+  margin: 0 auto;
+  background: var(--bg-base);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.ws-toolbar {
+  height: 40px;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  gap: 8px;
+}
+.ws-toolbar-btn {
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: var(--bg-surface-2);
+  border: 1px solid var(--border);
+  padding: 4px 10px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-family: var(--font-mono);
+}
+.ws-toolbar-btn.active {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.ws-toolbar-sep {
+  width: 1px;
+  height: 20px;
+  background: var(--border);
+  margin: 0 4px;
+}
+.ws-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+/* Left: watchlist */
+.ws-left {
+  width: 200px;
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-surface);
+}
+.ws-left-header {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.ws-left-add {
+  font-size: 14px;
+  color: var(--accent);
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+.ws-watchlist-item {
+  padding: 8px 12px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  font-size: 12px;
+}
+.ws-watchlist-item:hover {
+  background: var(--bg-surface-2);
+}
+.ws-watchlist-item.active {
+  background: var(--bg-surface-2);
+  border-left: 2px solid var(--accent);
+}
+.ws-wl-symbol {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.ws-wl-price {
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+  font-size: 11px;
+}
+.ws-wl-change {
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+.ws-wl-change.up { color: var(--green); }
+.ws-wl-change.down { color: var(--red); }
+
+/* Center: chart + instrument header */
+.ws-center {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.ws-instrument-header {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  background: var(--bg-surface);
+}
+.ws-inst-symbol {
+  font-size: 18px;
+  font-weight: 700;
+}
+.ws-inst-name {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.ws-inst-price {
+  font-family: var(--font-mono);
+  font-size: 22px;
+  font-weight: 700;
+  margin-left: auto;
+}
+.ws-inst-change {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 600;
+}
+.ws-inst-change.up { color: var(--green); }
+.ws-chart-area {
+  flex: 1;
+  background: var(--bg-base);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+.ws-chart-placeholder {
+  color: var(--text-tertiary);
+  font-size: 13px;
+  text-align: center;
+}
+.ws-chart-candle {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 120px;
+  margin-bottom: 16px;
+}
+.ws-candle-bar {
+  width: 8px;
+  border-radius: 1px;
+}
+.ws-candle-bar.up { background: var(--green); }
+.ws-candle-bar.down { background: var(--red); }
+
+/* Replay bar */
+.ws-replay {
+  height: 36px;
+  background: var(--bg-surface);
+  border-top: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.ws-replay-btn {
+  width: 24px;
+  height: 24px;
+  background: var(--bg-surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-size: 10px;
+}
+.ws-replay-time {
+  font-family: var(--font-mono);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* Right: order/research panel */
+.ws-right {
+  width: 280px;
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-surface);
+}
+.ws-right-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+}
+.ws-right-tab {
+  flex: 1;
+  padding: 10px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  text-align: center;
+  border: none;
+  background: none;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+}
+.ws-right-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+.ws-right-content {
+  flex: 1;
+  padding: 16px;
+  overflow-y: auto;
+}
+.ws-order-type {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 16px;
+}
+.ws-order-type-btn {
+  flex: 1;
+  padding: 6px;
+  font-size: 11px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-surface-2);
+  color: var(--text-secondary);
+  border-radius: var(--radius);
+  cursor: pointer;
+  text-align: center;
+}
+.ws-order-type-btn.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.ws-order-field {
+  margin-bottom: 12px;
+}
+.ws-order-label {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  margin-bottom: 4px;
+}
+.ws-order-input {
+  width: 100%;
+  height: 36px;
+  background: var(--bg-base);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  padding: 0 10px;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-family: var(--font-mono);
+}
+.ws-order-btn {
+  width: 100%;
+  height: 40px;
+  border: none;
+  border-radius: var(--radius);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  margin-top: 8px;
+}
+.ws-order-btn.buy {
+  background: var(--green);
+  color: #fff;
+}
+.ws-order-btn.sell {
+  background: var(--red);
+  color: #fff;
+}
+
+/* ===== PORTFOLIO PAGE ===== */
+.portfolio-frame {
+  width: 1200px;
+  margin: 0 auto;
+  background: var(--bg-base);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+.portfolio-content {
+  padding: 24px;
+}
+.portfolio-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+.portfolio-title {
+  font-size: 18px;
+  font-weight: 600;
+}
+.portfolio-summary {
+  display: flex;
+  gap: 24px;
+}
+.portfolio-sum-item {
+  text-align: right;
+}
+.portfolio-sum-label {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+}
+.portfolio-sum-value {
+  font-family: var(--font-mono);
+  font-size: 18px;
+  font-weight: 700;
+}
+.pos-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.pos-table th {
+  text-align: left;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.pos-table td {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+.pos-table .mono {
+  font-family: var(--font-mono);
+}
+</style>
+</head>
+<body>
+
+<!-- PROTOTYPE BANNER -->
+<div class="proto-banner">
+  <h1>PROTOTYPE — 方向 A：Trading Platform Standard</h1>
+  <span>Not implemented — Visual review only — 2026-10-27</span>
+</div>
+
+<!-- ==================== LOGIN ==================== -->
+<div class="proto-section">
+  <div class="proto-section-label">LOGIN PAGE — DESKTOP 1024×640</div>
+  <div class="login-frame">
+    <div class="login-brand">
+      <div class="login-brand-mark">ALETHRA</div>
+      <div class="login-brand-heading">Into the<br>Rabbit Hole</div>
+      <div class="login-brand-tagline">投資想法，值得被認真檢驗。</div>
+    </div>
+    <div class="login-form-side">
+      <div class="login-form-inner">
+        <div class="login-form-title">登入</div>
+        <div class="login-field">
+          <label class="login-label">電子郵件</label>
+          <input class="login-input" type="email" placeholder="your@email.com" readonly>
+        </div>
+        <div class="login-field">
+          <label class="login-label">密碼</label>
+          <input class="login-input" type="password" placeholder="至少 8 個字元" readonly>
+        </div>
+        <button class="login-submit">登入</button>
+        <div class="login-switch">沒有帳號？<a href="#">註冊</a></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== RESEARCH PAGE ==================== -->
+<div class="proto-section">
+  <div class="proto-section-label">RESEARCH PAGE — DESKTOP 1200×AUTO</div>
+  <div class="research-frame">
+    <!-- App bar -->
+    <div class="app-bar">
+      <span class="app-bar-brand">ALETHRA</span>
+      <nav class="app-nav">
+        <a class="app-nav-link" href="#">工作台</a>
+        <a class="app-nav-link active" href="#">策略與實驗</a>
+        <a class="app-nav-link" href="#">投資組合</a>
+        <a class="app-nav-link" href="#">紀錄</a>
+      </nav>
+      <div class="app-bar-right">
+        <button class="app-bar-btn">API 金鑰</button>
+        <button class="app-bar-btn">登出</button>
+      </div>
+    </div>
+    <!-- Ticker bar -->
+    <div class="ticker-bar">
+      <div class="ticker-item">
+        <span class="ticker-symbol">AAPL</span>
+        <span class="ticker-price">198.11</span>
+        <span class="ticker-change up">+1.24%</span>
+      </div>
+      <div class="ticker-item">
+        <span class="ticker-symbol">TSLA</span>
+        <span class="ticker-price">248.50</span>
+        <span class="ticker-change down">-0.83%</span>
+      </div>
+      <div class="ticker-item">
+        <span class="ticker-symbol">NVDA</span>
+        <span class="ticker-price">142.30</span>
+        <span class="ticker-change up">+2.15%</span>
+      </div>
+      <div class="ticker-item">
+        <span class="ticker-symbol">0700.HK</span>
+        <span class="ticker-price">372.40</span>
+        <span class="ticker-change up">+0.54%</span>
+      </div>
+      <div class="ticker-item">
+        <span class="ticker-symbol">BTC/USDT</span>
+        <span class="ticker-price">67,245</span>
+        <span class="ticker-change down">-1.02%</span>
+      </div>
+    </div>
+    <!-- Content -->
+    <div class="research-content">
+      <div class="research-header-row">
+        <div class="research-title">策略與實驗</div>
+        <a href="#" class="research-primary-action">+ 建立新實驗</a>
+      </div>
+      <!-- Stats -->
+      <div class="stats-row">
+        <div class="stat-card">
+          <div class="stat-label">總實驗</div>
+          <div class="stat-value accent">12</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">進行中</div>
+          <div class="stat-value">3</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">整體勝率</div>
+          <div class="stat-value green">62.5%</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">模擬收益</div>
+          <div class="stat-value green">+18.3%</div>
+        </div>
+      </div>
+      <!-- Filters -->
+      <div class="filter-tabs">
+        <button class="filter-tab active">全部<span class="count">12</span></button>
+        <button class="filter-tab">草稿<span class="count">5</span></button>
+        <button class="filter-tab">探索中<span class="count">3</span></button>
+        <button class="filter-tab">已鎖定<span class="count">4</span></button>
+      </div>
+      <!-- Table -->
+      <table class="exp-table">
+        <thead>
+          <tr>
+            <th>實驗名稱</th>
+            <th>狀態</th>
+            <th>勝率</th>
+            <th>收益</th>
+            <th>更新</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>
+              <div class="exp-name">AAPL 均線突破策略</div>
+              <div class="exp-meta">建於 2026-10-15 · 最後活動 10-24</div>
+            </td>
+            <td><span class="exp-status locked">已鎖定</span></td>
+            <td><span class="exp-metric green">68.2%</span></td>
+            <td><span class="exp-metric green">+12.5%</span></td>
+            <td style="color:var(--text-tertiary);font-size:12px;">2026-10-24</td>
+            <td><a href="#" class="exp-action-link">查看報告 →</a></td>
+          </tr>
+          <tr>
+            <td>
+              <div class="exp-name">TSLA 波動率分析</div>
+              <div class="exp-meta">建於 2026-10-18 · 最後活動 10-25</div>
+            </td>
+            <td><span class="exp-status exploring">探索中</span></td>
+            <td><span class="exp-metric">—</span></td>
+            <td><span class="exp-metric">—</span></td>
+            <td style="color:var(--text-tertiary);font-size:12px;">2026-10-25</td>
+            <td><a href="#" class="exp-action-link">查看結果 →</a></td>
+          </tr>
+          <tr>
+            <td>
+              <div class="exp-name">NVDA 動能策略回測</div>
+              <div class="exp-meta">建於 2026-10-20</div>
+            </td>
+            <td><span class="exp-status draft">草稿</span></td>
+            <td><span class="exp-metric">—</span></td>
+            <td><span class="exp-metric">—</span></td>
+            <td style="color:var(--text-tertiary);font-size:12px;">2026-10-20</td>
+            <td><a href="#" class="exp-action-link">繼續研究 →</a></td>
+          </tr>
+          <tr>
+            <td>
+              <div class="exp-name">騰訊 (0700.HK) 長線研究</div>
+              <div class="exp-meta">建於 2026-09-05 · 最後活動 10-22</div>
+            </td>
+            <td><span class="exp-status locked">已鎖定</span></td>
+            <td><span class="exp-metric green">55.0%</span></td>
+            <td><span class="exp-metric red">-2.3%</span></td>
+            <td style="color:var(--text-tertiary);font-size:12px;">2026-10-22</td>
+            <td><a href="#" class="exp-action-link">查看報告 →</a></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== WORKSPACE ==================== -->
+<div class="proto-section">
+  <div class="proto-section-label">WORKSPACE — DESKTOP 1200×700</div>
+  <div class="workspace-frame">
+    <!-- App bar -->
+    <div class="app-bar" style="border-radius:0;">
+      <span class="app-bar-brand">ALETHRA</span>
+      <nav class="app-nav">
+        <a class="app-nav-link active" href="#">工作台</a>
+        <a class="app-nav-link" href="#">策略與實驗</a>
+        <a class="app-nav-link" href="#">投資組合</a>
+        <a class="app-nav-link" href="#">紀錄</a>
+      </nav>
+      <div class="app-bar-right">
+        <button class="app-bar-btn">設定</button>
+        <button class="app-bar-btn">登出</button>
+      </div>
+    </div>
+    <!-- Toolbar -->
+    <div class="ws-toolbar">
+      <button class="ws-toolbar-btn active">1D</button>
+      <button class="ws-toolbar-btn">1W</button>
+      <button class="ws-toolbar-btn">1M</button>
+      <button class="ws-toolbar-btn">3M</button>
+      <button class="ws-toolbar-btn">1Y</button>
+      <div class="ws-toolbar-sep"></div>
+      <button class="ws-toolbar-btn">MA(5)</button>
+      <button class="ws-toolbar-btn">MA(20)</button>
+      <button class="ws-toolbar-btn">BOLL</button>
+      <div class="ws-toolbar-sep"></div>
+      <button class="ws-toolbar-btn" style="margin-left:auto;">⌘K</button>
+    </div>
+    <!-- Body -->
+    <div class="ws-body">
+      <!-- Left: watchlist -->
+      <div class="ws-left">
+        <div class="ws-left-header">
+          觀察名單
+          <button class="ws-left-add">+</button>
+        </div>
+        <div class="ws-watchlist-item active">
+          <span class="ws-wl-symbol">AAPL</span>
+          <div style="text-align:right">
+            <div class="ws-wl-price">198.11</div>
+            <div class="ws-wl-change up">+1.24%</div>
+          </div>
+        </div>
+        <div class="ws-watchlist-item">
+          <span class="ws-wl-symbol">TSLA</span>
+          <div style="text-align:right">
+            <div class="ws-wl-price">248.50</div>
+            <div class="ws-wl-change down">-0.83%</div>
+          </div>
+        </div>
+        <div class="ws-watchlist-item">
+          <span class="ws-wl-symbol">NVDA</span>
+          <div style="text-align:right">
+            <div class="ws-wl-price">142.30</div>
+            <div class="ws-wl-change up">+2.15%</div>
+          </div>
+        </div>
+        <div class="ws-watchlist-item">
+          <span class="ws-wl-symbol">0700.HK</span>
+          <div style="text-align:right">
+            <div class="ws-wl-price">372.40</div>
+            <div class="ws-wl-change up">+0.54%</div>
+          </div>
+        </div>
+        <div class="ws-watchlist-item">
+          <span class="ws-wl-symbol">BTC</span>
+          <div style="text-align:right">
+            <div class="ws-wl-price">67,245</div>
+            <div class="ws-wl-change down">-1.02%</div>
+          </div>
+        </div>
+      </div>
+      <!-- Center: chart -->
+      <div class="ws-center">
+        <div class="ws-instrument-header">
+          <span class="ws-inst-symbol">AAPL</span>
+          <span class="ws-inst-name">Apple Inc. · NASDAQ</span>
+          <span class="ws-inst-price">198.11</span>
+          <span class="ws-inst-change up">+2.43 (+1.24%)</span>
+        </div>
+        <div class="ws-chart-area">
+          <div class="ws-chart-placeholder">
+            <div class="ws-chart-candle">
+              <div class="ws-candle-bar up" style="height:45px"></div>
+              <div class="ws-candle-bar up" style="height:52px"></div>
+              <div class="ws-candle-bar down" style="height:38px"></div>
+              <div class="ws-candle-bar up" style="height:60px"></div>
+              <div class="ws-candle-bar up" style="height:72px"></div>
+              <div class="ws-candle-bar down" style="height:55px"></div>
+              <div class="ws-candle-bar up" style="height:68px"></div>
+              <div class="ws-candle-bar up" style="height:80px"></div>
+              <div class="ws-candle-bar down" style="height:42px"></div>
+              <div class="ws-candle-bar up" style="height:65px"></div>
+              <div class="ws-candle-bar up" style="height:90px"></div>
+              <div class="ws-candle-bar down" style="height:48px"></div>
+              <div class="ws-candle-bar up" style="height:75px"></div>
+              <div class="ws-candle-bar up" style="height:85px"></div>
+              <div class="ws-candle-bar down" style="height:58px"></div>
+              <div class="ws-candle-bar up" style="height:95px"></div>
+              <div class="ws-candle-bar up" style="height:100px"></div>
+              <div class="ws-candle-bar down" style="height:62px"></div>
+              <div class="ws-candle-bar up" style="height:78px"></div>
+              <div class="ws-candle-bar up" style="height:110px"></div>
+            </div>
+            K 線圖表區域 · 可疊加技術指標
+          </div>
+        </div>
+        <div class="ws-replay">
+          <button class="ws-replay-btn">▶</button>
+          <button class="ws-replay-btn">⏸</button>
+          <span>回放</span>
+          <span class="ws-replay-time">2026-10-24 14:35:00</span>
+          <span style="margin-left:auto;">1D · 模擬交易</span>
+        </div>
+      </div>
+      <!-- Right: order panel -->
+      <div class="ws-right">
+        <div class="ws-right-tabs">
+          <button class="ws-right-tab active">訂單</button>
+          <button class="ws-right-tab">持倉</button>
+          <button class="ws-right-tab">研究</button>
+        </div>
+        <div class="ws-right-content">
+          <div class="ws-order-type">
+            <button class="ws-order-type-btn active">限價</button>
+            <button class="ws-order-type-btn">市價</button>
+            <button class="ws-order-type-btn">止損</button>
+          </div>
+          <div class="ws-order-field">
+            <div class="ws-order-label">價格 (USD)</div>
+            <input class="ws-order-input" value="198.11" readonly>
+          </div>
+          <div class="ws-order-field">
+            <div class="ws-order-label">數量</div>
+            <input class="ws-order-input" value="100" readonly>
+          </div>
+          <div style="display:flex;gap:8px;margin-top:16px;">
+            <button class="ws-order-btn buy" style="flex:1">買入</button>
+            <button class="ws-order-btn sell" style="flex:1">賣出</button>
+          </div>
+          <div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border);">
+            <div class="ws-order-label" style="margin-bottom:8px;">訂單摘要</div>
+            <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;">
+              <span style="color:var(--text-tertiary)">預估總值</span>
+              <span class="mono" style="font-family:var(--font-mono)">19,811.00</span>
+            </div>
+            <div style="display:flex;justify-content:space-between;font-size:12px;">
+              <span style="color:var(--text-tertiary)">模擬佣金</span>
+              <span style="font-family:var(--font-mono);color:var(--text-secondary)">$0.00</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== PORTFOLIO ==================== -->
+<div class="proto-section">
+  <div class="proto-section-label">PORTFOLIO — DESKTOP 1200×AUTO</div>
+  <div class="portfolio-frame">
+    <div class="app-bar">
+      <span class="app-bar-brand">ALETHRA</span>
+      <nav class="app-nav">
+        <a class="app-nav-link" href="#">工作台</a>
+        <a class="app-nav-link" href="#">策略與實驗</a>
+        <a class="app-nav-link active" href="#">投資組合</a>
+        <a class="app-nav-link" href="#">紀錄</a>
+      </nav>
+      <div class="app-bar-right">
+        <button class="app-bar-btn">設定</button>
+        <button class="app-bar-btn">登出</button>
+      </div>
+    </div>
+    <div class="portfolio-content">
+      <div class="portfolio-header-row">
+        <div class="portfolio-title">模擬投資組合</div>
+        <div class="portfolio-summary">
+          <div class="portfolio-sum-item">
+            <div class="portfolio-sum-label">總資產</div>
+            <div class="portfolio-sum-value" style="font-family:var(--font-mono)">$118,342.50</div>
+          </div>
+          <div class="portfolio-sum-item">
+            <div class="portfolio-sum-label">今日盈虧</div>
+            <div class="portfolio-sum-value green" style="font-family:var(--font-mono)">+$1,245.30</div>
+          </div>
+          <div class="portfolio-sum-item">
+            <div class="portfolio-sum-label">總收益率</div>
+            <div class="portfolio-sum-value green" style="font-family:var(--font-mono)">+18.34%</div>
+          </div>
+        </div>
+      </div>
+      <table class="pos-table">
+        <thead>
+          <tr>
+            <th>標的</th>
+            <th>方向</th>
+            <th>數量</th>
+            <th>均價</th>
+            <th>現價</th>
+            <th>市值</th>
+            <th>盈虧</th>
+            <th>盈虧%</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="exp-name">AAPL</td>
+            <td><span style="color:var(--green);font-size:12px;font-weight:600">多頭</span></td>
+            <td class="mono">200</td>
+            <td class="mono">185.40</td>
+            <td class="mono">198.11</td>
+            <td class="mono">$39,622.00</td>
+            <td class="mono" style="color:var(--green)">+$2,542.00</td>
+            <td class="mono" style="color:var(--green)">+6.85%</td>
+          </tr>
+          <tr>
+            <td class="exp-name">TSLA</td>
+            <td><span style="color:var(--green);font-size:12px;font-weight:600">多頭</span></td>
+            <td class="mono">100</td>
+            <td class="mono">252.30</td>
+            <td class="mono">248.50</td>
+            <td class="mono">$24,850.00</td>
+            <td class="mono" style="color:var(--red)">-$380.00</td>
+            <td class="mono" style="color:var(--red)">-1.51%</td>
+          </tr>
+          <tr>
+            <td class="exp-name">NVDA</td>
+            <td><span style="color:var(--green);font-size:12px;font-weight:600">多頭</span></td>
+            <td class="mono">300</td>
+            <td class="mono">128.75</td>
+            <td class="mono">142.30</td>
+            <td class="mono">$42,690.00</td>
+            <td class="mono" style="color:var(--green)">+$4,065.00</td>
+            <td class="mono" style="color:var(--green)">+10.52%</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<div style="padding:48px;text-align:center;color:var(--text-tertiary);font-size:12px;">
+  PROTOTYPE — Direction A: Trading Platform Standard — Not Implemented<br>
+  Dark theme · Dense information · Monospace numbers · Three-column fixed layout
+</div>
+
+</body>
+</html>
