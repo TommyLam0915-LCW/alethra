@@ -28,6 +28,7 @@ class Market(str, enum.Enum):
     US = "US"
     HK = "HK"
     CRYPTO = "CRYPTO"
+    FOREX = "FOREX"
 
 
 class Exchange(str, enum.Enum):
@@ -44,12 +45,18 @@ class Exchange(str, enum.Enum):
     # Crypto spot venues (one at a time: a price without its venue is not an
     # instrument, so every crypto instrument_id carries the exchange)
     KRAKEN = "KRAKEN"
+    
+    # Forex (OTC market, no central exchange)
+    FOREX = "FOREX"
 
 
 class Currency(str, enum.Enum):
     """Supported currencies."""
     USD = "USD"
     HKD = "HKD"
+    JPY = "JPY"
+    EUR = "EUR"
+    GBP = "GBP"
 
 
 class AssetType(str, enum.Enum):
@@ -57,6 +64,7 @@ class AssetType(str, enum.Enum):
     STOCK = "STOCK"
     ETF = "ETF"
     CRYPTO_PAIR = "CRYPTO_PAIR"
+    FOREX_PAIR = "FOREX_PAIR"
     # Future: WARRANT, RIGHT, BOND, etc.
 
 

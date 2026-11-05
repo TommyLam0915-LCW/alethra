@@ -21,6 +21,8 @@ _PROVIDERS: Dict[str, DataProvider] = {
 _UNCONFIGURED: Dict[str, "UnconfiguredDataProvider"] = {}
 _LSEG_INITIALIZED = False
 _TWELVEDATA_INITIALIZED = False
+_SYNTHETIC_STOCK_INITIALIZED = False
+_SYNTHETIC_FOREX_INITIALIZED = False
 
 
 class UnconfiguredDataProvider(DataProvider):
@@ -136,8 +138,32 @@ def _try_init_twelvedata() -> Optional[DataProvider]:
     return None
 
 
+def _try_init_synthetic_stock() -> Optional[DataProvider]:
+    """Initialize synthetic stock provider for testing."""
+    try:
+        from app.providers.synthetic_stock_provider import SyntheticStockProvider
+        provider = SyntheticStockProvider()
+        logger.info("Synthetic stock provider auto-registered (testing only)")
+        return provider
+    except Exception as exc:
+        logger.warning("Synthetic stock provider failed to initialize: %s", exc)
+        return None
+
+
+def _try_init_synthetic_forex() -> Optional[DataProvider]:
+    """Initialize synthetic forex provider for testing."""
+    try:
+        from app.providers.synthetic_forex_provider import SyntheticForexProvider
+        provider = SyntheticForexProvider()
+        logger.info("Synthetic forex provider auto-registered (testing only)")
+        return provider
+    except Exception as exc:
+        logger.warning("Synthetic forex provider failed to initialize: %s", exc)
+        return None
+
+
 def get_data_provider() -> DataProvider:
-    global _LSEG_INITIALIZED, _TWELVEDATA_INITIALIZED
+    global _LSEG_INITIALIZED, _TWELVEDATA_INITIALIZED, _SYNTHETIC_STOCK_INITIALIZED, _SYNTHETIC_FOREX_INITIALIZED
     settings = get_settings()
     provider_id = settings.data_provider
 
@@ -152,6 +178,18 @@ def get_data_provider() -> DataProvider:
         td = _try_init_twelvedata()
         if td:
             _PROVIDERS["twelvedata"] = td
+
+    if provider_id == "synthetic_stock" and not _SYNTHETIC_STOCK_INITIALIZED:
+        _SYNTHETIC_STOCK_INITIALIZED = True
+        ss = _try_init_synthetic_stock()
+        if ss:
+            _PROVIDERS["synthetic_stock"] = ss
+
+    if provider_id == "synthetic_forex" and not _SYNTHETIC_FOREX_INITIALIZED:
+        _SYNTHETIC_FOREX_INITIALIZED = True
+        sf = _try_init_synthetic_forex()
+        if sf:
+            _PROVIDERS["synthetic_forex"] = sf
 
     if provider_id not in _PROVIDERS:
         # Missing credentials are a normal deployment state, not a boot failure.

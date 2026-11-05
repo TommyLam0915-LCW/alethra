@@ -28,10 +28,13 @@ from app.api.crypto_failures import crypto_failure
 from app.auth.jwt import get_current_user
 from app.auth.safety import rate_limit
 from app.data.crypto_instruments import CRYPTO_INSTRUMENTS, get_crypto_instrument
+from app.data.stock_instruments import YAHOO_STOCK_INSTRUMENTS, get_stock_instrument
+from app.data.forex_instruments import FOREX_INSTRUMENTS, get_forex_instrument
 from app.database import get_db
 from app.models.user import User
 from app.providers.crypto_registry import get_crypto_provider
 from app.providers.kraken_provider import KRAKEN_INTERVALS, KrakenError
+from app.providers.provider_registry import get_data_provider
 from app.services.strategy_lab import (
     DEFAULT_COMMISSION_RATE,
     DEFAULT_INTERVALS,
@@ -101,17 +104,54 @@ class StrategyLabRunRequest(BaseModel):
 
 
 def _require_instrument(instrument_id: str):
+    """Resolve instrument across all supported markets."""
+    # Try crypto first
     instrument = get_crypto_instrument(instrument_id)
-    if instrument is None:
+    if instrument is not None:
+        return instrument
+    
+    # Try stock
+    instrument = get_stock_instrument(instrument_id)
+    if instrument is not None:
+        return instrument
+    
+    # Try forex
+    instrument = get_forex_instrument(instrument_id)
+    if instrument is not None:
+        return instrument
+    
+    # Not found in any market
+    all_instruments = (
+        [item.instrument_id for item in CRYPTO_INSTRUMENTS]
+        + [item.instrument_id for item in YAHOO_STOCK_INSTRUMENTS]
+        + [item.instrument_id for item in FOREX_INSTRUMENTS]
+    )
+    raise HTTPException(
+        status_code=404,
+        detail={
+            "reason": "unknown_instrument",
+            "instrument_id": instrument_id,
+            "declared": all_instruments,
+        },
+    )
+
+
+def _get_provider_for_instrument(instrument):
+    """Get the appropriate data provider for an instrument's market."""
+    if instrument.market.value == "CRYPTO":
+        return get_crypto_provider()
+    elif instrument.market.value in ("US", "HK", "FOREX"):
+        # For stock and forex markets, use the configured data provider
+        # (synthetic_stock/synthetic_forex for testing, or real provider when configured)
+        return get_data_provider()
+    else:
         raise HTTPException(
-            status_code=404,
+            status_code=400,
             detail={
-                "reason": "unknown_crypto_instrument",
-                "instrument_id": instrument_id,
-                "declared": [item.instrument_id for item in CRYPTO_INSTRUMENTS],
+                "reason": "unsupported_market",
+                "market": instrument.market.value,
             },
         )
-    return instrument
 
 
 def _instrument_payload(instrument) -> dict:
@@ -250,7 +290,7 @@ def _research_study(
             },
         )
 
-    provider = get_crypto_provider()
+    provider = _get_provider_for_instrument(instrument)
     try:
         if payload.target_bars and payload.target_bars > BAR_LIMIT:
             series = provider.get_candle_series_paginated(

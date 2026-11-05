@@ -400,7 +400,7 @@ def test_research_rejects_unknown_instrument(client, auth_headers):
         json={"instrument_id": "CRYPTO:KRAKEN:DOGE-USD"},
     )
     assert response.status_code == 404
-    assert response.json()["detail"]["reason"] == "unknown_crypto_instrument"
+    assert response.json()["detail"]["reason"] == "unknown_instrument"
 
 
 def test_research_rejects_notional_above_starting_cash(client, auth_headers):
