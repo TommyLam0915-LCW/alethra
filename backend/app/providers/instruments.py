@@ -57,6 +57,8 @@ class Currency(str, enum.Enum):
     JPY = "JPY"
     EUR = "EUR"
     GBP = "GBP"
+    BTC = "BTC"
+    ETH = "ETH"
 
 
 class AssetType(str, enum.Enum):

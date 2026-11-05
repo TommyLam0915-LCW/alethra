@@ -65,6 +65,16 @@ from app.services.strategy_study_store import (
     run_summary,
     trades_csv,
 )
+from app.services.arbitrage_engine import (
+    ArbitrageConfig,
+    run_triangular_arbitrage,
+    result_to_dict,
+)
+from app.services.market_making_engine import (
+    MarketMakingConfig,
+    backtest_market_making,
+    result_to_dict as mm_result_to_dict,
+)
 
 
 router = APIRouter(prefix="/strategy-lab", tags=["strategy-lab"])
@@ -140,9 +150,20 @@ def _get_provider_for_instrument(instrument):
     """Get the appropriate data provider for an instrument's market."""
     if instrument.market.value == "CRYPTO":
         return get_crypto_provider()
-    elif instrument.market.value in ("US", "HK", "FOREX"):
-        # For stock and forex markets, use the configured data provider
-        # (synthetic_stock/synthetic_forex for testing, or real provider when configured)
+    elif instrument.market.value in ("US", "HK"):
+        # Stock markets: use configured provider (twelvedata, synthetic_stock, etc.)
+        return get_data_provider()
+    elif instrument.market.value == "FOREX":
+        # Forex: try to use the configured provider, but if it's synthetic_stock,
+        # we need synthetic_forex instead
+        from app.config import get_settings
+        settings = get_settings()
+        if settings.data_provider == "synthetic_stock":
+            # Route forex to synthetic_forex when stocks are using synthetic_stock
+            from app.providers.provider_registry import _try_init_synthetic_forex
+            provider = _try_init_synthetic_forex()
+            if provider:
+                return provider
         return get_data_provider()
     else:
         raise HTTPException(
@@ -306,6 +327,18 @@ def _research_study(
             )
     except KrakenError as exc:
         raise crypto_failure(exc)
+    except Exception as exc:
+        if type(exc).__name__ in ("TwelveDataError", "TwelveDataRateLimitError",
+                                   "SyntheticStockError", "SyntheticForexError"):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "reason": "provider_error",
+                    "provider": provider.provider_id,
+                    "message": str(exc),
+                },
+            )
+        raise
 
     bars = [
         LabBar(
@@ -500,3 +533,165 @@ def strategy_research_run_trades_csv(
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+class ArbitrageBacktestRequest(BaseModel):
+    """Request body for triangular arbitrage backtest."""
+    interval_minutes: int = Field(default=60, ge=1, le=1440)
+    limit: int = Field(default=720, ge=100, le=5000)
+    min_spread_bps: Decimal = Field(default=Decimal("20"), ge=0, le=1000)
+    target_atr_mult: Decimal = Field(default=Decimal("1.5"), gt=0, le=10)
+    stop_atr_mult: Decimal = Field(default=Decimal("1.0"), gt=0, le=10)
+    time_stop_bars: int = Field(default=8, ge=1, le=50)
+    starting_cash: Decimal = Field(default=DEFAULT_STARTING_CASH, gt=0)
+    notional_per_trade: Decimal = Field(default=DEFAULT_NOTIONAL_PER_TRADE, gt=0)
+    commission_rate: Decimal = Field(default=DEFAULT_COMMISSION_RATE, ge=0, le=Decimal("0.05"))
+    slippage_rate: Decimal = Field(default=DEFAULT_SLIPPAGE_RATE, ge=0, le=Decimal("0.05"))
+    config_id: str = Field(default="balanced")
+
+
+@router.post("/arbitrage/backtest")
+def arbitrage_backtest(
+    payload: ArbitrageBacktestRequest,
+    current_user: User = Depends(get_current_user),
+    _rate_limit=Depends(rate_limit("strategy_research")),
+):
+    """Triangular arbitrage backtest across BTC-USD, ETH-USD, ETH-BTC.
+
+    Fetches real Kraken OHLCV for all three legs, aligns by timestamp,
+    computes the implied cross rate (ETH-BTC × BTC-USD → implied ETH-USD),
+    and simulates trades when the spread exceeds the configured threshold.
+
+    This is a multi-instrument engine, separate from the single-instrument
+    research lane. All data is live from Kraken; no synthetic fills.
+    """
+    config = ArbitrageConfig(
+        min_spread_bps=payload.min_spread_bps,
+        target_atr_mult=payload.target_atr_mult,
+        stop_atr_mult=payload.stop_atr_mult,
+        time_stop_bars=payload.time_stop_bars,
+        starting_cash=payload.starting_cash,
+        notional_per_trade=payload.notional_per_trade,
+        commission_rate=payload.commission_rate,
+        slippage_rate=payload.slippage_rate,
+        config_id=payload.config_id,
+    )
+
+    try:
+        result = run_triangular_arbitrage(
+            interval_minutes=payload.interval_minutes,
+            limit=payload.limit,
+            config=config,
+        )
+    except KrakenError as exc:
+        raise crypto_failure(exc)
+    except Exception as exc:
+        logger.exception("arbitrage backtest failed")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "reason": "arbitrage_error",
+                "message": str(exc),
+            },
+        )
+
+    if result.bars == 0:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "reason": "no_aligned_bars",
+                "message": (
+                    "The three legs (BTC-USD, ETH-USD, ETH-BTC) had no timestamps "
+                    "in common after alignment. Check that ETH-BTC is available on Kraken."
+                ),
+            },
+        )
+
+    return result_to_dict(result)
+
+
+class MarketMakingBacktestRequest(BaseModel):
+    """Request body for market making backtest."""
+    instrument_id: str = DEFAULT_INSTRUMENT_ID
+    interval_minutes: int = Field(default=5, ge=1, le=1440)
+    limit: int = Field(default=720, ge=100, le=720)
+    spread_target_bps: Decimal = Field(default=Decimal("10"), ge=1, le=100)
+    min_spread_bps: Decimal = Field(default=Decimal("2"), ge=0, le=50)
+    max_spread_bps: Decimal = Field(default=Decimal("50"), ge=1, le=200)
+    order_size_usd: Decimal = Field(default=Decimal("100"), gt=0, le=10000)
+    max_inventory_usd: Decimal = Field(default=Decimal("1000"), gt=0, le=100000)
+    inventory_skew_factor: Decimal = Field(default=Decimal("0.1"), ge=0, le=1)
+    commission_rate: Decimal = Field(default=DEFAULT_COMMISSION_RATE, ge=0, le=Decimal("0.05"))
+    slippage_rate: Decimal = Field(default=DEFAULT_SLIPPAGE_RATE, ge=0, le=Decimal("0.05"))
+    config_id: str = Field(default="balanced")
+
+
+@router.post("/market-making/backtest")
+def market_making_backtest(
+    payload: MarketMakingBacktestRequest,
+    current_user: User = Depends(get_current_user),
+    _rate_limit=Depends(rate_limit("strategy_research")),
+):
+    """Market making backtest using OHLCV-simulated order book.
+
+    IMPORTANT: This is a simulation approximation, not a realistic backtest.
+    Real market making requires L2/L3 order book data, queue position modeling,
+    and adverse selection analysis. OHLCV bars cannot capture these dynamics.
+
+    The engine estimates bid/ask spread from each bar's high-low range, adjusted
+    by volume. Fills are detected when price touches our quotes. Inventory skew
+    adjusts quotes to limit directional exposure.
+    """
+    instrument = _require_instrument(payload.instrument_id)
+
+    if instrument.market.value != "CRYPTO":
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "reason": "unsupported_market",
+                "message": "Market making simulation is only supported for crypto instruments.",
+                "market": instrument.market.value,
+            },
+        )
+
+    config = MarketMakingConfig(
+        spread_target_bps=payload.spread_target_bps,
+        min_spread_bps=payload.min_spread_bps,
+        max_spread_bps=payload.max_spread_bps,
+        order_size_usd=payload.order_size_usd,
+        max_inventory_usd=payload.max_inventory_usd,
+        inventory_skew_factor=payload.inventory_skew_factor,
+        commission_rate=payload.commission_rate,
+        slippage_rate=payload.slippage_rate,
+        config_id=payload.config_id,
+    )
+
+    try:
+        result = backtest_market_making(
+            instrument_id=payload.instrument_id,
+            interval_minutes=payload.interval_minutes,
+            limit=payload.limit,
+            config=config,
+        )
+    except KrakenError as exc:
+        raise crypto_failure(exc)
+    except Exception as exc:
+        logger.exception("market making backtest failed")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "reason": "market_making_error",
+                "message": str(exc),
+            },
+        )
+
+    if result.bars == 0:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "reason": "no_bars",
+                "message": "No completed bars returned from the venue.",
+            },
+        )
+
+    return mm_result_to_dict(result)

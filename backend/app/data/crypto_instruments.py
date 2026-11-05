@@ -61,7 +61,19 @@ KRAKEN_SOL_USD = Instrument.create_crypto_pair(
     min_notional=Decimal("1.0"),
 )
 
-CRYPTO_INSTRUMENTS: List[Instrument] = [KRAKEN_BTC_USD, KRAKEN_ETH_USD, KRAKEN_SOL_USD]
+KRAKEN_ETH_BTC = Instrument.create_crypto_pair(
+    symbol="ETH-BTC",
+    name="Ethereum / Bitcoin (spot)",
+    base_asset="ETH",
+    quote=Currency.BTC,
+    exchange=Exchange.KRAKEN,
+    price_precision=5,
+    quantity_precision=8,
+    min_quantity=Decimal("0.02"),
+    min_notional=Decimal("0.0005"),
+)
+
+CRYPTO_INSTRUMENTS: List[Instrument] = [KRAKEN_BTC_USD, KRAKEN_ETH_USD, KRAKEN_SOL_USD, KRAKEN_ETH_BTC]
 
 # Kraken names bitcoin XBT and reports the pair as XXBTZUSD, with XBTUSD as the
 # public altname. Both are Kraken's spellings of the same pair; the internal id
@@ -101,6 +113,18 @@ KRAKEN_PAIR_MAP: Dict[str, ProviderSymbolMapping] = {
             "result_key": "SOLUSD",
             "result_key_alt": "SOLUSD",
             "wsname": "SOL/USD",
+            "spec_source": SPEC_SOURCE,
+        },
+    ),
+    KRAKEN_ETH_BTC.instrument_id: ProviderSymbolMapping(
+        provider_id="kraken",
+        instrument_id=KRAKEN_ETH_BTC.instrument_id,
+        provider_symbol="ETHXBT",
+        provider_exchange="KRAKEN",
+        metadata={
+            "result_key": "XETHXXBT",
+            "result_key_alt": "ETHXBT",
+            "wsname": "ETH/XBT",
             "spec_source": SPEC_SOURCE,
         },
     ),
