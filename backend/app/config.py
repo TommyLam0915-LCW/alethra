@@ -104,6 +104,10 @@ class Settings(BaseSettings):
     crypto_max_requests_per_day: int = 400
     crypto_verify_run_id: str = ""
     crypto_verify_max_requests: int = 0
+    # Local-only research auth bypass for MB-14 batch execution. Off by default;
+    # refused outside local development. When enabled, requests from loopback
+    # skip JWT validation and use the first active user in the database.
+    research_auth_bypass_enabled: bool = False
 
     @property
     def intraday_instrument_list(self) -> list[str]:
@@ -137,6 +141,7 @@ class Settings(BaseSettings):
         self._validate_agent_strategy_test_snapshot_authorization()
         self._validate_agent_strategy_test_training_authorization()
         self._validate_agent_strategy_owner_consent_mode()
+        self._validate_research_auth_bypass()
         self._validate_intraday_bounds()
         self._validate_crypto_budget_bounds()
 
@@ -337,6 +342,20 @@ class Settings(BaseSettings):
         if not 1 <= self.candidate_passwordless_session_minutes <= 120:
             raise ValueError(
                 "CANDIDATE_PASSWORDLESS_SESSION_MINUTES must be between 1 and 120."
+            )
+
+    def _validate_research_auth_bypass(self) -> None:
+        if not self.research_auth_bypass_enabled:
+            return
+        if self.is_production_like or self.app_env != "development":
+            raise ValueError(
+                "RESEARCH_AUTH_BYPASS_ENABLED is a local testing convenience and must be off "
+                f"when APP_ENV={self.app_env}. It cannot serve a public deployment."
+            )
+        if not is_local_database_url(self.database_url):
+            raise ValueError(
+                "RESEARCH_AUTH_BYPASS_ENABLED requires a sqlite or loopback DATABASE_URL; "
+                "refusing to bypass auth against a remote database."
             )
 
     def _validate_trial_passwordless(self) -> None:

@@ -6,12 +6,17 @@ eligibility and exclusions, preview a dataset with a chronological split,
 freeze a ready snapshot, record the owner's own consent, and run one bounded
 training → artifact → inference chain over a frozen snapshot.
 
-What they deliberately do not do: activate a model, release it to a customer
-environment, or use another account's data. Every training run needs a consent
-row the authenticated owner recorded for themselves, plus one authorization
-basis: the development fixture or, in a local trial, the operator's owner-consent
-mode. The agent cannot accept consent on the owner's behalf, and the fixture is
-never reported as the owner's consent.
+What they deliberately do not do: release a model to a customer environment, or
+use another account's data. Every training run needs a consent row the
+authenticated owner recorded for themselves, plus one authorization basis: the
+development fixture or, in a local trial, the operator's owner-consent mode. The
+agent cannot accept consent on the owner's behalf, and the fixture is never
+reported as the owner's consent.
+
+Activation is a separate judgment and a separate route: ``PUT
+/training/jobs/{id}/activation`` records that the authenticated owner chose to
+switch that one artifact on, and nothing in the training path can write it. With
+no such row the gate reports ``NOT_APPROVED``.
 """
 
 import uuid
@@ -54,6 +59,7 @@ from app.services.agent_strategy import (
     training_contract,
     validate_lineage,
 )
+from app.services import model_activation
 
 router = APIRouter(
     prefix="/agent-strategy", tags=["agent-strategy-screening"]
@@ -103,6 +109,24 @@ class ConsentRevokeRequest(BaseModel):
 
 class TrainingJobRequest(BaseModel):
     snapshot_id: uuid.UUID
+
+
+class ActivationApprovalRequest(BaseModel):
+    artifact_checksum: str = Field(
+        min_length=64, max_length=64,
+        description="The checksum of the artifact being switched on. An "
+        "approval binds one artifact and carries over to no other run.",
+    )
+    policy_version: str = Field(min_length=1, max_length=64)
+    acknowledgement_text_version: str = Field(min_length=1, max_length=64)
+    acknowledgement: str = Field(
+        min_length=1,
+        description="The full activation text, echoed back by the owner.",
+    )
+
+
+class ActivationRevokeRequest(BaseModel):
+    reason: Optional[str] = Field(default=None, max_length=64)
 
 
 class InferenceRequest(BaseModel):
@@ -190,8 +214,14 @@ def get_capability(
             "consent_status": training_auth["consent_status"],
             "customer_release_training": "NOT_APPROVED",
             "customer_release_inference": "NOT_APPROVED",
-            "model_activation": "NOT_APPROVED",
-            "activation_available": False,
+            # Read from this owner's recorded approvals, not a constant:
+            # training_authorization already resolved the gate once.
+            "model_activation": training_auth["model_activation"],
+            "activation_available": (
+                training_auth["model_activation"] == model_activation.ACTIVATED
+            ),
+            "completed_job_count": training_auth["completed_job_count"],
+            "approved_job_count": training_auth["approved_job_count"],
         },
     }
 
@@ -238,6 +268,70 @@ def post_revoke_consent(
     # Revocation is deliberately not gated on the screening flag: an owner can
     # always withdraw a permission that was previously recorded.
     return revoke_consent(db, current_user.id, reason=body.reason)
+
+
+@router.get("/training/jobs/{job_id}/activation")
+def get_job_activation(
+    job_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope("read")),
+    db: Session = Depends(get_db),
+):
+    """What the gate says about this artifact, and what an approval must echo."""
+    try:
+        job = model_activation.owned_job(db, current_user.id, job_id)
+    except AgentStrategyRefused as exc:
+        raise _refusal_http(exc)
+    return {
+        "requirements": model_activation.requirements(job),
+        "state": model_activation.activation_state(db, job),
+    }
+
+
+@router.put(
+    "/training/jobs/{job_id}/activation",
+    dependencies=[Depends(require_screening_enabled)],
+)
+def put_job_activation(
+    job_id: uuid.UUID,
+    body: ActivationApprovalRequest,
+    current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope("write")),
+    db: Session = Depends(get_db),
+):
+    # The owner's own click is the only identity this records: ``current_user``
+    # is the sole subject, the channel is fixed by this route, and the artifact
+    # checksum has to be presented so the approval binds one model and no other.
+    try:
+        return model_activation.record_activation_approval(
+            db,
+            current_user.id,
+            job_id=job_id,
+            artifact_checksum=body.artifact_checksum,
+            policy_version=body.policy_version,
+            acknowledgement_text_version=body.acknowledgement_text_version,
+            acknowledgement=body.acknowledgement,
+        )
+    except AgentStrategyRefused as exc:
+        raise _refusal_http(exc)
+
+
+@router.post("/training/jobs/{job_id}/activation/revoke")
+def post_job_activation_revoke(
+    job_id: uuid.UUID,
+    body: ActivationRevokeRequest,
+    current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope("write")),
+    db: Session = Depends(get_db),
+):
+    # Withdrawal is never gated: an owner can always turn a model back off.
+    try:
+        approval = model_activation.approval_for_job(db, current_user.id, job_id)
+    except AgentStrategyRefused as exc:
+        raise _refusal_http(exc)
+    return model_activation.revoke_activation_approval(
+        db, current_user.id, approval_id=approval.id, reason=body.reason
+    )
 
 
 @router.post(

@@ -5,18 +5,20 @@ identity, no synthetic fallback, forming-candle separation, truncation guard,
 read-only status) is pinned without touching the network.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
 
 from app.providers.kraken_provider import (
+    MAX_OHLC_ROWS,
     KrakenApiError,
     KrakenError,
     KrakenProvider,
     KrakenRateLimitError,
     KrakenUnavailableError,
 )
+from app.services.upstream_budget import AllowAllBudgetGate
 
 INSTRUMENT = "CRYPTO:KRAKEN:BTC-USD"
 NOW = datetime(2026, 10, 30, 12, 0, 30, tzinfo=timezone.utc)
@@ -291,3 +293,140 @@ def test_checksum_is_deterministic():
     provider.clear_cache()
     b = provider.compute_checksum([INSTRUMENT, INSTRUMENT], "2026-10-28", "2026-10-29")
     assert a == b
+
+
+# -- long-history pagination -------------------------------------------------
+
+DAILY = 1440
+LAST_DAILY_CLOSE_DAY = datetime(2026, 10, 29, tzinfo=timezone.utc)
+
+
+def daily_universe(days):
+    """Ascending daily rows ending on the last fully closed day before NOW."""
+    start = LAST_DAILY_CLOSE_DAY - timedelta(days=days - 1)
+    return [ohlc_row(start + timedelta(days=i), close=str(100 + i)) for i in range(days)]
+
+
+def paged_route(all_rows, page_size=MAX_OHLC_ROWS):
+    """Serve ``since`` (a unix timestamp) forward from that instant, as Kraken does."""
+    def handler(params):
+        since = int(params.get("since", 0))
+        start = next((i for i, row in enumerate(all_rows) if int(row[0]) >= since),
+                     len(all_rows))
+        page = all_rows[start:start + page_size]
+        last = str(page[-1][0]) if page else str(since)
+        return {"error": [], "result": {"XXBTZUSD": page, "last": last}}
+    return handler
+
+
+def make_paged_provider(all_rows, page_size=MAX_OHLC_ROWS, **kwargs):
+    transport = FakeTransport({"/0/public/OHLC": paged_route(all_rows, page_size)})
+    return KrakenProvider(transport=transport, clock=lambda: NOW,
+                          min_request_interval=0, **kwargs), transport
+
+
+def first_day(all_rows):
+    return datetime.fromtimestamp(int(all_rows[0][0]), tz=timezone.utc)
+
+
+def test_history_walk_pages_forward_and_spends_one_request_per_page():
+    rows = daily_universe(2160)
+    provider, transport = make_paged_provider(rows)
+    series = provider.get_history_candle_series(
+        INSTRUMENT, interval_minutes=DAILY, start=first_day(rows)
+    )
+    assert len(series.completed) == len(rows)
+    assert len(transport.calls) == 4  # three full pages plus the empty edge page
+    opens = [c.open_time for c in series.completed]
+    assert opens == sorted(opens)
+    assert series.duplicate_timestamps == ()
+    assert series.gaps == ()
+
+
+def test_history_walk_stops_at_end_without_reading_to_the_live_edge():
+    rows = daily_universe(2160)
+    provider, transport = make_paged_provider(rows)
+    start = first_day(rows)
+    series = provider.get_history_candle_series(
+        INSTRUMENT, interval_minutes=DAILY, start=start, end=start + timedelta(days=800)
+    )
+    assert len(series.completed) == 800
+    assert series.completed[-1].open_time < start + timedelta(days=800)
+    assert len(transport.calls) == 2
+
+
+def test_history_walk_refuses_to_present_a_short_series_as_full():
+    rows = daily_universe(2160)
+    provider, transport = make_paged_provider(rows)
+    with pytest.raises(KrakenError, match="must not be presented as the full history"):
+        provider.get_history_candle_series(
+            INSTRUMENT, interval_minutes=DAILY, start=first_day(rows), max_pages=2
+        )
+    assert len(transport.calls) == 2
+
+
+def test_history_walk_names_a_missing_head_instead_of_interpolating_it():
+    rows = daily_universe(720)
+    provider, _ = make_paged_provider(rows)
+    with pytest.raises(KrakenError, match="starts at"):
+        provider.get_history_candle_series(
+            INSTRUMENT, interval_minutes=DAILY, start=date(2015, 1, 1), max_pages=3
+        )
+
+
+def test_history_walk_charges_the_budget_gate_once_per_page():
+    class CountingGate:
+        def __init__(self):
+            self.inner = AllowAllBudgetGate()
+            self.reserved = 0
+
+        def reserve(self):
+            reservation = self.inner.reserve()
+            self.reserved += 1
+            return reservation
+
+    gate = CountingGate()
+    rows = daily_universe(1500)
+    provider, transport = make_paged_provider(rows, budget_gate=gate)
+    provider.get_history_candle_series(
+        INSTRUMENT, interval_minutes=DAILY, start=first_day(rows)
+    )
+    assert len(transport.calls) == 3
+    assert gate.reserved == len(transport.calls)
+
+
+def test_history_walk_rejects_an_empty_window_before_calling_the_venue():
+    provider, transport = make_paged_provider(daily_universe(720))
+    with pytest.raises(KrakenError, match="history window is empty"):
+        provider.get_history_candle_series(
+            INSTRUMENT, interval_minutes=DAILY,
+            start=date(2026, 10, 29), end=date(2026, 10, 1)
+        )
+    assert transport.calls == []
+
+
+def test_history_walk_refuses_a_stalled_pagination_cursor():
+    rows = daily_universe(2160)
+    def stalled(params):
+        return {"error": [], "result": {"XXBTZUSD": rows[:MAX_OHLC_ROWS], "last": "0"}}
+    provider, transport = make_provider({"/0/public/OHLC": stalled})
+    with pytest.raises(KrakenApiError, match="did not advance"):
+        provider.get_history_candle_series(
+            INSTRUMENT, interval_minutes=DAILY, start=first_day(rows)
+        )
+    assert len(transport.calls) == 1
+
+
+def test_history_walk_without_a_start_takes_whatever_the_venue_lends():
+    """A harvest asks for the whole shelf, so a head it cannot reach is not a failure.
+
+    The same walk *with* a start raises (see the missing-head test): naming a
+    start is a claim the series covers it, and only that claim is refused.
+    """
+    rows = daily_universe(720)
+    provider, transport = make_paged_provider(rows)
+    series = provider.get_history_candle_series(INSTRUMENT, interval_minutes=DAILY)
+    assert len(series.completed) == 720
+    assert series.completed[0].open_time == first_day(rows)
+    assert series.completed[0].open_time.year == 2024  # decades past VENUE_FLOOR
+    assert len(transport.calls) == 2  # the shelf, then the empty edge page

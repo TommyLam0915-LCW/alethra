@@ -40,10 +40,17 @@ class MarketDataBar(Base):
     adjustment_factor = Column(Float, nullable=True)
     is_adjusted = Column(String(20), nullable=True)
 
+    # Bar grain in minutes (1440 = daily, 240 = four-hour). NULL means "written
+    # before grain was recorded" — an unknown grain is never allowed into a
+    # series, because a daily bar stamped 00:00 is indistinguishable from a
+    # four-hour bar stamped 00:00 by timestamp alone.
+    interval_minutes = Column(Integer, nullable=True)
+
     fetched_at = Column(DateTime, default=utcnow, nullable=False)
 
     __table_args__ = (
-        UniqueConstraint('instrument_id', 'bar_timestamp', 'provider_id', name='uq_instrument_timestamp_provider'),
+        UniqueConstraint('instrument_id', 'provider_id', 'interval_minutes', 'bar_timestamp',
+                         name='uq_instrument_timestamp_provider'),
         Index('ix_market_data_instrument_date', 'instrument_id', 'bar_date'),
     )
 

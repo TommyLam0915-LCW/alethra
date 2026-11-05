@@ -7,8 +7,10 @@ The chain has three explicit steps and each one re-verifies the previous:
    matches. It fits on the frozen ``train`` split only and deliberately never
    touches the validation or test labels while fitting.
 2. The artifact records every lineage field needed to prove what produced it.
-   ``activation_status`` stays ``NOT_APPROVED``; this module cannot activate a
-   model.
+   ``activation_status`` is not a constant written here: it is read from the
+   artifact-bound approval gate in ``app.services.model_activation``, so a run
+   stays ``NOT_APPROVED`` until the owner records an approval for this exact
+   artifact checksum. This module grants nothing itself.
 3. ``run_inference`` re-verifies the artifact checksum, the dataset checksum
    and the full lineage before returning a take/skip estimate. It writes
    nothing.
@@ -45,6 +47,10 @@ from app.services.agent_strategy import (
     AgentStrategyRefused,
     _stored_checksum,
     training_authorization,
+)
+from app.services.model_activation import (
+    activation_report,
+    refresh_job_activation,
 )
 
 AGENT_ARTIFACTS_DIR = os.path.join(ARTIFACTS_DIR, "agent_strategy")
@@ -455,7 +461,9 @@ def train_from_snapshot(
         "metrics": metrics,
         "authorization_mode": authorization["authorization_mode"],
         "real_owner_consent": authorization["real_owner_consent"],
-        "model_activation": "NOT_APPROVED",
+        # Written before the job row exists, so no artifact-bound approval can
+        # exist yet; the value still comes from the gate rather than a literal.
+        "model_activation": activation_report(db, None)["model_activation"],
         "movable_to_customer_environment": False,
         "usable_for_customer": False,
         "trained_at": utcnow().isoformat(),
@@ -493,7 +501,6 @@ def train_from_snapshot(
         artifact_path=os.path.join(job_dir, "model.joblib"),
         artifact_checksum=artifact_checksum_hex,
         artifact_metadata_checksum=metadata_checksum,
-        activation_status="NOT_APPROVED",
         completed_at=utcnow(),
     )
     try:
@@ -503,6 +510,7 @@ def train_from_snapshot(
         db.rollback()
         existing = _find_existing_job(db, owner_id, snapshot_id, hp_hash)
         if existing is not None:
+            refresh_job_activation(db, existing)
             payload = _job_payload(existing)
             payload["created"] = False
             payload["deduplicated"] = True
@@ -510,6 +518,7 @@ def train_from_snapshot(
             return payload
         raise
     db.refresh(job)
+    refresh_job_activation(db, job)
     payload = _job_payload(job)
     payload["created"] = True
     payload["deduplicated"] = False
@@ -691,6 +700,7 @@ def run_inference(
         if probability >= HYPERPARAMETERS["positive_probability_threshold"]
         else "skip"
     )
+    activation = activation_report(db, job)
     return {
         "job_id": str(job.id),
         "snapshot_id": str(job.snapshot_id),
@@ -704,8 +714,9 @@ def run_inference(
         "artifact_checksum": job.artifact_checksum,
         "lineage_verified": lineage_check["valid"],
         "artifact_verified": True,
-        "activation_status": "NOT_APPROVED",
-        "model_activated": False,
+        "activation_status": activation["model_activation"],
+        "model_activated": activation["activation_available"],
+        "activation_reason_code": activation["activation_reason_code"],
         "runs_inference_for_customer": False,
         "not_a_recommendation": True,
         "not_a_profit_claim": True,
@@ -721,11 +732,16 @@ def list_training_jobs(
     if snapshot_id is not None:
         query = query.filter(AgentStrategyTrainingJob.snapshot_id == snapshot_id)
     jobs = query.order_by(AgentStrategyTrainingJob.created_at.desc()).all()
+    for job in jobs:
+        refresh_job_activation(db, job)
+    gate = activation_report(db, None)
     return {
         "jobs": [_job_payload(job) for job in jobs],
         "count": len(jobs),
-        "activation_available": False,
-        "model_activation": "NOT_APPROVED",
+        # No single artifact is bound here, so this is the gate's unbound
+        # default; each job's own column above carries its real status.
+        "activation_available": gate["activation_available"],
+        "model_activation": gate["model_activation"],
     }
 
 

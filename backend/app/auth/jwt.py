@@ -47,6 +47,19 @@ def get_current_user(
         headers={"WWW-Authenticate": "Bearer"},
     )
 
+    # Local-only research auth bypass for MB-14 batch execution
+    if settings.research_auth_bypass_enabled:
+        from app.auth.candidate_access import is_loopback_host
+        peer_host = request.client.host if request.client else None
+        if is_loopback_host(peer_host):
+            # Bypass auth: return the first active user
+            user = db.query(User).filter(User.is_active == True).first()
+            if user:
+                request.state.api_key_scopes = None
+                request.state.api_key_id = None
+                request.state.auth_amr = ["bypass"]
+                return user
+
     if credentials is None:
         raise credentials_exception
 

@@ -335,7 +335,12 @@ class KrakenProvider(DataProvider):
     # -- candles ------------------------------------------------------------
 
     @staticmethod
-    def _result_key(payload: Dict[str, Any], expected: Sequence[str]) -> str:
+    def _result_key(payload: Dict[str, Any], expected: Sequence[str]) -> Tuple[str, Optional[str]]:
+        """Extract the pair key and pagination cursor from Kraken response.
+
+        Returns (result_key, last_cursor) where last_cursor is the pagination
+        token for fetching older data, or None if not present.
+        """
         result = payload.get("result") or {}
         keys = [k for k in result.keys() if k != "last"]
         if len(keys) != 1:
@@ -344,7 +349,8 @@ class KrakenProvider(DataProvider):
             raise KrakenApiError(
                 f"Kraken answered for {keys[0]!r}, expected one of {list(expected)}"
             )
-        return keys[0]
+        last_cursor = result.get("last")
+        return keys[0], last_cursor
 
     def get_candle_series(
         self,
@@ -373,7 +379,7 @@ class KrakenProvider(DataProvider):
             "/0/public/OHLC",
             {"pair": mapping.provider_symbol, "interval": str(interval_minutes)},
         )
-        key = self._result_key(
+        key, _last_cursor = self._result_key(
             payload,
             (mapping.metadata.get("result_key", ""), mapping.metadata.get("result_key_alt", "")),
         )
@@ -389,6 +395,83 @@ class KrakenProvider(DataProvider):
             instrument_id=instrument_id,
             interval_minutes=interval_minutes,
             rows=raw_rows,
+            now=self._now(),
+        )
+
+    def get_candle_series_paginated(
+        self,
+        instrument_id: str,
+        interval_minutes: int = 1,
+        target_bars: int = 2000,
+        max_pages: int = 10,
+    ) -> CandleSeries:
+        """Fetch historical bars using pagination to exceed the 720-bar per-request limit.
+
+        The Kraken OHLC API returns up to 720 bars per request and provides a `last`
+        cursor for fetching older data. This method loops until it has collected
+        `target_bars` or exhausted available history.
+
+        Args:
+            instrument_id: The instrument to fetch (e.g., "CRYPTO:KRAKEN:BTC-USD")
+            interval_minutes: Bar interval (1, 5, 15, 30, 60, 240, or 1440)
+            target_bars: Desired number of historical bars (default 2000)
+            max_pages: Safety limit on number of API calls (default 10)
+
+        Returns:
+            CandleSeries with up to target_bars completed candles
+        """
+        instrument = self._require_instrument(instrument_id)
+        if interval_minutes not in KRAKEN_INTERVALS:
+            raise KrakenError(
+                f"Unsupported interval {interval_minutes}m for Kraken; "
+                f"choose one of {list(KRAKEN_INTERVALS)}"
+            )
+        if target_bars < 1:
+            raise KrakenError(f"target_bars must be >= 1, got {target_bars}")
+        if max_pages < 1:
+            raise KrakenError(f"max_pages must be >= 1, got {max_pages}")
+
+        mapping = get_kraken_pair(instrument.instrument_id)
+        assert mapping is not None
+        expected_keys = (
+            mapping.metadata.get("result_key", ""),
+            mapping.metadata.get("result_key_alt", ""),
+        )
+
+        all_rows: List[RawCandle] = []
+        since_cursor: Optional[str] = None
+        pages_fetched = 0
+
+        while pages_fetched < max_pages and len(all_rows) < target_bars:
+            params: Dict[str, str] = {
+                "pair": mapping.provider_symbol,
+                "interval": str(interval_minutes),
+            }
+            if since_cursor is not None:
+                params["since"] = since_cursor
+
+            payload = self._request("/0/public/OHLC", params)
+            key, last_cursor = self._result_key(payload, expected_keys)
+
+            rows = payload["result"][key]
+            if not rows:
+                break
+
+            page_rows = [self._parse_row(row, instrument_id) for row in rows]
+            all_rows.extend(page_rows)
+            pages_fetched += 1
+
+            if last_cursor is None or str(last_cursor) == since_cursor:
+                break
+            since_cursor = str(last_cursor)
+
+        if len(all_rows) > target_bars:
+            all_rows = all_rows[-target_bars:]
+
+        return build_series(
+            instrument_id=instrument_id,
+            interval_minutes=interval_minutes,
+            rows=all_rows,
             now=self._now(),
         )
 
@@ -523,7 +606,7 @@ class KrakenProvider(DataProvider):
             "/0/public/AssetPairs",
             {"pair": mapping.provider_symbol},
         )
-        key = self._result_key(
+        key, _last_cursor = self._result_key(
             payload,
             (mapping.metadata.get("result_key", ""), mapping.metadata.get("result_key_alt", "")),
         )

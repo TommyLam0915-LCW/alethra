@@ -67,6 +67,7 @@ from app.services.personal_dataset import (
     daily_bar_available_at,
     features_as_of,
 )
+from app.services.model_activation import owner_activation_summary
 
 PURPOSE = "agent_strategy_screening"
 CAPABILITY_STATUS = "DEVELOPMENT"
@@ -453,7 +454,9 @@ def training_authorization(
         "consent_record_id": consent.get("consent_id"),
         "granted": trial_granted or (fixture_granted and consent_active),
         "reason_code": reason_code,
-        "model_activation": "NOT_APPROVED",
+        # Reading recorded approvals, not a constant: training is still refused
+        # when this says APPROVED, and an APPROVED here authorises nothing new.
+        **owner_activation_summary(db, owner_id),
         "movable_to_customer_environment": False,
     }
 

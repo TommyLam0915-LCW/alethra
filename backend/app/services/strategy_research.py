@@ -45,6 +45,51 @@ MIN_TRAIN_TRADES = 6
 MONEY_QUANT = Decimal("0.00000001")
 QTY_QUANT = Decimal("0.00000001")
 RATE_QUANT = Decimal("0.000001")
+ZERO = Decimal(0)
+
+
+# -- MB-15: batch_metadata hashing helpers ------------------------------------
+import hashlib
+import json
+
+def _hash_rules(rules):
+    """Hash rule definitions for batch_metadata."""
+    payload = json.dumps(
+        [{"rule_id": r.rule_id, "family": r.family} for r in rules],
+        sort_keys=True
+    )
+    return f"sha256:{hashlib.sha256(payload.encode()).hexdigest()}"
+
+def _hash_exit_configs(configs):
+    """Hash exit config definitions for batch_metadata."""
+    payload = json.dumps(
+        [
+            {
+                "exit_id": c.exit_id,
+                "target_atr": str(c.target_atr),
+                "stop_atr": str(c.stop_atr),
+                "time_stop_bars": c.time_stop_bars,
+            }
+            for c in configs
+        ],
+        sort_keys=True
+    )
+    return f"sha256:{hashlib.sha256(payload.encode()).hexdigest()}"
+
+def _hash_settings(settings):
+    """Hash research settings for batch_metadata."""
+    payload = json.dumps(
+        {
+            "starting_cash": str(settings.starting_cash),
+            "notional_per_trade": str(settings.notional_per_trade),
+            "commission_rate": str(settings.commission_rate),
+            "slippage_rate": str(settings.slippage_rate),
+            "atr_window": settings.atr_window,
+            "cost_multiple": str(settings.cost_multiple),
+        },
+        sort_keys=True
+    )
+    return f"sha256:{hashlib.sha256(payload.encode()).hexdigest()}"
 
 
 @dataclass(frozen=True)
@@ -92,6 +137,23 @@ class _Indicators:
     low_prior: List[Optional[Decimal]]
     roc: List[Optional[Decimal]]
     trend_strength: List[Optional[Decimal]]
+    # MB-16: mean-reversion indicators
+    open: List[Decimal]
+    volume: List[Decimal]
+    volume_sma: List[Optional[Decimal]]
+    return_5bar: List[Optional[Decimal]]
+    # MB-17: volatility and momentum indicators
+    macd: List[Optional[Decimal]]
+    macd_signal: List[Optional[Decimal]]
+    macd_hist: List[Optional[Decimal]]
+    hv: List[Optional[Decimal]]  # Historical volatility (annualized)
+    atr_pct: List[Optional[Decimal]]  # ATR as percentage of close
+    # MB-18: crypto-specific indicators
+    open_times: List[Optional[datetime]]  # Bar open time for session detection
+    return_4bar: List[Optional[Decimal]]  # 4-bar return for session momentum
+    atr_sma20: List[Optional[Decimal]]  # 20-bar SMA of ATR for volatility breakout
+    volume_sma10: List[Optional[Decimal]]  # 10-bar SMA of volume for liquidity cycle
+    return_6bar: List[Optional[Decimal]]  # 6-bar return for extreme reversal
 
 
 @dataclass
@@ -217,6 +279,79 @@ def prepare_indicators(bars: Sequence[LabBar], atr_window: int = DEFAULT_ATR_WIN
         if ema_fast[index] is not None and ema_slow[index] is not None and atr[index]:
             trend_strength[index] = abs(ema_fast[index] - ema_slow[index]) / atr[index]
 
+    # MB-16: mean-reversion indicators
+    opens = [bar.open for bar in bars]
+    volumes = [bar.volume for bar in bars]
+    volume_sma: List[Optional[Decimal]] = [None] * len(bars)
+    for index in range(19, len(bars)):
+        window = volumes[index - 19 : index + 1]
+        volume_sma[index] = sum(window, Decimal(0)) / Decimal(20)
+    return_5bar: List[Optional[Decimal]] = [None] * len(bars)
+    for index in range(5, len(bars)):
+        previous = closes[index - 5]
+        if previous > 0:
+            return_5bar[index] = closes[index] / previous - Decimal(1)
+
+    # MB-17: MACD (12-26-9)
+    ema_12 = _ema_series(closes, 12)
+    ema_26 = _ema_series(closes, 26)
+    macd_line: List[Optional[Decimal]] = [None] * len(bars)
+    for index in range(len(bars)):
+        if ema_12[index] is not None and ema_26[index] is not None:
+            macd_line[index] = ema_12[index] - ema_26[index]
+    macd_signal = _ema_series([m if m is not None else Decimal(0) for m in macd_line], 9)
+    macd_hist: List[Optional[Decimal]] = [None] * len(bars)
+    for index in range(len(bars)):
+        if macd_line[index] is not None and macd_signal[index] is not None:
+            macd_hist[index] = macd_line[index] - macd_signal[index]
+
+    # MB-17: Historical volatility (20-day annualized)
+    import math
+    hv: List[Optional[Decimal]] = [None] * len(bars)
+    for index in range(20, len(bars)):
+        log_returns = []
+        for offset in range(index - 19, index + 1):
+            if closes[offset - 1] > 0 and closes[offset] > 0:
+                log_ret = Decimal(str(math.log(float(closes[offset] / closes[offset - 1]))))
+                log_returns.append(log_ret)
+        if len(log_returns) == 20:
+            mean_ret = sum(log_returns, Decimal(0)) / Decimal(20)
+            variance = sum((r - mean_ret) ** 2 for r in log_returns) / Decimal(19)
+            std_dev = variance.sqrt()
+            hv[index] = std_dev * Decimal(str(math.sqrt(252)))
+
+    # MB-17: ATR as percentage of close
+    atr_pct: List[Optional[Decimal]] = [None] * len(bars)
+    for index in range(len(bars)):
+        if atr[index] is not None and closes[index] > 0:
+            atr_pct[index] = (atr[index] / closes[index]) * Decimal(100)
+
+    # MB-18: crypto-specific indicators
+    open_times: List[Optional[datetime]] = [bar.open_time for bar in bars]
+
+    return_4bar: List[Optional[Decimal]] = [None] * len(bars)
+    for index in range(4, len(bars)):
+        previous = closes[index - 4]
+        if previous > 0:
+            return_4bar[index] = closes[index] / previous - Decimal(1)
+
+    atr_sma20: List[Optional[Decimal]] = [None] * len(bars)
+    for index in range(19, len(bars)):
+        window = [atr[i] for i in range(index - 19, index + 1) if atr[i] is not None]
+        if len(window) == 20:
+            atr_sma20[index] = sum(window, Decimal(0)) / Decimal(20)
+
+    volume_sma10: List[Optional[Decimal]] = [None] * len(bars)
+    for index in range(9, len(bars)):
+        window = volumes[index - 9 : index + 1]
+        volume_sma10[index] = sum(window, Decimal(0)) / Decimal(10)
+
+    return_6bar: List[Optional[Decimal]] = [None] * len(bars)
+    for index in range(6, len(bars)):
+        previous = closes[index - 6]
+        if previous > 0:
+            return_6bar[index] = closes[index] / previous - Decimal(1)
+
     return _Indicators(
         close=closes,
         atr=atr,
@@ -228,6 +363,20 @@ def prepare_indicators(bars: Sequence[LabBar], atr_window: int = DEFAULT_ATR_WIN
         low_prior=low_prior,
         roc=roc,
         trend_strength=trend_strength,
+        open=opens,
+        volume=volumes,
+        volume_sma=volume_sma,
+        return_5bar=return_5bar,
+        macd=macd_line,
+        macd_signal=macd_signal,
+        macd_hist=macd_hist,
+        hv=hv,
+        atr_pct=atr_pct,
+        open_times=open_times,
+        return_4bar=return_4bar,
+        atr_sma20=atr_sma20,
+        volume_sma10=volume_sma10,
+        return_6bar=return_6bar,
     )
 
 
@@ -280,6 +429,730 @@ def _sig_range_fade(ind: _Indicators, index: int) -> int:
     return 0
 
 
+# -- MB-16: mean-reversion signal functions ---------------------------------
+
+
+def _sig_bollinger_mean_reversion(ind: _Indicators, index: int) -> int:
+    """Price touches Bollinger Band outer rail + RSI confirmation.
+    
+    Long when close < lower band (zscore < -2) AND RSI < 30.
+    Short when close > upper band (zscore > 2) AND RSI > 70.
+    """
+    z, rsi = ind.zscore[index], ind.rsi[index]
+    if z is None or rsi is None:
+        return 0
+    if z <= Decimal("-2") and rsi < Decimal("30"):
+        return 1
+    if z >= Decimal("2") and rsi > Decimal("70"):
+        return -1
+    return 0
+
+
+def _sig_rsi_extreme_reversion(ind: _Indicators, index: int) -> int:
+    """RSI extreme + no trend.
+    
+    Long when RSI < 20 AND close within 1% of 50-day MA.
+    Short when RSI > 80 AND close within 1% of 50-day MA.
+    """
+    rsi, slow = ind.rsi[index], ind.ema_slow[index]
+    if rsi is None or slow is None or slow == 0:
+        return 0
+    deviation = abs(ind.close[index] - slow) / slow
+    if deviation > Decimal("0.01"):
+        return 0
+    if rsi < Decimal("20"):
+        return 1
+    if rsi > Decimal("80"):
+        return -1
+    return 0
+
+
+def _sig_gap_fill(ind: _Indicators, index: int) -> int:
+    """Open gaps > 1% + volume confirmation.
+    
+    Short when open > previous close × 1.01 AND volume > 1.5 × 20-day avg.
+    Long when open < previous close × 0.99 AND volume > 1.5 × 20-day avg.
+    """
+    if index == 0:
+        return 0
+    open_price = ind.open[index]
+    prev_close = ind.close[index - 1]
+    vol_sma = ind.volume_sma[index]
+    volume = ind.volume[index]
+    if prev_close == 0 or vol_sma is None or vol_sma == 0:
+        return 0
+    gap_ratio = open_price / prev_close
+    if gap_ratio > Decimal("1.01") and volume > vol_sma * Decimal("1.5"):
+        return -1
+    if gap_ratio < Decimal("0.99") and volume > vol_sma * Decimal("1.5"):
+        return 1
+    return 0
+
+
+def _sig_short_term_overbought_oversold(ind: _Indicators, index: int) -> int:
+    """5-bar return > 3% + no trend filter.
+    
+    Short when 5-bar gain > 3%.
+    Long when 5-bar loss > 3%.
+    """
+    ret = ind.return_5bar[index]
+    if ret is None:
+        return 0
+    if ret > Decimal("0.03"):
+        return -1
+    if ret < Decimal("-0.03"):
+        return 1
+    return 0
+
+
+# -- MB-17 Phase 3: volatility signal functions -----------------------------
+
+
+def _sma_atr(ind: _Indicators, index: int, window: int = 20) -> Optional[Decimal]:
+    """Calculate SMA of ATR over the given window ending at index."""
+    if index < window - 1:
+        return None
+    values = []
+    for i in range(index - window + 1, index + 1):
+        if ind.atr[i] is not None:
+            values.append(ind.atr[i])
+    if len(values) < window:
+        return None
+    return sum(values, Decimal(0)) / Decimal(window)
+
+
+def _hv_percentile(ind: _Indicators, index: int, lookback: int = 100) -> Optional[Decimal]:
+    """Calculate HV percentile (0-100) over the lookback period."""
+    if ind.hv[index] is None or index < lookback:
+        return None
+    current_hv = ind.hv[index]
+    values = []
+    for i in range(index - lookback + 1, index + 1):
+        if ind.hv[i] is not None:
+            values.append(ind.hv[i])
+    if len(values) < 20:
+        return None
+    values_sorted = sorted(values)
+    rank = 0
+    for v in values_sorted:
+        if v < current_hv:
+            rank += 1
+        else:
+            break
+    return Decimal(str(rank)) / Decimal(str(len(values))) * Decimal(100)
+
+
+def _bollinger_band_width(ind: _Indicators, index: int, window: int = 20) -> Optional[Decimal]:
+    """Calculate Bollinger band width: (upper - lower) / middle."""
+    if index < window - 1:
+        return None
+    closes = ind.close[index - window + 1:index + 1]
+    if len(closes) < window:
+        return None
+    mean = sum(closes, Decimal(0)) / Decimal(window)
+    if mean == 0:
+        return None
+    variance = sum((c - mean) ** 2 for c in closes) / Decimal(window)
+    std_dev = variance.sqrt()
+    upper = mean + 2 * std_dev
+    lower = mean - 2 * std_dev
+    return (upper - lower) / mean
+
+
+def _sig_volatility_breakout(ind: _Indicators, index: int) -> int:
+    """MB-17 Phase 3 Rule 1: volatility_breakout.
+    
+    Entry conditions:
+    - ATR(14) > 1.5 × SMA(ATR, 20) [volatility expansion]
+    - Close > Bollinger upper band (z-score > 2) → long
+    - Close < Bollinger lower band (z-score < -2) → short
+    - MACD histogram confirms direction (> 0 for long, < 0 for short)
+    """
+    atr_val = ind.atr[index]
+    sma_atr_val = _sma_atr(ind, index, 20)
+    z = ind.zscore[index]
+    macd_hist_val = ind.macd_hist[index]
+    
+    if atr_val is None or sma_atr_val is None or z is None or macd_hist_val is None:
+        return 0
+    if sma_atr_val == 0:
+        return 0
+    
+    # Volatility expansion: ATR > 1.5 × SMA(ATR, 20)
+    if atr_val <= Decimal("1.5") * sma_atr_val:
+        return 0
+    
+    # Bollinger band breakout with MACD confirmation
+    if z > Decimal("2") and macd_hist_val > 0:
+        return 1  # Long
+    if z < Decimal("-2") and macd_hist_val < 0:
+        return -1  # Short
+    return 0
+
+
+def _sig_volatility_mean_reversion(ind: _Indicators, index: int) -> int:
+    """MB-17 Phase 3 Rule 2: volatility_mean_reversion.
+    
+    Entry conditions:
+    - ATR(14) > 2.0 × SMA(ATR, 20) [extreme volatility]
+    - HV(20) > 80th percentile [high historical volatility]
+    - Close near Bollinger midline (|z-score| < 0.5) [expecting contraction]
+    - Direction: opposite to prior 5-bar trend
+    """
+    atr_val = ind.atr[index]
+    sma_atr_val = _sma_atr(ind, index, 20)
+    hv_pct = _hv_percentile(ind, index, 100)
+    z = ind.zscore[index]
+    ret_5bar = ind.return_5bar[index]
+    
+    if atr_val is None or sma_atr_val is None or hv_pct is None or z is None or ret_5bar is None:
+        return 0
+    if sma_atr_val == 0:
+        return 0
+    
+    # Extreme volatility: ATR > 2.0 × SMA(ATR, 20)
+    if atr_val <= Decimal("2.0") * sma_atr_val:
+        return 0
+    
+    # HV > 80th percentile
+    if hv_pct < Decimal("80"):
+        return 0
+    
+    # Near Bollinger midline: |z-score| < 0.5
+    if abs(z) >= Decimal("0.5"):
+        return 0
+    
+    # Opposite to prior 5-bar trend
+    if ret_5bar > Decimal("0.005"):  # Recent uptrend → short
+        return -1
+    if ret_5bar < Decimal("-0.005"):  # Recent downtrend → long
+        return 1
+    return 0
+
+
+def _sig_volatility_regime(ind: _Indicators, index: int) -> int:
+    """MB-17 Phase 3 Rule 3: volatility_regime.
+    
+    Entry conditions:
+    - ATR(14) < 0.5 × SMA(ATR, 20) [extreme low volatility]
+    - HV(20) < 20th percentile [low historical volatility]
+    - Bollinger band width < minimum of last 20 bars [compression]
+    - Direction: breakout (close crosses Bollinger band)
+    """
+    atr_val = ind.atr[index]
+    sma_atr_val = _sma_atr(ind, index, 20)
+    hv_pct = _hv_percentile(ind, index, 100)
+    bb_width = _bollinger_band_width(ind, index, 20)
+    z = ind.zscore[index]
+    
+    if atr_val is None or sma_atr_val is None or hv_pct is None or bb_width is None or z is None:
+        return 0
+    if sma_atr_val == 0:
+        return 0
+    
+    # Extreme low volatility: ATR < 0.5 × SMA(ATR, 20)
+    if atr_val >= Decimal("0.5") * sma_atr_val:
+        return 0
+    
+    # HV < 20th percentile
+    if hv_pct >= Decimal("20"):
+        return 0
+    
+    # Check Bollinger band width is at minimum (compare to prior 20 bars)
+    if index >= 40:
+        min_width = bb_width
+        for i in range(index - 20, index):
+            w = _bollinger_band_width(ind, i, 20)
+            if w is not None and w < min_width:
+                min_width = w
+        if bb_width > min_width * Decimal("1.1"):  # Not at minimum
+            return 0
+    
+    # Breakout: close crosses Bollinger band
+    if z > Decimal("2"):
+        return 1  # Long breakout
+    if z < Decimal("-2"):
+        return -1  # Short breakout
+    return 0
+
+
+def _sig_hv_extreme(ind: _Indicators, index: int) -> int:
+    """MB-17 Phase 3 Rule 4: hv_extreme.
+    
+    Entry conditions:
+    - HV(20) > 90th percentile → expect contraction (fade direction)
+    - HV(20) < 10th percentile → expect expansion (trend direction)
+    - ATR% > 5% [high volatility] or < 1% [low volatility]
+    - Direction: high HV → opposite, low HV → same as recent trend
+    """
+    hv_pct = _hv_percentile(ind, index, 100)
+    atr_pct_val = ind.atr_pct[index]
+    ret_5bar = ind.return_5bar[index]
+    
+    if hv_pct is None or atr_pct_val is None or ret_5bar is None:
+        return 0
+    
+    # High HV (> 90th percentile): expect contraction, fade the trend
+    if hv_pct > Decimal("90") and atr_pct_val > Decimal("5"):
+        if ret_5bar > Decimal("0.005"):  # Recent uptrend → short
+            return -1
+        if ret_5bar < Decimal("-0.005"):  # Recent downtrend → long
+            return 1
+    
+    # Low HV (< 10th percentile): expect expansion, follow the trend
+    if hv_pct < Decimal("10") and atr_pct_val < Decimal("1"):
+        if ret_5bar > Decimal("0.005"):  # Recent uptrend → long
+            return 1
+        if ret_5bar < Decimal("-0.005"):  # Recent downtrend → short
+            return -1
+    
+    return 0
+
+
+# -- MB-17 Phase 4: market making rules -------------------------------------
+
+def _sig_spread_capture(ind: _Indicators, index: int) -> int:
+    """Market Making Rule 1: spread_capture.
+    
+    Simulates market making by capturing the bid-ask spread.
+    Entry conditions:
+    - Low volatility environment (ATR% < 2%)
+    - Price at candle low → simulate bid fill (long entry)
+    - Price at candle high → simulate ask fill (short entry)
+    - Tight target: 0.5 × ATR (capture half the spread)
+    - Tight stop: 0.5 × ATR
+    
+    This rule profits when the market is range-bound and we can capture
+    the spread by providing liquidity at both sides.
+    """
+    if index < 1:
+        return 0
+    
+    atr_pct_val = ind.atr_pct[index]
+    if atr_pct_val is None:
+        return 0
+    
+    # Only trade in low volatility (tight spreads are profitable)
+    if atr_pct_val > Decimal("2"):
+        return 0
+    
+    bar = ind.close[index]
+    # Use high/low from the indicators (we need to add them)
+    # For now, approximate: if close is near the low of recent range, go long
+    # if close is near the high, go short
+    
+    # Simple proxy: compare to 5-bar high/low
+    if index >= 5:
+        recent_closes = ind.close[index-5:index+1]
+        recent_high = max(recent_closes)
+        recent_low = min(recent_closes)
+        range_size = recent_high - recent_low
+        
+        if range_size == 0:
+            return 0
+        
+        # Position in range: 0 = at low, 1 = at high
+        position_in_range = (bar - recent_low) / range_size
+        
+        if position_in_range < Decimal("0.2"):  # Near low → simulate bid fill
+            return 1  # Long
+        if position_in_range > Decimal("0.8"):  # Near high → simulate ask fill
+            return -1  # Short
+    
+    return 0
+
+
+def _sig_inventory_neutral(ind: _Indicators, index: int) -> int:
+    """Market Making Rule 2: inventory_neutral.
+    
+    Adjusts quotes based on inventory to maintain neutral position.
+    Entry conditions:
+    - Z-score > 1.5 → skew quotes downward (prefer short)
+    - Z-score < -1.5 → skew quotes upward (prefer long)
+    - ATR% < 3% (moderate volatility)
+    
+    This simulates a market maker adjusting prices to manage inventory risk.
+    """
+    z = ind.zscore[index]
+    atr_pct_val = ind.atr_pct[index]
+    
+    if z is None or atr_pct_val is None:
+        return 0
+    
+    # Only trade in moderate volatility
+    if atr_pct_val > Decimal("3") or atr_pct_val < Decimal("0.5"):
+        return 0
+    
+    # Skew based on z-score (inventory proxy)
+    if z > Decimal("1.5"):
+        return -1  # Price high → prefer short (skew ask down)
+    if z < Decimal("-1.5"):
+        return 1  # Price low → prefer long (skew bid up)
+    
+    return 0
+
+
+def _sig_mean_reversion_mm(ind: _Indicators, index: int) -> int:
+    """Market Making Rule 3: mean_reversion_mm.
+    
+    Combines mean reversion with market making logic.
+    Entry conditions:
+    - |Z-score| > 2 (price deviated from mean)
+    - RSI confirms overbought/oversold
+    - ATR% < 2% (low volatility, tight spreads profitable)
+    - Fade the move: buy when oversold, sell when overbought
+    
+    This is a market maker providing liquidity at extreme prices.
+    """
+    z = ind.zscore[index]
+    rsi = ind.rsi[index]
+    atr_pct_val = ind.atr_pct[index]
+    
+    if z is None or rsi is None or atr_pct_val is None:
+        return 0
+    
+    # Only trade in low volatility
+    if atr_pct_val > Decimal("2"):
+        return 0
+    
+    # Oversold: Z < -2 and RSI < 30 → provide liquidity (buy)
+    if z < Decimal("-2") and rsi < Decimal("30"):
+        return 1
+    
+    # Overbought: Z > 2 and RSI > 70 → provide liquidity (sell)
+    if z > Decimal("2") and rsi > Decimal("70"):
+        return -1
+    
+    return 0
+
+
+def _sig_volatility_mm(ind: _Indicators, index: int) -> int:
+    """Market Making Rule 4: volatility_mm.
+    
+    Adjusts spread based on volatility regime.
+    Entry conditions:
+    - ATR expanding (current ATR > 1.2 × prior ATR) → widen quotes, trade less
+    - ATR contracting (current ATR < 0.8 × prior ATR) → tighten quotes, trade more
+    - HV < 50th percentile → favorable for market making
+    
+    This simulates a market maker adjusting to volatility changes.
+    """
+    atr_val = ind.atr[index]
+    hv_pct = _hv_percentile(ind, index, 100)
+    
+    if atr_val is None or hv_pct is None or index < 20:
+        return 0
+    
+    # Calculate prior ATR (20 bars ago)
+    atr_prior = ind.atr[index - 20]
+    if atr_prior is None or atr_prior == 0:
+        return 0
+    
+    atr_ratio = atr_val / atr_prior
+    
+    # Only trade when HV is low (favorable for market making)
+    if hv_pct > Decimal("50"):
+        return 0
+    
+    # ATR contracting: tighten quotes, be more aggressive
+    if atr_ratio < Decimal("0.8"):
+        # Use z-score to determine direction
+        z = ind.zscore[index]
+        if z is None:
+            return 0
+        if z < Decimal("-1"):
+            return 1  # Buy
+        if z > Decimal("1"):
+            return -1  # Sell
+    
+    # ATR expanding: widen quotes, be more selective
+    if atr_ratio > Decimal("1.2"):
+        # Only trade at extremes
+        z = ind.zscore[index]
+        if z is None:
+            return 0
+        if z < Decimal("-2"):
+            return 1  # Buy at extreme low
+        if z > Decimal("2"):
+            return -1  # Sell at extreme high
+    
+    return 0
+
+
+# -- MB-18: crypto-specific rules --------------------------------------------
+
+
+def _sig_session_momentum(ind: _Indicators, index: int) -> int:
+    """MB-18 Rule 1: session_momentum.
+
+    Crypto trades 24/7 but volume clusters in Asian (UTC 0-8) and US (UTC 13-21)
+    sessions. This rule captures session-specific momentum:
+    - Asian session + 4-bar return > 2% + RSI > 50 → long
+    - US session + 4-bar return < -2% + RSI < 50 → short
+    """
+    ret_4 = ind.return_4bar[index]
+    rsi_val = ind.rsi[index]
+    open_time = ind.open_times[index]
+
+    if ret_4 is None or rsi_val is None or open_time is None:
+        return 0
+
+    utc_hour = open_time.hour
+
+    # Asian session (UTC 0-8): momentum continuation on strength
+    if 0 <= utc_hour <= 8:
+        if ret_4 > Decimal("0.02") and rsi_val > Decimal("50"):
+            return 1  # Long
+        if ret_4 < Decimal("-0.02") and rsi_val < Decimal("50"):
+            return -1  # Short
+
+    # US session (UTC 13-21): momentum continuation on strength
+    if 13 <= utc_hour <= 21:
+        if ret_4 > Decimal("0.02") and rsi_val > Decimal("50"):
+            return 1  # Long
+        if ret_4 < Decimal("-0.02") and rsi_val < Decimal("50"):
+            return -1  # Short
+
+    return 0
+
+
+def _sig_volatility_breakout_crypto(ind: _Indicators, index: int) -> int:
+    """MB-18 Rule 2: volatility_breakout_crypto.
+
+    Crypto volatility clusters. When ATR expands above its 20-bar mean AND price
+    breaks a 20-bar high/low with volume confirmation, the move often continues:
+    - ATR(14) > 2.0 × SMA(ATR, 20)
+    - Close breaks 20-bar high (long) or low (short)
+    - Volume > 1.5 × SMA(Volume, 20)
+    """
+    atr_val = ind.atr[index]
+    atr_avg = ind.atr_sma20[index]
+    close_val = ind.close[index]
+    high_20 = ind.high_prior[index]
+    low_20 = ind.low_prior[index]
+    vol_val = ind.volume[index]
+    vol_sma = ind.volume_sma[index]
+
+    if (atr_val is None or atr_avg is None or high_20 is None or
+            low_20 is None or vol_val is None or vol_sma is None):
+        return 0
+
+    if atr_avg == 0 or vol_sma == 0:
+        return 0
+
+    # ATR must be expanding significantly
+    if atr_val < Decimal("2.0") * atr_avg:
+        return 0
+
+    # Volume must confirm
+    if vol_val < Decimal("1.5") * vol_sma:
+        return 0
+
+    # Breakout direction
+    if close_val > high_20:
+        return 1  # Long breakout
+    if close_val < low_20:
+        return -1  # Short breakout
+
+    return 0
+
+
+def _sig_liquidity_cycle(ind: _Indicators, index: int) -> int:
+    """MB-18 Rule 3: liquidity_cycle.
+
+    Crypto liquidity dries up before big moves. When volume drops below half its
+    10-bar mean AND price breaks a Bollinger Band rail, the breakout often leads
+    to a sustained move:
+    - Volume < 0.5 × SMA(Volume, 10)
+    - Close breaks Bollinger Band outer rail (z-score > 2 or < -2)
+    - Direction = breakout direction
+    """
+    vol_val = ind.volume[index]
+    vol_sma10 = ind.volume_sma10[index]
+    z = ind.zscore[index]
+
+    if vol_val is None or vol_sma10 is None or z is None:
+        return 0
+
+    if vol_sma10 == 0:
+        return 0
+
+    # Volume must be low (liquidity drying up)
+    if vol_val > Decimal("0.5") * vol_sma10:
+        return 0
+
+    # Bollinger Band breakout
+    if z > Decimal("2"):
+        return 1  # Long breakout
+    if z < Decimal("-2"):
+        return -1  # Short breakout
+
+    return 0
+
+
+def _sig_extreme_reversal(ind: _Indicators, index: int) -> int:
+    """MB-18 Rule 4: extreme_reversal.
+
+    Crypto overspends frequently. After an extreme 6-bar move (>5% or <-5%),
+    RSI extremes signal exhaustion and reversal:
+    - 6-bar return > 5% + RSI > 80 → short (overbought exhaustion)
+    - 6-bar return < -5% + RSI < 20 → long (oversold exhaustion)
+    - Volume declining confirms exhaustion
+    """
+    ret_6 = ind.return_6bar[index]
+    rsi_val = ind.rsi[index]
+    vol_val = ind.volume[index]
+    vol_sma10 = ind.volume_sma10[index]
+
+    if ret_6 is None or rsi_val is None or vol_val is None or vol_sma10 is None:
+        return 0
+
+    if vol_sma10 == 0:
+        return 0
+
+    # Volume must be declining (exhaustion)
+    if vol_val > vol_sma10:
+        return 0
+
+    # Extreme move + RSI exhaustion
+    if ret_6 > Decimal("0.05") and rsi_val > Decimal("80"):
+        return -1  # Short reversal
+    if ret_6 < Decimal("-0.05") and rsi_val < Decimal("20"):
+        return 1  # Long reversal
+
+    return 0
+
+
+# -- MB-18 TASK 2: arbitrage-proxy rules --------------------------------------
+# These rules approximate arbitrage-like patterns within the single-instrument
+# framework. True triangular arbitrage requires multi-instrument data alignment,
+# which is handled by the standalone arbitrage_engine.py. These proxy rules
+# detect intra-bar price inefficiencies and volatility divergences.
+
+def _sig_intra_bar_arbitrage(ind: _Indicators, index: int) -> int:
+    """MB-18 TASK 2: Detect intra-bar price inefficiency (arbitrage proxy).
+
+    When the close is significantly displaced from the bar's midpoint
+    (H+L)/2, it suggests rapid price discovery that may overshoot.
+    Combined with volume confirmation and ATR-scaled threshold.
+
+    Thesis: large close-to-midpoint displacement relative to ATR, with
+    volume confirmation, indicates potential overshoot -> mean-reversion trade.
+    """
+    if index < 1:
+        return 0
+    atr_val = ind.atr[index]
+    if atr_val is None or atr_val <= ZERO:
+        return 0
+
+    close = ind.close[index]
+    high = ind.high_prior[index] if ind.high_prior[index] is not None else close
+    low = ind.low_prior[index] if ind.low_prior[index] is not None else close
+    open_price = ind.open[index]
+
+    bar_high = max(high, open_price, close)
+    bar_low = min(low, open_price, close)
+    mid = (bar_high + bar_low) / Decimal("2")
+
+    displacement = (close - mid).copy_abs()
+    displacement_ratio = displacement / atr_val if atr_val > ZERO else ZERO
+
+    if displacement_ratio < Decimal("0.5"):
+        return 0
+
+    vol_sma = ind.volume_sma[index] if index < len(ind.volume_sma) else None
+    if vol_sma is not None and vol_sma > ZERO:
+        vol_ratio = ind.volume[index] / vol_sma
+        if vol_ratio < Decimal("1.2"):
+            return 0
+    else:
+        return 0
+
+    if close > mid:
+        return -1
+    else:
+        return 1
+
+
+def _sig_volatility_ratio_arb(ind: _Indicators, index: int) -> int:
+    """MB-18 TASK 2: Volatility ratio arbitrage proxy.
+
+    When ATR% (short-term volatility relative to price) diverges significantly
+    from historical volatility (long-term annualized), it suggests a volatility
+    regime change that may be tradable as a convergence bet.
+
+    Thesis: if ATR% > 2x HV/sqrt(252) (daily HV), volatility is elevated
+    relative to history -> expect mean reversion in vol -> fade the move.
+    """
+    if index < 20:
+        return 0
+
+    atr_pct_val = ind.atr_pct[index]
+    hv_val = ind.hv[index]
+
+    if atr_pct_val is None or hv_val is None:
+        return 0
+    if atr_pct_val <= ZERO or hv_val <= ZERO:
+        return 0
+
+    import math
+    daily_hv = hv_val / Decimal(str(math.sqrt(252)))
+    vol_ratio = atr_pct_val / daily_hv if daily_hv > ZERO else ZERO
+
+    if vol_ratio < Decimal("2.0"):
+        return 0
+
+    rsi_val = ind.rsi[index]
+    if rsi_val is None:
+        return 0
+
+    roc_val = ind.roc[index]
+    if roc_val is None:
+        return 0
+
+    if rsi_val > Decimal("60") and roc_val > ZERO:
+        return -1
+    elif rsi_val < Decimal("40") and roc_val < ZERO:
+        return 1
+
+    return 0
+
+
+def _sig_momentum_divergence_arb(ind: _Indicators, index: int) -> int:
+    """MB-18 TASK 2: Momentum divergence arbitrage proxy.
+
+    When short-term momentum (ROC) and medium-term momentum (MACD histogram)
+    diverge -- one accelerating while the other decelerating -- it signals
+    an impending convergence (similar to cross-asset convergence trades).
+
+    Thesis: ROC > 0 but MACD histogram declining (or vice versa) indicates
+    momentum exhaustion -> trade the convergence direction.
+    """
+    if index < 2:
+        return 0
+
+    roc_val = ind.roc[index]
+    macd_hist_val = ind.macd_hist[index]
+    macd_hist_prev = ind.macd_hist[index - 1] if index - 1 < len(ind.macd_hist) else None
+
+    if roc_val is None or macd_hist_val is None or macd_hist_prev is None:
+        return 0
+
+    roc_prev = ind.roc[index - 1]
+    if roc_prev is None:
+        return 0
+
+    roc_accel = roc_val - roc_prev
+    macd_delta = macd_hist_val - macd_hist_prev
+
+    if roc_accel > ZERO and macd_delta < ZERO:
+        return -1
+    elif roc_accel < ZERO and macd_delta > ZERO:
+        return 1
+
+    return 0
+
+
 RULES: Tuple[ResearchRule, ...] = (
     ResearchRule(
         rule_id="breakout_trend",
@@ -308,6 +1181,144 @@ RULES: Tuple[ResearchRule, ...] = (
         family="mean_reversion",
         thesis_zh="只有在趨勢強度低時，才對 1.5 標準差的偏離做反向。",
         signal=_sig_range_fade,
+    ),
+    # MB-16: pure mean-reversion rules
+    ResearchRule(
+        rule_id="bollinger_mean_reversion",
+        label_zh="布林帶均值回歸",
+        family="mean_reversion",
+        thesis_zh="收盤觸及布林帶外軌（z-score < -2 或 > 2）且 RSI 確認過度反應時反向進場。",
+        signal=_sig_bollinger_mean_reversion,
+    ),
+    ResearchRule(
+        rule_id="rsi_extreme_reversion",
+        label_zh="RSI 極值回歸",
+        family="mean_reversion",
+        thesis_zh="RSI < 20 或 > 80 且價格在 50 日均線附近（無趨勢）時反向進場。",
+        signal=_sig_rsi_extreme_reversion,
+    ),
+    ResearchRule(
+        rule_id="gap_fill",
+        label_zh="跳空回填",
+        family="mean_reversion",
+        thesis_zh="開盤跳空 > 1% 且成交量確認過度反應時，預期回填反向進場。",
+        signal=_sig_gap_fill,
+    ),
+    ResearchRule(
+        rule_id="short_term_overbought_oversold",
+        label_zh="短期超買超賣",
+        family="mean_reversion",
+        thesis_zh="5 根漲跌 > 3% 時反向進場，無趨勢過濾。",
+        signal=_sig_short_term_overbought_oversold,
+    ),
+    # MB-17 Phase 3: volatility trading rules
+    ResearchRule(
+        rule_id="volatility_breakout",
+        label_zh="波動率突破",
+        family="volatility",
+        thesis_zh="ATR 擴張（> 1.5× SMA）+ 布林帶突破（|z| > 2）+ MACD 確認時順勢進場。",
+        signal=_sig_volatility_breakout,
+    ),
+    ResearchRule(
+        rule_id="volatility_mean_reversion",
+        label_zh="波動率均值回歸",
+        family="volatility",
+        thesis_zh="ATR 極高（> 2× SMA）+ HV > 80th percentile + 價格在中軌附近時反向進場。",
+        signal=_sig_volatility_mean_reversion,
+    ),
+    ResearchRule(
+        rule_id="volatility_regime",
+        label_zh="波動率狀態",
+        family="volatility",
+        thesis_zh="ATR 極低（< 0.5× SMA）+ HV < 20th percentile + 布林帶壓縮後突破時進場。",
+        signal=_sig_volatility_regime,
+    ),
+    ResearchRule(
+        rule_id="hv_extreme",
+        label_zh="歷史波動率極值",
+        family="volatility",
+        thesis_zh="HV > 90th 時反向（預期收縮），HV < 10th 時順向（預期擴張）。",
+        signal=_sig_hv_extreme,
+    ),
+    # MB-17 Phase 4: market making rules
+    ResearchRule(
+        rule_id="spread_capture",
+        label_zh="價差捕捉",
+        family="market_making",
+        thesis_zh="低波動率環境（ATR% < 2%）下，價格觸及區間邊緣時提供流動性捕捉價差。",
+        signal=_sig_spread_capture,
+    ),
+    ResearchRule(
+        rule_id="inventory_neutral",
+        label_zh="庫存中性",
+        family="market_making",
+        thesis_zh="根據 Z-score 偏離調整報價方向，維持庫存中性（|Z| > 1.5 時反向操作）。",
+        signal=_sig_inventory_neutral,
+    ),
+    ResearchRule(
+        rule_id="mean_reversion_mm",
+        label_zh="均值回歸做市",
+        family="market_making",
+        thesis_zh="價格極端偏離（|Z| > 2）+ RSI 確認超買超賣時，提供流動性反向進場。",
+        signal=_sig_mean_reversion_mm,
+    ),
+    ResearchRule(
+        rule_id="volatility_mm",
+        label_zh="波動率做市",
+        family="market_making",
+        thesis_zh="根據 ATR 變化調整報價寬度：收縮時積極，擴張時保守（HV < 50th）。",
+        signal=_sig_volatility_mm,
+    ),
+    # MB-18: crypto-specific rules
+    ResearchRule(
+        rule_id="session_momentum",
+        label_zh="時段動量",
+        family="crypto_specific",
+        thesis_zh="亞洲（UTC 0-8）或美國（UTC 13-21）時段內，4 根報酬 > 2% 且 RSI 確認方向時順勢進場。",
+        signal=_sig_session_momentum,
+    ),
+    ResearchRule(
+        rule_id="volatility_breakout_crypto",
+        label_zh="加密波動突破",
+        family="crypto_specific",
+        thesis_zh="ATR 擴張 > 2× 均值 + 價格突破 20 根高低點 + 成交量 > 1.5× 均值時順勢進場。",
+        signal=_sig_volatility_breakout_crypto,
+    ),
+    ResearchRule(
+        rule_id="liquidity_cycle",
+        label_zh="流動性週期",
+        family="crypto_specific",
+        thesis_zh="成交量 < 0.5× 均值（流動性枯竭）+ 布林帶突破（|Z| > 2）時順突破方向進場。",
+        signal=_sig_liquidity_cycle,
+    ),
+    ResearchRule(
+        rule_id="extreme_reversal",
+        label_zh="極值反轉",
+        family="crypto_specific",
+        thesis_zh="6 根漲跌 > 5% + RSI 極值（> 80 或 < 20）+ 成交量下降時反向進場。",
+        signal=_sig_extreme_reversal,
+    ),
+    # MB-18 TASK 2: arbitrage-proxy rules
+    ResearchRule(
+        rule_id="intra_bar_arbitrage",
+        label_zh="K線內套利",
+        family="arbitrage_proxy",
+        thesis_zh="收盤價顯著偏離 K 線中點 (H+L)/2，且成交量確認時，做均值回歸交易。",
+        signal=_sig_intra_bar_arbitrage,
+    ),
+    ResearchRule(
+        rule_id="volatility_ratio_arb",
+        label_zh="波動率比率套利",
+        family="arbitrage_proxy",
+        thesis_zh="ATR% 相對歷史波動率極端偏高（> 2×），配合 RSI/ROC 方向做波動率回歸交易。",
+        signal=_sig_volatility_ratio_arb,
+    ),
+    ResearchRule(
+        rule_id="momentum_divergence_arb",
+        label_zh="動量背離套利",
+        family="arbitrage_proxy",
+        thesis_zh="短期動量 (ROC) 與中期動量 (MACD histogram) 背離時，做動量收斂交易。",
+        signal=_sig_momentum_divergence_arb,
     ),
 )
 
@@ -343,6 +1354,56 @@ EXIT_CONFIGS: Tuple[ExitConfig, ...] = (
         stop_atr=Decimal("2.0"),
         time_stop_bars=6,
         thesis_zh="小目標配寬停損，勝率會被推高，但期望值通常被拖低；列入對照。",
+    ),
+    # MB-18: crypto-specific exit configs
+    ExitConfig(
+        exit_id="crypto_balanced",
+        label_zh="加密平衡",
+        target_atr=Decimal("2.0"),
+        stop_atr=Decimal("1.5"),
+        time_stop_bars=12,
+        thesis_zh="加密貨幣波動較大，目標 2 倍 ATR、停損 1.5 倍 ATR、持有上限 12 根。",
+    ),
+    ExitConfig(
+        exit_id="crypto_trend",
+        label_zh="加密順勢",
+        target_atr=Decimal("3.0"),
+        stop_atr=Decimal("1.5"),
+        time_stop_bars=16,
+        thesis_zh="讓加密趨勢單跑更遠，目標 3 倍 ATR、停損 1.5 倍 ATR、持有上限 16 根。",
+    ),
+    ExitConfig(
+        exit_id="crypto_conservative",
+        label_zh="加密保守",
+        target_atr=Decimal("1.5"),
+        stop_atr=Decimal("1.5"),
+        time_stop_bars=8,
+        thesis_zh="加密保守退出，目標與停損同為 1.5 倍 ATR、持有上限 8 根。",
+    ),
+    ExitConfig(
+        exit_id="crypto_aggressive",
+        label_zh="加密激進",
+        target_atr=Decimal("2.5"),
+        stop_atr=Decimal("2.0"),
+        time_stop_bars=10,
+        thesis_zh="加密激進配置，目標 2.5 倍 ATR、停損 2 倍 ATR、持有上限 10 根。",
+    ),
+    # MB-18 TASK 2: arbitrage-proxy exit configs
+    ExitConfig(
+        exit_id="arb_tight",
+        label_zh="套利緊縮",
+        target_atr=Decimal("0.8"),
+        stop_atr=Decimal("0.8"),
+        time_stop_bars=4,
+        thesis_zh="套利快速進出，目標與停損同為 0.8 倍 ATR、持有上限 4 根。",
+    ),
+    ExitConfig(
+        exit_id="arb_standard",
+        label_zh="套利標準",
+        target_atr=Decimal("1.2"),
+        stop_atr=Decimal("1.0"),
+        time_stop_bars=6,
+        thesis_zh="套利標準配置，目標 1.2 倍 ATR、停損 1.0 倍 ATR、持有上限 6 根。",
     ),
 )
 
@@ -796,6 +1857,18 @@ def run_study(
             }
         )
 
+    # Aggregate signal-level stats across all folds for G1 observability
+    total_signal_stats = {
+        "scanned": 0,
+        "signals": 0,
+        "blocked_by_cost_gate": 0,
+        "blocked_by_range": 0,
+    }
+    for fold in walk_forward_folds:
+        if "stats" in fold:
+            for key in total_signal_stats:
+                total_signal_stats[key] += fold["stats"].get(key, 0)
+
     # Full-sample grid: reported as in-sample, never as evidence of edge.
     grid: List[dict] = []
     for rule in RULES:
@@ -819,13 +1892,18 @@ def run_study(
         key=lambda row: Decimal(row["summary"]["expectancy_per_trade"] or "0"),
         default=None,
     )
-    highest_win_rate = max(
-        (row for row in grid if row["summary"]["trades"] > 0),
-        key=lambda row: Decimal(row["summary"]["win_rate"] or "0"),
-        default=None,
-    )
 
     oos_summary = summarize(out_of_sample, starting_cash=settings.starting_cash)
+    
+    # Add signal-level stats for G1 observability
+    oos_summary.update(total_signal_stats)
+    oos_summary["unlabeled"] = (
+        total_signal_stats["signals"]
+        - total_signal_stats["blocked_by_cost_gate"]
+        - total_signal_stats["blocked_by_range"]
+        - oos_summary["trades"]
+    )
+    oos_summary["accounting_ok"] = oos_summary["unlabeled"] >= 0
 
     winning_folds = sum(
         1
@@ -837,6 +1915,17 @@ def run_study(
     payload = {
         "lane": LANE,
         "research_version": RESEARCH_VERSION,
+        "batch_metadata": {
+            "fingerprint": None,  # Will be set by API layer from dataset
+            "first_open_time": bars[0].open_time.isoformat(),
+            "last_open_time": bars[-1].open_time.isoformat(),
+            "bars": len(bars),
+            "interval_minutes": bars[0].interval_minutes,
+            "research_version": RESEARCH_VERSION,
+            "rules_hash": _hash_rules(RULES),
+            "exit_configs_hash": _hash_exit_configs(EXIT_CONFIGS),
+            "settings_hash": _hash_settings(settings),
+        },
         "bars": {
             "count": len(bars),
             "first_open_time": bars[0].open_time.isoformat(),
@@ -895,12 +1984,6 @@ def run_study(
                 "summary": best_in_sample["summary"],
             }
             if best_in_sample
-            else None,
-            "highest_win_rate": {
-                "label_zh": highest_win_rate["label_zh"],
-                "summary": highest_win_rate["summary"],
-            }
-            if highest_win_rate
             else None,
         },
         "disclosures": [

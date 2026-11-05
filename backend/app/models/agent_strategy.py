@@ -37,7 +37,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 from app.database import Base
-from app.lib.timeutil import utcnow
+from app.lib.timeutil import utcnow, utcnow_aware
 
 
 class AgentCandidate(Base):
@@ -293,4 +293,63 @@ class AgentStrategyTrainingJob(Base):
         ),
         Index("ix_agent_training_jobs_owner", "owner_id"),
         Index("ix_agent_training_jobs_snapshot", "snapshot_id"),
+    )
+
+
+class AgentModelActivationApproval(Base):
+    """The owner's own recorded decision to switch one artifact on.
+
+    ``activation_status`` on a training job is not a column anything in the
+    training path may set: it is a read of this table. A row here only carries
+    the activation if the owner recorded it for themselves through the
+    authenticated route, and only for the exact artifact checksum that was
+    approved — a new training run is not covered by an older approval.
+    """
+
+    __tablename__ = "agent_model_activation_approvals"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    approved_by_user_id = Column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    )
+    job_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("agent_strategy_training_jobs.id"),
+        nullable=False,
+    )
+    strategy_version_id = Column(
+        UUID(as_uuid=True), ForeignKey("experiment_versions.id"), nullable=False
+    )
+    artifact_checksum = Column(String(64), nullable=False)
+    dataset_checksum = Column(String(64), nullable=False)
+    training_contract_version = Column(String(64), nullable=False)
+    consent_record_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("agent_strategy_consents.id"),
+        nullable=False,
+    )
+    approval_policy_version = Column(String(64), nullable=False)
+    acknowledgement_text_version = Column(String(64), nullable=False)
+    acknowledgement = Column(Text, nullable=False)
+    # Only "owner_ui" is honoured by the gate; anything else in this column is
+    # kept for the audit trail and is reported as a non-qualifying provenance.
+    channel = Column(String(32), nullable=False)
+    # approved | revoked
+    decision = Column(String(16), nullable=False, default="approved")
+    gate_snapshot_json = Column(JSONB, nullable=False)
+    approved_at = Column(DateTime(timezone=True), default=utcnow_aware, nullable=False)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+    revoke_reason = Column(String(64), nullable=True)
+
+    __table_args__ = (
+        Index(
+            "uq_agent_activation_approval_live_job",
+            "job_id",
+            unique=True,
+            postgresql_where=text("decision = 'approved'"),
+            sqlite_where=text("decision = 'approved'"),
+        ),
+        Index("ix_agent_activation_approval_owner", "owner_id"),
+        Index("ix_agent_activation_approval_job", "job_id"),
     )

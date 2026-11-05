@@ -32,6 +32,7 @@ from app.database import get_db
 from app.models.user import User
 from app.providers.crypto_registry import get_crypto_provider
 from app.providers.kraken_provider import KRAKEN_INTERVALS, KrakenError
+from app.providers.provider_registry import get_data_provider
 from app.services.strategy_lab import (
     DEFAULT_COMMISSION_RATE,
     DEFAULT_INTERVALS,
@@ -62,6 +63,25 @@ from app.services.strategy_study_store import (
     run_summary,
     trades_csv,
 )
+from app.services.arbitrage_engine import (
+    ArbitrageConfig,
+    run_triangular_arbitrage,
+    result_to_dict,
+)
+from app.services.market_making_engine import (
+    MarketMakingConfig,
+    backtest_market_making,
+    result_to_dict as mm_result_to_dict,
+)
+from app.services.pairs_trading_engine import (
+    PairsConfig,
+    run_pairs_backtest,
+    result_to_dict as pairs_result_to_dict,
+)
+from app.services.seasonality_engine import (
+    analyze_seasonality,
+    result_to_dict as seasonality_result_to_dict,
+)
 
 
 router = APIRouter(prefix="/strategy-lab", tags=["strategy-lab"])
@@ -73,7 +93,7 @@ BAR_LIMIT = 720
 # Daily bars give about two years of history; 4h about four months. Sub-hourly
 # bars cannot cover a 40 bps round trip at their typical range, so the study
 # refuses to pretend they are tradeable.
-RESEARCH_INTERVALS = frozenset({1440, 240, 60})
+RESEARCH_INTERVALS = frozenset({1440, 240, 60, 15, 5})
 
 
 class StrategyLabRunRequest(BaseModel):
@@ -101,6 +121,7 @@ class StrategyLabRunRequest(BaseModel):
 
 
 def _require_instrument(instrument_id: str):
+    """Resolve crypto instrument."""
     instrument = get_crypto_instrument(instrument_id)
     if instrument is None:
         raise HTTPException(
@@ -112,6 +133,20 @@ def _require_instrument(instrument_id: str):
             },
         )
     return instrument
+
+
+def _get_provider_for_instrument(instrument):
+    """Get the appropriate data provider for an instrument's market."""
+    if instrument.market.value == "CRYPTO":
+        return get_crypto_provider()
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "reason": "unsupported_market",
+                "market": instrument.market.value,
+            },
+        )
 
 
 def _instrument_payload(instrument) -> dict:
@@ -137,6 +172,12 @@ class StrategyResearchRequest(BaseModel):
     commission_rate: Decimal = Field(default=DEFAULT_COMMISSION_RATE, ge=0, le=Decimal("0.05"))
     slippage_rate: Decimal = Field(default=DEFAULT_SLIPPAGE_RATE, ge=0, le=Decimal("0.05"))
     include_trades: bool = False
+    target_bars: Optional[int] = Field(
+        default=None,
+        ge=120,
+        le=10000,
+        description="Number of historical bars to fetch. If > 720, uses pagination. Default: 720",
+    )
 
     @model_validator(mode="after")
     def _validate_balances(self) -> "StrategyResearchRequest":
@@ -244,15 +285,34 @@ def _research_study(
             },
         )
 
-    provider = get_crypto_provider()
+    provider = _get_provider_for_instrument(instrument)
     try:
-        series = provider.get_candle_series(
-            payload.instrument_id,
-            interval_minutes=payload.interval_minutes,
-            limit=BAR_LIMIT,
-        )
+        if payload.target_bars and payload.target_bars > BAR_LIMIT:
+            series = provider.get_candle_series_paginated(
+                payload.instrument_id,
+                interval_minutes=payload.interval_minutes,
+                target_bars=payload.target_bars,
+            )
+        else:
+            series = provider.get_candle_series(
+                payload.instrument_id,
+                interval_minutes=payload.interval_minutes,
+                limit=BAR_LIMIT,
+            )
     except KrakenError as exc:
         raise crypto_failure(exc)
+    except Exception as exc:
+        if type(exc).__name__ in ("TwelveDataError", "TwelveDataRateLimitError",
+                                   "SyntheticStockError", "SyntheticForexError"):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "reason": "provider_error",
+                    "provider": provider.provider_id,
+                    "message": str(exc),
+                },
+            )
+        raise
 
     bars = [
         LabBar(
@@ -317,6 +377,11 @@ def _research_study(
     }
     result["dataset"] = dataset
     result["instrument"] = _instrument_payload(instrument)
+    
+    # MB-15: Set fingerprint in batch_metadata from dataset
+    if "batch_metadata" in result:
+        result["batch_metadata"]["fingerprint"] = series.fingerprint
+    
     return result, bars, dataset
 
 
@@ -442,3 +507,305 @@ def strategy_research_run_trades_csv(
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+class ArbitrageBacktestRequest(BaseModel):
+    """Request body for triangular arbitrage backtest."""
+    interval_minutes: int = Field(default=60, ge=1, le=1440)
+    limit: int = Field(default=720, ge=100, le=5000)
+    min_spread_bps: Decimal = Field(default=Decimal("20"), ge=0, le=1000)
+    target_atr_mult: Decimal = Field(default=Decimal("1.5"), gt=0, le=10)
+    stop_atr_mult: Decimal = Field(default=Decimal("1.0"), gt=0, le=10)
+    time_stop_bars: int = Field(default=8, ge=1, le=50)
+    starting_cash: Decimal = Field(default=DEFAULT_STARTING_CASH, gt=0)
+    notional_per_trade: Decimal = Field(default=DEFAULT_NOTIONAL_PER_TRADE, gt=0)
+    commission_rate: Decimal = Field(default=DEFAULT_COMMISSION_RATE, ge=0, le=Decimal("0.05"))
+    slippage_rate: Decimal = Field(default=DEFAULT_SLIPPAGE_RATE, ge=0, le=Decimal("0.05"))
+    config_id: str = Field(default="balanced")
+
+
+@router.post("/arbitrage/backtest")
+def arbitrage_backtest(
+    payload: ArbitrageBacktestRequest,
+    current_user: User = Depends(get_current_user),
+    _rate_limit=Depends(rate_limit("strategy_research")),
+):
+    """Triangular arbitrage backtest across BTC-USD, ETH-USD, ETH-BTC.
+
+    Fetches real Kraken OHLCV for all three legs, aligns by timestamp,
+    computes the implied cross rate (ETH-BTC × BTC-USD → implied ETH-USD),
+    and simulates trades when the spread exceeds the configured threshold.
+
+    This is a multi-instrument engine, separate from the single-instrument
+    research lane. All data is live from Kraken; no synthetic fills.
+    """
+    config = ArbitrageConfig(
+        min_spread_bps=payload.min_spread_bps,
+        target_atr_mult=payload.target_atr_mult,
+        stop_atr_mult=payload.stop_atr_mult,
+        time_stop_bars=payload.time_stop_bars,
+        starting_cash=payload.starting_cash,
+        notional_per_trade=payload.notional_per_trade,
+        commission_rate=payload.commission_rate,
+        slippage_rate=payload.slippage_rate,
+        config_id=payload.config_id,
+    )
+
+    try:
+        result = run_triangular_arbitrage(
+            interval_minutes=payload.interval_minutes,
+            limit=payload.limit,
+            config=config,
+        )
+    except KrakenError as exc:
+        raise crypto_failure(exc)
+    except Exception as exc:
+        logger.exception("arbitrage backtest failed")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "reason": "arbitrage_error",
+                "message": str(exc),
+            },
+        )
+
+    if result.bars == 0:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "reason": "no_aligned_bars",
+                "message": (
+                    "The three legs (BTC-USD, ETH-USD, ETH-BTC) had no timestamps "
+                    "in common after alignment. Check that ETH-BTC is available on Kraken."
+                ),
+            },
+        )
+
+    return result_to_dict(result)
+
+
+class MarketMakingBacktestRequest(BaseModel):
+    """Request body for market making backtest."""
+    instrument_id: str = DEFAULT_INSTRUMENT_ID
+    interval_minutes: int = Field(default=5, ge=1, le=1440)
+    limit: int = Field(default=720, ge=100, le=720)
+    spread_target_bps: Decimal = Field(default=Decimal("10"), ge=1, le=100)
+    min_spread_bps: Decimal = Field(default=Decimal("2"), ge=0, le=50)
+    max_spread_bps: Decimal = Field(default=Decimal("50"), ge=1, le=200)
+    order_size_usd: Decimal = Field(default=Decimal("100"), gt=0, le=10000)
+    max_inventory_usd: Decimal = Field(default=Decimal("1000"), gt=0, le=100000)
+    inventory_skew_factor: Decimal = Field(default=Decimal("0.1"), ge=0, le=1)
+    commission_rate: Decimal = Field(default=DEFAULT_COMMISSION_RATE, ge=0, le=Decimal("0.05"))
+    slippage_rate: Decimal = Field(default=DEFAULT_SLIPPAGE_RATE, ge=0, le=Decimal("0.05"))
+    config_id: str = Field(default="balanced")
+
+
+@router.post("/market-making/backtest")
+def market_making_backtest(
+    payload: MarketMakingBacktestRequest,
+    current_user: User = Depends(get_current_user),
+    _rate_limit=Depends(rate_limit("strategy_research")),
+):
+    """Market making backtest using OHLCV-simulated order book.
+
+    IMPORTANT: This is a simulation approximation, not a realistic backtest.
+    Real market making requires L2/L3 order book data, queue position modeling,
+    and adverse selection analysis. OHLCV bars cannot capture these dynamics.
+
+    The engine estimates bid/ask spread from each bar's high-low range, adjusted
+    by volume. Fills are detected when price touches our quotes. Inventory skew
+    adjusts quotes to limit directional exposure.
+    """
+    instrument = _require_instrument(payload.instrument_id)
+
+    if instrument.market.value != "CRYPTO":
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "reason": "unsupported_market",
+                "message": "Market making simulation is only supported for crypto instruments.",
+                "market": instrument.market.value,
+            },
+        )
+
+    config = MarketMakingConfig(
+        spread_target_bps=payload.spread_target_bps,
+        min_spread_bps=payload.min_spread_bps,
+        max_spread_bps=payload.max_spread_bps,
+        order_size_usd=payload.order_size_usd,
+        max_inventory_usd=payload.max_inventory_usd,
+        inventory_skew_factor=payload.inventory_skew_factor,
+        commission_rate=payload.commission_rate,
+        slippage_rate=payload.slippage_rate,
+        config_id=payload.config_id,
+    )
+
+    try:
+        result = backtest_market_making(
+            instrument_id=payload.instrument_id,
+            interval_minutes=payload.interval_minutes,
+            limit=payload.limit,
+            config=config,
+        )
+    except KrakenError as exc:
+        raise crypto_failure(exc)
+    except Exception as exc:
+        logger.exception("market making backtest failed")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "reason": "market_making_error",
+                "message": str(exc),
+            },
+        )
+
+    if result.bars == 0:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "reason": "no_bars",
+                "message": "No completed bars returned from the venue.",
+            },
+        )
+
+    return mm_result_to_dict(result)
+
+
+class PairsTradingBacktestRequest(BaseModel):
+    """Request body for pairs trading backtest."""
+    pair: str = Field(default="ETH-BTC")
+    interval_minutes: int = Field(default=60, ge=1, le=1440)
+    limit: int = Field(default=720, ge=100, le=5000)
+    zscore_window: int = Field(default=20, ge=5, le=100)
+    entry_threshold: Decimal = Field(default=Decimal("2.0"), ge=Decimal("0.5"), le=Decimal("5.0"))
+    exit_threshold: Decimal = Field(default=Decimal("0.5"), ge=Decimal("0"), le=Decimal("2.0"))
+    stop_threshold: Decimal = Field(default=Decimal("3.0"), ge=Decimal("1.0"), le=Decimal("10.0"))
+    time_stop_bars: int = Field(default=15, ge=1, le=100)
+    starting_cash: Decimal = Field(default=DEFAULT_STARTING_CASH, gt=0)
+    notional_per_leg: Decimal = Field(default=Decimal("5000"), gt=0)
+    commission_rate: Decimal = Field(default=DEFAULT_COMMISSION_RATE, ge=0, le=Decimal("0.05"))
+    config_id: str = Field(default="balanced")
+
+
+@router.post("/pairs-trading/backtest")
+def pairs_trading_backtest(
+    payload: PairsTradingBacktestRequest,
+    current_user: User = Depends(get_current_user),
+    _rate_limit=Depends(rate_limit("strategy_research")),
+):
+    """Pairs trading backtest using z-score mean reversion on asset ratios.
+
+    Fetches real Kraken OHLCV for both legs, computes a rolling z-score of the
+    price ratio, and simulates dollar-neutral trades with a triple barrier exit
+    (z-score reversion, stop-loss, time-stop).
+
+    Supports direct quotes (ETH-BTC) and synthetic ratios (ETH-SOL, BTC-SOL).
+    """
+    config = PairsConfig(
+        zscore_window=payload.zscore_window,
+        entry_threshold=payload.entry_threshold,
+        exit_threshold=payload.exit_threshold,
+        stop_threshold=payload.stop_threshold,
+        time_stop_bars=payload.time_stop_bars,
+        starting_cash=payload.starting_cash,
+        notional_per_leg=payload.notional_per_leg,
+        commission_rate=payload.commission_rate,
+        config_id=payload.config_id,
+    )
+
+    try:
+        result = run_pairs_backtest(
+            pair=payload.pair,
+            interval_minutes=payload.interval_minutes,
+            limit=payload.limit,
+            config=config,
+        )
+    except KrakenError as exc:
+        raise crypto_failure(exc)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "reason": "invalid_pair",
+                "message": str(exc),
+            },
+        )
+    except Exception as exc:
+        logger.exception("pairs trading backtest failed")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "reason": "pairs_trading_error",
+                "message": str(exc),
+            },
+        )
+
+    if result.bars == 0:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "reason": "no_aligned_bars",
+                "message": (
+                    f"The two legs of {payload.pair} had no timestamps in common "
+                    "after alignment. Check that both instruments are available on Kraken."
+                ),
+            },
+        )
+
+    return pairs_result_to_dict(result)
+
+
+class SeasonalityAnalyzeRequest(BaseModel):
+    """Request body for intraday seasonality analysis."""
+    instrument_id: str = DEFAULT_INSTRUMENT_ID
+    interval_minutes: int = Field(default=60, ge=1, le=1440)
+    limit: int = Field(default=720, ge=100, le=5000)
+
+
+@router.post("/seasonality/analyze")
+def seasonality_analyze(
+    payload: SeasonalityAnalyzeRequest,
+    current_user: User = Depends(get_current_user),
+    _rate_limit=Depends(rate_limit("strategy_research")),
+):
+    """Intraday seasonality analysis — diagnostic, not a trading signal.
+
+    Fetches live Kraken OHLCV, computes per-bar returns, and tests whether
+    specific hours-of-day or days-of-week carry systematically non-zero mean
+    returns.  All p-values carry Bonferroni and Benjamini-Hochberg FDR
+    corrections for multiple testing.
+
+    Stage 1 is purely exploratory.  A significant slot is evidence of a
+    historical pattern, not a promise of future returns.
+    """
+    instrument = _require_instrument(payload.instrument_id)
+
+    if instrument.market.value != "CRYPTO":
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "reason": "unsupported_market",
+                "message": "Seasonality analysis is only supported for crypto instruments.",
+                "market": instrument.market.value,
+            },
+        )
+
+    try:
+        result = analyze_seasonality(
+            instrument_id=payload.instrument_id,
+            interval_minutes=payload.interval_minutes,
+            limit=payload.limit,
+        )
+    except KrakenError as exc:
+        raise crypto_failure(exc)
+    except Exception as exc:
+        logger.exception("seasonality analysis failed")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "reason": "seasonality_error",
+                "message": str(exc),
+            },
+        )
+
+    return seasonality_result_to_dict(result)

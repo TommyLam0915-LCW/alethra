@@ -24,7 +24,7 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import relationship
 
 from app.database import Base
-from app.lib.timeutil import utcnow
+from app.lib.timeutil import utcnow_aware
 
 
 class StrategyStudyRun(Base):
@@ -61,7 +61,7 @@ class StrategyStudyRun(Base):
     # reproducible even after the venue's rolling window has moved past it.
     bars_json = Column(JSONB, nullable=False)
     trade_count = Column(Integer, nullable=False, default=0)
-    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow_aware)
 
     trades = relationship(
         "StrategyStudyTrade",
@@ -114,6 +114,6 @@ class StrategyStudyTrade(Base):
     cost_ratio_pct = Column(Numeric(12, 4), nullable=True)
     pnl_reason_zh = Column(Text, nullable=False)
     pnl_reason_en = Column(Text, nullable=False)
-    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow_aware)
 
     run = relationship("StrategyStudyRun", back_populates="trades")

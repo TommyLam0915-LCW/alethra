@@ -125,6 +125,7 @@ from app.models.agent_strategy import (
     AgentCandidate,
     AgentCandidateOutcome,
     AgentDatasetSnapshot,
+    AgentModelActivationApproval,
     AgentStrategyConsent,
     AgentStrategyTrainingJob,
 )
@@ -256,6 +257,7 @@ __all__ = [
     "AgentCandidate",
     "AgentCandidateOutcome",
     "AgentDatasetSnapshot",
+    "AgentModelActivationApproval",
     "AgentStrategyConsent",
     "AgentStrategyTrainingJob",
     "StrategyStudyRun",
