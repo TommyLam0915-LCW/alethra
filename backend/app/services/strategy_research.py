@@ -671,6 +671,176 @@ def _sig_hv_extreme(ind: _Indicators, index: int) -> int:
     return 0
 
 
+# -- MB-17 Phase 4: market making rules -------------------------------------
+
+def _sig_spread_capture(ind: _Indicators, index: int) -> int:
+    """Market Making Rule 1: spread_capture.
+    
+    Simulates market making by capturing the bid-ask spread.
+    Entry conditions:
+    - Low volatility environment (ATR% < 2%)
+    - Price at candle low → simulate bid fill (long entry)
+    - Price at candle high → simulate ask fill (short entry)
+    - Tight target: 0.5 × ATR (capture half the spread)
+    - Tight stop: 0.5 × ATR
+    
+    This rule profits when the market is range-bound and we can capture
+    the spread by providing liquidity at both sides.
+    """
+    if index < 1:
+        return 0
+    
+    atr_pct_val = ind.atr_pct[index]
+    if atr_pct_val is None:
+        return 0
+    
+    # Only trade in low volatility (tight spreads are profitable)
+    if atr_pct_val > Decimal("2"):
+        return 0
+    
+    bar = ind.close[index]
+    # Use high/low from the indicators (we need to add them)
+    # For now, approximate: if close is near the low of recent range, go long
+    # if close is near the high, go short
+    
+    # Simple proxy: compare to 5-bar high/low
+    if index >= 5:
+        recent_closes = ind.close[index-5:index+1]
+        recent_high = max(recent_closes)
+        recent_low = min(recent_closes)
+        range_size = recent_high - recent_low
+        
+        if range_size == 0:
+            return 0
+        
+        # Position in range: 0 = at low, 1 = at high
+        position_in_range = (bar - recent_low) / range_size
+        
+        if position_in_range < Decimal("0.2"):  # Near low → simulate bid fill
+            return 1  # Long
+        if position_in_range > Decimal("0.8"):  # Near high → simulate ask fill
+            return -1  # Short
+    
+    return 0
+
+
+def _sig_inventory_neutral(ind: _Indicators, index: int) -> int:
+    """Market Making Rule 2: inventory_neutral.
+    
+    Adjusts quotes based on inventory to maintain neutral position.
+    Entry conditions:
+    - Z-score > 1.5 → skew quotes downward (prefer short)
+    - Z-score < -1.5 → skew quotes upward (prefer long)
+    - ATR% < 3% (moderate volatility)
+    
+    This simulates a market maker adjusting prices to manage inventory risk.
+    """
+    z = ind.zscore[index]
+    atr_pct_val = ind.atr_pct[index]
+    
+    if z is None or atr_pct_val is None:
+        return 0
+    
+    # Only trade in moderate volatility
+    if atr_pct_val > Decimal("3") or atr_pct_val < Decimal("0.5"):
+        return 0
+    
+    # Skew based on z-score (inventory proxy)
+    if z > Decimal("1.5"):
+        return -1  # Price high → prefer short (skew ask down)
+    if z < Decimal("-1.5"):
+        return 1  # Price low → prefer long (skew bid up)
+    
+    return 0
+
+
+def _sig_mean_reversion_mm(ind: _Indicators, index: int) -> int:
+    """Market Making Rule 3: mean_reversion_mm.
+    
+    Combines mean reversion with market making logic.
+    Entry conditions:
+    - |Z-score| > 2 (price deviated from mean)
+    - RSI confirms overbought/oversold
+    - ATR% < 2% (low volatility, tight spreads profitable)
+    - Fade the move: buy when oversold, sell when overbought
+    
+    This is a market maker providing liquidity at extreme prices.
+    """
+    z = ind.zscore[index]
+    rsi = ind.rsi[index]
+    atr_pct_val = ind.atr_pct[index]
+    
+    if z is None or rsi is None or atr_pct_val is None:
+        return 0
+    
+    # Only trade in low volatility
+    if atr_pct_val > Decimal("2"):
+        return 0
+    
+    # Oversold: Z < -2 and RSI < 30 → provide liquidity (buy)
+    if z < Decimal("-2") and rsi < Decimal("30"):
+        return 1
+    
+    # Overbought: Z > 2 and RSI > 70 → provide liquidity (sell)
+    if z > Decimal("2") and rsi > Decimal("70"):
+        return -1
+    
+    return 0
+
+
+def _sig_volatility_mm(ind: _Indicators, index: int) -> int:
+    """Market Making Rule 4: volatility_mm.
+    
+    Adjusts spread based on volatility regime.
+    Entry conditions:
+    - ATR expanding (current ATR > 1.2 × prior ATR) → widen quotes, trade less
+    - ATR contracting (current ATR < 0.8 × prior ATR) → tighten quotes, trade more
+    - HV < 50th percentile → favorable for market making
+    
+    This simulates a market maker adjusting to volatility changes.
+    """
+    atr_val = ind.atr[index]
+    hv_pct = _hv_percentile(ind, index, 100)
+    
+    if atr_val is None or hv_pct is None or index < 20:
+        return 0
+    
+    # Calculate prior ATR (20 bars ago)
+    atr_prior = ind.atr[index - 20]
+    if atr_prior is None or atr_prior == 0:
+        return 0
+    
+    atr_ratio = atr_val / atr_prior
+    
+    # Only trade when HV is low (favorable for market making)
+    if hv_pct > Decimal("50"):
+        return 0
+    
+    # ATR contracting: tighten quotes, be more aggressive
+    if atr_ratio < Decimal("0.8"):
+        # Use z-score to determine direction
+        z = ind.zscore[index]
+        if z is None:
+            return 0
+        if z < Decimal("-1"):
+            return 1  # Buy
+        if z > Decimal("1"):
+            return -1  # Sell
+    
+    # ATR expanding: widen quotes, be more selective
+    if atr_ratio > Decimal("1.2"):
+        # Only trade at extremes
+        z = ind.zscore[index]
+        if z is None:
+            return 0
+        if z < Decimal("-2"):
+            return 1  # Buy at extreme low
+        if z > Decimal("2"):
+            return -1  # Sell at extreme high
+    
+    return 0
+
+
 RULES: Tuple[ResearchRule, ...] = (
     ResearchRule(
         rule_id="breakout_trend",
@@ -757,6 +927,35 @@ RULES: Tuple[ResearchRule, ...] = (
         family="volatility",
         thesis_zh="HV > 90th 時反向（預期收縮），HV < 10th 時順向（預期擴張）。",
         signal=_sig_hv_extreme,
+    ),
+    # MB-17 Phase 4: market making rules
+    ResearchRule(
+        rule_id="spread_capture",
+        label_zh="價差捕捉",
+        family="market_making",
+        thesis_zh="低波動率環境（ATR% < 2%）下，價格觸及區間邊緣時提供流動性捕捉價差。",
+        signal=_sig_spread_capture,
+    ),
+    ResearchRule(
+        rule_id="inventory_neutral",
+        label_zh="庫存中性",
+        family="market_making",
+        thesis_zh="根據 Z-score 偏離調整報價方向，維持庫存中性（|Z| > 1.5 時反向操作）。",
+        signal=_sig_inventory_neutral,
+    ),
+    ResearchRule(
+        rule_id="mean_reversion_mm",
+        label_zh="均值回歸做市",
+        family="market_making",
+        thesis_zh="價格極端偏離（|Z| > 2）+ RSI 確認超買超賣時，提供流動性反向進場。",
+        signal=_sig_mean_reversion_mm,
+    ),
+    ResearchRule(
+        rule_id="volatility_mm",
+        label_zh="波動率做市",
+        family="market_making",
+        thesis_zh="根據 ATR 變化調整報價寬度：收縮時積極，擴張時保守（HV < 50th）。",
+        signal=_sig_volatility_mm,
     ),
 )
 

@@ -363,7 +363,7 @@ def test_research_returns_walk_forward_evidence_and_dataset_provenance(client, a
     assert body["walk_forward"]["folds"][0]["role"] == "seed"
     assert body["walk_forward"]["tested_folds"] == 2
     assert body["walk_forward"]["out_of_sample"]["accounting_ok"] is True
-    assert len(body["in_sample_grid"]) == 48  # 12 rules × 4 exit configs (MB-16: 4 mean-reversion, MB-17: 4 volatility)
+    assert len(body["in_sample_grid"]) == 64  # 16 rules × 4 exit configs (MB-16: 4 mean-reversion, MB-17: 4 volatility + 4 market-making)
     assert "out_of_sample_trades" in body
 
 
