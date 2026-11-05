@@ -47,6 +47,50 @@ QTY_QUANT = Decimal("0.00000001")
 RATE_QUANT = Decimal("0.000001")
 
 
+# -- MB-15: batch_metadata hashing helpers ------------------------------------
+import hashlib
+import json
+
+def _hash_rules(rules):
+    """Hash rule definitions for batch_metadata."""
+    payload = json.dumps(
+        [{"rule_id": r.rule_id, "family": r.family} for r in rules],
+        sort_keys=True
+    )
+    return f"sha256:{hashlib.sha256(payload.encode()).hexdigest()}"
+
+def _hash_exit_configs(configs):
+    """Hash exit config definitions for batch_metadata."""
+    payload = json.dumps(
+        [
+            {
+                "exit_id": c.exit_id,
+                "target_atr": str(c.target_atr),
+                "stop_atr": str(c.stop_atr),
+                "time_stop_bars": c.time_stop_bars,
+            }
+            for c in configs
+        ],
+        sort_keys=True
+    )
+    return f"sha256:{hashlib.sha256(payload.encode()).hexdigest()}"
+
+def _hash_settings(settings):
+    """Hash research settings for batch_metadata."""
+    payload = json.dumps(
+        {
+            "starting_cash": str(settings.starting_cash),
+            "notional_per_trade": str(settings.notional_per_trade),
+            "commission_rate": str(settings.commission_rate),
+            "slippage_rate": str(settings.slippage_rate),
+            "atr_window": settings.atr_window,
+            "cost_multiple": str(settings.cost_multiple),
+        },
+        sort_keys=True
+    )
+    return f"sha256:{hashlib.sha256(payload.encode()).hexdigest()}"
+
+
 @dataclass(frozen=True)
 class ResearchSettings:
     starting_cash: Decimal = Decimal("10000")
@@ -796,6 +840,18 @@ def run_study(
             }
         )
 
+    # Aggregate signal-level stats across all folds for G1 observability
+    total_signal_stats = {
+        "scanned": 0,
+        "signals": 0,
+        "blocked_by_cost_gate": 0,
+        "blocked_by_range": 0,
+    }
+    for fold in walk_forward_folds:
+        if "stats" in fold:
+            for key in total_signal_stats:
+                total_signal_stats[key] += fold["stats"].get(key, 0)
+
     # Full-sample grid: reported as in-sample, never as evidence of edge.
     grid: List[dict] = []
     for rule in RULES:
@@ -819,13 +875,18 @@ def run_study(
         key=lambda row: Decimal(row["summary"]["expectancy_per_trade"] or "0"),
         default=None,
     )
-    highest_win_rate = max(
-        (row for row in grid if row["summary"]["trades"] > 0),
-        key=lambda row: Decimal(row["summary"]["win_rate"] or "0"),
-        default=None,
-    )
 
     oos_summary = summarize(out_of_sample, starting_cash=settings.starting_cash)
+    
+    # Add signal-level stats for G1 observability
+    oos_summary.update(total_signal_stats)
+    oos_summary["unlabeled"] = (
+        total_signal_stats["signals"]
+        - total_signal_stats["blocked_by_cost_gate"]
+        - total_signal_stats["blocked_by_range"]
+        - oos_summary["trades"]
+    )
+    oos_summary["accounting_ok"] = oos_summary["unlabeled"] >= 0
 
     winning_folds = sum(
         1
@@ -837,6 +898,17 @@ def run_study(
     payload = {
         "lane": LANE,
         "research_version": RESEARCH_VERSION,
+        "batch_metadata": {
+            "fingerprint": None,  # Will be set by API layer from dataset
+            "first_open_time": bars[0].open_time.isoformat(),
+            "last_open_time": bars[-1].open_time.isoformat(),
+            "bars": len(bars),
+            "interval_minutes": bars[0].interval_minutes,
+            "research_version": RESEARCH_VERSION,
+            "rules_hash": _hash_rules(RULES),
+            "exit_configs_hash": _hash_exit_configs(EXIT_CONFIGS),
+            "settings_hash": _hash_settings(settings),
+        },
         "bars": {
             "count": len(bars),
             "first_open_time": bars[0].open_time.isoformat(),
@@ -895,12 +967,6 @@ def run_study(
                 "summary": best_in_sample["summary"],
             }
             if best_in_sample
-            else None,
-            "highest_win_rate": {
-                "label_zh": highest_win_rate["label_zh"],
-                "summary": highest_win_rate["summary"],
-            }
-            if highest_win_rate
             else None,
         },
         "disclosures": [

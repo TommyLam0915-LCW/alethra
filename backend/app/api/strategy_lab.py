@@ -317,6 +317,11 @@ def _research_study(
     }
     result["dataset"] = dataset
     result["instrument"] = _instrument_payload(instrument)
+    
+    # MB-15: Set fingerprint in batch_metadata from dataset
+    if "batch_metadata" in result:
+        result["batch_metadata"]["fingerprint"] = series.fingerprint
+    
     return result, bars, dataset
 
 
