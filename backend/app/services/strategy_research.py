@@ -136,6 +136,17 @@ class _Indicators:
     low_prior: List[Optional[Decimal]]
     roc: List[Optional[Decimal]]
     trend_strength: List[Optional[Decimal]]
+    # MB-16: mean-reversion indicators
+    open: List[Decimal]
+    volume: List[Decimal]
+    volume_sma: List[Optional[Decimal]]
+    return_5bar: List[Optional[Decimal]]
+    # MB-17: volatility and momentum indicators
+    macd: List[Optional[Decimal]]
+    macd_signal: List[Optional[Decimal]]
+    macd_hist: List[Optional[Decimal]]
+    hv: List[Optional[Decimal]]  # Historical volatility (annualized)
+    atr_pct: List[Optional[Decimal]]  # ATR as percentage of close
 
 
 @dataclass
@@ -261,6 +272,53 @@ def prepare_indicators(bars: Sequence[LabBar], atr_window: int = DEFAULT_ATR_WIN
         if ema_fast[index] is not None and ema_slow[index] is not None and atr[index]:
             trend_strength[index] = abs(ema_fast[index] - ema_slow[index]) / atr[index]
 
+    # MB-16: mean-reversion indicators
+    opens = [bar.open for bar in bars]
+    volumes = [bar.volume for bar in bars]
+    volume_sma: List[Optional[Decimal]] = [None] * len(bars)
+    for index in range(19, len(bars)):
+        window = volumes[index - 19 : index + 1]
+        volume_sma[index] = sum(window, Decimal(0)) / Decimal(20)
+    return_5bar: List[Optional[Decimal]] = [None] * len(bars)
+    for index in range(5, len(bars)):
+        previous = closes[index - 5]
+        if previous > 0:
+            return_5bar[index] = closes[index] / previous - Decimal(1)
+
+    # MB-17: MACD (12-26-9)
+    ema_12 = _ema_series(closes, 12)
+    ema_26 = _ema_series(closes, 26)
+    macd_line: List[Optional[Decimal]] = [None] * len(bars)
+    for index in range(len(bars)):
+        if ema_12[index] is not None and ema_26[index] is not None:
+            macd_line[index] = ema_12[index] - ema_26[index]
+    macd_signal = _ema_series([m if m is not None else Decimal(0) for m in macd_line], 9)
+    macd_hist: List[Optional[Decimal]] = [None] * len(bars)
+    for index in range(len(bars)):
+        if macd_line[index] is not None and macd_signal[index] is not None:
+            macd_hist[index] = macd_line[index] - macd_signal[index]
+
+    # MB-17: Historical volatility (20-day annualized)
+    import math
+    hv: List[Optional[Decimal]] = [None] * len(bars)
+    for index in range(20, len(bars)):
+        log_returns = []
+        for offset in range(index - 19, index + 1):
+            if closes[offset - 1] > 0 and closes[offset] > 0:
+                log_ret = Decimal(str(math.log(float(closes[offset] / closes[offset - 1]))))
+                log_returns.append(log_ret)
+        if len(log_returns) == 20:
+            mean_ret = sum(log_returns, Decimal(0)) / Decimal(20)
+            variance = sum((r - mean_ret) ** 2 for r in log_returns) / Decimal(19)
+            std_dev = variance.sqrt()
+            hv[index] = std_dev * Decimal(str(math.sqrt(252)))
+
+    # MB-17: ATR as percentage of close
+    atr_pct: List[Optional[Decimal]] = [None] * len(bars)
+    for index in range(len(bars)):
+        if atr[index] is not None and closes[index] > 0:
+            atr_pct[index] = (atr[index] / closes[index]) * Decimal(100)
+
     return _Indicators(
         close=closes,
         atr=atr,
@@ -272,6 +330,15 @@ def prepare_indicators(bars: Sequence[LabBar], atr_window: int = DEFAULT_ATR_WIN
         low_prior=low_prior,
         roc=roc,
         trend_strength=trend_strength,
+        open=opens,
+        volume=volumes,
+        volume_sma=volume_sma,
+        return_5bar=return_5bar,
+        macd=macd_line,
+        macd_signal=macd_signal,
+        macd_hist=macd_hist,
+        hv=hv,
+        atr_pct=atr_pct,
     )
 
 
@@ -324,6 +391,82 @@ def _sig_range_fade(ind: _Indicators, index: int) -> int:
     return 0
 
 
+# -- MB-16: mean-reversion signal functions ---------------------------------
+
+
+def _sig_bollinger_mean_reversion(ind: _Indicators, index: int) -> int:
+    """Price touches Bollinger Band outer rail + RSI confirmation.
+    
+    Long when close < lower band (zscore < -2) AND RSI < 30.
+    Short when close > upper band (zscore > 2) AND RSI > 70.
+    """
+    z, rsi = ind.zscore[index], ind.rsi[index]
+    if z is None or rsi is None:
+        return 0
+    if z <= Decimal("-2") and rsi < Decimal("30"):
+        return 1
+    if z >= Decimal("2") and rsi > Decimal("70"):
+        return -1
+    return 0
+
+
+def _sig_rsi_extreme_reversion(ind: _Indicators, index: int) -> int:
+    """RSI extreme + no trend.
+    
+    Long when RSI < 20 AND close within 1% of 50-day MA.
+    Short when RSI > 80 AND close within 1% of 50-day MA.
+    """
+    rsi, slow = ind.rsi[index], ind.ema_slow[index]
+    if rsi is None or slow is None or slow == 0:
+        return 0
+    deviation = abs(ind.close[index] - slow) / slow
+    if deviation > Decimal("0.01"):
+        return 0
+    if rsi < Decimal("20"):
+        return 1
+    if rsi > Decimal("80"):
+        return -1
+    return 0
+
+
+def _sig_gap_fill(ind: _Indicators, index: int) -> int:
+    """Open gaps > 1% + volume confirmation.
+    
+    Short when open > previous close × 1.01 AND volume > 1.5 × 20-day avg.
+    Long when open < previous close × 0.99 AND volume > 1.5 × 20-day avg.
+    """
+    if index == 0:
+        return 0
+    open_price = ind.open[index]
+    prev_close = ind.close[index - 1]
+    vol_sma = ind.volume_sma[index]
+    volume = ind.volume[index]
+    if prev_close == 0 or vol_sma is None or vol_sma == 0:
+        return 0
+    gap_ratio = open_price / prev_close
+    if gap_ratio > Decimal("1.01") and volume > vol_sma * Decimal("1.5"):
+        return -1
+    if gap_ratio < Decimal("0.99") and volume > vol_sma * Decimal("1.5"):
+        return 1
+    return 0
+
+
+def _sig_short_term_overbought_oversold(ind: _Indicators, index: int) -> int:
+    """5-bar return > 3% + no trend filter.
+    
+    Short when 5-bar gain > 3%.
+    Long when 5-bar loss > 3%.
+    """
+    ret = ind.return_5bar[index]
+    if ret is None:
+        return 0
+    if ret > Decimal("0.03"):
+        return -1
+    if ret < Decimal("-0.03"):
+        return 1
+    return 0
+
+
 RULES: Tuple[ResearchRule, ...] = (
     ResearchRule(
         rule_id="breakout_trend",
@@ -352,6 +495,35 @@ RULES: Tuple[ResearchRule, ...] = (
         family="mean_reversion",
         thesis_zh="只有在趨勢強度低時，才對 1.5 標準差的偏離做反向。",
         signal=_sig_range_fade,
+    ),
+    # MB-16: pure mean-reversion rules
+    ResearchRule(
+        rule_id="bollinger_mean_reversion",
+        label_zh="布林帶均值回歸",
+        family="mean_reversion",
+        thesis_zh="收盤觸及布林帶外軌（z-score < -2 或 > 2）且 RSI 確認過度反應時反向進場。",
+        signal=_sig_bollinger_mean_reversion,
+    ),
+    ResearchRule(
+        rule_id="rsi_extreme_reversion",
+        label_zh="RSI 極值回歸",
+        family="mean_reversion",
+        thesis_zh="RSI < 20 或 > 80 且價格在 50 日均線附近（無趨勢）時反向進場。",
+        signal=_sig_rsi_extreme_reversion,
+    ),
+    ResearchRule(
+        rule_id="gap_fill",
+        label_zh="跳空回填",
+        family="mean_reversion",
+        thesis_zh="開盤跳空 > 1% 且成交量確認過度反應時，預期回填反向進場。",
+        signal=_sig_gap_fill,
+    ),
+    ResearchRule(
+        rule_id="short_term_overbought_oversold",
+        label_zh="短期超買超賣",
+        family="mean_reversion",
+        thesis_zh="5 根漲跌 > 3% 時反向進場，無趨勢過濾。",
+        signal=_sig_short_term_overbought_oversold,
     ),
 )
 

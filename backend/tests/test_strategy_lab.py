@@ -492,7 +492,7 @@ def test_run_rejects_unknown_instrument(client, auth_headers):
     response = client.post(
         "/api/v1/strategy-lab/run",
         headers=auth_headers,
-        json={"trades_per_strategy": 5, "instrument_id": "CRYPTO:KRAKEN:ETH-USD"},
+        json={"trades_per_strategy": 5, "instrument_id": "CRYPTO:KRAKEN:DOGE-USD"},
     )
     assert response.status_code == 404
     assert response.json()["detail"]["reason"] == "unknown_crypto_instrument"

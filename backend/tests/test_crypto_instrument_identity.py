@@ -11,6 +11,8 @@ import pytest
 from app.data.crypto_instruments import (
     CRYPTO_INSTRUMENTS,
     KRAKEN_BTC_USD,
+    KRAKEN_ETH_USD,
+    KRAKEN_SOL_USD,
     KRAKEN_PAIR_MAP,
     get_crypto_instrument,
     get_kraken_pair,
@@ -142,10 +144,15 @@ def test_crypto_market_is_always_open():
     assert structure.is_trading_day(date(2026, 11, 1))   # Sunday
 
 
-def test_catalog_exposes_exactly_one_pair():
-    assert [i.instrument_id for i in CRYPTO_INSTRUMENTS] == ["CRYPTO:KRAKEN:BTC-USD"]
+def test_catalog_exposes_three_pairs():
+    assert [i.instrument_id for i in CRYPTO_INSTRUMENTS] == [
+        "CRYPTO:KRAKEN:BTC-USD",
+        "CRYPTO:KRAKEN:ETH-USD",
+        "CRYPTO:KRAKEN:SOL-USD",
+    ]
     assert get_crypto_instrument("CRYPTO:KRAKEN:BTC-USD") is KRAKEN_BTC_USD
-    assert get_crypto_instrument("CRYPTO:KRAKEN:ETH-USD") is None
+    assert get_crypto_instrument("CRYPTO:KRAKEN:ETH-USD") is KRAKEN_ETH_USD
+    assert get_crypto_instrument("CRYPTO:KRAKEN:SOL-USD") is KRAKEN_SOL_USD
 
 
 def test_kraken_pair_map_keeps_exchange_spelling_separate():
@@ -156,4 +163,8 @@ def test_kraken_pair_map_keeps_exchange_spelling_separate():
     assert mapping.metadata["result_key_alt"] == "XBTUSD"
     # The internal id never leaks Kraken's nickname.
     assert "XBT" not in (KRAKEN_BTC_USD.instrument_id)
-    assert set(KRAKEN_PAIR_MAP) == {"CRYPTO:KRAKEN:BTC-USD"}
+    assert set(KRAKEN_PAIR_MAP) == {
+        "CRYPTO:KRAKEN:BTC-USD",
+        "CRYPTO:KRAKEN:ETH-USD",
+        "CRYPTO:KRAKEN:SOL-USD",
+    }

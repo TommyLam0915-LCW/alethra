@@ -15,6 +15,8 @@ from app.services.market_data_storage import MarketDataStorage
 from tests.conftest import TestSession
 
 BTC = "CRYPTO:KRAKEN:BTC-USD"
+ETH = "CRYPTO:KRAKEN:ETH-USD"
+SOL = "CRYPTO:KRAKEN:SOL-USD"
 
 
 def _candle(day: int, close: float) -> Candle:
@@ -98,7 +100,7 @@ class TestCryptoCatalogIsOptIn:
         pair = client.get(
             "/api/v1/instruments", params={"market": "CRYPTO", "asset_type": "CRYPTO_PAIR"}
         ).json()
-        assert [r["instrument_id"] for r in pair["instruments"]] == [BTC]
+        assert [r["instrument_id"] for r in pair["instruments"]] == [BTC, ETH, SOL]
 
         hit = client.get(
             "/api/v1/instruments", params={"market": "CRYPTO", "q": "btc"}

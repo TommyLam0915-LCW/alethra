@@ -73,7 +73,7 @@ BAR_LIMIT = 720
 # Daily bars give about two years of history; 4h about four months. Sub-hourly
 # bars cannot cover a 40 bps round trip at their typical range, so the study
 # refuses to pretend they are tradeable.
-RESEARCH_INTERVALS = frozenset({1440, 240, 60})
+RESEARCH_INTERVALS = frozenset({1440, 240, 60, 15, 5})
 
 
 class StrategyLabRunRequest(BaseModel):
