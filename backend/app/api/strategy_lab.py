@@ -75,6 +75,11 @@ from app.services.market_making_engine import (
     backtest_market_making,
     result_to_dict as mm_result_to_dict,
 )
+from app.services.pairs_trading_engine import (
+    PairsConfig,
+    run_pairs_backtest,
+    result_to_dict as pairs_result_to_dict,
+)
 
 
 router = APIRouter(prefix="/strategy-lab", tags=["strategy-lab"])
@@ -695,3 +700,87 @@ def market_making_backtest(
         )
 
     return mm_result_to_dict(result)
+
+
+class PairsTradingBacktestRequest(BaseModel):
+    """Request body for pairs trading backtest."""
+    pair: str = Field(default="ETH-BTC")
+    interval_minutes: int = Field(default=60, ge=1, le=1440)
+    limit: int = Field(default=720, ge=100, le=5000)
+    zscore_window: int = Field(default=20, ge=5, le=100)
+    entry_threshold: Decimal = Field(default=Decimal("2.0"), ge=Decimal("0.5"), le=Decimal("5.0"))
+    exit_threshold: Decimal = Field(default=Decimal("0.5"), ge=Decimal("0"), le=Decimal("2.0"))
+    stop_threshold: Decimal = Field(default=Decimal("3.0"), ge=Decimal("1.0"), le=Decimal("10.0"))
+    time_stop_bars: int = Field(default=15, ge=1, le=100)
+    starting_cash: Decimal = Field(default=DEFAULT_STARTING_CASH, gt=0)
+    notional_per_leg: Decimal = Field(default=Decimal("5000"), gt=0)
+    commission_rate: Decimal = Field(default=DEFAULT_COMMISSION_RATE, ge=0, le=Decimal("0.05"))
+    config_id: str = Field(default="balanced")
+
+
+@router.post("/pairs-trading/backtest")
+def pairs_trading_backtest(
+    payload: PairsTradingBacktestRequest,
+    current_user: User = Depends(get_current_user),
+    _rate_limit=Depends(rate_limit("strategy_research")),
+):
+    """Pairs trading backtest using z-score mean reversion on asset ratios.
+
+    Fetches real Kraken OHLCV for both legs, computes a rolling z-score of the
+    price ratio, and simulates dollar-neutral trades with a triple barrier exit
+    (z-score reversion, stop-loss, time-stop).
+
+    Supports direct quotes (ETH-BTC) and synthetic ratios (ETH-SOL, BTC-SOL).
+    """
+    config = PairsConfig(
+        zscore_window=payload.zscore_window,
+        entry_threshold=payload.entry_threshold,
+        exit_threshold=payload.exit_threshold,
+        stop_threshold=payload.stop_threshold,
+        time_stop_bars=payload.time_stop_bars,
+        starting_cash=payload.starting_cash,
+        notional_per_leg=payload.notional_per_leg,
+        commission_rate=payload.commission_rate,
+        config_id=payload.config_id,
+    )
+
+    try:
+        result = run_pairs_backtest(
+            pair=payload.pair,
+            interval_minutes=payload.interval_minutes,
+            limit=payload.limit,
+            config=config,
+        )
+    except KrakenError as exc:
+        raise crypto_failure(exc)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "reason": "invalid_pair",
+                "message": str(exc),
+            },
+        )
+    except Exception as exc:
+        logger.exception("pairs trading backtest failed")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "reason": "pairs_trading_error",
+                "message": str(exc),
+            },
+        )
+
+    if result.bars == 0:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "reason": "no_aligned_bars",
+                "message": (
+                    f"The two legs of {payload.pair} had no timestamps in common "
+                    "after alignment. Check that both instruments are available on Kraken."
+                ),
+            },
+        )
+
+    return pairs_result_to_dict(result)
