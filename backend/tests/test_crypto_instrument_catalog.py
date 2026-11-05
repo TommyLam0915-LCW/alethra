@@ -98,12 +98,17 @@ class TestCryptoCatalogIsOptIn:
         pair = client.get(
             "/api/v1/instruments", params={"market": "CRYPTO", "asset_type": "CRYPTO_PAIR"}
         ).json()
-        assert [r["instrument_id"] for r in pair["instruments"]] == [BTC]
+        assert [r["instrument_id"] for r in pair["instruments"]] == [
+            BTC,
+            "CRYPTO:KRAKEN:ETH-USD",
+            "CRYPTO:KRAKEN:SOL-USD",
+            "CRYPTO:KRAKEN:ETH-BTC",
+        ]
 
         hit = client.get(
             "/api/v1/instruments", params={"market": "CRYPTO", "q": "btc"}
         ).json()
-        assert [r["instrument_id"] for r in hit["instruments"]] == [BTC]
+        assert [r["instrument_id"] for r in hit["instruments"]] == [BTC, "CRYPTO:KRAKEN:ETH-BTC"]
 
         miss = client.get(
             "/api/v1/instruments", params={"market": "CRYPTO", "q": "no-such-pair"}

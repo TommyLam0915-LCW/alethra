@@ -119,7 +119,7 @@ def test_forming_candle_is_separate_from_completed():
 def test_unknown_instrument_is_refused_before_any_request():
     provider, transport = make_provider({"/0/public/OHLC": ohlc_payload(minute_rows())})
     with pytest.raises(KrakenError, match="not a declared crypto instrument"):
-        provider.get_candle_series("CRYPTO:KRAKEN:ETH-USD", interval_minutes=1)
+        provider.get_candle_series("CRYPTO:KRAKEN:DOGE-USD", interval_minutes=1)
     assert transport.calls == []
 
 
@@ -263,7 +263,7 @@ def test_resolve_instrument_uses_exchange_spelling():
     provider, _ = make_provider({})
     assert provider.resolve_instrument(INSTRUMENT) == "XBTUSD"
     with pytest.raises(KrakenError, match="does not serve"):
-        provider.resolve_instrument("CRYPTO:KRAKEN:ETH-USD")
+        provider.resolve_instrument("CRYPTO:KRAKEN:DOGE-USD")
 
 
 def test_status_is_explicitly_read_only_and_not_cleared():
@@ -273,7 +273,12 @@ def test_status_is_explicitly_read_only_and_not_cleared():
     assert status["read_only"] is True
     assert status["orders_supported"] is False
     assert status["redistribution"] == "NOT_CLEARED"
-    assert status["declared_pairs"] == [INSTRUMENT]
+    assert status["declared_pairs"] == [
+        "CRYPTO:KRAKEN:BTC-USD",
+        "CRYPTO:KRAKEN:ETH-USD",
+        "CRYPTO:KRAKEN:SOL-USD",
+        "CRYPTO:KRAKEN:ETH-BTC",
+    ]
     assert status["available"] is True
 
 

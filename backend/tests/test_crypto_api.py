@@ -84,7 +84,12 @@ def test_overview_declares_lane_and_terms(client):
     assert body["terms_note_zh"]
     assert body["instruments"][0]["instrument_id"] == INSTRUMENT
     assert body["instruments"][0]["quote_asset"] == "USD"
-    assert body["provider"]["declared_pairs"] == [INSTRUMENT]
+    assert body["provider"]["declared_pairs"] == [
+        "CRYPTO:KRAKEN:BTC-USD",
+        "CRYPTO:KRAKEN:ETH-USD",
+        "CRYPTO:KRAKEN:SOL-USD",
+        "CRYPTO:KRAKEN:ETH-BTC",
+    ]
     # Nothing has been fetched yet, so the venue is not claimed as live.
     assert body["provider"]["available"] is False
 
@@ -93,7 +98,7 @@ def test_instruments_endpoint_lists_venue_and_pair(client):
     resp = client.get(f"{BASE}/instruments")
     assert resp.status_code == 200
     instruments = resp.json()["instruments"]
-    assert len(instruments) == 1
+    assert len(instruments) == 4
     inst = instruments[0]
     assert inst["exchange"] == "KRAKEN"
     assert inst["pair"] == "BTC/USD"
@@ -125,7 +130,7 @@ def test_series_separates_completed_and_forming(client):
 
 def test_series_unknown_instrument_is_404(client):
     _install({})
-    resp = client.get(f"{BASE}/series", params={"instrument_id": "CRYPTO:KRAKEN:ETH-USD"})
+    resp = client.get(f"{BASE}/series", params={"instrument_id": "CRYPTO:KRAKEN:DOGE-USD"})
     assert resp.status_code == 404
     assert resp.json()["detail"]["reason"] == "unknown_crypto_instrument"
 
@@ -269,5 +274,5 @@ def test_stored_is_empty_before_any_snapshot(client):
 
 def test_stored_unknown_instrument_is_404(client):
     _install({})
-    resp = client.get(f"{BASE}/stored", params={"instrument_id": "CRYPTO:KRAKEN:ETH-USD"})
+    resp = client.get(f"{BASE}/stored", params={"instrument_id": "CRYPTO:KRAKEN:DOGE-USD"})
     assert resp.status_code == 404

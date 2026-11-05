@@ -363,7 +363,7 @@ def test_research_returns_walk_forward_evidence_and_dataset_provenance(client, a
     assert body["walk_forward"]["folds"][0]["role"] == "seed"
     assert body["walk_forward"]["tested_folds"] == 2
     assert body["walk_forward"]["out_of_sample"]["accounting_ok"] is True
-    assert len(body["in_sample_grid"]) == 16
+    assert len(body["in_sample_grid"]) == 230
     assert "out_of_sample_trades" in body
 
 
@@ -397,7 +397,7 @@ def test_research_rejects_unknown_instrument(client, auth_headers):
     response = client.post(
         "/api/v1/strategy-lab/research",
         headers=auth_headers,
-        json={"instrument_id": "CRYPTO:KRAKEN:ETH-USD"},
+        json={"instrument_id": "CRYPTO:KRAKEN:DOGE-USD"},
     )
     assert response.status_code == 404
     assert response.json()["detail"]["reason"] == "unknown_crypto_instrument"
