@@ -137,6 +137,12 @@ class StrategyResearchRequest(BaseModel):
     commission_rate: Decimal = Field(default=DEFAULT_COMMISSION_RATE, ge=0, le=Decimal("0.05"))
     slippage_rate: Decimal = Field(default=DEFAULT_SLIPPAGE_RATE, ge=0, le=Decimal("0.05"))
     include_trades: bool = False
+    target_bars: Optional[int] = Field(
+        default=None,
+        ge=120,
+        le=10000,
+        description="Number of historical bars to fetch. If > 720, uses pagination. Default: 720",
+    )
 
     @model_validator(mode="after")
     def _validate_balances(self) -> "StrategyResearchRequest":
@@ -246,11 +252,18 @@ def _research_study(
 
     provider = get_crypto_provider()
     try:
-        series = provider.get_candle_series(
-            payload.instrument_id,
-            interval_minutes=payload.interval_minutes,
-            limit=BAR_LIMIT,
-        )
+        if payload.target_bars and payload.target_bars > BAR_LIMIT:
+            series = provider.get_candle_series_paginated(
+                payload.instrument_id,
+                interval_minutes=payload.interval_minutes,
+                target_bars=payload.target_bars,
+            )
+        else:
+            series = provider.get_candle_series(
+                payload.instrument_id,
+                interval_minutes=payload.interval_minutes,
+                limit=BAR_LIMIT,
+            )
     except KrakenError as exc:
         raise crypto_failure(exc)
 

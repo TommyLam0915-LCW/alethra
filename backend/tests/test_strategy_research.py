@@ -371,7 +371,7 @@ def test_research_rejects_an_interval_the_cost_model_cannot_support(client, auth
     response = client.post(
         "/api/v1/strategy-lab/research",
         headers=auth_headers,
-        json={"interval_minutes": 5},
+        json={"interval_minutes": 2},
     )
     assert response.status_code == 400
     assert response.json()["detail"]["reason"] == "unsupported_interval"
