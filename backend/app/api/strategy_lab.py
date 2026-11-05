@@ -80,6 +80,10 @@ from app.services.pairs_trading_engine import (
     run_pairs_backtest,
     result_to_dict as pairs_result_to_dict,
 )
+from app.services.seasonality_engine import (
+    analyze_seasonality,
+    result_to_dict as seasonality_result_to_dict,
+)
 
 
 router = APIRouter(prefix="/strategy-lab", tags=["strategy-lab"])
@@ -784,3 +788,59 @@ def pairs_trading_backtest(
         )
 
     return pairs_result_to_dict(result)
+
+
+class SeasonalityAnalyzeRequest(BaseModel):
+    """Request body for intraday seasonality analysis."""
+    instrument_id: str = DEFAULT_INSTRUMENT_ID
+    interval_minutes: int = Field(default=60, ge=1, le=1440)
+    limit: int = Field(default=720, ge=100, le=5000)
+
+
+@router.post("/seasonality/analyze")
+def seasonality_analyze(
+    payload: SeasonalityAnalyzeRequest,
+    current_user: User = Depends(get_current_user),
+    _rate_limit=Depends(rate_limit("strategy_research")),
+):
+    """Intraday seasonality analysis — diagnostic, not a trading signal.
+
+    Fetches live Kraken OHLCV, computes per-bar returns, and tests whether
+    specific hours-of-day or days-of-week carry systematically non-zero mean
+    returns.  All p-values carry Bonferroni and Benjamini-Hochberg FDR
+    corrections for multiple testing.
+
+    Stage 1 is purely exploratory.  A significant slot is evidence of a
+    historical pattern, not a promise of future returns.
+    """
+    instrument = _require_instrument(payload.instrument_id)
+
+    if instrument.market.value != "CRYPTO":
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "reason": "unsupported_market",
+                "message": "Seasonality analysis is only supported for crypto instruments.",
+                "market": instrument.market.value,
+            },
+        )
+
+    try:
+        result = analyze_seasonality(
+            instrument_id=payload.instrument_id,
+            interval_minutes=payload.interval_minutes,
+            limit=payload.limit,
+        )
+    except KrakenError as exc:
+        raise crypto_failure(exc)
+    except Exception as exc:
+        logger.exception("seasonality analysis failed")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "reason": "seasonality_error",
+                "message": str(exc),
+            },
+        )
+
+    return seasonality_result_to_dict(result)
