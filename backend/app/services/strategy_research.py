@@ -467,6 +467,210 @@ def _sig_short_term_overbought_oversold(ind: _Indicators, index: int) -> int:
     return 0
 
 
+# -- MB-17 Phase 3: volatility signal functions -----------------------------
+
+
+def _sma_atr(ind: _Indicators, index: int, window: int = 20) -> Optional[Decimal]:
+    """Calculate SMA of ATR over the given window ending at index."""
+    if index < window - 1:
+        return None
+    values = []
+    for i in range(index - window + 1, index + 1):
+        if ind.atr[i] is not None:
+            values.append(ind.atr[i])
+    if len(values) < window:
+        return None
+    return sum(values, Decimal(0)) / Decimal(window)
+
+
+def _hv_percentile(ind: _Indicators, index: int, lookback: int = 100) -> Optional[Decimal]:
+    """Calculate HV percentile (0-100) over the lookback period."""
+    if ind.hv[index] is None or index < lookback:
+        return None
+    current_hv = ind.hv[index]
+    values = []
+    for i in range(index - lookback + 1, index + 1):
+        if ind.hv[i] is not None:
+            values.append(ind.hv[i])
+    if len(values) < 20:
+        return None
+    values_sorted = sorted(values)
+    rank = 0
+    for v in values_sorted:
+        if v < current_hv:
+            rank += 1
+        else:
+            break
+    return Decimal(str(rank)) / Decimal(str(len(values))) * Decimal(100)
+
+
+def _bollinger_band_width(ind: _Indicators, index: int, window: int = 20) -> Optional[Decimal]:
+    """Calculate Bollinger band width: (upper - lower) / middle."""
+    if index < window - 1:
+        return None
+    closes = ind.close[index - window + 1:index + 1]
+    if len(closes) < window:
+        return None
+    mean = sum(closes, Decimal(0)) / Decimal(window)
+    if mean == 0:
+        return None
+    variance = sum((c - mean) ** 2 for c in closes) / Decimal(window)
+    std_dev = variance.sqrt()
+    upper = mean + 2 * std_dev
+    lower = mean - 2 * std_dev
+    return (upper - lower) / mean
+
+
+def _sig_volatility_breakout(ind: _Indicators, index: int) -> int:
+    """MB-17 Phase 3 Rule 1: volatility_breakout.
+    
+    Entry conditions:
+    - ATR(14) > 1.5 × SMA(ATR, 20) [volatility expansion]
+    - Close > Bollinger upper band (z-score > 2) → long
+    - Close < Bollinger lower band (z-score < -2) → short
+    - MACD histogram confirms direction (> 0 for long, < 0 for short)
+    """
+    atr_val = ind.atr[index]
+    sma_atr_val = _sma_atr(ind, index, 20)
+    z = ind.zscore[index]
+    macd_hist_val = ind.macd_hist[index]
+    
+    if atr_val is None or sma_atr_val is None or z is None or macd_hist_val is None:
+        return 0
+    if sma_atr_val == 0:
+        return 0
+    
+    # Volatility expansion: ATR > 1.5 × SMA(ATR, 20)
+    if atr_val <= Decimal("1.5") * sma_atr_val:
+        return 0
+    
+    # Bollinger band breakout with MACD confirmation
+    if z > Decimal("2") and macd_hist_val > 0:
+        return 1  # Long
+    if z < Decimal("-2") and macd_hist_val < 0:
+        return -1  # Short
+    return 0
+
+
+def _sig_volatility_mean_reversion(ind: _Indicators, index: int) -> int:
+    """MB-17 Phase 3 Rule 2: volatility_mean_reversion.
+    
+    Entry conditions:
+    - ATR(14) > 2.0 × SMA(ATR, 20) [extreme volatility]
+    - HV(20) > 80th percentile [high historical volatility]
+    - Close near Bollinger midline (|z-score| < 0.5) [expecting contraction]
+    - Direction: opposite to prior 5-bar trend
+    """
+    atr_val = ind.atr[index]
+    sma_atr_val = _sma_atr(ind, index, 20)
+    hv_pct = _hv_percentile(ind, index, 100)
+    z = ind.zscore[index]
+    ret_5bar = ind.return_5bar[index]
+    
+    if atr_val is None or sma_atr_val is None or hv_pct is None or z is None or ret_5bar is None:
+        return 0
+    if sma_atr_val == 0:
+        return 0
+    
+    # Extreme volatility: ATR > 2.0 × SMA(ATR, 20)
+    if atr_val <= Decimal("2.0") * sma_atr_val:
+        return 0
+    
+    # HV > 80th percentile
+    if hv_pct < Decimal("80"):
+        return 0
+    
+    # Near Bollinger midline: |z-score| < 0.5
+    if abs(z) >= Decimal("0.5"):
+        return 0
+    
+    # Opposite to prior 5-bar trend
+    if ret_5bar > Decimal("0.005"):  # Recent uptrend → short
+        return -1
+    if ret_5bar < Decimal("-0.005"):  # Recent downtrend → long
+        return 1
+    return 0
+
+
+def _sig_volatility_regime(ind: _Indicators, index: int) -> int:
+    """MB-17 Phase 3 Rule 3: volatility_regime.
+    
+    Entry conditions:
+    - ATR(14) < 0.5 × SMA(ATR, 20) [extreme low volatility]
+    - HV(20) < 20th percentile [low historical volatility]
+    - Bollinger band width < minimum of last 20 bars [compression]
+    - Direction: breakout (close crosses Bollinger band)
+    """
+    atr_val = ind.atr[index]
+    sma_atr_val = _sma_atr(ind, index, 20)
+    hv_pct = _hv_percentile(ind, index, 100)
+    bb_width = _bollinger_band_width(ind, index, 20)
+    z = ind.zscore[index]
+    
+    if atr_val is None or sma_atr_val is None or hv_pct is None or bb_width is None or z is None:
+        return 0
+    if sma_atr_val == 0:
+        return 0
+    
+    # Extreme low volatility: ATR < 0.5 × SMA(ATR, 20)
+    if atr_val >= Decimal("0.5") * sma_atr_val:
+        return 0
+    
+    # HV < 20th percentile
+    if hv_pct >= Decimal("20"):
+        return 0
+    
+    # Check Bollinger band width is at minimum (compare to prior 20 bars)
+    if index >= 40:
+        min_width = bb_width
+        for i in range(index - 20, index):
+            w = _bollinger_band_width(ind, i, 20)
+            if w is not None and w < min_width:
+                min_width = w
+        if bb_width > min_width * Decimal("1.1"):  # Not at minimum
+            return 0
+    
+    # Breakout: close crosses Bollinger band
+    if z > Decimal("2"):
+        return 1  # Long breakout
+    if z < Decimal("-2"):
+        return -1  # Short breakout
+    return 0
+
+
+def _sig_hv_extreme(ind: _Indicators, index: int) -> int:
+    """MB-17 Phase 3 Rule 4: hv_extreme.
+    
+    Entry conditions:
+    - HV(20) > 90th percentile → expect contraction (fade direction)
+    - HV(20) < 10th percentile → expect expansion (trend direction)
+    - ATR% > 5% [high volatility] or < 1% [low volatility]
+    - Direction: high HV → opposite, low HV → same as recent trend
+    """
+    hv_pct = _hv_percentile(ind, index, 100)
+    atr_pct_val = ind.atr_pct[index]
+    ret_5bar = ind.return_5bar[index]
+    
+    if hv_pct is None or atr_pct_val is None or ret_5bar is None:
+        return 0
+    
+    # High HV (> 90th percentile): expect contraction, fade the trend
+    if hv_pct > Decimal("90") and atr_pct_val > Decimal("5"):
+        if ret_5bar > Decimal("0.005"):  # Recent uptrend → short
+            return -1
+        if ret_5bar < Decimal("-0.005"):  # Recent downtrend → long
+            return 1
+    
+    # Low HV (< 10th percentile): expect expansion, follow the trend
+    if hv_pct < Decimal("10") and atr_pct_val < Decimal("1"):
+        if ret_5bar > Decimal("0.005"):  # Recent uptrend → long
+            return 1
+        if ret_5bar < Decimal("-0.005"):  # Recent downtrend → short
+            return -1
+    
+    return 0
+
+
 RULES: Tuple[ResearchRule, ...] = (
     ResearchRule(
         rule_id="breakout_trend",
@@ -524,6 +728,35 @@ RULES: Tuple[ResearchRule, ...] = (
         family="mean_reversion",
         thesis_zh="5 根漲跌 > 3% 時反向進場，無趨勢過濾。",
         signal=_sig_short_term_overbought_oversold,
+    ),
+    # MB-17 Phase 3: volatility trading rules
+    ResearchRule(
+        rule_id="volatility_breakout",
+        label_zh="波動率突破",
+        family="volatility",
+        thesis_zh="ATR 擴張（> 1.5× SMA）+ 布林帶突破（|z| > 2）+ MACD 確認時順勢進場。",
+        signal=_sig_volatility_breakout,
+    ),
+    ResearchRule(
+        rule_id="volatility_mean_reversion",
+        label_zh="波動率均值回歸",
+        family="volatility",
+        thesis_zh="ATR 極高（> 2× SMA）+ HV > 80th percentile + 價格在中軌附近時反向進場。",
+        signal=_sig_volatility_mean_reversion,
+    ),
+    ResearchRule(
+        rule_id="volatility_regime",
+        label_zh="波動率狀態",
+        family="volatility",
+        thesis_zh="ATR 極低（< 0.5× SMA）+ HV < 20th percentile + 布林帶壓縮後突破時進場。",
+        signal=_sig_volatility_regime,
+    ),
+    ResearchRule(
+        rule_id="hv_extreme",
+        label_zh="歷史波動率極值",
+        family="volatility",
+        thesis_zh="HV > 90th 時反向（預期收縮），HV < 10th 時順向（預期擴張）。",
+        signal=_sig_hv_extreme,
     ),
 )
 
