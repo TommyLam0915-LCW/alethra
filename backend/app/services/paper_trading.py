@@ -129,6 +129,17 @@ class PaperTradingEngine:
             if not run:
                 raise ValueError(f"Run {run_id} not found")
 
+            # Idempotency protection: reject re-run if already completed or in progress
+            if run.status == "completed":
+                raise ValueError(
+                    f"Run {run_id} already completed. Cannot re-run historical replay. "
+                    f"Create a new run instead."
+                )
+            if run.status == "running":
+                raise ValueError(
+                    f"Run {run_id} is currently running. Concurrent replays not allowed."
+                )
+
             skill = run.skill
             instrument = run.instrument_id
             interval = run.interval_minutes
@@ -171,6 +182,17 @@ class PaperTradingEngine:
             ).fetchall()
 
             logger.info(f"Found {len(trades)} historical trades to replay")
+
+            # Mark run as 'running' to prevent concurrent replays
+            db.execute(
+                text("""
+                UPDATE paper_trading_runs
+                SET status = 'running', updated_at = NOW()
+                WHERE id = :id
+            """),
+                {"id": run_id},
+            )
+            db.commit()
 
             # Build event list: each trade produces an entry event and an exit event.
             # Events are sorted by timestamp; at the same timestamp exits come first
@@ -708,6 +730,19 @@ class PaperTradingEngine:
 
         except Exception as exc:
             db.rollback()
+            # Mark run as 'failed' to allow retry
+            try:
+                db.execute(
+                    text("""
+                    UPDATE paper_trading_runs
+                    SET status = 'failed', updated_at = NOW()
+                    WHERE id = :id
+                """),
+                    {"id": run_id},
+                )
+                db.commit()
+            except Exception:
+                logger.exception("Failed to update run status to 'failed'")
             logger.exception("Historical replay failed")
             raise
         finally:
