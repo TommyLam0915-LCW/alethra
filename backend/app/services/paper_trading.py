@@ -341,7 +341,7 @@ class PaperTradingEngine:
                     })
 
                 elif event_type == ENTRY and idx not in active_positions:
-                    # Process entry: check capacity, calculate size from available capital
+                    # Process entry: check capacity and exposure limits
                     if len(active_positions) >= max_positions:
                         event_log.append({
                             "time": event_time.isoformat(),
@@ -353,7 +353,68 @@ class PaperTradingEngine:
                         })
                         continue
 
-                    position_value = current_capital * position_size_pct
+                    # Exposure limit checks (engineering defaults for isolated simulation)
+                    # Check equity > 0
+                    if current_capital <= 0:
+                        event_log.append({
+                            "time": event_time.isoformat(),
+                            "event": "entry_blocked",
+                            "trade_idx": idx,
+                            "capital": current_capital,
+                            "reason": "equity_non_positive",
+                        })
+                        continue
+
+                    # Check price is valid
+                    if float(entry_price) <= 0:
+                        event_log.append({
+                            "time": event_time.isoformat(),
+                            "event": "entry_blocked",
+                            "trade_idx": idx,
+                            "price": float(entry_price),
+                            "reason": "invalid_price",
+                        })
+                        continue
+
+                    # Calculate current gross exposure (sum of absolute position values)
+                    current_exposure = sum(
+                        abs(pos["quantity"] * pos["entry_price"])
+                        for pos in active_positions.values()
+                    )
+
+                    # Calculate proposed position value (10% of equity)
+                    proposed_position_value = current_capital * position_size_pct
+                    proposed_exposure = current_exposure + proposed_position_value
+
+                    # Check single asset exposure limit (10% of equity)
+                    single_asset_limit = current_capital * 0.10
+                    if proposed_position_value > single_asset_limit:
+                        event_log.append({
+                            "time": event_time.isoformat(),
+                            "event": "entry_blocked",
+                            "trade_idx": idx,
+                            "proposed_value": proposed_position_value,
+                            "limit": single_asset_limit,
+                            "reason": "single_asset_exposure_limit",
+                        })
+                        continue
+
+                    # Check total gross exposure limit (100% of equity)
+                    total_exposure_limit = current_capital * 1.0
+                    if proposed_exposure > total_exposure_limit:
+                        event_log.append({
+                            "time": event_time.isoformat(),
+                            "event": "entry_blocked",
+                            "trade_idx": idx,
+                            "current_exposure": current_exposure,
+                            "proposed_exposure": proposed_exposure,
+                            "limit": total_exposure_limit,
+                            "reason": "total_exposure_limit",
+                        })
+                        continue
+
+                    # All checks passed, proceed with entry
+                    position_value = proposed_position_value
                     trade_quantity = position_value / float(entry_price)
                     is_long = (direction or "long").lower() in ["long", "buy"]
                     side = "BUY" if is_long else "SELL"
