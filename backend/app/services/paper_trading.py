@@ -186,29 +186,41 @@ class PaperTradingEngine:
             # Sort: by timestamp first, then exits before entries at same time
             events.sort(key=lambda e: (e[0], 0 if e[1] == EXIT else 1))
 
-            # Simulation state
-            current_capital = initial_capital
+            # Simulation state — credible ledger with separate cash and position tracking
+            available_cash = Decimal(str(initial_capital))
+            position_value = Decimal("0")  # Total value locked in positions
             active_positions = {}  # idx -> position dict
             executed_trades = []
             daily_pnl = {}
-            event_log = []  # For audit: (time, event_type, idx, positions_count, capital)
+            event_log = []
+
+            # Track all cash flows for reconciliation (trading activities only, not initial deposit)
+            cash_flows = []  # List of (time, flow_type, amount) for audit
 
             for event_time, event_type, idx in events:
                 trade = trades[idx]
                 entry_time, exit_time, entry_price, exit_price, orig_net_pnl, direction, quantity, exit_reason = trade
 
                 if event_type == EXIT and idx in active_positions:
-                    # Process exit: settle PnL, release position
+                    # Process exit: return position value + settle PnL to available cash
                     pos = active_positions.pop(idx)
-                    trade_quantity = pos["quantity"]
+                    trade_quantity = Decimal(str(pos["quantity"]))
                     is_long = pos["is_long"]
+                    entry_price = Decimal(str(pos["entry_price"]))
+                    exit_price_dec = Decimal(str(exit_price))
 
+                    # Calculate realized PnL
                     if is_long:
-                        realized_pnl = trade_quantity * (float(exit_price) - pos["entry_price"])
+                        realized_pnl = trade_quantity * (exit_price_dec - entry_price)
                     else:
-                        realized_pnl = trade_quantity * (pos["entry_price"] - float(exit_price))
+                        realized_pnl = trade_quantity * (entry_price - exit_price_dec)
 
-                    current_capital += realized_pnl
+                    # Return position value to available cash
+                    position_cost = trade_quantity * entry_price
+                    available_cash += position_cost + realized_pnl
+                    position_value -= position_cost
+                    
+                    cash_flows.append((event_time, "exit_proceeds", position_cost + realized_pnl))
 
                     # Create exit decision, order, and fill (mirror entry logic)
                     exit_decision_id = str(uuid.uuid4())
@@ -255,7 +267,7 @@ class PaperTradingEngine:
                             "decision_id": exit_decision_id,
                             "asset_id": instrument,
                             "side": exit_side,
-                            "quantity": trade_quantity,
+                            "quantity": float(trade_quantity),
                             "exit_time": exit_time,
                         },
                     )
@@ -263,7 +275,7 @@ class PaperTradingEngine:
                     # Create exit fill
                     # For exits: gross_amount is the proceeds (positive for cash inflow)
                     # net_cash_change = gross_amount - commission - slippage
-                    exit_gross = trade_quantity * float(exit_price)
+                    exit_gross = float(trade_quantity) * float(exit_price)
                     exit_commission = 0.0  # TODO: implement commission model
                     exit_slippage = 0.0  # TODO: implement slippage model
                     exit_net = exit_gross - exit_commission - exit_slippage
@@ -289,7 +301,7 @@ class PaperTradingEngine:
                             "exec_price": float(exit_price),
                             "slippage": exit_slippage,
                             "commission": exit_commission,
-                            "quantity": trade_quantity,
+                            "quantity": float(trade_quantity),
                             "gross": exit_gross,
                             "net": exit_net,
                             "timestamp": exit_time,
@@ -314,7 +326,6 @@ class PaperTradingEngine:
 
                     # Update PaperPortfolio: adjust current_virtual_cash
                     # Cash change = exit proceeds (gross) - entry cost (already deducted)
-                    # For simplicity: current_capital already tracks this in memory
                     # We'll update the DB at the end of replay (batch update)
 
                     exit_date = exit_time.date() if isinstance(exit_time, datetime) else exit_time
@@ -336,31 +347,34 @@ class PaperTradingEngine:
                         "event": "exit",
                         "trade_idx": idx,
                         "active_positions": len(active_positions),
-                        "capital": current_capital,
-                        "realized_pnl": realized_pnl,
+                        "available_cash": float(available_cash),
+                        "position_value": float(position_value),
+                        "realized_pnl": float(realized_pnl),
                     })
 
                 elif event_type == ENTRY and idx not in active_positions:
                     # Process entry: check capacity and exposure limits
+                    total_equity = available_cash + position_value
+                    
                     if len(active_positions) >= max_positions:
                         event_log.append({
                             "time": event_time.isoformat(),
                             "event": "entry_blocked",
                             "trade_idx": idx,
                             "active_positions": len(active_positions),
-                            "capital": current_capital,
+                            "equity": float(total_equity),
                             "reason": "max_positions",
                         })
                         continue
 
                     # Exposure limit checks (engineering defaults for isolated simulation)
                     # Check equity > 0
-                    if current_capital <= 0:
+                    if total_equity <= 0:
                         event_log.append({
                             "time": event_time.isoformat(),
                             "event": "entry_blocked",
                             "trade_idx": idx,
-                            "capital": current_capital,
+                            "equity": float(total_equity),
                             "reason": "equity_non_positive",
                         })
                         continue
@@ -376,48 +390,65 @@ class PaperTradingEngine:
                         })
                         continue
 
-                    # Calculate current gross exposure (sum of absolute position values)
-                    current_exposure = sum(
-                        abs(pos["quantity"] * pos["entry_price"])
-                        for pos in active_positions.values()
-                    )
-
-                    # Calculate proposed position value (10% of equity)
-                    proposed_position_value = current_capital * position_size_pct
-                    proposed_exposure = current_exposure + proposed_position_value
-
-                    # Check single asset exposure limit (10% of equity)
-                    single_asset_limit = current_capital * 0.10
-                    if proposed_position_value > single_asset_limit:
+                    # Check available cash is sufficient
+                    proposed_position_value = float(total_equity) * position_size_pct
+                    if Decimal(str(proposed_position_value)) > available_cash:
                         event_log.append({
                             "time": event_time.isoformat(),
                             "event": "entry_blocked",
                             "trade_idx": idx,
                             "proposed_value": proposed_position_value,
-                            "limit": single_asset_limit,
+                            "available_cash": float(available_cash),
+                            "reason": "insufficient_cash",
+                        })
+                        continue
+
+                    # Calculate current gross exposure (sum of absolute position values)
+                    current_exposure = sum(
+                        abs(Decimal(str(pos["quantity"])) * Decimal(str(pos["entry_price"])))
+                        for pos in active_positions.values()
+                    )
+
+                    proposed_exposure = current_exposure + Decimal(str(proposed_position_value))
+
+                    # Check single asset exposure limit (10% of equity)
+                    single_asset_limit = total_equity * Decimal("0.10")
+                    if Decimal(str(proposed_position_value)) > single_asset_limit:
+                        event_log.append({
+                            "time": event_time.isoformat(),
+                            "event": "entry_blocked",
+                            "trade_idx": idx,
+                            "proposed_value": proposed_position_value,
+                            "limit": float(single_asset_limit),
                             "reason": "single_asset_exposure_limit",
                         })
                         continue
 
                     # Check total gross exposure limit (100% of equity)
-                    total_exposure_limit = current_capital * 1.0
+                    total_exposure_limit = total_equity
                     if proposed_exposure > total_exposure_limit:
                         event_log.append({
                             "time": event_time.isoformat(),
                             "event": "entry_blocked",
                             "trade_idx": idx,
-                            "current_exposure": current_exposure,
-                            "proposed_exposure": proposed_exposure,
-                            "limit": total_exposure_limit,
+                            "current_exposure": float(current_exposure),
+                            "proposed_exposure": float(proposed_exposure),
+                            "limit": float(total_exposure_limit),
                             "reason": "total_exposure_limit",
                         })
                         continue
 
                     # All checks passed, proceed with entry
-                    position_value = proposed_position_value
-                    trade_quantity = position_value / float(entry_price)
+                    entry_position_value = Decimal(str(proposed_position_value))
+                    entry_price_dec = Decimal(str(entry_price))
+                    trade_quantity = entry_position_value / entry_price_dec
                     is_long = (direction or "long").lower() in ["long", "buy"]
                     side = "BUY" if is_long else "SELL"
+
+                    # Deduct position cost from available cash
+                    available_cash -= entry_position_value
+                    position_value += entry_position_value
+                    cash_flows.append((event_time, "entry_cost", -entry_position_value))
 
                     order_id = str(uuid.uuid4())
                     fill_id = str(uuid.uuid4())
@@ -460,7 +491,7 @@ class PaperTradingEngine:
                             "decision_id": decision_id,
                             "asset_id": instrument,
                             "side": side,
-                            "quantity": trade_quantity,
+                            "quantity": float(trade_quantity),
                             "entry_time": entry_time,
                         },
                     )
@@ -484,9 +515,9 @@ class PaperTradingEngine:
                             "exec_date": entry_time.strftime("%Y-%m-%d"),
                             "obs_price": float(entry_price),
                             "exec_price": float(entry_price),
-                            "quantity": trade_quantity,
-                            "gross": trade_quantity * float(entry_price),
-                            "net": -trade_quantity * float(entry_price),
+                            "quantity": float(trade_quantity),
+                            "gross": float(trade_quantity) * float(entry_price),
+                            "net": -float(trade_quantity) * float(entry_price),
                             "timestamp": entry_time,
                         },
                     )
@@ -508,7 +539,7 @@ class PaperTradingEngine:
                             "id": position_id,
                             "portfolio_id": run.portfolio_id,
                             "asset_id": instrument,
-                            "quantity": trade_quantity if is_long else -trade_quantity,
+                            "quantity": float(trade_quantity) if is_long else -float(trade_quantity),
                             "entry_price": float(entry_price),
                             "opened_at": entry_time,
                         },
@@ -519,9 +550,9 @@ class PaperTradingEngine:
                         "order_id": order_id,
                         "entry_time": entry_time,
                         "exit_time": exit_time,
-                        "entry_price": float(entry_price),
+                        "entry_price": float(entry_price_dec),
                         "exit_price": float(exit_price),
-                        "quantity": trade_quantity,
+                        "quantity": float(trade_quantity),
                         "is_long": is_long,
                     }
 
@@ -530,8 +561,9 @@ class PaperTradingEngine:
                         "event": "entry",
                         "trade_idx": idx,
                         "active_positions": len(active_positions),
-                        "capital": current_capital,
-                        "quantity": trade_quantity,
+                        "available_cash": float(available_cash),
+                        "position_value": float(position_value),
+                        "quantity": float(trade_quantity),
                     })
 
             # Close out any positions still open at end (shouldn't happen with complete trade data)
@@ -539,19 +571,47 @@ class PaperTradingEngine:
                 logger.warning(f"Position {idx} still open at end of replay — forcing close")
                 trade = trades[idx]
                 exit_time = trade[1]
-                exit_price = float(pos["exit_price"])
-                trade_quantity = pos["quantity"]
+                exit_price = Decimal(str(pos["exit_price"]))
+                trade_quantity = Decimal(str(pos["quantity"]))
+                entry_price = Decimal(str(pos["entry_price"]))
+                
                 if pos["is_long"]:
-                    realized_pnl = trade_quantity * (exit_price - pos["entry_price"])
+                    realized_pnl = trade_quantity * (exit_price - entry_price)
                 else:
-                    realized_pnl = trade_quantity * (pos["entry_price"] - exit_price)
-                current_capital += realized_pnl
+                    realized_pnl = trade_quantity * (entry_price - exit_price)
+                
+                # Return position value + PnL to available cash
+                position_cost = trade_quantity * entry_price
+                available_cash += position_cost + realized_pnl
+                position_value -= position_cost
+                
+                cash_flows.append((exit_time, "forced_exit_proceeds", position_cost + realized_pnl))
+                
                 executed_trades.append({
                     "entry_time": pos["entry_time"].isoformat(),
                     "exit_time": exit_time.isoformat(),
-                    "net_pnl": realized_pnl,
+                    "net_pnl": float(realized_pnl),
                 })
             active_positions.clear()
+
+            # Reconciliation check: beginning cash + net flows = ending cash
+            total_equity = available_cash + position_value
+            net_cash_flows = sum(flow[2] for flow in cash_flows)
+            expected_equity = Decimal(str(initial_capital)) + net_cash_flows
+            
+            # Allow small floating point tolerance
+            reconciliation_diff = abs(total_equity - expected_equity)
+            if reconciliation_diff > Decimal("0.01"):
+                logger.error(
+                    f"RECONCILIATION FAILED: equity={total_equity}, expected={expected_equity}, "
+                    f"diff={reconciliation_diff}, flows={cash_flows}"
+                )
+                raise ValueError(
+                    f"Cash reconciliation failed: equity {total_equity} != expected {expected_equity} "
+                    f"(diff: {reconciliation_diff})"
+                )
+            
+            logger.info(f"✓ Cash reconciliation passed: equity={total_equity}, diff={reconciliation_diff}")
 
             # Store daily metrics
             cumulative_pnl = 0
@@ -589,7 +649,7 @@ class PaperTradingEngine:
 
             # Update run with final results
             total_trades = len(executed_trades)
-            total_pnl = current_capital - initial_capital
+            total_pnl = total_equity - Decimal(str(initial_capital))
             win_rate = (
                 sum(1 for t in executed_trades if t["net_pnl"] > 0) / total_trades * 100
                 if total_trades > 0
@@ -609,8 +669,8 @@ class PaperTradingEngine:
                 WHERE id = :id
             """),
                 {
-                    "final": current_capital,
-                    "pnl": total_pnl,
+                    "final": float(total_equity),
+                    "pnl": float(total_pnl),
                     "trades": total_trades,
                     "wr": win_rate,
                     "id": run_id,
@@ -624,7 +684,7 @@ class PaperTradingEngine:
                 SET current_virtual_cash = :capital, closed_at = NOW()
                 WHERE id = :id
             """),
-                {"capital": current_capital, "id": run.portfolio_id},
+                {"capital": float(total_equity), "id": run.portfolio_id},
             )
 
             db.commit()
@@ -637,9 +697,11 @@ class PaperTradingEngine:
                 "run_id": run_id,
                 "status": "completed",
                 "total_trades": total_trades,
-                "total_pnl": total_pnl,
+                "total_pnl": float(total_pnl),
                 "win_rate": win_rate,
-                "final_capital": current_capital,
+                "final_capital": float(total_equity),
+                "reconciliation_status": "passed",
+                "reconciliation_diff": float(reconciliation_diff),
                 "executed_trades": executed_trades,
                 "event_log": event_log,
             }
