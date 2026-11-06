@@ -46,7 +46,7 @@ class PaperTradingEngine:
             db.execute(
                 text("""
                 INSERT INTO paper_portfolios (id, owner_id, currency, initial_virtual_cash, current_virtual_cash, status, created_at)
-                VALUES (:id, :owner_id, 'USD', :initial, :current, 'active', NOW())
+                VALUES (:id, :owner_id, 'USD', :initial, :current, 'active', CURRENT_TIMESTAMP)
             """),
                 {
                     "id": portfolio_id,
@@ -66,7 +66,7 @@ class PaperTradingEngine:
                 )
                 VALUES (
                     :id, :portfolio_id, :skill, :instrument, :interval, :exit_config,
-                    NOW(), 'running', :initial, 0, 0
+                    CURRENT_TIMESTAMP, 'queued', :initial, 0, 0
                 )
             """),
                 {
@@ -91,7 +91,7 @@ class PaperTradingEngine:
                 "instrument_id": instrument_id,
                 "interval_minutes": interval_minutes,
                 "initial_capital": float(initial_capital),
-                "status": "running",
+                "status": "queued",
             }
 
         except Exception as exc:
@@ -119,6 +119,7 @@ class PaperTradingEngine:
             raise ValueError(f"days_back must be a positive integer, got {days_back!r}")
 
         db = SessionLocal()
+        acquired_execution = False
         try:
             # Get run details
             run = db.execute(
@@ -129,15 +130,11 @@ class PaperTradingEngine:
             if not run:
                 raise ValueError(f"Run {run_id} not found")
 
-            # Idempotency protection: reject re-run if already completed or in progress
+            # Idempotency protection: reject re-run if already completed
             if run.status == "completed":
                 raise ValueError(
                     f"Run {run_id} already completed. Cannot re-run historical replay. "
                     f"Create a new run instead."
-                )
-            if run.status == "running":
-                raise ValueError(
-                    f"Run {run_id} is currently running. Concurrent replays not allowed."
                 )
 
             skill = run.skill
@@ -183,15 +180,27 @@ class PaperTradingEngine:
 
             logger.info(f"Found {len(trades)} historical trades to replay")
 
-            # Mark run as 'running' to prevent concurrent replays
-            db.execute(
+            # Atomic conditional UPDATE: only acquire execution rights if status allows
+            # PostgreSQL re-checks WHERE condition on concurrent updates, so this prevents race
+            result = db.execute(
                 text("""
                 UPDATE paper_trading_runs
-                SET status = 'running', updated_at = NOW()
-                WHERE id = :id
+                SET status = 'running', updated_at = CURRENT_TIMESTAMP
+                WHERE id = :id AND status IN ('queued', 'pending', 'failed')
+                RETURNING id
             """),
                 {"id": run_id},
             )
+            acquired_row = result.fetchone()
+
+            if not acquired_row:
+                # Another task acquired execution rights, or status is not allowed
+                raise ValueError(
+                    f"Run {run_id} cannot be executed (current status: {run.status}). "
+                    f"Concurrent replays not allowed."
+                )
+
+            acquired_execution = True
             db.commit()
 
             # Build event list: each trade produces an entry event and an exit event.
@@ -687,7 +696,7 @@ class PaperTradingEngine:
                     total_pnl = :pnl,
                     total_trades = :trades,
                     win_rate = :wr,
-                    updated_at = NOW()
+                    updated_at = CURRENT_TIMESTAMP
                 WHERE id = :id
             """),
                 {
@@ -703,7 +712,7 @@ class PaperTradingEngine:
             db.execute(
                 text("""
                 UPDATE paper_portfolios
-                SET current_virtual_cash = :capital, closed_at = NOW()
+                SET current_virtual_cash = :capital, closed_at = CURRENT_TIMESTAMP
                 WHERE id = :id
             """),
                 {"capital": float(total_equity), "id": run.portfolio_id},
@@ -730,19 +739,21 @@ class PaperTradingEngine:
 
         except Exception as exc:
             db.rollback()
-            # Mark run as 'failed' to allow retry
-            try:
-                db.execute(
-                    text("""
-                    UPDATE paper_trading_runs
-                    SET status = 'failed', updated_at = NOW()
-                    WHERE id = :id
-                """),
-                    {"id": run_id},
-                )
-                db.commit()
-            except Exception:
-                logger.exception("Failed to update run status to 'failed'")
+            # Only mark run as 'failed' if we acquired execution rights
+            # Rejection (before acquiring) should have no side effects
+            if acquired_execution:
+                try:
+                    db.execute(
+                        text("""
+                        UPDATE paper_trading_runs
+                        SET status = 'failed', updated_at = CURRENT_TIMESTAMP
+                        WHERE id = :id
+                    """),
+                        {"id": run_id},
+                    )
+                    db.commit()
+                except Exception:
+                    logger.exception("Failed to update run status to 'failed'")
             logger.exception("Historical replay failed")
             raise
         finally:
