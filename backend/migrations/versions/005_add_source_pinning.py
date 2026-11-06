@@ -13,7 +13,7 @@ from sqlalchemy.dialects.postgresql import UUID, TIMESTAMP
 
 # revision identifiers, used by Alembic.
 revision = 'add_source_pinning'
-down_revision = '004_add_paper_trading_unique_constraint'
+down_revision = 'p4p5t6r7n8g9'
 branch_labels = None
 depends_on = None
 
@@ -35,9 +35,27 @@ def upgrade():
     op.create_index('idx_decision_records_source_trade', 'decision_records', ['source_trade_id'])
     op.create_index('idx_decision_records_source_run', 'decision_records', ['source_run_id'])
     op.create_index('idx_paper_positions_source_trade', 'paper_positions', ['source_trade_id'])
+    
+    # Add unique constraints for source deduplication
+    # Prevents duplicate decisions from the same source trade + decision type
+    op.create_unique_constraint(
+        'uq_decision_records_source_trade_type',
+        'decision_records',
+        ['source_trade_id', 'decision_type']
+    )
+    # Prevents duplicate positions from the same source trade
+    op.create_unique_constraint(
+        'uq_paper_positions_source_trade',
+        'paper_positions',
+        ['source_trade_id']
+    )
 
 
 def downgrade():
+    # Remove unique constraints
+    op.drop_constraint('uq_paper_positions_source_trade', 'paper_positions', type_='unique')
+    op.drop_constraint('uq_decision_records_source_trade_type', 'decision_records', type_='unique')
+    
     # Remove indexes
     op.drop_index('idx_paper_positions_source_trade', table_name='paper_positions')
     op.drop_index('idx_decision_records_source_run', table_name='decision_records')

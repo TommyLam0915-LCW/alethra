@@ -163,10 +163,14 @@ class PaperTradingEngine:
 
             # Compute UTC cutoff in Python — never embed bind param in INTERVAL string
             cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
+            
+            # Set as_of BEFORE query: only replay trades fully completed before this timestamp
+            as_of = datetime.now(timezone.utc)
 
             # Get historical trades for this skill/instrument/interval/user
             # Use rule_id (stable identifier) instead of rule_label_zh (display name)
             # Include source pinning fields: trade_id, run_id, rule_id, exit_id, data_version
+            # Constrain by as_of: only trades where exit_time <= as_of (completed before replay start)
             trades = db.execute(
                 text("""
                 SELECT
@@ -190,6 +194,7 @@ class PaperTradingEngine:
                   AND t.rule_id = :rule_id
                   AND r.user_id = :user_id
                   AND t.entry_time >= :cutoff
+                  AND t.exit_time <= :as_of
                 ORDER BY t.entry_time ASC
             """),
                 {
@@ -198,6 +203,7 @@ class PaperTradingEngine:
                     "rule_id": skill,  # skill parameter now contains rule_id, not display name
                     "user_id": user_id,
                     "cutoff": cutoff,
+                    "as_of": as_of,
                 },
             ).fetchall()
 
@@ -261,9 +267,6 @@ class PaperTradingEngine:
             executed_trades = []
             daily_pnl = {}
             event_log = []
-            
-            # Track as_of timestamp for source pinning
-            as_of = datetime.now(timezone.utc)
 
             # Track all cash flows for reconciliation (trading activities only, not initial deposit)
             cash_flows = []  # List of (time, flow_type, amount) for audit
@@ -287,28 +290,35 @@ class PaperTradingEngine:
                     is_long = pos["is_long"]
                     entry_price = Decimal(str(pos["entry_price"]))
                     exit_price_dec = Decimal(str(exit_price))
+                    # Retrieve entry costs stored at entry time for full round-trip accounting
+                    entry_commission_stored = Decimal(str(pos["entry_commission"]))
+                    entry_slippage_stored = Decimal(str(pos["entry_slippage"]))
+                    entry_total_costs_stored = Decimal(str(pos["entry_total_costs"]))
 
-                    # Calculate realized PnL using Decimal precision
+                    # Calculate realized PnL using Decimal precision (gross, before any costs)
                     if is_long:
                         realized_pnl = trade_quantity * (exit_price_dec - entry_price)
                     else:
                         realized_pnl = trade_quantity * (entry_price - exit_price_dec)
                     
-                    # Apply exit commission and slippage (non-zero costs)
+                    # Apply exit commission and slippage
                     exit_gross_dec = trade_quantity * exit_price_dec
                     exit_commission = exit_gross_dec * commission_rate
                     exit_slippage = exit_gross_dec * slippage_rate
                     exit_total_costs = exit_commission + exit_slippage
                     
-                    # Net PnL after costs
-                    realized_pnl_net = realized_pnl - exit_total_costs
+                    # Full round-trip net PnL: gross - entry costs - exit costs
+                    full_net_pnl = realized_pnl - entry_total_costs_stored - exit_total_costs
 
-                    # Return position value to available cash
+                    # Return position value + net PnL to available cash.
+                    # Entry costs were already deducted from cash at entry time;
+                    # exit costs are deducted here from the gross proceeds.
                     position_cost = trade_quantity * entry_price
-                    available_cash += position_cost + realized_pnl_net
+                    available_cash += position_cost + realized_pnl - exit_total_costs
                     position_value -= position_cost
                     
-                    cash_flows.append((event_time, "exit_proceeds", position_cost + realized_pnl_net))
+                    # Track cash flows: gross proceeds, then separate exit costs (for audit)
+                    cash_flows.append((event_time, "exit_proceeds_gross", position_cost + realized_pnl))
                     cash_flows.append((event_time, "exit_commission", -exit_commission))
                     cash_flows.append((event_time, "exit_slippage", -exit_slippage))
 
@@ -318,24 +328,35 @@ class PaperTradingEngine:
                     exit_fill_id = str(uuid.uuid4())
                     exit_side = "SELL" if is_long else "BUY"  # Close position: sell long, buy short
 
-                    # Create exit decision record
+                    # Create exit decision record with source pinning
                     db.execute(
                         text("""
                         INSERT INTO decision_records (
                             id, owner_id, actor_type, decision_type, decision_time,
-                            rationale, paper_portfolio_id
+                            rationale, paper_portfolio_id, source_trade_id, source_run_id,
+                            source_rule_id, source_exit_config, source_data_version,
+                            cutoff_timestamp, as_of_timestamp
                         )
                         VALUES (
                             :id, :owner_id, 'system', 'exit', :time,
-                            :rationale, :portfolio_id
+                            :rationale, :portfolio_id, :source_trade_id, :source_run_id,
+                            :source_rule_id, :source_exit_config, :source_data_version,
+                            :cutoff, :as_of
                         )
                     """),
                         {
                             "id": exit_decision_id,
                             "owner_id": user_id,
                             "time": exit_time,
-                            "rationale": f"Exit {exit_reason or 'signal'}: realized PnL ${realized_pnl:.2f}",
+                            "rationale": f"Exit {exit_reason or 'signal'}: gross PnL ${realized_pnl:.2f}, net PnL ${full_net_pnl:.2f}",
                             "portfolio_id": run.portfolio_id,
+                            "source_trade_id": source_trade_id,
+                            "source_run_id": source_run_id,
+                            "source_rule_id": source_rule_id,
+                            "source_exit_config": source_exit_id,
+                            "source_data_version": source_data_version,
+                            "cutoff": cutoff,
+                            "as_of": as_of,
                         },
                     )
 
@@ -398,7 +419,7 @@ class PaperTradingEngine:
                         },
                     )
 
-                    # Update PaperPosition: close position and record realized PnL (net of costs)
+                    # Update PaperPosition: close position and record full round-trip realized PnL
                     db.execute(
                         text("""
                         UPDATE paper_positions
@@ -409,7 +430,7 @@ class PaperTradingEngine:
                     """),
                         {
                             "closed_at": exit_time,
-                            "realized_pnl": realized_pnl_net,
+                            "realized_pnl": full_net_pnl,
                             "position_id": pos["position_id"],
                         },
                     )
@@ -421,17 +442,20 @@ class PaperTradingEngine:
                     exit_date = exit_time.date() if isinstance(exit_time, datetime) else exit_time
                     if exit_date not in daily_pnl:
                         daily_pnl[exit_date] = {"pnl": 0, "trades": 0, "wins": 0}
-                    daily_pnl[exit_date]["pnl"] += realized_pnl_net
+                    daily_pnl[exit_date]["pnl"] += full_net_pnl
                     daily_pnl[exit_date]["trades"] += 1
-                    if realized_pnl_net > 0:
+                    if full_net_pnl > 0:
                         daily_pnl[exit_date]["wins"] += 1
 
                     executed_trades.append({
                         "entry_time": pos["entry_time"].isoformat(),
                         "exit_time": exit_time.isoformat(),
-                        "net_pnl": float(realized_pnl_net),
-                        "commission": float(exit_commission),
-                        "slippage": float(exit_slippage),
+                        "gross_pnl": float(realized_pnl),
+                        "entry_commission": float(entry_commission_stored),
+                        "entry_slippage": float(entry_slippage_stored),
+                        "exit_commission": float(exit_commission),
+                        "exit_slippage": float(exit_slippage),
+                        "net_pnl": float(full_net_pnl),
                     })
 
                     event_log.append({
@@ -441,9 +465,10 @@ class PaperTradingEngine:
                         "active_positions": len(active_positions),
                         "available_cash": float(available_cash),
                         "position_value": float(position_value),
-                        "realized_pnl": float(realized_pnl_net),
-                        "commission": float(exit_commission),
-                        "slippage": float(exit_slippage),
+                        "gross_pnl": float(realized_pnl),
+                        "net_pnl": float(full_net_pnl),
+                        "entry_costs": float(entry_total_costs_stored),
+                        "exit_costs": float(exit_total_costs),
                     })
 
                 elif event_type == ENTRY and idx not in active_positions:
@@ -581,7 +606,7 @@ class PaperTradingEngine:
                             "source_trade_id": source_trade_id,
                             "source_run_id": source_run_id,
                             "source_rule_id": source_rule_id,
-                            "source_exit_config": run.exit_config,
+                            "source_exit_config": source_exit_id,
                             "source_data_version": source_data_version,
                             "cutoff": cutoff,
                             "as_of": as_of,
@@ -672,6 +697,9 @@ class PaperTradingEngine:
                         "quantity": trade_quantity,
                         "is_long": is_long,
                         "source_trade_id": source_trade_id,
+                        "entry_commission": entry_commission,
+                        "entry_slippage": entry_slippage,
+                        "entry_total_costs": entry_total_costs,
                     }
 
                     event_log.append({
@@ -694,13 +722,18 @@ class PaperTradingEngine:
                 exit_price = Decimal(str(pos["exit_price"]))
                 trade_quantity = Decimal(str(pos["quantity"]))
                 entry_price = Decimal(str(pos["entry_price"]))
+                entry_total_costs_stored = Decimal(str(pos["entry_total_costs"]))
                 
                 if pos["is_long"]:
                     realized_pnl = trade_quantity * (exit_price - entry_price)
                 else:
                     realized_pnl = trade_quantity * (entry_price - exit_price)
                 
-                # Return position value + PnL to available cash
+                # Full net PnL: gross - entry costs (no exit costs applied for forced close)
+                forced_net_pnl = realized_pnl - entry_total_costs_stored
+                
+                # Return position value + gross PnL to available cash
+                # (entry costs were already deducted at entry time)
                 position_cost = trade_quantity * entry_price
                 available_cash += position_cost + realized_pnl
                 position_value -= position_cost
@@ -710,7 +743,10 @@ class PaperTradingEngine:
                 executed_trades.append({
                     "entry_time": pos["entry_time"].isoformat(),
                     "exit_time": exit_time.isoformat(),
-                    "net_pnl": float(realized_pnl),
+                    "gross_pnl": float(realized_pnl),
+                    "entry_costs": float(entry_total_costs_stored),
+                    "net_pnl": float(forced_net_pnl),
+                    "forced": True,
                 })
             active_positions.clear()
 
