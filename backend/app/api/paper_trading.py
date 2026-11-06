@@ -15,13 +15,33 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.auth.jwt import get_current_user
+from app.auth.jwt import get_current_user, require_admin
 from app.database import get_db
 from app.models.user import User
 from app.services.paper_trading import get_engine
 
 router = APIRouter(prefix="/paper-trading", tags=["paper-trading"])
 logger = logging.getLogger(__name__)
+
+
+def _verify_run_ownership(db: Session, run_id: str, user_id: str) -> None:
+    """Verify that the run belongs to the given user.
+
+    Raises ValueError if the run does not exist or does not belong to the user.
+    Uses the same 404 for both cases to avoid information leakage.
+    """
+    from sqlalchemy import text
+
+    result = db.execute(
+        text("""
+            SELECT 1 FROM paper_trading_runs r
+            JOIN paper_portfolios p ON r.portfolio_id = p.id
+            WHERE r.id = :run_id AND p.owner_id = :user_id
+        """),
+        {"run_id": run_id, "user_id": user_id},
+    ).fetchone()
+    if not result:
+        raise ValueError("not_found")
 
 
 class CreatePortfolioRequest(BaseModel):
@@ -118,12 +138,14 @@ def create_portfolio(
 def get_status(
     run_id: str,
     current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     """Get current status of a paper trading run."""
     database_url = os.environ.get('DATABASE_URL', 'postgresql://postgres:postgres@localhost:5432/ai_investment_lab')
     engine = get_engine(database_url)
 
     try:
+        _verify_run_ownership(db, run_id, str(current_user.id))
         return engine.get_status(run_id)
     except ValueError as exc:
         raise HTTPException(
@@ -143,12 +165,14 @@ def get_daily_report(
     run_id: str,
     report_date: Optional[str] = Query(None, description="Date in YYYY-MM-DD format"),
     current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     """Get daily performance report for a run."""
     database_url = os.environ.get('DATABASE_URL', 'postgresql://postgres:postgres@localhost:5432/ai_investment_lab')
     engine = get_engine(database_url)
 
     try:
+        _verify_run_ownership(db, run_id, str(current_user.id))
         parsed_date = None
         if report_date:
             parsed_date = datetime.strptime(report_date, "%Y-%m-%d").date()
@@ -172,12 +196,14 @@ def execute_replay(
     run_id: str,
     request: ReplayRequest,
     current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     """Execute historical replay for a paper trading run."""
     database_url = os.environ.get('DATABASE_URL', 'postgresql://postgres:postgres@localhost:5432/ai_investment_lab')
     engine = get_engine(database_url)
 
     try:
+        _verify_run_ownership(db, run_id, str(current_user.id))
         result = engine.execute_historical_replay(
             run_id=run_id,
             user_id=str(current_user.id),
@@ -209,6 +235,7 @@ def stop_run(
     from sqlalchemy import text
 
     try:
+        _verify_run_ownership(db, run_id, str(current_user.id))
         db.execute(
             text("""
             UPDATE paper_trading_runs
@@ -220,6 +247,11 @@ def stop_run(
         db.commit()
 
         return {"status": "stopped", "run_id": run_id}
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"reason": "not_found", "message": "Run not found"},
+        )
     except Exception as exc:
         db.rollback()
         logger.exception("Failed to stop run")
@@ -309,7 +341,7 @@ class LiveStatusResponse(BaseModel):
 
 @router.get("/live/status", response_model=LiveStatusResponse)
 def live_status(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_admin),
 ):
     """Get live trading daemon status."""
     global _live_daemon
@@ -336,7 +368,7 @@ def live_status(
 
 @router.post("/live/start")
 async def live_start(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_admin),
 ):
     """Start the live trading daemon."""
     global _live_daemon
@@ -421,7 +453,7 @@ async def live_start(
 
 @router.post("/live/stop")
 async def live_stop(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_admin),
 ):
     """Stop the live trading daemon."""
     global _live_daemon
