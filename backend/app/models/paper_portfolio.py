@@ -133,6 +133,7 @@ class PaperPosition(Base):
     realized_pnl = Column(Float, nullable=True)
     unrealized_pnl = Column(Float, nullable=True)
     status = Column(SAEnum(PositionStatus), default=PositionStatus.open)
+    source_trade_id = Column(UUID(as_uuid=True), nullable=True, index=True)
 
     portfolio = relationship("PaperPortfolio", back_populates="positions")
 
@@ -220,6 +221,15 @@ class DecisionRecord(Base):
     falsification_condition = Column(Text, nullable=True)
     risk_flags = Column(JSONB, nullable=True)
     outcome_status = Column(SAEnum(OutcomeStatus), default=OutcomeStatus.pending)
+    
+    # Source pinning columns for traceability
+    source_trade_id = Column(UUID(as_uuid=True), nullable=True, index=True)
+    source_run_id = Column(UUID(as_uuid=True), nullable=True, index=True)
+    source_rule_id = Column(String(100), nullable=True)
+    source_exit_config = Column(String(100), nullable=True)
+    source_data_version = Column(String(50), nullable=True)
+    cutoff_timestamp = Column(DateTime(timezone=True), nullable=True)
+    as_of_timestamp = Column(DateTime(timezone=True), nullable=True)
 
     outcome_evaluation = relationship("OutcomeEvaluation", back_populates="decision", uselist=False)
 

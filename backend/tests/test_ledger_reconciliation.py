@@ -248,7 +248,7 @@ class TestLedgerReconciliation:
             for fill in fills:
                 net_change = Decimal(str(fill.net_cash_change))
                 total_net_flows += net_change
-                if fill.simulated_fill_reason == "signal":
+                if fill.simulated_fill_reason == "entry_signal":
                     entry_flows.append(net_change)
                 elif fill.simulated_fill_reason == "exit_signal":
                     exit_flows.append(net_change)
@@ -372,17 +372,39 @@ class TestLedgerReconciliation:
             position_size_pct=position_size_pct,
         )
 
-        # Hand-calculate expected PnL
+        # Hand-calculate expected PnL (including commission and slippage)
         # Trade 1: buy 100 units @ 100, sell @ 110
         capital_after_trade_1 = initial_capital
         quantity_1 = (capital_after_trade_1 * Decimal(str(position_size_pct))) / Decimal("100")
-        pnl_1 = quantity_1 * (Decimal("110") - Decimal("100"))
-        capital_after_trade_1 = capital_after_trade_1 + pnl_1
+        gross_pnl_1 = quantity_1 * (Decimal("110") - Decimal("100"))
+        
+        # Calculate costs for trade 1
+        entry_value_1 = quantity_1 * Decimal("100")
+        entry_commission_1 = entry_value_1 * Decimal("0.001")  # 0.1%
+        entry_slippage_1 = entry_value_1 * Decimal("0.0005")   # 0.05%
+        exit_value_1 = quantity_1 * Decimal("110")
+        exit_commission_1 = exit_value_1 * Decimal("0.001")
+        exit_slippage_1 = exit_value_1 * Decimal("0.0005")
+        total_costs_1 = entry_commission_1 + entry_slippage_1 + exit_commission_1 + exit_slippage_1
+        
+        net_pnl_1 = gross_pnl_1 - total_costs_1
+        capital_after_trade_1 = capital_after_trade_1 + net_pnl_1
 
         # Trade 2: buy units @ 100, sell @ 90
         quantity_2 = (capital_after_trade_1 * Decimal(str(position_size_pct))) / Decimal("100")
-        pnl_2 = quantity_2 * (Decimal("90") - Decimal("100"))
-        expected_total_pnl = pnl_1 + pnl_2
+        gross_pnl_2 = quantity_2 * (Decimal("90") - Decimal("100"))
+        
+        # Calculate costs for trade 2
+        entry_value_2 = quantity_2 * Decimal("100")
+        entry_commission_2 = entry_value_2 * Decimal("0.001")
+        entry_slippage_2 = entry_value_2 * Decimal("0.0005")
+        exit_value_2 = quantity_2 * Decimal("90")
+        exit_commission_2 = exit_value_2 * Decimal("0.001")
+        exit_slippage_2 = exit_value_2 * Decimal("0.0005")
+        total_costs_2 = entry_commission_2 + entry_slippage_2 + exit_commission_2 + exit_slippage_2
+        
+        net_pnl_2 = gross_pnl_2 - total_costs_2
+        expected_total_pnl = net_pnl_1 + net_pnl_2
 
         # Read DB total_pnl
         db = SessionLocal()
@@ -453,9 +475,9 @@ class TestLedgerReconciliation:
 
             fill_dict = {row.simulated_fill_reason: row.count for row in fill_counts}
 
-            # Should have 2 entry fills (signal) and 2 exit fills (exit_signal)
-            assert fill_dict.get("signal", 0) == 2, (
-                f"Expected 2 entry fills, got {fill_dict.get('signal', 0)}"
+            # Should have 2 entry fills (entry_signal) and 2 exit fills (exit_signal)
+            assert fill_dict.get("entry_signal", 0) == 2, (
+                f"Expected 2 entry fills, got {fill_dict.get('entry_signal', 0)}"
             )
             assert fill_dict.get("exit_signal", 0) == 2, (
                 f"Expected 2 exit fills, got {fill_dict.get('exit_signal', 0)}"
