@@ -262,39 +262,49 @@ def _generate_recommendations(
 ) -> List[dict]:
     """Generate parameter adjustment recommendations from performance data.
     
-    Only generates recommendations when there is sufficient evidence.
-    Small sample sizes (< 30 trades) are flagged as insufficient_evidence,
-    not as opportunities to increase exposure.
+    Evidence gating:
+    - trade_count < 30: insufficient_evidence (no actionable recommendation)
+    - trade_count >= 30 AND sharpe < 0: parameter_adjustment (evidence-supported)
+    
+    These are mutually exclusive — a config cannot be both "insufficient evidence"
+    and "evidence-supported adjustment" at the same time.
     """
     recommendations: List[dict] = []
 
-    # Find exit configs with poor Sharpe that could benefit from parameter tuning
-    # Only recommend when sample size is sufficient (>= 5 trades)
     for exit_id, metrics in per_exit_config.items():
-        if metrics["sharpe"] is not None and metrics["sharpe"] < 0 and metrics["trade_count"] >= 5:
-            recommendations.append(
-                {
-                    "type": "parameter_adjustment",
-                    "exit_id": exit_id,
-                    "reason": (
-                        f"Exit config {exit_id} has negative Sharpe ({metrics['sharpe']:.2f}). "
-                        f"Parameter adjustment recommended."
-                    ),
-                    "metrics": metrics,
-                }
-            )
+        trade_count = metrics.get("trade_count", 0)
+        sharpe = metrics.get("sharpe")
         
-        # Flag small sample sizes as insufficient evidence
-        if metrics["trade_count"] < 30:
+        # Insufficient evidence: small sample size
+        if trade_count < 30:
             recommendations.append(
                 {
                     "type": "insufficient_evidence",
                     "exit_id": exit_id,
                     "reason": (
-                        f"Exit config {exit_id} has only {metrics['trade_count']} trades. "
-                        f"Cannot draw reliable conclusions from small samples."
+                        f"Exit config {exit_id} has only {trade_count} trades. "
+                        f"Cannot draw reliable conclusions from small samples. "
+                        f"Need >= 30 trades for evidence-based recommendations."
                     ),
                     "metrics": metrics,
+                    "evidence_status": "insufficient",
+                }
+            )
+            # Do NOT generate parameter_adjustment for insufficient evidence
+            continue
+        
+        # Sufficient evidence: can recommend parameter adjustment
+        if sharpe is not None and sharpe < 0:
+            recommendations.append(
+                {
+                    "type": "parameter_adjustment",
+                    "exit_id": exit_id,
+                    "reason": (
+                        f"Exit config {exit_id} has negative Sharpe ({sharpe:.2f}) "
+                        f"with {trade_count} trades. Parameter adjustment recommended."
+                    ),
+                    "metrics": metrics,
+                    "evidence_status": "sufficient",
                 }
             )
 
@@ -311,8 +321,15 @@ def propose_parameter_adjustment(
     If the exit config has poor metrics, suggest adjusting target_atr toward
     a neighboring config that performs better. Returns None if no clear
     improvement direction exists.
+    
+    Evidence gating:
+    - trade_count < 30: returns None (insufficient evidence)
+    - trade_count >= 30: may return a proposal with evidence_status
     """
-    if performance_data.get("trade_count", 0) < 3:
+    trade_count = performance_data.get("trade_count", 0)
+    
+    # Insufficient evidence: cannot make reliable proposals
+    if trade_count < 30:
         return None
 
     win_rate = performance_data.get("win_rate", 0)
@@ -345,10 +362,13 @@ def propose_parameter_adjustment(
                 "time_stop_bars": current_exit.time_stop_bars,
             },
             "pattern": "high_win_rate_low_pnl",
+            "evidence_status": "hypothesis",
             "rationale": (
-                f"Win rate is {win_rate:.0%} but avg PnL is negative. "
+                f"Win rate is {win_rate:.0%} but avg PnL is negative "
+                f"({trade_count} trades). "
                 f"Widening target from {current_target} to {new_target} ATR "
-                f"to let winners run further."
+                f"to let winners run further. "
+                f"This is a hypothesis, not evidence-based conclusion."
             ),
         }
 
@@ -370,10 +390,12 @@ def propose_parameter_adjustment(
                 "time_stop_bars": current_exit.time_stop_bars,
             },
             "pattern": "low_win_rate",
+            "evidence_status": "hypothesis",
             "rationale": (
-                f"Win rate is only {win_rate:.0%}. "
+                f"Win rate is only {win_rate:.0%} ({trade_count} trades). "
                 f"Widening stop from {current_stop} to {new_stop} ATR "
-                f"to reduce premature stop-outs."
+                f"to reduce premature stop-outs. "
+                f"This is a hypothesis, not evidence-based conclusion."
             ),
         }
 
@@ -396,10 +418,13 @@ def propose_parameter_adjustment(
                 "time_stop_bars": current_exit.time_stop_bars,
             },
             "pattern": "negative_sharpe_pnl",
+            "evidence_status": "hypothesis",
             "rationale": (
-                f"Sharpe {sharpe:.2f} and avg PnL {avg_pnl:.2f} are both negative. "
+                f"Sharpe {sharpe:.2f} and avg PnL {avg_pnl:.2f} are both negative "
+                f"({trade_count} trades). "
                 f"Widening target from {current_target} to {new_target} ATR "
-                f"to let winners run further."
+                f"to let winners run further. "
+                f"This is a hypothesis, not evidence-based conclusion."
             ),
         }
 

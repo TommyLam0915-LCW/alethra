@@ -329,6 +329,10 @@ def run_pattern_analysis_job():
                 continue
 
             # Create proposal
+            # Note: propose_parameter_adjustment now gates on trade_count >= 30
+            # and marks all proposals as "hypothesis" (not evidence-based)
+            evidence_status = adjustment.get("evidence_status", "hypothesis")
+            
             proposal = LearningProposal(
                 user_id=user_id,
                 learning_job_id=job.id,
@@ -342,6 +346,7 @@ def run_pattern_analysis_job():
                     "pattern": adjustment["pattern"],
                     "baseline_metrics": metrics,
                     "rationale": adjustment["rationale"],
+                    "evidence_status": evidence_status,
                 },
                 status="pending",
             )
@@ -365,7 +370,16 @@ def run_pattern_analysis_job():
             )
 
             proposal.validation_result = validation
-            if validation.get("passed"):
+            
+            # Evidence gating: hypothesis proposals cannot be validated/deployed
+            # They remain as pending for manual review only
+            if evidence_status == "hypothesis":
+                proposal.status = "pending"
+                logger.info(
+                    "Proposal %s remains pending (hypothesis, not evidence-based)",
+                    proposal.id,
+                )
+            elif validation.get("passed"):
                 proposal.status = "validated"
                 proposal.validated_at = utcnow_aware()
                 logger.info(
@@ -374,8 +388,8 @@ def run_pattern_analysis_job():
                     validation.get("sharpe_before", 0),
                     validation.get("sharpe_after", 0),
                 )
-            elif validation.get("error") in ("no_baseline_run", "insufficient_bars"):
-                # Validation could not run due to missing data — keep as
+            elif validation.get("error") in ("no_baseline_run", "insufficient_bars", "unknown_rule"):
+                # Validation could not run due to missing data or unknown rule — keep as
                 # ``pending`` for manual review rather than rejecting.
                 proposal.status = "pending"
                 logger.info(

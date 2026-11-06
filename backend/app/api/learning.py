@@ -256,13 +256,49 @@ def deploy_proposal(
             detail={"reason": "proposal_not_found", "proposal_id": str(proposal_id)},
         )
 
-    if proposal.status not in ("validated", "pending"):
+    # Check status: only 'validated' can be deployed
+    if proposal.status != "validated":
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={
-                "reason": "proposal_not_deployable",
+                "reason": "proposal_not_validated",
                 "current_status": proposal.status,
-                "message": "Only proposals with status 'validated' or 'pending' can be deployed.",
+                "message": (
+                    f"Only proposals with status 'validated' can be deployed. "
+                    f"Current status: '{proposal.status}'. "
+                    f"Pending proposals require validation first."
+                ),
+            },
+        )
+
+    # Check evidence status: hypothesis proposals cannot be deployed
+    evidence_status = proposal.rationale_json.get("evidence_status", "unknown")
+    if evidence_status == "hypothesis":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "reason": "proposal_is_hypothesis",
+                "evidence_status": evidence_status,
+                "message": (
+                    "This proposal is marked as 'hypothesis' (not evidence-based). "
+                    "Hypothesis proposals cannot be deployed. "
+                    "They require further validation with sufficient evidence (>= 30 trades)."
+                ),
+            },
+        )
+
+    # Check validation result: must have passed
+    validation_result = proposal.validation_result or {}
+    if not validation_result.get("passed", False):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "reason": "validation_not_passed",
+                "validation_result": validation_result,
+                "message": (
+                    "This proposal has not passed validation. "
+                    "Cannot deploy unvalidated proposals."
+                ),
             },
         )
 
