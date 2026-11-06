@@ -111,6 +111,10 @@ class Settings(BaseSettings):
     # Auto-learning scheduler: runs daily research and weekly pattern analysis.
     # Off by default; requires explicit opt-in to consume provider quota.
     enable_learning_scheduler: bool = False
+    # Auto-collection scheduler: periodically fetches new market data and runs backtests.
+    # Off by default; requires explicit opt-in to consume provider quota.
+    auto_collection_enabled: bool = False
+    auto_collection_interval_hours: int = 4
 
     @property
     def intraday_instrument_list(self) -> list[str]:

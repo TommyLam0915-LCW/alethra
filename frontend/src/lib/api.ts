@@ -1108,6 +1108,44 @@ export const api = {
       }
       return apiFetch(`/api/v1/journal/skill-heatmap?${qs.toString()}`);
     },
+    compare: (runIds: string) => {
+      const qs = new URLSearchParams({ run_ids: runIds });
+      return apiFetch(`/api/v1/journal/compare?${qs.toString()}`);
+    },
+    unified: (source: string, params?: Record<string, any>) => {
+      const qs = new URLSearchParams({ source });
+      if (params) {
+        for (const [k, v] of Object.entries(params)) {
+          if (v !== undefined && v !== null && v !== '') qs.set(k, String(v));
+        }
+      }
+      return apiFetch(`/api/v1/journal/unified?${qs.toString()}`);
+    },
+  },
+  admin: {
+    collectionStatus: () => apiFetch('/api/v1/admin/collection/status'),
+    collectionTrigger: () => apiFetch('/api/v1/admin/collection/trigger', { method: 'POST' }),
+    collectionStart: () => apiFetch('/api/v1/admin/collection/start', { method: 'POST' }),
+    collectionStop: () => apiFetch('/api/v1/admin/collection/stop', { method: 'POST' }),
+    collectionHistory: (limit: number = 20) => apiFetch(`/api/v1/admin/collection/history?limit=${limit}`),
+  },
+  paperTrading: {
+    history: (limit: number = 50) => apiFetch(`/api/v1/paper-trading/history?limit=${limit}`),
+    status: (runId: string) => apiFetch(`/api/v1/paper-trading/status/${runId}`),
+    dailyReport: (runId: string, date?: string) => {
+      const params = date ? `?date=${date}` : '';
+      return apiFetch(`/api/v1/paper-trading/daily-report/${runId}${params}`);
+    },
+    create: (data: {
+      skill: string;
+      instrument_id: string;
+      interval_minutes: number;
+      exit_config: string;
+      initial_capital?: number;
+    }) => apiFetch('/api/v1/paper-trading/create', { method: 'POST', body: JSON.stringify(data) }),
+    replay: (runId: string, data?: { days_back?: number; position_size_pct?: number; max_positions?: number }) =>
+      apiFetch(`/api/v1/paper-trading/replay/${runId}`, { method: 'POST', body: JSON.stringify(data || {}) }),
+    stop: (runId: string) => apiFetch(`/api/v1/paper-trading/stop/${runId}`, { method: 'POST' }),
   },
   layouts: {
     getWorkspace: () => apiFetch('/api/v1/layouts/workspace'),

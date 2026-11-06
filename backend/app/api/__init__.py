@@ -41,6 +41,8 @@ from app.api.agent_strategy import router as agent_strategy_router
 from app.api.strategy_lab import router as strategy_lab_router
 from app.api.journal import router as journal_router
 from app.api.learning import router as learning_router
+from app.api.admin import router as admin_router
+from app.api.paper_trading import router as paper_trading_router
 
 v1_router = APIRouter(prefix="/v1")
 v1_router.include_router(brand_router)
@@ -82,6 +84,8 @@ v1_router.include_router(agent_strategy_router)
 v1_router.include_router(strategy_lab_router)
 v1_router.include_router(journal_router)
 v1_router.include_router(learning_router)
+v1_router.include_router(admin_router)
+v1_router.include_router(paper_trading_router)
 
 api_router = APIRouter()
 api_router.include_router(auth_router)

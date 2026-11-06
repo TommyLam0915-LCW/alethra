@@ -11,6 +11,10 @@ import CumulativePnlChart from './CumulativePnlChart';
 import EquityCurveChart from './EquityCurveChart';
 import SkillAttributionPanel from './SkillAttributionPanel';
 import SkillHeatmap from './SkillHeatmap';
+import AutoCollectionStatus from './AutoCollectionStatus';
+import CrossRunComparison from './CrossRunComparison';
+import UnifiedJournalView from './UnifiedJournalView';
+import { PaperTradingDashboard } from './PaperTradingDashboard';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -83,7 +87,7 @@ export interface JournalSummary {
   worst_trade: { trade_id: string; net_pnl: string; entry_time: string; instrument_id: string; rule_label_zh: string } | null;
 }
 
-type TabKey = 'trades' | 'cumulative-pnl' | 'equity-curve' | 'skill-attribution' | 'skill-heatmap';
+type TabKey = 'trades' | 'cumulative-pnl' | 'equity-curve' | 'skill-attribution' | 'skill-heatmap' | 'unified' | 'comparison' | 'auto-collection' | 'paper-trading';
 
 const TABS: { key: TabKey; label: string }[] = [
   { key: 'trades', label: 'Trades' },
@@ -91,6 +95,10 @@ const TABS: { key: TabKey; label: string }[] = [
   { key: 'equity-curve', label: 'Equity Curve' },
   { key: 'skill-attribution', label: 'Skill Attribution' },
   { key: 'skill-heatmap', label: 'Skill Heatmap' },
+  { key: 'unified', label: 'Unified View' },
+  { key: 'comparison', label: 'Compare Runs' },
+  { key: 'auto-collection', label: 'Auto Collection' },
+  { key: 'paper-trading', label: 'Paper Trading' },
 ];
 
 const TAB_DESCRIPTIONS: Record<TabKey, { title: string; description: string }> = {
@@ -113,6 +121,18 @@ const TAB_DESCRIPTIONS: Record<TabKey, { title: string; description: string }> =
   'skill-heatmap': {
     title: 'Skill Heatmap',
     description: 'Visual matrix showing which skills work best on which instruments. Green cells = profitable, red cells = losing. Use this to find your best instrument/skill combinations.',
+  },
+  'unified': {
+    title: 'Unified Journal View',
+    description: 'See all trades from both research backtests and paper trading in one place. Filter by source (research/paper/all) to compare performance across different trading modes.',
+  },
+  'comparison': {
+    title: 'Cross-Run Comparison',
+    description: 'Compare multiple research runs side-by-side. Select up to 10 runs to see their metrics together. Best/worst values are highlighted to help you identify top performers.',
+  },
+  'auto-collection': {
+    title: 'Auto Data Collection',
+    description: 'Manage automatic data collection scheduler. Start/stop the scheduler, trigger manual collections, and view recent collection runs. Keeps your research data up-to-date automatically.',
   },
 };
 
@@ -720,6 +740,18 @@ export default function JournalDashboard() {
                   )}
                   {activeTab === 'skill-heatmap' && (
                     <SkillHeatmap filters={appliedFilters} />
+                  )}
+                  {activeTab === 'unified' && (
+                    <UnifiedJournalView />
+                  )}
+                  {activeTab === 'comparison' && (
+                    <CrossRunComparison />
+                  )}
+                  {activeTab === 'auto-collection' && (
+                    <AutoCollectionStatus />
+                  )}
+                  {activeTab === 'paper-trading' && (
+                    <PaperTradingDashboard />
                   )}
                 </>
               )}
