@@ -260,26 +260,16 @@ def _generate_recommendations(
     per_exit_config: Dict[str, dict],
     per_skill_instrument: Dict[str, dict],
 ) -> List[dict]:
-    """Generate parameter adjustment recommendations from performance data."""
+    """Generate parameter adjustment recommendations from performance data.
+    
+    Only generates recommendations when there is sufficient evidence.
+    Small sample sizes (< 30 trades) are flagged as insufficient_evidence,
+    not as opportunities to increase exposure.
+    """
     recommendations: List[dict] = []
 
-    # Find exit configs with low trade counts but high win rates
-    # (under-sampled but potentially good)
-    for exit_id, metrics in per_exit_config.items():
-        if metrics["trade_count"] < 10 and metrics["win_rate"] > 0.55:
-            recommendations.append(
-                {
-                    "type": "increase_exposure",
-                    "exit_id": exit_id,
-                    "reason": (
-                        f"Exit config {exit_id} has {metrics['win_rate']:.0%} win rate "
-                        f"but only {metrics['trade_count']} trades. Consider wider usage."
-                    ),
-                    "metrics": metrics,
-                }
-            )
-
     # Find exit configs with poor Sharpe that could benefit from parameter tuning
+    # Only recommend when sample size is sufficient (>= 5 trades)
     for exit_id, metrics in per_exit_config.items():
         if metrics["sharpe"] is not None and metrics["sharpe"] < 0 and metrics["trade_count"] >= 5:
             recommendations.append(
@@ -289,6 +279,20 @@ def _generate_recommendations(
                     "reason": (
                         f"Exit config {exit_id} has negative Sharpe ({metrics['sharpe']:.2f}). "
                         f"Parameter adjustment recommended."
+                    ),
+                    "metrics": metrics,
+                }
+            )
+        
+        # Flag small sample sizes as insufficient evidence
+        if metrics["trade_count"] < 30:
+            recommendations.append(
+                {
+                    "type": "insufficient_evidence",
+                    "exit_id": exit_id,
+                    "reason": (
+                        f"Exit config {exit_id} has only {metrics['trade_count']} trades. "
+                        f"Cannot draw reliable conclusions from small samples."
                     ),
                     "metrics": metrics,
                 }
@@ -474,13 +478,10 @@ def validate_proposal(
     # Find the rule
     rule = RULE_BY_ID.get(rule_id)
     if rule is None:
-        # Legacy rule ID not in current registry — skip backtest validation
-        # but return a positive result so the proposal can be reviewed manually.
         return {
-            "passed": True,
-            "skipped": True,
+            "passed": False,
             "error": "unknown_rule",
-            "message": f"Rule {rule_id} not in current registry; validation skipped.",
+            "message": f"Rule {rule_id} not in current registry. Cannot validate — rejecting.",
             "sharpe_before": 0,
             "sharpe_after": 0,
             "max_dd_before": 0,

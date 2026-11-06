@@ -115,6 +115,13 @@ class Settings(BaseSettings):
     # Off by default; requires explicit opt-in to consume provider quota.
     auto_collection_enabled: bool = False
     auto_collection_interval_hours: int = 4
+    # Live trading daemon: real-time paper trading via Kraken WebSocket.
+    # Off by default; requires explicit opt-in.
+    live_trading_enabled: bool = False
+    live_trading_symbols: str = "XBT/USD,ETH/USD,SOL/USD"
+    live_trading_interval: int = 60
+    live_trading_capital: float = 100000.0
+    kraken_ws_url: str = "wss://ws.kraken.com"
 
     @property
     def intraday_instrument_list(self) -> list[str]:

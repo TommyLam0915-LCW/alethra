@@ -28,6 +28,34 @@ class SignalType(Enum):
     HOLD = "hold"
 
 
+class StrategyType(Enum):
+    """Registered strategy types with stable IDs."""
+    MEAN_REVERSION_RSI_BB = "mean_reversion_rsi_bb_v1"
+    BB_MEAN_REVERSION = "bb_mean_reversion_v1"
+    MOMENTUM_RSI = "momentum_rsi_v1"
+    RSI_BASIC = "rsi_basic_v1"
+
+
+STRATEGY_REGISTRY = {
+    StrategyType.MEAN_REVERSION_RSI_BB.value: {
+        "display_name_zh": "RSI+布林帶均值回歸",
+        "generator_method": "_mean_reversion_signal",
+    },
+    StrategyType.BB_MEAN_REVERSION.value: {
+        "display_name_zh": "布林帶均值回歸",
+        "generator_method": "_bb_mean_reversion_signal",
+    },
+    StrategyType.MOMENTUM_RSI.value: {
+        "display_name_zh": "RSI動量策略",
+        "generator_method": "_momentum_signal",
+    },
+    StrategyType.RSI_BASIC.value: {
+        "display_name_zh": "基礎RSI策略",
+        "generator_method": "_rsi_signal",
+    },
+}
+
+
 @dataclass
 class TradingSignal:
     """Generated trading signal."""
@@ -35,7 +63,13 @@ class TradingSignal:
     symbol: str
     timestamp: datetime
     price: float
-    confidence: float
+    rule_score: float
+    """Uncalibrated score from rule-based logic (NOT a probability).
+
+    This is a heuristic confidence indicator from the strategy rules,
+    not a statistically calibrated probability. Do not interpret as
+    P(profitable) or P(success).
+    """
     reason: str
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
@@ -137,21 +171,35 @@ class SignalGenerator:
     def __init__(
         self,
         symbol: str,
-        skill: str,
+        rule_id: str,
         interval_minutes: int,
+        skill: Optional[str] = None,
         max_bars: int = 100,
     ):
         """
         Args:
             symbol: Trading pair symbol
-            skill: Skill/strategy name
+            rule_id: Stable strategy identifier (must be in STRATEGY_REGISTRY)
             interval_minutes: Bar interval in minutes
+            skill: Optional display name (for logging only)
             max_bars: Maximum bars to keep in memory
+
+        Raises:
+            ValueError: If rule_id is not in STRATEGY_REGISTRY
         """
+        if rule_id not in STRATEGY_REGISTRY:
+            raise ValueError(
+                f"Unknown strategy rule_id: {rule_id}. "
+                f"Valid IDs: {list(STRATEGY_REGISTRY.keys())}. "
+                f"Unknown strategies are rejected, not defaulted."
+            )
+        
         self.symbol = symbol
-        self.skill = skill
+        self.rule_id = rule_id
+        self.skill = skill or STRATEGY_REGISTRY[rule_id]["display_name_zh"]
         self.interval_minutes = interval_minutes
         self.max_bars = max_bars
+        self.generator_method = STRATEGY_REGISTRY[rule_id]["generator_method"]
 
         # Bar history
         self.bars: deque[KrakenBar] = deque(maxlen=max_bars)
@@ -176,10 +224,14 @@ class SignalGenerator:
     def generate_signal(self) -> Optional[TradingSignal]:
         """Generate trading signal based on current market state."""
         if len(self.prices) < 20:
-            return None  # Not enough data
+            if len(self.prices) % 5 == 0:
+                logger.info(f"📈 {self.skill} on {self.symbol}: {len(self.prices)}/20 bars collected")
+            return None
 
         current_price = self.prices[-1]
         timestamp = self.bars[-1].timestamp
+        
+        logger.info(f"🔍 {self.skill} ({self.rule_id}) on {self.symbol}: Generating signal with {len(self.prices)} bars, price=${current_price:.2f}")
 
         # Calculate indicators
         rsi = TechnicalIndicators.rsi(list(self.prices), period=14)
@@ -193,30 +245,19 @@ class SignalGenerator:
 
         bb_upper, bb_middle, bb_lower = bb
 
-        # Strategy logic based on skill type
-        signal = None
-
-        if "超買超賣" in self.skill or "overbought" in self.skill.lower():
-            # Mean reversion strategy
-            signal = self._mean_reversion_signal(
-                current_price, rsi, bb_lower, bb_upper, atr, timestamp
-            )
-
-        elif "均值回歸" in self.skill or "mean_reversion" in self.skill.lower():
-            # Bollinger Band mean reversion
-            signal = self._bb_mean_reversion_signal(
-                current_price, bb_lower, bb_upper, bb_middle, atr, timestamp
-            )
-
-        elif "套利" in self.skill or "arbitrage" in self.skill.lower():
-            # Momentum/trend following
-            signal = self._momentum_signal(current_price, rsi, atr, timestamp)
-
+        # Dispatch to the registered generator method
+        method = getattr(self, self.generator_method)
+        if self.generator_method == "_mean_reversion_signal":
+            return method(current_price, rsi, bb_lower, bb_upper, atr, timestamp)
+        elif self.generator_method == "_bb_mean_reversion_signal":
+            return method(current_price, bb_lower, bb_upper, bb_middle, atr, timestamp)
+        elif self.generator_method == "_momentum_signal":
+            return method(current_price, rsi, atr, timestamp)
+        elif self.generator_method == "_rsi_signal":
+            return method(current_price, rsi, atr, timestamp)
         else:
-            # Default: RSI-based signals
-            signal = self._rsi_signal(current_price, rsi, atr, timestamp)
-
-        return signal
+            logger.error(f"Unknown generator method: {self.generator_method}")
+            return None
 
     def _mean_reversion_signal(
         self,
@@ -238,7 +279,7 @@ class SignalGenerator:
                 symbol=self.symbol,
                 timestamp=timestamp,
                 price=price,
-                confidence=0.7,
+                rule_score=0.7,
                 reason=f"RSI oversold ({rsi:.1f}) at lower BB",
                 stop_loss=price - (2 * atr),
                 take_profit=price + (3 * atr),
@@ -254,7 +295,7 @@ class SignalGenerator:
                 symbol=self.symbol,
                 timestamp=timestamp,
                 price=price,
-                confidence=0.7,
+                rule_score=0.7,
                 reason=f"RSI overbought ({rsi:.1f}) at upper BB",
                 stop_loss=price + (2 * atr),
                 take_profit=price - (3 * atr),
@@ -269,7 +310,7 @@ class SignalGenerator:
                     symbol=self.symbol,
                     timestamp=timestamp,
                     price=price,
-                    confidence=0.8,
+                    rule_score=0.8,
                     reason="Mean reversion complete (long)",
                 )
             elif self.position_side == "short" and (rsi < 50 or price <= bb_lower):
@@ -279,7 +320,7 @@ class SignalGenerator:
                     symbol=self.symbol,
                     timestamp=timestamp,
                     price=price,
-                    confidence=0.8,
+                    rule_score=0.8,
                     reason="Mean reversion complete (short)",
                 )
 
@@ -305,7 +346,7 @@ class SignalGenerator:
                 symbol=self.symbol,
                 timestamp=timestamp,
                 price=price,
-                confidence=0.65,
+                rule_score=0.65,
                 reason="Price at lower Bollinger Band",
                 stop_loss=price - (2 * atr),
                 take_profit=bb_middle,
@@ -321,7 +362,7 @@ class SignalGenerator:
                 symbol=self.symbol,
                 timestamp=timestamp,
                 price=price,
-                confidence=0.65,
+                rule_score=0.65,
                 reason="Price at upper Bollinger Band",
                 stop_loss=price + (2 * atr),
                 take_profit=bb_middle,
@@ -336,7 +377,7 @@ class SignalGenerator:
                     symbol=self.symbol,
                     timestamp=timestamp,
                     price=price,
-                    confidence=0.75,
+                    rule_score=0.75,
                     reason="Reached middle Bollinger Band (long)",
                 )
             elif self.position_side == "short" and price <= bb_middle:
@@ -346,7 +387,7 @@ class SignalGenerator:
                     symbol=self.symbol,
                     timestamp=timestamp,
                     price=price,
-                    confidence=0.75,
+                    rule_score=0.75,
                     reason="Reached middle Bollinger Band (short)",
                 )
 
@@ -370,7 +411,7 @@ class SignalGenerator:
                 symbol=self.symbol,
                 timestamp=timestamp,
                 price=price,
-                confidence=0.6,
+                rule_score=0.6,
                 reason=f"Momentum entry (RSI {rsi:.1f})",
                 stop_loss=price - (2 * atr),
                 take_profit=price + (4 * atr),
@@ -386,7 +427,7 @@ class SignalGenerator:
                 symbol=self.symbol,
                 timestamp=timestamp,
                 price=price,
-                confidence=0.6,
+                rule_score=0.6,
                 reason=f"Weak momentum entry (RSI {rsi:.1f})",
                 stop_loss=price + (2 * atr),
                 take_profit=price - (4 * atr),
@@ -401,7 +442,7 @@ class SignalGenerator:
                     symbol=self.symbol,
                     timestamp=timestamp,
                     price=price,
-                    confidence=0.7,
+                    rule_score=0.7,
                     reason="Momentum reversal (long)",
                 )
             elif self.position_side == "short" and rsi < 25:
@@ -411,7 +452,7 @@ class SignalGenerator:
                     symbol=self.symbol,
                     timestamp=timestamp,
                     price=price,
-                    confidence=0.7,
+                    rule_score=0.7,
                     reason="Momentum reversal (short)",
                 )
 
@@ -435,7 +476,7 @@ class SignalGenerator:
                 symbol=self.symbol,
                 timestamp=timestamp,
                 price=price,
-                confidence=0.6,
+                rule_score=0.6,
                 reason=f"RSI oversold ({rsi:.1f})",
                 stop_loss=price - (2 * atr),
                 take_profit=price + (3 * atr),
@@ -451,7 +492,7 @@ class SignalGenerator:
                 symbol=self.symbol,
                 timestamp=timestamp,
                 price=price,
-                confidence=0.6,
+                rule_score=0.6,
                 reason=f"RSI overbought ({rsi:.1f})",
                 stop_loss=price + (2 * atr),
                 take_profit=price - (3 * atr),
@@ -466,7 +507,7 @@ class SignalGenerator:
                     symbol=self.symbol,
                     timestamp=timestamp,
                     price=price,
-                    confidence=0.7,
+                    rule_score=0.7,
                     reason="RSI normalized (long)",
                 )
             elif self.position_side == "short" and rsi < 50:
@@ -476,7 +517,7 @@ class SignalGenerator:
                     symbol=self.symbol,
                     timestamp=timestamp,
                     price=price,
-                    confidence=0.7,
+                    rule_score=0.7,
                     reason="RSI normalized (short)",
                 )
 
