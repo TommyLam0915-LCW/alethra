@@ -267,7 +267,7 @@ class PaperTradingEngine:
                             rationale, paper_portfolio_id
                         )
                         VALUES (
-                            :id, :owner_id, 'paper_trading', 'exit', :time,
+                            :id, :owner_id, 'system', 'exit', :time,
                             :rationale, :portfolio_id
                         )
                     """),
@@ -493,7 +493,7 @@ class PaperTradingEngine:
                             rationale, paper_portfolio_id
                         )
                         VALUES (
-                            :id, :owner_id, 'paper_trading', 'entry', :time,
+                            :id, :owner_id, 'system', 'entry', :time,
                             'Paper trading signal', :portfolio_id
                         )
                     """),
@@ -653,11 +653,11 @@ class PaperTradingEngine:
                 db.execute(
                     text("""
                     INSERT INTO paper_trading_daily_metrics (
-                        run_id, date, trades_count, wins, losses,
+                        id, run_id, date, trades_count, wins, losses,
                         daily_pnl, cumulative_pnl, drawdown_pct
                     )
                     VALUES (
-                        :run_id, :date, :trades, :wins, :losses,
+                        :metric_id, :run_id, :date, :trades, :wins, :losses,
                         :daily_pnl, :cum_pnl, 0
                     )
                     ON CONFLICT (run_id, date) DO UPDATE SET
@@ -668,6 +668,7 @@ class PaperTradingEngine:
                         cumulative_pnl = EXCLUDED.cumulative_pnl
                 """),
                     {
+                        "metric_id": str(uuid.uuid4()),
                         "run_id": run_id,
                         "date": trade_date,
                         "trades": metrics["trades"],

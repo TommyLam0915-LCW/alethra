@@ -30,7 +30,7 @@ def test_user_id():
         db.execute(
             text("""
                 INSERT INTO users (id, email, password_hash, created_at, updated_at, is_active, is_admin)
-                VALUES (:id, :email, :password, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, 0)
+                VALUES (:id, :email, :password, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, true, false)
             """),
             {"id": user_id, "email": f"test_{user_id[:8]}@test.local", "password": "test_hash_placeholder"}
         )

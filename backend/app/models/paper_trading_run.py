@@ -5,7 +5,7 @@ which track individual replay/execution runs and their daily performance aggrega
 """
 import uuid
 from datetime import datetime, date
-from sqlalchemy import Column, String, Integer, DateTime, Date, Numeric, ForeignKey, Index
+from sqlalchemy import Column, String, Integer, DateTime, Date, Numeric, ForeignKey, Index, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 from app.database import Base
@@ -58,5 +58,6 @@ class PaperTradingDailyMetric(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
+        UniqueConstraint("run_id", "date", name="uq_paper_trading_daily_run_date"),
         Index("idx_paper_trading_daily_run_date", "run_id", "date"),
     )

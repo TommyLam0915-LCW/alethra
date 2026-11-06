@@ -344,7 +344,7 @@ class TestReplayEventTiming:
 
 
 class TestReplayActorType:
-    """Verify actor_type is 'paper_trading', not 'human'."""
+    """Verify actor_type is 'system' for automated paper trading decisions."""
 
     @patch("app.services.paper_trading.SessionLocal")
     def test_actor_type_is_paper_trading(self, mock_session_local):
@@ -377,5 +377,5 @@ class TestReplayActorType:
 
         assert len(decision_insert_calls) > 0, "decision_records INSERT must be called"
         sql_text = str(decision_insert_calls[0][0][0])
-        assert "paper_trading" in sql_text
+        assert "'system'" in sql_text
         assert "'human'" not in sql_text
