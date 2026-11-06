@@ -10,6 +10,7 @@ import pytest
 from weakref import WeakSet
 
 from sqlalchemy import create_engine, event, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.pool import StaticPool
 from sqlalchemy.ext.compiler import compiles
@@ -18,6 +19,54 @@ from fastapi.testclient import TestClient
 
 from app.database import Base, get_db
 from app.models import *
+
+
+def _safe_dsn(url_str: str) -> str:
+    """Return a loggable DSN with password redacted."""
+    try:
+        u = make_url(url_str)
+        if u.password:
+            return str(u.set(password="***"))
+    except Exception:
+        pass
+    return "<unparseable DSN>"
+
+
+def _validate_pg_test_target(url_str: str) -> None:
+    """Fail closed: PostgreSQL test URLs must target a disposable database.
+
+    Checks parsed host, port, and database name. Does NOT log passwords.
+    """
+    u = make_url(url_str)
+    if u.drivername not in ("postgresql", "postgresql+psycopg2", "postgresql+pg8000"):
+        return  # non-PG URLs are handled elsewhere (e.g. sqlite)
+
+    host = u.host or ""
+    if host and host not in ("localhost", "127.0.0.1", "::1", "/tmp"):
+        raise RuntimeError(
+            f"SAFETY: PostgreSQL test DB must be on localhost, got host={host!r}. "
+            f"DSN: {_safe_dsn(url_str)}"
+        )
+
+    db_name = u.database or ""
+    if "test" not in db_name.lower():
+        raise RuntimeError(
+            f"SAFETY: PostgreSQL test DB name must contain 'test', got {db_name!r}. "
+            f"DSN: {_safe_dsn(url_str)}"
+        )
+
+    _PRODUCTION_DB_NAMES = {"ai_investment_lab", "alethra_production", "alethra_prod"}
+    if db_name in _PRODUCTION_DB_NAMES:
+        raise RuntimeError(
+            f"SAFETY: Refusing to use production database {db_name!r} for testing. "
+            f"DSN: {_safe_dsn(url_str)}"
+        )
+
+
+_IS_SQLITE = _TEST_DB_PATH.startswith("sqlite")
+
+if not _IS_SQLITE:
+    _validate_pg_test_target(_TEST_DB_PATH)
 
 
 @compiles(JSONB, "sqlite")
@@ -29,8 +78,6 @@ def _compile_jsonb_sqlite(element, compiler, **kw):
 def _compile_uuid_sqlite(element, compiler, **kw):
     return "VARCHAR(36)"
 
-
-_IS_SQLITE = _TEST_DB_PATH.startswith("sqlite")
 
 if _IS_SQLITE:
     TEST_ENGINE = create_engine(
@@ -47,6 +94,18 @@ if _IS_SQLITE:
 else:
     # PostgreSQL-backed disposable run: real connections, real row locks.
     TEST_ENGINE = create_engine(_TEST_DB_PATH, pool_pre_ping=True)
+
+    # Verify actual database target after connection — not just URL parsing.
+    # This catches misconfigured URLs where the parsed name differs from the
+    # actual database the server connects to.
+    _expected_db = make_url(_TEST_DB_PATH).database or ""
+    with TEST_ENGINE.connect() as _verify_conn:
+        _actual_db = _verify_conn.execute(text("SELECT current_database()")).scalar()
+        if _actual_db != _expected_db:
+            raise RuntimeError(
+                f"SAFETY: Connected database {_actual_db!r} does not match "
+                f"expected {_expected_db!r}. Refusing to proceed."
+            )
 
     @event.listens_for(TEST_ENGINE, "connect")
     def _set_pg_disposable_timeouts(dbapi_connection, connection_record):

@@ -131,6 +131,7 @@ from app.models.agent_strategy import (
 )
 from app.models.strategy_study import StrategyStudyRun, StrategyStudyTrade
 from app.models.learning_job import LearningJob, LearningProposal
+from app.models.paper_trading_run import PaperTradingRun, PaperTradingDailyMetric
 
 __all__ = [
     "User",
@@ -265,4 +266,6 @@ __all__ = [
     "StrategyStudyTrade",
     "LearningJob",
     "LearningProposal",
+    "PaperTradingRun",
+    "PaperTradingDailyMetric",
 ]

@@ -17,92 +17,57 @@ import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 
+from sqlalchemy.engine import make_url
+
+
+def _safe_dsn(url_str: str) -> str:
+    """Return a loggable DSN with password redacted."""
+    try:
+        u = make_url(url_str)
+        if u.password:
+            return str(u.set(password="***"))
+    except Exception:
+        pass
+    return "<unparseable DSN>"
+
+
 # Safety: refuse to run against production database
 _test_db_url = os.environ.get("ALETHRA_TEST_DB", "")
-if "ai_investment_lab_test" not in _test_db_url and _test_db_url.startswith("postgresql"):
+if _test_db_url:
+    _parsed = make_url(_test_db_url)
+    _db_name = _parsed.database or ""
+    _host = _parsed.host or ""
+
+    # Must be PostgreSQL
+    if _parsed.drivername not in ("postgresql", "postgresql+psycopg2"):
+        raise RuntimeError(
+            f"SAFETY: Integration tests require PostgreSQL, got {_parsed.drivername!r}"
+        )
+
+    # Host must be localhost
+    if _host and _host not in ("localhost", "127.0.0.1", "::1", "/tmp"):
+        raise RuntimeError(
+            f"SAFETY: Integration tests require localhost, got host={_host!r}. "
+            f"DSN: {_safe_dsn(_test_db_url)}"
+        )
+
+    # Database name must contain 'test'
+    if "test" not in _db_name.lower():
+        raise RuntimeError(
+            f"SAFETY: Test DB name must contain 'test', got {_db_name!r}. "
+            f"DSN: {_safe_dsn(_test_db_url)}"
+        )
+
+    # Must not be production
+    if _db_name in ("ai_investment_lab", "alethra_production", "alethra_prod"):
+        raise RuntimeError(
+            f"SAFETY: Refusing to use production database {_db_name!r}. "
+            f"DSN: {_safe_dsn(_test_db_url)}"
+        )
+else:
     raise RuntimeError(
-        f"SAFETY: Integration tests require ALETHRA_TEST_DB pointing to "
-        f"ai_investment_lab_test, got: {_test_db_url}"
+        "SAFETY: ALETHRA_TEST_DB environment variable is required for integration tests"
     )
-
-
-@pytest.fixture(autouse=True)
-def ensure_paper_trading_tables():
-    """Create raw-SQL tables that conftest's setup_db doesn't know about.
-
-    paper_trading_runs and paper_trading_daily_metrics are created by raw SQL
-    in the service layer, not by SQLAlchemy models, so they're not in
-    Base.metadata and don't get recreated by conftest's create_all().
-    """
-    from tests.conftest import TEST_ENGINE
-    from sqlalchemy import text
-
-    with TEST_ENGINE.connect() as conn:
-        # paper_trading_runs depends on paper_portfolios (FK), which IS in Base.metadata
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS paper_trading_runs (
-                id uuid NOT NULL DEFAULT gen_random_uuid(),
-                portfolio_id uuid NOT NULL,
-                skill character varying NOT NULL,
-                instrument_id character varying NOT NULL,
-                interval_minutes integer NOT NULL,
-                exit_config character varying NOT NULL,
-                start_date timestamp without time zone NOT NULL,
-                end_date date,
-                status character varying DEFAULT 'running',
-                initial_capital numeric(15,2) NOT NULL,
-                final_capital numeric(15,2),
-                total_pnl numeric(15,2) DEFAULT 0,
-                total_trades integer DEFAULT 0,
-                win_rate numeric(5,2),
-                sharpe_ratio numeric(8,4),
-                max_drawdown_pct numeric(8,4),
-                created_at timestamp with time zone DEFAULT now(),
-                updated_at timestamp with time zone DEFAULT now(),
-                run_type character varying(50) DEFAULT 'historical_simulation',
-                CONSTRAINT paper_trading_runs_pkey PRIMARY KEY (id),
-                CONSTRAINT paper_trading_runs_portfolio_id_fkey FOREIGN KEY (portfolio_id) REFERENCES paper_portfolios(id)
-            )
-        """))
-        conn.execute(text("""
-            CREATE INDEX IF NOT EXISTS idx_paper_trading_runs_portfolio
-            ON paper_trading_runs(portfolio_id)
-        """))
-        conn.execute(text("""
-            CREATE INDEX IF NOT EXISTS idx_paper_trading_runs_status
-            ON paper_trading_runs(status)
-        """))
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS paper_trading_daily_metrics (
-                id uuid NOT NULL DEFAULT gen_random_uuid(),
-                run_id uuid NOT NULL,
-                date date NOT NULL,
-                trades_count integer DEFAULT 0,
-                wins integer DEFAULT 0,
-                losses integer DEFAULT 0,
-                daily_pnl numeric(15,2) DEFAULT 0,
-                cumulative_pnl numeric(15,2) DEFAULT 0,
-                drawdown_pct numeric(8,4) DEFAULT 0,
-                sharpe_7d numeric(8,4),
-                created_at timestamp with time zone DEFAULT now(),
-                CONSTRAINT paper_trading_daily_metrics_pkey PRIMARY KEY (id),
-                CONSTRAINT paper_trading_daily_metrics_run_id_date_key UNIQUE (run_id, date),
-                CONSTRAINT paper_trading_daily_metrics_run_id_fkey FOREIGN KEY (run_id) REFERENCES paper_trading_runs(id)
-            )
-        """))
-        conn.execute(text("""
-            CREATE INDEX IF NOT EXISTS idx_paper_trading_daily_run_date
-            ON paper_trading_daily_metrics(run_id, date)
-        """))
-        conn.commit()
-
-    yield
-
-    # Cleanup: drop in reverse dependency order
-    with TEST_ENGINE.connect() as conn:
-        conn.execute(text("DROP TABLE IF EXISTS paper_trading_daily_metrics CASCADE"))
-        conn.execute(text("DROP TABLE IF EXISTS paper_trading_runs CASCADE"))
-        conn.commit()
 
 
 def _make_user(client, email: str, is_admin: bool = False):
