@@ -140,6 +140,7 @@ class PaperTradingEngine:
             cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
 
             # Get historical trades for this skill/instrument/interval/user
+            # Use rule_id (stable identifier) instead of rule_label_zh (display name)
             trades = db.execute(
                 text("""
                 SELECT
@@ -155,7 +156,7 @@ class PaperTradingEngine:
                 JOIN strategy_study_runs r ON t.run_id = r.id
                 WHERE r.instrument_id = :instrument
                   AND r.interval_minutes = :interval
-                  AND t.rule_label_zh = :skill
+                  AND t.rule_id = :rule_id
                   AND r.user_id = :user_id
                   AND t.entry_time >= :cutoff
                 ORDER BY t.entry_time ASC
@@ -163,7 +164,7 @@ class PaperTradingEngine:
                 {
                     "instrument": instrument,
                     "interval": interval,
-                    "skill": skill,
+                    "rule_id": skill,  # skill parameter now contains rule_id, not display name
                     "user_id": user_id,
                     "cutoff": cutoff,
                 },
