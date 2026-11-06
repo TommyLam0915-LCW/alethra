@@ -601,9 +601,37 @@ class SignalGenerator:
         - Only trade when trend_strength <= 0.25 (range-bound market)
         - Long when zscore <= -1.5 (oversold relative to 20-day mean)
         - Short when zscore >= 1.5 (overbought relative to 20-day mean)
-        - Exit when zscore crosses zero (mean reversion complete)
+        - Exit when signal returns to 0 (zscore between -1.5 and 1.5, OR trend > 0.25)
         """
-        # No signal in trending markets
+        # Check if we should exit existing position
+        # Exit when: zscore crosses back toward zero (between -1.5 and 1.5) OR trend becomes too strong
+        if self.in_position:
+            should_exit = False
+            exit_reason = ""
+            
+            if self.position_side == "long":
+                # Exit long when zscore >= -1.5 (mean reversion progressing) OR trend > 0.25
+                if zscore >= -1.5 or trend_strength > 0.25:
+                    should_exit = True
+                    exit_reason = f"z={zscore:.2f}, trend={trend_strength:.2f}"
+            elif self.position_side == "short":
+                # Exit short when zscore <= 1.5 (mean reversion progressing) OR trend > 0.25
+                if zscore <= 1.5 or trend_strength > 0.25:
+                    should_exit = True
+                    exit_reason = f"z={zscore:.2f}, trend={trend_strength:.2f}"
+            
+            if should_exit:
+                self.in_position = False
+                return TradingSignal(
+                    signal_type=SignalType.EXIT,
+                    symbol=self.symbol,
+                    timestamp=timestamp,
+                    price=price,
+                    rule_score=0.8,
+                    reason=f"Range fade exit {self.position_side}: {exit_reason}",
+                )
+        
+        # No new entries in trending markets
         if trend_strength > 0.25:
             return None
         
@@ -624,7 +652,7 @@ class SignalGenerator:
             )
 
         # Entry short when overbought in range-bound market
-        elif not self.in_position and zscore >= 1.5:
+        if not self.in_position and zscore >= 1.5:
             self.in_position = True
             self.position_side = "short"
             self.entry_price = price
@@ -638,28 +666,5 @@ class SignalGenerator:
                 stop_loss=price + (2 * atr),
                 take_profit=price - (2 * atr),  # Target: mean reversion to z=0
             )
-
-        # Exit when mean reversion complete (z-score crosses zero)
-        elif self.in_position:
-            if self.position_side == "long" and zscore >= 0:
-                self.in_position = False
-                return TradingSignal(
-                    signal_type=SignalType.EXIT,
-                    symbol=self.symbol,
-                    timestamp=timestamp,
-                    price=price,
-                    rule_score=0.8,
-                    reason=f"Range fade exit long: z={zscore:.2f} (mean reached)",
-                )
-            elif self.position_side == "short" and zscore <= 0:
-                self.in_position = False
-                return TradingSignal(
-                    signal_type=SignalType.EXIT,
-                    symbol=self.symbol,
-                    timestamp=timestamp,
-                    price=price,
-                    rule_score=0.8,
-                    reason=f"Range fade exit short: z={zscore:.2f} (mean reached)",
-                )
 
         return None

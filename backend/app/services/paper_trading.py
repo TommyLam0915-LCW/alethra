@@ -748,6 +748,277 @@ class PaperTradingEngine:
         finally:
             db.close()
 
+    def execute_synthetic_replay(
+        self,
+        events: list[dict],
+        initial_capital: float = 100000.0,
+        max_positions: int = 5,
+        position_size_pct: float = 0.10,
+        commission_rate: float = 0.0,
+        slippage_rate: float = 0.0,
+    ) -> dict:
+        """Execute paper trading using synthetic events (for testing).
+
+        This method is designed for unit tests. It accepts a list of trade events
+        directly, without querying the database. Returns the full ledger including
+        orders, fills, positions, and daily PnL.
+
+        Args:
+            events: List of trade event dicts with keys:
+                - idx: trade index
+                - event_type: "entry" or "exit"
+                - event_time: datetime
+                - instrument_id: str
+                - rule_id: str
+                - exit_config: str
+                - quantity: float
+                - price: float
+            initial_capital: Starting capital
+            max_positions: Maximum concurrent positions
+            position_size_pct: Max position size as % of capital
+            commission_rate: Commission as fraction of gross (e.g., 0.001 = 0.1%)
+            slippage_rate: Slippage as fraction of price (e.g., 0.0005 = 0.05%)
+
+        Returns:
+            Dict with keys: orders, fills, positions, daily_pnl, event_log,
+            initial_capital, final_capital
+        """
+        ENTRY = "entry"
+        EXIT = "exit"
+
+        # Sort events: by time, exits before entries at same time
+        sorted_events = sorted(events, key=lambda e: (e["event_time"], 0 if e["event_type"] == EXIT else 1))
+
+        # Simulation state
+        current_capital = initial_capital
+        active_positions = {}  # idx -> position dict
+        orders = []
+        fills = []
+        positions = []
+        daily_pnl = {}
+        event_log = []
+
+        for event in sorted_events:
+            event_time = event["event_time"]
+            event_type = event["event_type"]
+            idx = event["idx"]
+            instrument_id = event["instrument_id"]
+            quantity = event["quantity"]
+            price = event["price"]
+
+            if event_type == EXIT and idx in active_positions:
+                # Process exit
+                pos = active_positions.pop(idx)
+                trade_quantity = pos["quantity"]
+                is_long = pos["is_long"]
+                entry_price = pos["entry_price"]
+
+                # Calculate PnL (for reporting only, not for cash flow)
+                if is_long:
+                    realized_pnl = trade_quantity * (price - entry_price)
+                else:
+                    realized_pnl = trade_quantity * (entry_price - price)
+
+                # Create exit order
+                exit_order_id = str(uuid.uuid4())
+                exit_side = "SELL" if is_long else "BUY"
+                exit_order = {
+                    "id": exit_order_id,
+                    "side": exit_side,
+                    "quantity": trade_quantity,
+                    "status": "filled",
+                    "created_at": event_time,
+                }
+                orders.append(exit_order)
+
+                # Create exit fill with costs
+                # Cash flow: we receive money from selling
+                exit_gross = trade_quantity * price
+                exit_commission = exit_gross * commission_rate
+                exit_slippage = exit_gross * slippage_rate
+                exit_net = exit_gross - exit_commission - exit_slippage
+
+                # Update capital with net cash flow (not realized_pnl separately)
+                current_capital += exit_net
+
+                exit_fill_id = str(uuid.uuid4())
+                exit_fill = {
+                    "id": exit_fill_id,
+                    "order_id": exit_order_id,
+                    "position_id": pos["id"],
+                    "quantity": -trade_quantity,  # Negative for exit
+                    "price": price,
+                    "gross_amount": exit_gross,
+                    "commission_amount": exit_commission,
+                    "slippage_amount": exit_slippage,
+                    "net_cash_change": exit_net,
+                    "realized_pnl": realized_pnl,
+                    "execution_date": event_time.strftime("%Y-%m-%d"),
+                }
+                fills.append(exit_fill)
+
+                # Update position
+                pos["status"] = "closed"
+                pos["closed_at"] = event_time
+                pos["realized_pnl"] = realized_pnl
+
+                # Track daily PnL
+                exit_date = event_time.date()
+                if exit_date not in daily_pnl:
+                    daily_pnl[exit_date] = {"pnl": 0, "trades": 0, "wins": 0}
+                daily_pnl[exit_date]["pnl"] += realized_pnl
+                daily_pnl[exit_date]["trades"] += 1
+                if realized_pnl > 0:
+                    daily_pnl[exit_date]["wins"] += 1
+
+                event_log.append({
+                    "time": event_time.isoformat(),
+                    "event": "exit",
+                    "trade_idx": idx,
+                    "active_positions": len(active_positions),
+                    "capital": current_capital,
+                    "realized_pnl": realized_pnl,
+                })
+
+            elif event_type == ENTRY and idx not in active_positions:
+                # Check capacity
+                if len(active_positions) >= max_positions:
+                    event_log.append({
+                        "time": event_time.isoformat(),
+                        "event": "entry_blocked",
+                        "trade_idx": idx,
+                        "active_positions": len(active_positions),
+                        "capital": current_capital,
+                        "reason": "max_positions",
+                    })
+                    continue
+
+                # Check equity > 0
+                if current_capital <= 0:
+                    event_log.append({
+                        "time": event_time.isoformat(),
+                        "event": "entry_blocked",
+                        "trade_idx": idx,
+                        "active_positions": len(active_positions),
+                        "capital": current_capital,
+                        "reason": "equity_non_positive",
+                    })
+                    continue
+
+                # Calculate position value
+                proposed_position_value = quantity * price
+
+                # Check single asset exposure limit
+                single_asset_limit = current_capital * position_size_pct
+                if proposed_position_value > single_asset_limit:
+                    event_log.append({
+                        "time": event_time.isoformat(),
+                        "event": "entry_blocked",
+                        "trade_idx": idx,
+                        "active_positions": len(active_positions),
+                        "capital": current_capital,
+                        "reason": "single_asset_exposure_limit",
+                        "proposed_value": proposed_position_value,
+                        "limit": single_asset_limit,
+                    })
+                    continue
+
+                # Check total gross exposure limit (100% of equity)
+                current_exposure = sum(
+                    abs(pos["quantity"] * pos["entry_price"])
+                    for pos in active_positions.values()
+                )
+                proposed_exposure = current_exposure + proposed_position_value
+                total_exposure_limit = current_capital * 1.0
+                if proposed_exposure > total_exposure_limit:
+                    event_log.append({
+                        "time": event_time.isoformat(),
+                        "event": "entry_blocked",
+                        "trade_idx": idx,
+                        "active_positions": len(active_positions),
+                        "capital": current_capital,
+                        "reason": "total_exposure_limit",
+                        "proposed_exposure": proposed_exposure,
+                        "limit": total_exposure_limit,
+                    })
+                    continue
+
+                # Process entry
+                is_long = quantity > 0
+                trade_quantity = abs(quantity)
+
+                # Create entry order
+                entry_order_id = str(uuid.uuid4())
+                entry_order = {
+                    "id": entry_order_id,
+                    "side": "BUY" if is_long else "SELL",
+                    "quantity": trade_quantity,
+                    "status": "filled",
+                    "created_at": event_time,
+                }
+                orders.append(entry_order)
+
+                # Create entry fill with costs
+                entry_gross = trade_quantity * price
+                entry_commission = entry_gross * commission_rate
+                entry_slippage = entry_gross * slippage_rate
+                entry_net = -(entry_gross + entry_commission + entry_slippage)  # Negative for cash outflow
+
+                entry_fill_id = str(uuid.uuid4())
+                entry_fill = {
+                    "id": entry_fill_id,
+                    "order_id": entry_order_id,
+                    "position_id": None,  # Will be set after position created
+                    "quantity": trade_quantity if is_long else -trade_quantity,
+                    "price": price,
+                    "gross_amount": entry_gross,
+                    "commission_amount": entry_commission,
+                    "slippage_amount": entry_slippage,
+                    "net_cash_change": entry_net,
+                    "execution_date": event_time.strftime("%Y-%m-%d"),
+                }
+                fills.append(entry_fill)
+
+                # Create position
+                position_id = str(uuid.uuid4())
+                position = {
+                    "id": position_id,
+                    "instrument_id": instrument_id,
+                    "quantity": trade_quantity,
+                    "entry_price": price,
+                    "is_long": is_long,
+                    "status": "open",
+                    "opened_at": event_time,
+                    "closed_at": None,
+                    "realized_pnl": 0.0,
+                }
+                positions.append(position)
+                active_positions[idx] = position
+
+                # Link fill to position
+                entry_fill["position_id"] = position_id
+
+                # Deduct cash
+                current_capital += entry_net
+
+                event_log.append({
+                    "time": event_time.isoformat(),
+                    "event": "entry",
+                    "trade_idx": idx,
+                    "active_positions": len(active_positions),
+                    "capital": current_capital,
+                })
+
+        return {
+            "orders": orders,
+            "fills": fills,
+            "positions": positions,
+            "daily_pnl": daily_pnl,
+            "event_log": event_log,
+            "initial_capital": initial_capital,
+            "final_capital": current_capital,
+        }
+
     def generate_daily_report(self, run_id: str, report_date: Optional[date] = None) -> dict:
         """Generate daily performance report for a run."""
         if report_date is None:

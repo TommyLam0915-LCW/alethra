@@ -203,45 +203,35 @@ class TestRangeFadeStepByStepParity:
         assert len(live_entries) > 0, "Live should have entry signals"
         
         # Verify signal directions match for ALL entries (not just first 3)
-        # Allow ±1 bar timing difference due to incremental vs batch processing
+        # Research and live must produce identical timing - no tolerance allowed
         min_entries = min(len(research_entries), len(live_entries))
         assert min_entries >= 2, f"Should have at least 2 entries for comparison, got {min_entries}"
-        
-        timing_differences = []
+
         for i in range(min_entries):
             research_sig = research_entries[i]
             live_sig = live_entries[i]
-            
+
             print(f"\nEntry {i+1}:")
             print(f"  Research: bar={research_sig['bar_index']}, signal={research_sig['signal']}")
             print(f"  Live:     bar={live_sig['bar_index']}, signal={live_sig['signal']}")
-            
+
             # Signals should match in direction (1=long, -1=short)
             assert research_sig["signal"] == live_sig["signal"], (
                 f"Entry {i+1} signal mismatch: "
                 f"research={research_sig['signal']}, live={live_sig['signal']}"
             )
-            
-            # Track timing difference (allow ±1 bar)
-            bar_diff = abs(research_sig["bar_index"] - live_sig["bar_index"])
-            timing_differences.append(bar_diff)
-            
-            # Document timing difference (should be small)
-            if bar_diff > 0:
-                print(f"  ⚠ Timing difference: {bar_diff} bar(s)")
-        
-        # Verify all timing differences are within acceptable range (±1 bar)
-        max_timing_diff = max(timing_differences) if timing_differences else 0
-        assert max_timing_diff <= 1, (
-            f"Timing difference too large: max {max_timing_diff} bars. "
-            f"Expected ≤1 bar difference due to incremental vs batch processing."
-        )
-        
+
+            # Timing must match EXACTLY - no tolerance
+            assert research_sig["bar_index"] == live_sig["bar_index"], (
+                f"Entry {i+1} timing mismatch: "
+                f"research bar {research_sig['bar_index']}, live bar {live_sig['bar_index']}. "
+                f"Research and live must produce identical signal timing."
+            )
+
         print(f"\n=== PARITY SUMMARY ===")
         print(f"Total entries compared: {min_entries}")
-        print(f"Max timing difference: {max_timing_diff} bar(s)")
         print(f"All signal directions match: ✓")
-        print(f"Timing within tolerance (≤1 bar): ✓")
+        print(f"All timing matches exactly: ✓")
 
     def test_no_future_data_leakage_in_live(self):
         """Verify live system only uses data available at signal time.
