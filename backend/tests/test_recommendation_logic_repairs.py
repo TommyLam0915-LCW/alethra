@@ -198,22 +198,44 @@ class TestPatternAnalysisUnknownRule:
     """Test that unknown rules fail validation (fail closed)."""
 
     def test_unknown_rule_fails_validation(self):
-        """Unknown rule_id should return passed=False, not passed=True."""
+        """Unknown rule_id should return passed=False at the unknown_rule check."""
         from unittest.mock import MagicMock
         from uuid import uuid4
         
-        # Mock database session
         mock_db = MagicMock()
         
-        # Mock no baseline run found
-        mock_db.scalars.return_value.first.return_value = None
+        # Mock a valid run with bars and trades
+        # The trades must have the SAME rule_id as the proposal (even though it's unknown)
+        # This simulates: rule was known when trades were recorded, but has since been removed
+        unknown_rule_id = "nonexistent_rule_v1"
         
+        mock_trade = MagicMock()
+        mock_trade.rule_id = unknown_rule_id  # Same as proposal
+        mock_trade.exit_id = "exit_1"
+        mock_trade.net_pnl = 10.0
+        mock_trade.cash_after = 10010.0
+        
+        mock_run = MagicMock()
+        mock_run.bars_json = [{"open_time": "2024-01-01T00:00:00", "open": 100, "high": 101, "low": 99, "close": 100, "volume": 1000}] * 100
+        mock_run.trades = [mock_trade] * 5  # Baseline trades for the unknown rule
+        mock_run.settings_json = {
+            "starting_cash": "10000",
+            "notional_per_trade": "1000",
+            "commission_rate": "0.001",
+            "slippage_rate": "0.001",
+            "atr_window": 14,
+            "cost_multiple": "2.0",
+        }
+        
+        mock_db.scalars.return_value.first.return_value = mock_run
+        
+        # Use an unknown rule_id
         proposal = {
             "instrument_id": "CRYPTO:KRAKEN:BTC-USD",
             "interval_minutes": 1440,
-            "rule_id": "nonexistent_rule_v1",
+            "rule_id": unknown_rule_id,  # This rule doesn't exist in RULE_BY_ID
             "baseline_exit_config": {"exit_id": "exit_1"},
-            "proposed_exit_config": {"target_atr": "2.0", "stop_atr": "1.5"},
+            "proposed_exit_config": {"target_atr": "2.0", "stop_atr": "1.5", "time_stop_bars": 6},
         }
         
         result = validate_proposal(
@@ -222,10 +244,11 @@ class TestPatternAnalysisUnknownRule:
             proposal=proposal,
         )
         
-        # Should fail with no_baseline_run (since we mocked no run found)
-        # The key is that it should NOT pass
-        assert result["passed"] is False, (
-            "Unknown rule should fail validation (fail closed)"
+        # Should fail with unknown_rule error (not no_baseline_trades or other early exit)
+        assert result["passed"] is False, "Unknown rule should fail validation"
+        assert result.get("error") == "unknown_rule", (
+            f"Expected error='unknown_rule', got error='{result.get('error')}'. "
+            f"Test did not reach the unknown_rule branch!"
         )
 
     def test_known_rule_can_pass_validation(self):
@@ -345,12 +368,18 @@ class TestIntegrationEndToEnd:
         # Generate signal
         signal = gen.generate_signal()
         
-        if signal is not None:
-            # Should have rule_score, not confidence
-            assert hasattr(signal, "rule_score")
-            assert not hasattr(signal, "confidence")
-            assert isinstance(signal.rule_score, float)
-            assert 0.0 <= signal.rule_score <= 1.0
+        # E2E test must actually produce a signal and assert on it
+        # Cannot pass with zero assertions (signal is None)
+        assert signal is not None, (
+            "E2E test must produce a signal. If signal is None, the test is not "
+            "actually exercising the target behavior. Adjust bar data or parameters."
+        )
+        
+        # Should have rule_score, not confidence
+        assert hasattr(signal, "rule_score"), "Signal must have rule_score attribute"
+        assert not hasattr(signal, "confidence"), "Signal must not have confidence attribute (renamed to rule_score)"
+        assert isinstance(signal.rule_score, float), "rule_score must be a float"
+        assert 0.0 <= signal.rule_score <= 1.0, f"rule_score must be in [0, 1], got {signal.rule_score}"
 
 
 class TestValidationLoopholes:
