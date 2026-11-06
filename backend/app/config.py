@@ -27,7 +27,7 @@ AGENT_STRATEGY_TEST_SNAPSHOT_AUTHORIZATION = "test-only-fixture-v1"
 # validator refuses it outside a local development process.
 AGENT_STRATEGY_TEST_TRAINING_AUTHORIZATION = "test-only-training-fixture-v1"
 
-_KNOWN_DATA_PROVIDERS = {"demo", "lseg", "twelvedata"}
+_KNOWN_DATA_PROVIDERS = {"demo", "lseg", "twelvedata", "synthetic_stock", "synthetic_forex"}
 _KNOWN_AI_PROVIDERS = {"mock", "openai_compatible"}
 _INTRADAY_INTERVAL_LABELS = {"1min", "5min", "15min", "30min"}
 
@@ -108,6 +108,14 @@ class Settings(BaseSettings):
     # refused outside local development. When enabled, requests from loopback
     # skip JWT validation and use the first active user in the database.
     research_auth_bypass_enabled: bool = False
+    # Live paper trading daemon configuration. Off by default; when enabled,
+    # connects to Kraken WebSocket for real-time crypto data and executes
+    # paper trades based on technical signals.
+    live_trading_enabled: bool = False
+    live_trading_symbols: str = "XBT/USD,ETH/USD,SOL/USD"
+    live_trading_interval: int = 60
+    live_trading_capital: float = 100000.0
+    kraken_ws_url: str = "wss://ws.kraken.com"
 
     @property
     def intraday_instrument_list(self) -> list[str]:
@@ -130,6 +138,14 @@ class Settings(BaseSettings):
         return [origin.strip() for origin in self.cors_origins.split(",")]
 
     @property
+    def live_trading_symbol_list(self) -> list[str]:
+        return [
+            symbol.strip()
+            for symbol in self.live_trading_symbols.split(",")
+            if symbol.strip()
+        ]
+
+    @property
     def is_production_like(self) -> bool:
         return self.app_env in ("production", "staging")
 
@@ -144,6 +160,7 @@ class Settings(BaseSettings):
         self._validate_research_auth_bypass()
         self._validate_intraday_bounds()
         self._validate_crypto_budget_bounds()
+        self._validate_live_trading()
 
         if not self.is_production_like:
             return self
@@ -357,6 +374,23 @@ class Settings(BaseSettings):
                 "RESEARCH_AUTH_BYPASS_ENABLED requires a sqlite or loopback DATABASE_URL; "
                 "refusing to bypass auth against a remote database."
             )
+
+    def _validate_live_trading(self) -> None:
+        if not self.live_trading_enabled:
+            return
+        if self.is_production_like:
+            raise ValueError(
+                "LIVE_TRADING_ENABLED is a local development capability and must be off "
+                f"when APP_ENV={self.app_env}. It cannot serve a production deployment."
+            )
+        if self.live_trading_interval < 10:
+            raise ValueError(
+                "LIVE_TRADING_INTERVAL must be at least 10 seconds to avoid rate limits."
+            )
+        if self.live_trading_capital <= 0:
+            raise ValueError("LIVE_TRADING_CAPITAL must be positive.")
+        if not self.live_trading_symbols.strip():
+            raise ValueError("LIVE_TRADING_SYMBOLS must specify at least one symbol.")
 
     def _validate_trial_passwordless(self) -> None:
         if not self.trial_passwordless_enabled:
