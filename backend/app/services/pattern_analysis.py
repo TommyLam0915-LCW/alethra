@@ -293,7 +293,8 @@ def _generate_recommendations(
             # Do NOT generate parameter_adjustment for insufficient evidence
             continue
         
-        # Sufficient evidence: can recommend parameter adjustment
+        # Descriptive evidence: can describe historical performance, but not validated
+        # trade_count >= 30 allows statistical description, not formal validation
         if sharpe is not None and sharpe < 0:
             recommendations.append(
                 {
@@ -304,7 +305,7 @@ def _generate_recommendations(
                         f"with {trade_count} trades. Parameter adjustment recommended."
                     ),
                     "metrics": metrics,
-                    "evidence_status": "sufficient",
+                    "evidence_status": "descriptive",  # Historical description, not validated
                 }
             )
 

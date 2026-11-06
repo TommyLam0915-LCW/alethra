@@ -64,6 +64,7 @@ class TestSignalGeneratorRuleIdMatching:
                 "_bb_mean_reversion_signal",
                 "_momentum_signal",
                 "_rsi_signal",
+                "_range_fade_signal",
             ]
 
     def test_skill_parameter_optional(self):

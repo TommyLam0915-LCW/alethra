@@ -249,7 +249,7 @@ function PerformanceInsights({ summary, skills, trades }: { summary: JournalSumm
   const insights: InsightItem[] = [];
 
   // Insight 1: Best performing skill
-  // Evidence gating: only recommend if trade_count >= 30
+  // Evidence gating: distinguish descriptive (historical) from validated
   if (skills.length > 0) {
     const bestSkill = [...skills].sort((a, b) => Number(b.total_pnl) - Number(a.total_pnl))[0];
     if (Number(bestSkill.total_pnl) > 0 && bestSkill.trade_count >= 30) {
@@ -258,15 +258,15 @@ function PerformanceInsights({ summary, skills, trades }: { summary: JournalSumm
         icon: '\uD83C\uDFC6',
         title: 'Your best skill',
         message: `${bestSkill.rule_label_zh ?? bestSkill.rule_id} generated $${Number(bestSkill.total_pnl).toFixed(2)} profit with ${Number(bestSkill.win_rate).toFixed(1)}% win rate (${bestSkill.trade_count} trades)`,
-        action: `Evidence-supported: Consider focusing on ${bestSkill.rule_label_zh ?? bestSkill.rule_id}`,
+        action: `Descriptive: Historical data suggests ${bestSkill.rule_label_zh ?? bestSkill.rule_id} performed well. Not validated evidence.`,
       });
     } else if (Number(bestSkill.total_pnl) > 0 && bestSkill.trade_count < 30) {
       insights.push({
         type: 'info',
         icon: '\u2139\uFE0F',
-        title: 'Insufficient evidence',
-        message: `${bestSkill.rule_label_zh ?? bestSkill.rule_id} shows profit but only ${bestSkill.trade_count} trades. Need >= 30 trades for reliable conclusions.`,
-        action: 'Continue collecting data before making decisions',
+        title: 'Insufficient data for description',
+        message: `${bestSkill.rule_label_zh ?? bestSkill.rule_id} shows profit but only ${bestSkill.trade_count} trades. Need >= 30 trades for reliable historical description.`,
+        action: 'Continue collecting data before drawing conclusions',
       });
     }
   }
@@ -301,7 +301,7 @@ function PerformanceInsights({ summary, skills, trades }: { summary: JournalSumm
     })
     .sort((a, b) => b.totalPnl - a.totalPnl);
 
-  // Evidence gating: only recommend timeframe if count >= 30
+  // Evidence gating: distinguish descriptive (historical) from validated
   if (intervalPerformance.length > 0 && intervalPerformance[0].totalPnl > 0 && intervalPerformance[0].count >= 30) {
     const best = intervalPerformance[0];
     insights.push({
@@ -309,14 +309,14 @@ function PerformanceInsights({ summary, skills, trades }: { summary: JournalSumm
       icon: '\u23F0',
       title: 'Best timeframe',
       message: `${best.interval}m trades generated $${best.totalPnl.toFixed(2)} profit (${best.count} trades, ${best.winRate.toFixed(1)}% win rate)`,
-      action: 'Evidence-supported: Consider focusing on this timeframe',
+      action: 'Descriptive: Historical data suggests this timeframe performed well. Not validated evidence.',
     });
   } else if (intervalPerformance.length > 0 && intervalPerformance[0].totalPnl > 0 && intervalPerformance[0].count < 30) {
     const best = intervalPerformance[0];
     insights.push({
       type: 'info',
       icon: '\u2139\uFE0F',
-      title: 'Insufficient evidence for timeframe',
+      title: 'Insufficient data for timeframe description',
       message: `${best.interval}m shows profit but only ${best.count} trades. Need >= 30 trades for reliable conclusions.`,
       action: 'Continue collecting data before making decisions',
     });

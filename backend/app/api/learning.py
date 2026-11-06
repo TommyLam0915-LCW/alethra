@@ -280,9 +280,9 @@ def deploy_proposal(
                 "reason": "proposal_is_hypothesis",
                 "evidence_status": evidence_status,
                 "message": (
-                    "This proposal is marked as 'hypothesis' (not evidence-based). "
+                    "This proposal is marked as 'hypothesis' (parameter exploration, not validated). "
                     "Hypothesis proposals cannot be deployed. "
-                    "They require further validation with sufficient evidence (>= 30 trades)."
+                    "They require formal validation to become validated_candidate status."
                 ),
             },
         )
