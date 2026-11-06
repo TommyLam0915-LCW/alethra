@@ -108,15 +108,32 @@ class PaperTradingEngine:
         days_back: int = 30,
         position_size_pct: float = 0.10,
         max_positions: int = 3,
+        commission_rate: Decimal = Decimal("0.001"),  # 0.1% commission
+        slippage_rate: Decimal = Decimal("0.0005"),   # 0.05% slippage
     ) -> dict:
         """Execute paper trading using historical data replay.
 
         Event-driven simulation: exits are processed before entries at the
         same timestamp, so released capital is available for new positions
         only after the exit settles.
+        
+        Args:
+            run_id: The paper trading run ID
+            user_id: The user ID (must match run owner)
+            days_back: Number of days to look back for historical trades
+            position_size_pct: Position size as percentage of equity (e.g., 0.10 = 10%)
+            max_positions: Maximum number of concurrent positions
+            commission_rate: Commission rate as decimal (e.g., 0.001 = 0.1%)
+            slippage_rate: Slippage rate as decimal (e.g., 0.0005 = 0.05%)
         """
         if days_back is None or days_back <= 0:
             raise ValueError(f"days_back must be a positive integer, got {days_back!r}")
+        
+        # Validate commission and slippage rates are non-negative Decimals
+        if not isinstance(commission_rate, Decimal) or commission_rate < 0:
+            raise ValueError(f"commission_rate must be a non-negative Decimal, got {commission_rate!r}")
+        if not isinstance(slippage_rate, Decimal) or slippage_rate < 0:
+            raise ValueError(f"slippage_rate must be a non-negative Decimal, got {slippage_rate!r}")
 
         db = SessionLocal()
         acquired_execution = False
@@ -149,9 +166,11 @@ class PaperTradingEngine:
 
             # Get historical trades for this skill/instrument/interval/user
             # Use rule_id (stable identifier) instead of rule_label_zh (display name)
+            # Include source pinning fields: trade_id, run_id, rule_id, exit_id, data_version
             trades = db.execute(
                 text("""
                 SELECT
+                    t.id as source_trade_id,
                     t.entry_time,
                     t.exit_time,
                     t.entry_price,
@@ -159,7 +178,11 @@ class PaperTradingEngine:
                     t.net_pnl,
                     t.direction,
                     t.quantity,
-                    t.exit_reason
+                    t.exit_reason,
+                    t.run_id as source_run_id,
+                    t.rule_id as source_rule_id,
+                    t.exit_id as source_exit_id,
+                    r.research_version as source_data_version
                 FROM strategy_study_trades t
                 JOIN strategy_study_runs r ON t.run_id = r.id
                 WHERE r.instrument_id = :instrument
@@ -179,6 +202,15 @@ class PaperTradingEngine:
             ).fetchall()
 
             logger.info(f"Found {len(trades)} historical trades to replay")
+            
+            # Long-only enforcement: reject any short positions
+            for trade in trades:
+                direction = trade.direction or "long"
+                if direction.lower() not in ["long", "buy"]:
+                    raise ValueError(
+                        f"Long-only mode: cannot replay short trade {trade.source_trade_id} "
+                        f"with direction={direction!r}. Paper trading currently supports long positions only."
+                    )
 
             # Atomic conditional UPDATE: only acquire execution rights if status allows
             # PostgreSQL re-checks WHERE condition on concurrent updates, so this prevents race
@@ -210,7 +242,11 @@ class PaperTradingEngine:
             EXIT = "exit"
             events = []
             for idx, trade in enumerate(trades):
-                entry_time, exit_time, entry_price, exit_price, net_pnl, direction, quantity, exit_reason = trade
+                # trade tuple: (source_trade_id, entry_time, exit_time, entry_price, exit_price, 
+                #               net_pnl, direction, quantity, exit_reason, source_run_id, 
+                #               source_rule_id, source_exit_id, source_data_version)
+                entry_time = trade.entry_time
+                exit_time = trade.exit_time
                 events.append((entry_time, ENTRY, idx))
                 events.append((exit_time, EXIT, idx))
 
@@ -218,19 +254,31 @@ class PaperTradingEngine:
             events.sort(key=lambda e: (e[0], 0 if e[1] == EXIT else 1))
 
             # Simulation state — credible ledger with separate cash and position tracking
+            # All calculations use Decimal for precision
             available_cash = Decimal(str(initial_capital))
             position_value = Decimal("0")  # Total value locked in positions
             active_positions = {}  # idx -> position dict
             executed_trades = []
             daily_pnl = {}
             event_log = []
+            
+            # Track as_of timestamp for source pinning
+            as_of = datetime.now(timezone.utc)
 
             # Track all cash flows for reconciliation (trading activities only, not initial deposit)
             cash_flows = []  # List of (time, flow_type, amount) for audit
 
             for event_time, event_type, idx in events:
                 trade = trades[idx]
-                entry_time, exit_time, entry_price, exit_price, orig_net_pnl, direction, quantity, exit_reason = trade
+                # Unpack trade tuple with source pinning fields
+                (source_trade_id, entry_time, exit_time, entry_price, exit_price, 
+                 orig_net_pnl, direction, quantity, exit_reason, source_run_id,
+                 source_rule_id, source_exit_id, source_data_version) = trade
+                
+                # Convert prices and quantity to Decimal for precision
+                entry_price_dec = Decimal(str(entry_price))
+                exit_price_dec = Decimal(str(exit_price))
+                trade_quantity_dec = Decimal(str(quantity))
 
                 if event_type == EXIT and idx in active_positions:
                     # Process exit: return position value + settle PnL to available cash
@@ -240,18 +288,29 @@ class PaperTradingEngine:
                     entry_price = Decimal(str(pos["entry_price"]))
                     exit_price_dec = Decimal(str(exit_price))
 
-                    # Calculate realized PnL
+                    # Calculate realized PnL using Decimal precision
                     if is_long:
                         realized_pnl = trade_quantity * (exit_price_dec - entry_price)
                     else:
                         realized_pnl = trade_quantity * (entry_price - exit_price_dec)
+                    
+                    # Apply exit commission and slippage (non-zero costs)
+                    exit_gross_dec = trade_quantity * exit_price_dec
+                    exit_commission = exit_gross_dec * commission_rate
+                    exit_slippage = exit_gross_dec * slippage_rate
+                    exit_total_costs = exit_commission + exit_slippage
+                    
+                    # Net PnL after costs
+                    realized_pnl_net = realized_pnl - exit_total_costs
 
                     # Return position value to available cash
                     position_cost = trade_quantity * entry_price
-                    available_cash += position_cost + realized_pnl
+                    available_cash += position_cost + realized_pnl_net
                     position_value -= position_cost
                     
-                    cash_flows.append((event_time, "exit_proceeds", position_cost + realized_pnl))
+                    cash_flows.append((event_time, "exit_proceeds", position_cost + realized_pnl_net))
+                    cash_flows.append((event_time, "exit_commission", -exit_commission))
+                    cash_flows.append((event_time, "exit_slippage", -exit_slippage))
 
                     # Create exit decision, order, and fill (mirror entry logic)
                     exit_decision_id = str(uuid.uuid4())
@@ -303,12 +362,12 @@ class PaperTradingEngine:
                         },
                     )
 
-                    # Create exit fill
+                    # Create exit fill with non-zero costs
                     # For exits: gross_amount is the proceeds (positive for cash inflow)
                     # net_cash_change = gross_amount - commission - slippage
-                    exit_gross = float(trade_quantity) * float(exit_price)
-                    exit_commission = 0.0  # TODO: implement commission model
-                    exit_slippage = 0.0  # TODO: implement slippage model
+                    exit_gross = trade_quantity * exit_price_dec
+                    exit_commission = exit_gross * commission_rate
+                    exit_slippage = exit_gross * slippage_rate
                     exit_net = exit_gross - exit_commission - exit_slippage
 
                     db.execute(
@@ -328,18 +387,18 @@ class PaperTradingEngine:
                             "id": exit_fill_id,
                             "order_id": exit_order_id,
                             "exec_date": exit_time.strftime("%Y-%m-%d"),
-                            "obs_price": float(exit_price),
-                            "exec_price": float(exit_price),
+                            "obs_price": exit_price_dec,
+                            "exec_price": exit_price_dec,
                             "slippage": exit_slippage,
                             "commission": exit_commission,
-                            "quantity": float(trade_quantity),
+                            "quantity": trade_quantity,
                             "gross": exit_gross,
                             "net": exit_net,
                             "timestamp": exit_time,
                         },
                     )
 
-                    # Update PaperPosition: close position and record realized PnL
+                    # Update PaperPosition: close position and record realized PnL (net of costs)
                     db.execute(
                         text("""
                         UPDATE paper_positions
@@ -350,27 +409,29 @@ class PaperTradingEngine:
                     """),
                         {
                             "closed_at": exit_time,
-                            "realized_pnl": realized_pnl,
+                            "realized_pnl": realized_pnl_net,
                             "position_id": pos["position_id"],
                         },
                     )
 
                     # Update PaperPortfolio: adjust current_virtual_cash
-                    # Cash change = exit proceeds (gross) - entry cost (already deducted)
+                    # Cash change = exit proceeds (net) - entry cost (already deducted)
                     # We'll update the DB at the end of replay (batch update)
 
                     exit_date = exit_time.date() if isinstance(exit_time, datetime) else exit_time
                     if exit_date not in daily_pnl:
                         daily_pnl[exit_date] = {"pnl": 0, "trades": 0, "wins": 0}
-                    daily_pnl[exit_date]["pnl"] += realized_pnl
+                    daily_pnl[exit_date]["pnl"] += realized_pnl_net
                     daily_pnl[exit_date]["trades"] += 1
-                    if realized_pnl > 0:
+                    if realized_pnl_net > 0:
                         daily_pnl[exit_date]["wins"] += 1
 
                     executed_trades.append({
                         "entry_time": pos["entry_time"].isoformat(),
                         "exit_time": exit_time.isoformat(),
-                        "net_pnl": realized_pnl,
+                        "net_pnl": float(realized_pnl_net),
+                        "commission": float(exit_commission),
+                        "slippage": float(exit_slippage),
                     })
 
                     event_log.append({
@@ -380,7 +441,9 @@ class PaperTradingEngine:
                         "active_positions": len(active_positions),
                         "available_cash": float(available_cash),
                         "position_value": float(position_value),
-                        "realized_pnl": float(realized_pnl),
+                        "realized_pnl": float(realized_pnl_net),
+                        "commission": float(exit_commission),
+                        "slippage": float(exit_slippage),
                     })
 
                 elif event_type == ENTRY and idx not in active_positions:
@@ -475,33 +538,53 @@ class PaperTradingEngine:
                     trade_quantity = entry_position_value / entry_price_dec
                     is_long = (direction or "long").lower() in ["long", "buy"]
                     side = "BUY" if is_long else "SELL"
+                    
+                    # Apply entry commission and slippage (non-zero costs)
+                    entry_commission = entry_position_value * commission_rate
+                    entry_slippage = entry_position_value * slippage_rate
+                    entry_total_costs = entry_commission + entry_slippage
 
-                    # Deduct position cost from available cash
+                    # Deduct position cost and entry costs from available cash
                     available_cash -= entry_position_value
+                    available_cash -= entry_total_costs
                     position_value += entry_position_value
                     cash_flows.append((event_time, "entry_cost", -entry_position_value))
+                    cash_flows.append((event_time, "entry_commission", -entry_commission))
+                    cash_flows.append((event_time, "entry_slippage", -entry_slippage))
 
                     order_id = str(uuid.uuid4())
                     fill_id = str(uuid.uuid4())
                     decision_id = str(uuid.uuid4())
 
-                    # Create decision record
+                    # Create decision record with source pinning
                     db.execute(
                         text("""
                         INSERT INTO decision_records (
                             id, owner_id, actor_type, decision_type, decision_time,
-                            rationale, paper_portfolio_id
+                            rationale, paper_portfolio_id, source_trade_id, source_run_id,
+                            source_rule_id, source_exit_config, source_data_version,
+                            cutoff_timestamp, as_of_timestamp
                         )
                         VALUES (
                             :id, :owner_id, 'system', 'entry', :time,
-                            'Paper trading signal', :portfolio_id
+                            :rationale, :portfolio_id, :source_trade_id, :source_run_id,
+                            :source_rule_id, :source_exit_config, :source_data_version,
+                            :cutoff, :as_of
                         )
                     """),
                         {
                             "id": decision_id,
                             "owner_id": user_id,
                             "time": entry_time,
+                            "rationale": f"Paper trading entry from source trade {source_trade_id}",
                             "portfolio_id": run.portfolio_id,
+                            "source_trade_id": source_trade_id,
+                            "source_run_id": source_run_id,
+                            "source_rule_id": source_rule_id,
+                            "source_exit_config": run.exit_config,
+                            "source_data_version": source_data_version,
+                            "cutoff": cutoff,
+                            "as_of": as_of,
                         },
                     )
 
@@ -522,7 +605,7 @@ class PaperTradingEngine:
                             "decision_id": decision_id,
                             "asset_id": instrument,
                             "side": side,
-                            "quantity": float(trade_quantity),
+                            "quantity": trade_quantity,
                             "entry_time": entry_time,
                         },
                     )
@@ -536,43 +619,46 @@ class PaperTradingEngine:
                         )
                         VALUES (
                             :id, :order_id, :exec_date, :obs_price,
-                            :exec_price, 0, 0,
-                            :quantity, :gross, :net, 'signal', :timestamp
+                            :exec_price, :slippage, :commission,
+                            :quantity, :gross, :net, 'entry_signal', :timestamp
                         )
                     """),
                         {
                             "id": fill_id,
                             "order_id": order_id,
                             "exec_date": entry_time.strftime("%Y-%m-%d"),
-                            "obs_price": float(entry_price),
-                            "exec_price": float(entry_price),
-                            "quantity": float(trade_quantity),
-                            "gross": float(trade_quantity) * float(entry_price),
-                            "net": -float(trade_quantity) * float(entry_price),
+                            "obs_price": entry_price_dec,
+                            "exec_price": entry_price_dec,
+                            "slippage": entry_slippage,
+                            "commission": entry_commission,
+                            "quantity": trade_quantity,
+                            "gross": entry_position_value,
+                            "net": -(entry_position_value + entry_total_costs),
                             "timestamp": entry_time,
                         },
                     )
 
-                    # Create PaperPosition record in DB
+                    # Create PaperPosition record in DB with Decimal precision
                     position_id = str(uuid.uuid4())
                     db.execute(
                         text("""
                         INSERT INTO paper_positions (
                             id, portfolio_id, asset_id, quantity, average_entry_price,
-                            opened_at, status
+                            opened_at, status, source_trade_id
                         )
                         VALUES (
                             :id, :portfolio_id, :asset_id, :quantity, :entry_price,
-                            :opened_at, 'open'
+                            :opened_at, 'open', :source_trade_id
                         )
                     """),
                         {
                             "id": position_id,
                             "portfolio_id": run.portfolio_id,
                             "asset_id": instrument,
-                            "quantity": float(trade_quantity) if is_long else -float(trade_quantity),
-                            "entry_price": float(entry_price),
+                            "quantity": trade_quantity,
+                            "entry_price": entry_price_dec,
                             "opened_at": entry_time,
+                            "source_trade_id": source_trade_id,
                         },
                     )
 
@@ -581,10 +667,11 @@ class PaperTradingEngine:
                         "order_id": order_id,
                         "entry_time": entry_time,
                         "exit_time": exit_time,
-                        "entry_price": float(entry_price_dec),
-                        "exit_price": float(exit_price),
-                        "quantity": float(trade_quantity),
+                        "entry_price": entry_price_dec,
+                        "exit_price": exit_price_dec,
+                        "quantity": trade_quantity,
                         "is_long": is_long,
+                        "source_trade_id": source_trade_id,
                     }
 
                     event_log.append({
@@ -595,6 +682,8 @@ class PaperTradingEngine:
                         "available_cash": float(available_cash),
                         "position_value": float(position_value),
                         "quantity": float(trade_quantity),
+                        "commission": float(entry_commission),
+                        "slippage": float(entry_slippage),
                     })
 
             # Close out any positions still open at end (shouldn't happen with complete trade data)
