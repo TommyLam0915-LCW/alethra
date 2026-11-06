@@ -249,15 +249,24 @@ function PerformanceInsights({ summary, skills, trades }: { summary: JournalSumm
   const insights: InsightItem[] = [];
 
   // Insight 1: Best performing skill
+  // Evidence gating: only recommend if trade_count >= 30
   if (skills.length > 0) {
     const bestSkill = [...skills].sort((a, b) => Number(b.total_pnl) - Number(a.total_pnl))[0];
-    if (Number(bestSkill.total_pnl) > 0) {
+    if (Number(bestSkill.total_pnl) > 0 && bestSkill.trade_count >= 30) {
       insights.push({
         type: 'success',
         icon: '\uD83C\uDFC6',
         title: 'Your best skill',
-        message: `${bestSkill.rule_label_zh ?? bestSkill.rule_id} generated $${Number(bestSkill.total_pnl).toFixed(2)} profit with ${Number(bestSkill.win_rate).toFixed(1)}% win rate`,
-        action: `Focus more trades on ${bestSkill.rule_label_zh ?? bestSkill.rule_id}`,
+        message: `${bestSkill.rule_label_zh ?? bestSkill.rule_id} generated $${Number(bestSkill.total_pnl).toFixed(2)} profit with ${Number(bestSkill.win_rate).toFixed(1)}% win rate (${bestSkill.trade_count} trades)`,
+        action: `Evidence-supported: Consider focusing on ${bestSkill.rule_label_zh ?? bestSkill.rule_id}`,
+      });
+    } else if (Number(bestSkill.total_pnl) > 0 && bestSkill.trade_count < 30) {
+      insights.push({
+        type: 'info',
+        icon: '\u2139\uFE0F',
+        title: 'Insufficient evidence',
+        message: `${bestSkill.rule_label_zh ?? bestSkill.rule_id} shows profit but only ${bestSkill.trade_count} trades. Need >= 30 trades for reliable conclusions.`,
+        action: 'Continue collecting data before making decisions',
       });
     }
   }
@@ -292,25 +301,46 @@ function PerformanceInsights({ summary, skills, trades }: { summary: JournalSumm
     })
     .sort((a, b) => b.totalPnl - a.totalPnl);
 
-  if (intervalPerformance.length > 0 && intervalPerformance[0].totalPnl > 0) {
+  // Evidence gating: only recommend timeframe if count >= 30
+  if (intervalPerformance.length > 0 && intervalPerformance[0].totalPnl > 0 && intervalPerformance[0].count >= 30) {
     const best = intervalPerformance[0];
     insights.push({
       type: 'success',
       icon: '\u23F0',
       title: 'Best timeframe',
       message: `${best.interval}m trades generated $${best.totalPnl.toFixed(2)} profit (${best.count} trades, ${best.winRate.toFixed(1)}% win rate)`,
-      action: 'Consider focusing on this timeframe',
+      action: 'Evidence-supported: Consider focusing on this timeframe',
+    });
+  } else if (intervalPerformance.length > 0 && intervalPerformance[0].totalPnl > 0 && intervalPerformance[0].count < 30) {
+    const best = intervalPerformance[0];
+    insights.push({
+      type: 'info',
+      icon: '\u2139\uFE0F',
+      title: 'Insufficient evidence for timeframe',
+      message: `${best.interval}m shows profit but only ${best.count} trades. Need >= 30 trades for reliable conclusions.`,
+      action: 'Continue collecting data before making decisions',
     });
   }
 
   // Insight 4: Win rate
+  // Evidence gating: only comment on win rate if total_trades >= 30
   const winRate = Number(summary.win_rate);
-  if (winRate >= 50 && winRate < 60) {
+  const totalTrades = summary.total_trades;
+  
+  if (totalTrades < 30) {
+    insights.push({
+      type: 'info',
+      icon: '\u2139\uFE0F',
+      title: 'Insufficient evidence for win rate analysis',
+      message: `Only ${totalTrades} trades recorded. Need >= 30 trades for reliable win rate analysis.`,
+      action: 'Continue collecting data',
+    });
+  } else if (winRate >= 50 && winRate < 60) {
     insights.push({
       type: 'info',
       icon: '\u2139\uFE0F',
       title: 'Win rate',
-      message: `Your ${winRate.toFixed(1)}% win rate is acceptable but could improve`,
+      message: `Your ${winRate.toFixed(1)}% win rate is acceptable but could improve (${totalTrades} trades)`,
       action: 'Review losing trades to identify patterns',
     });
   } else if (winRate > 0 && winRate < 50) {
@@ -318,7 +348,7 @@ function PerformanceInsights({ summary, skills, trades }: { summary: JournalSumm
       type: 'warning',
       icon: '\u26A0\uFE0F',
       title: 'Low win rate',
-      message: `Your ${winRate.toFixed(1)}% win rate is below 50%`,
+      message: `Your ${winRate.toFixed(1)}% win rate is below 50% (${totalTrades} trades)`,
       action: 'Consider adjusting entry criteria or stop losses',
     });
   }
