@@ -194,11 +194,14 @@ class LivePaperTradingDaemon:
         finally:
             db.close()
 
-    def _create_portfolios(self):
+    def _create_portfolios(self) -> int:
         """Create paper trading portfolios for each skill.
         
         Validates strategy support BEFORE creating any DB records to avoid
         orphaned portfolios/runs for unknown strategies.
+        
+        Returns:
+            Number of successfully validated and created portfolios.
         """
         # Phase 1: Validate all skills before any DB writes
         validated_skills = []
@@ -227,10 +230,16 @@ class LivePaperTradingDaemon:
         
         if not validated_skills:
             logger.error("No valid skills after validation. Aborting portfolio creation.")
-            return
+            return 0
+        
+        # Report actual validated set
+        validated_set = [f"{skill}_{symbol}" for skill_config, symbol, gen in validated_skills 
+                        for skill in [skill_config["skill"]]]
+        logger.info(f"📋 Validated skill set: {', '.join(validated_set)}")
         
         # Phase 2: Create DB records only for validated skills
         db = SessionLocal()
+        created_count = 0
         try:
             for skill_config, symbol, gen in validated_skills:
                 skill = skill_config["skill"]
@@ -291,14 +300,18 @@ class LivePaperTradingDaemon:
                 self.portfolio_ids[key] = portfolio_id
                 self.run_ids[key] = run_id
                 self.signal_generators[key] = gen
+                created_count += 1
 
                 logger.info(f"✅ Created portfolio for {skill} on {symbol}")
 
         except Exception as exc:
             db.rollback()
             logger.exception(f"Failed to create portfolios: {exc}")
+            return 0
         finally:
             db.close()
+        
+        return created_count
 
     async def start(self):
         """Start the live trading daemon."""
@@ -314,7 +327,21 @@ class LivePaperTradingDaemon:
         self.running = True
 
         # Create portfolios
-        self._create_portfolios()
+        created_count = self._create_portfolios()
+        
+        # Fail closed: if no portfolios created, don't start WebSocket
+        if created_count == 0:
+            logger.error("=" * 80)
+            logger.error("❌ DAEMON STARTUP ABORTED: No valid portfolios created")
+            logger.error("=" * 80)
+            logger.error("All requested skills were rejected during validation.")
+            logger.error("Cannot start WebSocket without active portfolios.")
+            self.running = False
+            return
+        
+        logger.info(f"✅ Successfully created {created_count} portfolio(s)")
+        logger.info(f"📊 Active skill set: {', '.join(sorted(self.portfolio_ids.keys()))}")
+        logger.info("")
 
         # Start WebSocket client
         self.ws_client = KrakenWebSocketClient(

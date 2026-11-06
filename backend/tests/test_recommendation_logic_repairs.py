@@ -25,6 +25,7 @@ from app.services.pattern_analysis import (
     _generate_recommendations,
     validate_proposal,
 )
+from app.services.live_trading_daemon import LivePaperTradingDaemon
 
 
 class TestSignalGeneratorRuleIdMatching:
@@ -497,6 +498,111 @@ class TestValidationLoopholes:
                 call_kwargs = mock_settings_class.call_args[1]
                 assert call_kwargs.get("starting_cash") == 50000 or str(call_kwargs.get("starting_cash")) == "50000", \
                     "Should use starting_cash from run.settings_json, not default"
+
+
+class TestDaemonStartupState:
+    """Tests for daemon startup state reporting."""
+
+    def test_daemon_aborts_when_all_skills_invalid(self):
+        """Daemon must not start WebSocket if all skills are invalid."""
+        import asyncio
+        from unittest.mock import MagicMock, patch
+        
+        # Create daemon with all invalid skills
+        daemon = LivePaperTradingDaemon(
+            symbols=["XBT/USD"],
+            skills=[
+                {
+                    "skill": "invalid_skill_1",
+                    "instrument_id": "CRYPTO:KRAKEN:BTC-USD",
+                    "interval_minutes": 60,
+                    "rule_id": "nonexistent_rule_1",
+                    "exit_config": {},
+                    "user_id": uuid4(),
+                },
+                {
+                    "skill": "invalid_skill_2",
+                    "instrument_id": "CRYPTO:KRAKEN:BTC-USD",
+                    "interval_minutes": 60,
+                    "rule_id": "nonexistent_rule_2",
+                    "exit_config": {},
+                    "user_id": uuid4(),
+                },
+            ],
+        )
+        
+        # Mock KrakenWebSocketClient to track if start() is called
+        with patch("app.services.live_trading_daemon.KrakenWebSocketClient") as mock_ws_class:
+            mock_ws = MagicMock()
+            
+            # Create an async function for start()
+            async def mock_start():
+                pass
+            
+            mock_ws.start = mock_start
+            mock_ws_class.return_value = mock_ws
+            
+            # Run daemon start
+            asyncio.run(daemon.start())
+            
+            # WebSocket should NOT have been started
+            assert not mock_ws_class.called or not hasattr(mock_ws, '_start_called'), (
+                "WebSocket must not start when all skills are invalid"
+            )
+            
+            # Daemon should not be running
+            assert daemon.running is False, (
+                "Daemon.running must be False after abort"
+            )
+            
+            # No portfolios should be created
+            assert len(daemon.portfolio_ids) == 0, (
+                "No portfolios should be created for invalid skills"
+            )
+
+    def test_daemon_reports_actual_validated_set(self):
+        """Daemon must report the actual set of validated skills, not just count."""
+        from unittest.mock import MagicMock, patch
+        
+        # Create daemon with mix of valid and invalid skills
+        daemon = LivePaperTradingDaemon(
+            symbols=["BTC/USD"],
+            skills=[
+                {
+                    "skill": "valid_skill",
+                    "instrument_id": "CRYPTO:KRAKEN:BTC-USD",
+                    "interval_minutes": 60,
+                    "rule_id": StrategyType.RSI_BASIC.value,  # Valid
+                    "exit_config": {},
+                    "user_id": uuid4(),
+                },
+                {
+                    "skill": "invalid_skill",
+                    "instrument_id": "CRYPTO:KRAKEN:BTC-USD",
+                    "interval_minutes": 60,
+                    "rule_id": "nonexistent_rule",  # Invalid
+                    "exit_config": {},
+                    "user_id": uuid4(),
+                },
+            ],
+        )
+        
+        # Mock database and SignalGenerator
+        with patch("app.services.live_trading_daemon.SessionLocal") as mock_session_class:
+            mock_db = MagicMock()
+            mock_session_class.return_value = mock_db
+            
+            # Call _create_portfolios
+            created_count = daemon._create_portfolios()
+            
+            # Should have created exactly 1 portfolio
+            assert created_count == 1, f"Expected 1 portfolio, got {created_count}"
+            
+            # portfolio_ids should contain only the valid skill
+            # Note: symbol is extracted as "BTC/USD" from "CRYPTO:KRAKEN:BTC-USD"
+            assert len(daemon.portfolio_ids) == 1
+            assert "valid_skill_BTC/USD" in daemon.portfolio_ids
+            assert "invalid_skill_BTC/USD" not in daemon.portfolio_ids
 
 
 if __name__ == "__main__":
