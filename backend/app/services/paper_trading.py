@@ -422,13 +422,13 @@ class PaperTradingEngine:
                         continue
 
                     # Check available cash is sufficient
-                    proposed_position_value = float(total_equity) * position_size_pct
-                    if Decimal(str(proposed_position_value)) > available_cash:
+                    proposed_position_value = total_equity * Decimal(str(position_size_pct))
+                    if proposed_position_value > available_cash:
                         event_log.append({
                             "time": event_time.isoformat(),
                             "event": "entry_blocked",
                             "trade_idx": idx,
-                            "proposed_value": proposed_position_value,
+                            "proposed_value": float(proposed_position_value),
                             "available_cash": float(available_cash),
                             "reason": "insufficient_cash",
                         })
@@ -440,16 +440,16 @@ class PaperTradingEngine:
                         for pos in active_positions.values()
                     )
 
-                    proposed_exposure = current_exposure + Decimal(str(proposed_position_value))
+                    proposed_exposure = current_exposure + proposed_position_value
 
                     # Check single asset exposure limit (10% of equity)
                     single_asset_limit = total_equity * Decimal("0.10")
-                    if Decimal(str(proposed_position_value)) > single_asset_limit:
+                    if proposed_position_value > single_asset_limit:
                         event_log.append({
                             "time": event_time.isoformat(),
                             "event": "entry_blocked",
                             "trade_idx": idx,
-                            "proposed_value": proposed_position_value,
+                            "proposed_value": float(proposed_position_value),
                             "limit": float(single_asset_limit),
                             "reason": "single_asset_exposure_limit",
                         })
@@ -470,7 +470,7 @@ class PaperTradingEngine:
                         continue
 
                     # All checks passed, proceed with entry
-                    entry_position_value = Decimal(str(proposed_position_value))
+                    entry_position_value = proposed_position_value
                     entry_price_dec = Decimal(str(entry_price))
                     trade_quantity = entry_position_value / entry_price_dec
                     is_long = (direction or "long").lower() in ["long", "buy"]
