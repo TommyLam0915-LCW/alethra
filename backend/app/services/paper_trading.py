@@ -147,10 +147,21 @@ class PaperTradingEngine:
             if not run:
                 raise ValueError(f"Run {run_id} not found")
 
-            # Idempotency protection: reject re-run if already completed
-            if run.status == "completed":
+            # Cross-user rejection: validate ownership via portfolio
+            portfolio = db.execute(
+                text("SELECT owner_id FROM paper_portfolios WHERE id = :id"),
+                {"id": run.portfolio_id},
+            ).fetchone()
+
+            if not portfolio or str(portfolio.owner_id) != user_id:
                 raise ValueError(
-                    f"Run {run_id} already completed. Cannot re-run historical replay. "
+                    f"Access denied: run {run_id} does not belong to user {user_id}"
+                )
+
+            # Idempotency protection: reject re-run if already completed or cancelled
+            if run.status in ("completed", "cancelled"):
+                raise ValueError(
+                    f"Run {run_id} already {run.status}. Cannot re-run historical replay. "
                     f"Create a new run instead."
                 )
 
@@ -881,6 +892,74 @@ class PaperTradingEngine:
                 except Exception:
                     logger.exception("Failed to update run status to 'failed'")
             logger.exception("Historical replay failed")
+            raise
+        finally:
+            db.close()
+
+    def cancel_run(self, run_id: str, user_id: str) -> dict:
+        """Cancel a paper trading run.
+        
+        Explicit stop contract: marks run as 'cancelled' and prevents restart.
+        Validates ownership before allowing cancellation.
+        
+        Args:
+            run_id: The run ID to cancel
+            user_id: The user ID (must match run owner)
+            
+        Returns:
+            Dict with cancellation result
+        """
+        db = SessionLocal()
+        try:
+            # Get run and validate ownership
+            run = db.execute(
+                text("SELECT * FROM paper_trading_runs WHERE id = :id"),
+                {"id": run_id},
+            ).fetchone()
+
+            if not run:
+                raise ValueError(f"Run {run_id} not found")
+
+            # Cross-user rejection: validate ownership via portfolio
+            portfolio = db.execute(
+                text("SELECT owner_id FROM paper_portfolios WHERE id = :id"),
+                {"id": run.portfolio_id},
+            ).fetchone()
+
+            if not portfolio or str(portfolio.owner_id) != user_id:
+                raise ValueError(
+                    f"Access denied: run {run_id} does not belong to user {user_id}"
+                )
+
+            # Check if run can be cancelled
+            if run.status in ("completed", "cancelled"):
+                raise ValueError(
+                    f"Run {run_id} cannot be cancelled (status: {run.status})"
+                )
+
+            # Mark as cancelled
+            db.execute(
+                text("""
+                UPDATE paper_trading_runs
+                SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP
+                WHERE id = :id
+            """),
+                {"id": run_id},
+            )
+
+            db.commit()
+
+            logger.info(f"Cancelled run {run_id}")
+
+            return {
+                "run_id": run_id,
+                "status": "cancelled",
+                "message": "Run cancelled successfully",
+            }
+
+        except Exception as exc:
+            db.rollback()
+            logger.exception("Failed to cancel run")
             raise
         finally:
             db.close()
