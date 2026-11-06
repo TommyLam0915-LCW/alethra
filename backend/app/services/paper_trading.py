@@ -163,8 +163,9 @@ class PaperTradingEngine:
             for trade in trades:
                 entry_time, exit_time, entry_price, exit_price, net_pnl, direction, quantity, exit_reason = trade
 
-                # Remove positions that have exited
-                positions = [p for p in positions if p["exit_time"] <= entry_time]
+                # Remove positions that have exited (exit_time <= entry_time means already exited)
+                # Keep positions that are still active (exit_time > entry_time)
+                positions = [p for p in positions if p["exit_time"] > entry_time]
 
                 # Check if we can open position
                 if len(positions) >= max_positions:
