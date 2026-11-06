@@ -296,6 +296,27 @@ class PaperTradingEngine:
                         },
                     )
 
+                    # Update PaperPosition: close position and record realized PnL
+                    db.execute(
+                        text("""
+                        UPDATE paper_positions
+                        SET closed_at = :closed_at,
+                            realized_pnl = :realized_pnl,
+                            status = 'closed'
+                        WHERE id = :position_id
+                    """),
+                        {
+                            "closed_at": exit_time,
+                            "realized_pnl": realized_pnl,
+                            "position_id": pos["position_id"],
+                        },
+                    )
+
+                    # Update PaperPortfolio: adjust current_virtual_cash
+                    # Cash change = exit proceeds (gross) - entry cost (already deducted)
+                    # For simplicity: current_capital already tracks this in memory
+                    # We'll update the DB at the end of replay (batch update)
+
                     exit_date = exit_time.date() if isinstance(exit_time, datetime) else exit_time
                     if exit_date not in daily_pnl:
                         daily_pnl[exit_date] = {"pnl": 0, "trades": 0, "wins": 0}
@@ -409,7 +430,31 @@ class PaperTradingEngine:
                         },
                     )
 
+                    # Create PaperPosition record in DB
+                    position_id = str(uuid.uuid4())
+                    db.execute(
+                        text("""
+                        INSERT INTO paper_positions (
+                            id, portfolio_id, asset_id, quantity, average_entry_price,
+                            opened_at, status
+                        )
+                        VALUES (
+                            :id, :portfolio_id, :asset_id, :quantity, :entry_price,
+                            :opened_at, 'open'
+                        )
+                    """),
+                        {
+                            "id": position_id,
+                            "portfolio_id": run.portfolio_id,
+                            "asset_id": instrument,
+                            "quantity": trade_quantity if is_long else -trade_quantity,
+                            "entry_price": float(entry_price),
+                            "opened_at": entry_time,
+                        },
+                    )
+
                     active_positions[idx] = {
+                        "position_id": position_id,
                         "order_id": order_id,
                         "entry_time": entry_time,
                         "exit_time": exit_time,
