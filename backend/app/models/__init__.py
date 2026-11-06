@@ -130,6 +130,7 @@ from app.models.agent_strategy import (
     AgentStrategyTrainingJob,
 )
 from app.models.strategy_study import StrategyStudyRun, StrategyStudyTrade
+from app.models.learning_job import LearningJob, LearningProposal
 
 __all__ = [
     "User",
@@ -262,4 +263,6 @@ __all__ = [
     "AgentStrategyTrainingJob",
     "StrategyStudyRun",
     "StrategyStudyTrade",
+    "LearningJob",
+    "LearningProposal",
 ]

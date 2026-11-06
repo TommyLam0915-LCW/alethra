@@ -363,7 +363,7 @@ def test_research_returns_walk_forward_evidence_and_dataset_provenance(client, a
     assert body["walk_forward"]["folds"][0]["role"] == "seed"
     assert body["walk_forward"]["tested_folds"] == 2
     assert body["walk_forward"]["out_of_sample"]["accounting_ok"] is True
-    assert len(body["in_sample_grid"]) == 230
+    assert len(body["in_sample_grid"]) == 432
     assert "out_of_sample_trades" in body
 
 
@@ -371,7 +371,7 @@ def test_research_rejects_an_interval_the_cost_model_cannot_support(client, auth
     response = client.post(
         "/api/v1/strategy-lab/research",
         headers=auth_headers,
-        json={"interval_minutes": 5},
+        json={"interval_minutes": 2},
     )
     assert response.status_code == 400
     assert response.json()["detail"]["reason"] == "unsupported_interval"

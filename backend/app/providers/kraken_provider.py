@@ -21,7 +21,7 @@ import hashlib
 import json
 import logging
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional, Protocol, Sequence, Tuple
 
@@ -405,11 +405,12 @@ class KrakenProvider(DataProvider):
         target_bars: int = 2000,
         max_pages: int = 10,
     ) -> CandleSeries:
-        """Fetch historical bars using pagination to exceed the 720-bar per-request limit.
+        """Fetch historical bars using forward pagination from a calculated start.
 
-        The Kraken OHLC API returns up to 720 bars per request and provides a `last`
-        cursor for fetching older data. This method loops until it has collected
-        `target_bars` or exhausted available history.
+        Kraken's OHLC endpoint returns up to 720 bars per request. The ``since``
+        parameter fetches FORWARD from that timestamp. To get more than 720 bars,
+        we calculate a start timestamp far enough in the past and page forward,
+        using each page's last bar timestamp as the next page's ``since``.
 
         Args:
             instrument_id: The instrument to fetch (e.g., "CRYPTO:KRAKEN:BTC-USD")
@@ -438,17 +439,19 @@ class KrakenProvider(DataProvider):
             mapping.metadata.get("result_key_alt", ""),
         )
 
+        now = self._now()
+        start_dt = now - timedelta(seconds=target_bars * interval_minutes * 60)
+        since_cursor: str = str(int(start_dt.timestamp()))
+
         all_rows: List[RawCandle] = []
-        since_cursor: Optional[str] = None
         pages_fetched = 0
 
         while pages_fetched < max_pages and len(all_rows) < target_bars:
             params: Dict[str, str] = {
                 "pair": mapping.provider_symbol,
                 "interval": str(interval_minutes),
+                "since": since_cursor,
             }
-            if since_cursor is not None:
-                params["since"] = since_cursor
 
             payload = self._request("/0/public/OHLC", params)
             key, last_cursor = self._result_key(payload, expected_keys)
@@ -472,7 +475,7 @@ class KrakenProvider(DataProvider):
             instrument_id=instrument_id,
             interval_minutes=interval_minutes,
             rows=all_rows,
-            now=self._now(),
+            now=now,
         )
 
     @staticmethod

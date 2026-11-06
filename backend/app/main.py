@@ -41,6 +41,31 @@ app.include_router(health_router)
 app.include_router(api_router, prefix="/api")
 
 
+# -- Auto-learning scheduler ------------------------------------------------
+
+_learning_scheduler = None
+
+
+@app.on_event("startup")
+def start_learning_scheduler():
+    global _learning_scheduler
+    if settings.enable_learning_scheduler:
+        from app.workers.learning_scheduler import create_learning_scheduler
+
+        _learning_scheduler = create_learning_scheduler()
+        _learning_scheduler.start()
+        import logging
+        logging.getLogger(__name__).info("Auto-learning scheduler started")
+
+
+@app.on_event("shutdown")
+def stop_learning_scheduler():
+    if _learning_scheduler:
+        _learning_scheduler.shutdown(wait=False)
+        import logging
+        logging.getLogger(__name__).info("Auto-learning scheduler stopped")
+
+
 @app.get("/")
 def root():
     return {

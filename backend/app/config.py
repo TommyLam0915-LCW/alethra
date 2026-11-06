@@ -108,6 +108,9 @@ class Settings(BaseSettings):
     # refused outside local development. When enabled, requests from loopback
     # skip JWT validation and use the first active user in the database.
     research_auth_bypass_enabled: bool = False
+    # Auto-learning scheduler: runs daily research and weekly pattern analysis.
+    # Off by default; requires explicit opt-in to consume provider quota.
+    enable_learning_scheduler: bool = False
 
     @property
     def intraday_instrument_list(self) -> list[str]:

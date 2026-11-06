@@ -154,6 +154,15 @@ class _Indicators:
     atr_sma20: List[Optional[Decimal]]  # 20-bar SMA of ATR for volatility breakout
     volume_sma10: List[Optional[Decimal]]  # 10-bar SMA of volume for liquidity cycle
     return_6bar: List[Optional[Decimal]]  # 6-bar return for extreme reversal
+    # MB-20: triple MA alignment for 捕鯨者
+    ema_mid: List[Optional[Decimal]]  # EMA(60)
+    ema_long: List[Optional[Decimal]]  # EMA(120)
+    # MB-20: VWAP and day-trading indicators for 當日沖銷
+    high: List[Decimal]  # Bar high prices
+    low: List[Decimal]  # Bar low prices
+    vwap: List[Optional[Decimal]]  # Rolling VWAP (96-bar window ≈ 24h of 15m bars)
+    prev_day_high: List[Optional[Decimal]]  # Previous "day" high (last 96 bars high)
+    prev_day_low: List[Optional[Decimal]]  # Previous "day" low (last 96 bars low)
 
 
 @dataclass
@@ -274,6 +283,9 @@ def prepare_indicators(bars: Sequence[LabBar], atr_window: int = DEFAULT_ATR_WIN
 
     ema_fast = _ema_series(closes, 20)
     ema_slow = _ema_series(closes, 50)
+    # MB-20: EMA(60) and EMA(120) for triple MA alignment (捕鯨者)
+    ema_mid = _ema_series(closes, 60)
+    ema_long = _ema_series(closes, 120)
     trend_strength: List[Optional[Decimal]] = [None] * len(bars)
     for index in range(len(bars)):
         if ema_fast[index] is not None and ema_slow[index] is not None and atr[index]:
@@ -352,6 +364,31 @@ def prepare_indicators(bars: Sequence[LabBar], atr_window: int = DEFAULT_ATR_WIN
         if previous > 0:
             return_6bar[index] = closes[index] / previous - Decimal(1)
 
+    # MB-20: VWAP and day-trading indicators for 當日沖銷
+    bar_highs = [bar.high for bar in bars]
+    bar_lows = [bar.low for bar in bars]
+    VWAP_WINDOW = 96  # ~24h of 15m bars, or ~4 days of 1h bars
+
+    vwap: List[Optional[Decimal]] = [None] * len(bars)
+    for index in range(VWAP_WINDOW - 1, len(bars)):
+        cumulative_pv = Decimal(0)
+        cumulative_vol = Decimal(0)
+        for offset in range(VWAP_WINDOW):
+            i = index - offset
+            typical_price = (bar_highs[i] + bar_lows[i] + closes[i]) / Decimal(3)
+            cumulative_pv += typical_price * volumes[i]
+            cumulative_vol += volumes[i]
+        if cumulative_vol > 0:
+            vwap[index] = cumulative_pv / cumulative_vol
+
+    prev_day_high: List[Optional[Decimal]] = [None] * len(bars)
+    prev_day_low: List[Optional[Decimal]] = [None] * len(bars)
+    for index in range(VWAP_WINDOW, len(bars)):
+        window_highs = bar_highs[index - VWAP_WINDOW:index]
+        window_lows = bar_lows[index - VWAP_WINDOW:index]
+        prev_day_high[index] = max(window_highs)
+        prev_day_low[index] = min(window_lows)
+
     return _Indicators(
         close=closes,
         atr=atr,
@@ -377,6 +414,13 @@ def prepare_indicators(bars: Sequence[LabBar], atr_window: int = DEFAULT_ATR_WIN
         atr_sma20=atr_sma20,
         volume_sma10=volume_sma10,
         return_6bar=return_6bar,
+        ema_mid=ema_mid,
+        ema_long=ema_long,
+        high=bar_highs,
+        low=bar_lows,
+        vwap=vwap,
+        prev_day_high=prev_day_high,
+        prev_day_low=prev_day_low,
     )
 
 
@@ -407,13 +451,21 @@ def _sig_momentum_continuation(ind: _Indicators, index: int) -> int:
 
 
 def _sig_pullback_in_trend(ind: _Indicators, index: int) -> int:
+    """捕鯨者：三線多頭排列 + 回踩進場 (MB-20 升級版).
+    
+    多頭：EMA(20) > EMA(60) > EMA(120) + 價格回踩 EMA(20) 附近 + RSI 40-65
+    空头：EMA(20) < EMA(60) < EMA(120) + 價格反彈 EMA(20) 附近 + RSI 35-60
+    """
     fast, slow = ind.ema_fast[index], ind.ema_slow[index]
+    mid, long_ = ind.ema_mid[index], ind.ema_long[index]
     rsi = ind.rsi[index]
-    if fast is None or slow is None or rsi is None:
+    if fast is None or slow is None or mid is None or long_ is None or rsi is None:
         return 0
-    if fast > slow and ind.close[index] > fast and Decimal(40) <= rsi <= Decimal(65):
+    # Triple MA bullish alignment: EMA(20) > EMA(60) > EMA(120)
+    if fast > mid > long_ and ind.close[index] > fast and Decimal(40) <= rsi <= Decimal(65):
         return 1
-    if fast < slow and ind.close[index] < fast and Decimal(35) <= rsi <= Decimal(60):
+    # Triple MA bearish alignment: EMA(20) < EMA(60) < EMA(120)
+    if fast < mid < long_ and ind.close[index] < fast and Decimal(35) <= rsi <= Decimal(60):
         return -1
     return 0
 
@@ -449,20 +501,43 @@ def _sig_bollinger_mean_reversion(ind: _Indicators, index: int) -> int:
 
 
 def _sig_rsi_extreme_reversion(ind: _Indicators, index: int) -> int:
-    """RSI extreme + no trend.
+    """RSI extreme + no trend (釣魚郎參數修正版).
     
-    Long when RSI < 20 AND close within 1% of 50-day MA.
-    Short when RSI > 80 AND close within 1% of 50-day MA.
+    Long when RSI < 30 AND close within 5% of 50-day MA.
+    Short when RSI > 70 AND close within 5% of 50-day MA.
+    
+    修正：RSI 從 20/80 放寬到 30/70，乖離率從 1% 增加到 5%。
     """
     rsi, slow = ind.rsi[index], ind.ema_slow[index]
     if rsi is None or slow is None or slow == 0:
         return 0
     deviation = abs(ind.close[index] - slow) / slow
-    if deviation > Decimal("0.01"):
+    if deviation > Decimal("0.05"):
         return 0
-    if rsi < Decimal("20"):
+    if rsi < Decimal("30"):
         return 1
-    if rsi > Decimal("80"):
+    if rsi > Decimal("70"):
+        return -1
+    return 0
+
+
+def _sig_rsi_extreme_reversion_wide(ind: _Indicators, index: int) -> int:
+    """RSI extreme + wide deviation (經典釣魚郎 10% 乖離率).
+    
+    Long when RSI < 30 AND close within 10% of 50-day MA.
+    Short when RSI > 70 AND close within 10% of 50-day MA.
+    
+    經典釣魚郎設定：乖離率放寬到 10%，捕捉更極端的均值回歸機會。
+    """
+    rsi, slow = ind.rsi[index], ind.ema_slow[index]
+    if rsi is None or slow is None or slow == 0:
+        return 0
+    deviation = abs(ind.close[index] - slow) / slow
+    if deviation > Decimal("0.10"):
+        return 0
+    if rsi < Decimal("30"):
+        return 1
+    if rsi > Decimal("70"):
         return -1
     return 0
 
@@ -1153,6 +1228,108 @@ def _sig_momentum_divergence_arb(ind: _Indicators, index: int) -> int:
     return 0
 
 
+# -- MB-20: triple MA alignment for 捕鯨者 -----------------------------------
+
+
+def _sig_triple_ma_trend(ind: _Indicators, index: int) -> int:
+    """捕鯨者：三線多頭/空头排列突破。
+    
+    多頭：EMA(20) > EMA(60) > EMA(120) + 收盤 > EMA(20) + 趨勢確認
+    空头：EMA(20) < EMA(60) < EMA(120) + 收盤 < EMA(20) + 趨勢確認
+    
+    與 pullback_in_trend 差異：此規則不需要 RSI 中性區間，
+    只要三線排列正確且價格在正確側即可進場。
+    """
+    fast, mid, long_ = ind.ema_fast[index], ind.ema_mid[index], ind.ema_long[index]
+    strength = ind.trend_strength[index]
+    if fast is None or mid is None or long_ is None or strength is None:
+        return 0
+    if strength < Decimal("0.2"):
+        return 0
+    if fast > mid > long_ and ind.close[index] > fast:
+        return 1
+    if fast < mid < long_ and ind.close[index] < fast:
+        return -1
+    return 0
+
+
+# -- MB-20: VWAP and day-trading rules for 當日沖銷 ---------------------------
+
+
+def _sig_vwap_bounce(ind: _Indicators, index: int) -> int:
+    """當日沖銷：VWAP 反彈交易。
+    
+    多頭：價格從下方觸及 VWAP 後反彈（close > VWAP 且前一根 close <= VWAP）
+          + 成交量 > 1.2 × 均量 + 價格在 VWAP 上方 1% 以內
+    空头：價格從上方觸及 VWAP 後回落（close < VWAP 且前一根 close >= VWAP）
+          + 成交量 > 1.2 × 均量 + 價格在 VWAP 下方 1% 以內
+    
+    VWAP 是日內交易的強弱分界線，觸及後反彈是經典進場信號。
+    """
+    if index < 1:
+        return 0
+    vwap_val = ind.vwap[index]
+    vwap_prev = ind.vwap[index - 1]
+    vol_sma = ind.volume_sma[index]
+    
+    if vwap_val is None or vwap_prev is None or vol_sma is None or vol_sma == 0:
+        return 0
+    
+    close = ind.close[index]
+    prev_close = ind.close[index - 1]
+    volume = ind.volume[index]
+    
+    # Volume confirmation
+    if volume < Decimal("1.2") * vol_sma:
+        return 0
+    
+    distance_from_vwap = abs(close - vwap_val) / vwap_val
+    
+    # Must be near VWAP (within 1%)
+    if distance_from_vwap > Decimal("0.01"):
+        return 0
+    
+    # Long: price bounced up from VWAP
+    if prev_close <= vwap_prev and close > vwap_val:
+        return 1
+    
+    # Short: price bounced down from VWAP
+    if prev_close >= vwap_prev and close < vwap_val:
+        return -1
+    
+    return 0
+
+
+def _sig_previous_day_breakout(ind: _Indicators, index: int) -> int:
+    """當日沖銷：前日高低點突破。
+    
+    多頭：收盤突破前日高點 + 成交量 > 1.5 × 均量
+    空头：收盤跌破前日低點 + 成交量 > 1.5 × 均量
+    
+    前日高低點是日內交易的重要支撐/壓力位。
+    """
+    pdh = ind.prev_day_high[index]
+    pdl = ind.prev_day_low[index]
+    vol_sma = ind.volume_sma[index]
+    
+    if pdh is None or pdl is None or vol_sma is None or vol_sma == 0:
+        return 0
+    
+    close = ind.close[index]
+    volume = ind.volume[index]
+    
+    # Volume confirmation: must be above average
+    if volume < Decimal("1.5") * vol_sma:
+        return 0
+    
+    if close > pdh:
+        return 1  # Long breakout
+    if close < pdl:
+        return -1  # Short breakout
+    
+    return 0
+
+
 RULES: Tuple[ResearchRule, ...] = (
     ResearchRule(
         rule_id="breakout_trend",
@@ -1170,10 +1347,17 @@ RULES: Tuple[ResearchRule, ...] = (
     ),
     ResearchRule(
         rule_id="pullback_in_trend",
-        label_zh="趨勢回撤",
+        label_zh="趨勢回撤（三線排列）",
         family="trend",
-        thesis_zh="均線多頭排列時等待回撤到快線附近、RSI 回到中性區再進場。",
+        thesis_zh="EMA(20) > EMA(60) > EMA(120) 三線多頭排列時，等待回撤到 EMA(20) 附近、RSI 回到中性區再進場。",
         signal=_sig_pullback_in_trend,
+    ),
+    ResearchRule(
+        rule_id="triple_ma_trend",
+        label_zh="三線趨勢突破",
+        family="trend",
+        thesis_zh="EMA(20)/60/120 多頭排列且收盤在 EMA(20) 上方、趨勢分離度 > 0.2 時順勢進場。",
+        signal=_sig_triple_ma_trend,
     ),
     ResearchRule(
         rule_id="range_fade",
@@ -1194,8 +1378,15 @@ RULES: Tuple[ResearchRule, ...] = (
         rule_id="rsi_extreme_reversion",
         label_zh="RSI 極值回歸",
         family="mean_reversion",
-        thesis_zh="RSI < 20 或 > 80 且價格在 50 日均線附近（無趨勢）時反向進場。",
+        thesis_zh="RSI < 30 或 > 70 且價格在 50 日均線 5% 以內（無趨勢）時反向進場。",
         signal=_sig_rsi_extreme_reversion,
+    ),
+    ResearchRule(
+        rule_id="rsi_extreme_reversion_wide",
+        label_zh="RSI 極值回歸（寬版）",
+        family="mean_reversion",
+        thesis_zh="RSI < 30 或 > 70 且價格在 50 日均線 10% 以內（經典釣魚郎乖離率）時反向進場。",
+        signal=_sig_rsi_extreme_reversion_wide,
     ),
     ResearchRule(
         rule_id="gap_fill",
@@ -1320,6 +1511,21 @@ RULES: Tuple[ResearchRule, ...] = (
         thesis_zh="短期動量 (ROC) 與中期動量 (MACD histogram) 背離時，做動量收斂交易。",
         signal=_sig_momentum_divergence_arb,
     ),
+    # MB-20: day-trading rules for 當日沖銷
+    ResearchRule(
+        rule_id="vwap_bounce",
+        label_zh="VWAP 反彈",
+        family="day_trading",
+        thesis_zh="價格觸及 VWAP 後反彈 + 成交量 > 1.2× 均量時進場（日內強弱分界線交易）。",
+        signal=_sig_vwap_bounce,
+    ),
+    ResearchRule(
+        rule_id="previous_day_breakout",
+        label_zh="前日高低點突破",
+        family="day_trading",
+        thesis_zh="收盤突破前日高點或跌破前日低點 + 成交量 > 1.5× 均量時順勢進場。",
+        signal=_sig_previous_day_breakout,
+    ),
 )
 
 EXIT_CONFIGS: Tuple[ExitConfig, ...] = (
@@ -1404,6 +1610,56 @@ EXIT_CONFIGS: Tuple[ExitConfig, ...] = (
         stop_atr=Decimal("1.0"),
         time_stop_bars=6,
         thesis_zh="套利標準配置，目標 1.2 倍 ATR、停損 1.0 倍 ATR、持有上限 6 根。",
+    ),
+    # MB-20: day-trading exit configs for 當日沖銷
+    ExitConfig(
+        exit_id="day_scalp",
+        label_zh="日內剝頭皮",
+        target_atr=Decimal("0.5"),
+        stop_atr=Decimal("0.5"),
+        time_stop_bars=4,
+        thesis_zh="日內快進快出，目標與停損同為 0.5 倍 ATR、持有上限 4 根。",
+    ),
+    ExitConfig(
+        exit_id="day_standard",
+        label_zh="日內標準",
+        target_atr=Decimal("1.0"),
+        stop_atr=Decimal("0.75"),
+        time_stop_bars=6,
+        thesis_zh="日內標準配置，目標 1.0 倍 ATR、停損 0.75 倍 ATR、持有上限 6 根。",
+    ),
+    ExitConfig(
+        exit_id="day_conservative",
+        label_zh="日內保守",
+        target_atr=Decimal("0.8"),
+        stop_atr=Decimal("0.5"),
+        time_stop_bars=8,
+        thesis_zh="日內保守配置，目標 0.8 倍 ATR、停損 0.5 倍 ATR、持有上限 8 根。",
+    ),
+    # MB-21: ultra-wide exits for high-fee environments (Kraken entry 1.4% round-trip)
+    ExitConfig(
+        exit_id="ultra_wide_conservative",
+        label_zh="超寬保守",
+        target_atr=Decimal("5.0"),
+        stop_atr=Decimal("2.0"),
+        time_stop_bars=24,
+        thesis_zh="MB-21: 超寬目標 5 倍 ATR 覆蓋高費用，停損 2 倍 ATR，持有上限 24 根。",
+    ),
+    ExitConfig(
+        exit_id="ultra_wide_standard",
+        label_zh="超寬標準",
+        target_atr=Decimal("7.0"),
+        stop_atr=Decimal("2.5"),
+        time_stop_bars=36,
+        thesis_zh="MB-21: 超寬目標 7 倍 ATR 覆蓋高費用，停損 2.5 倍 ATR，持有上限 36 根。",
+    ),
+    ExitConfig(
+        exit_id="ultra_wide_aggressive",
+        label_zh="超寬激進",
+        target_atr=Decimal("10.0"),
+        stop_atr=Decimal("3.0"),
+        time_stop_bars=48,
+        thesis_zh="MB-21: 超寬目標 10 倍 ATR 覆蓋高費用，停損 3 倍 ATR，持有上限 48 根。",
     ),
 )
 
@@ -1541,7 +1797,8 @@ def _simulate_range(
         if atr_value is None or atr_value <= 0 or close <= 0:
             index += 1
             continue
-        if atr_value / close < settings.cost_multiple * settings.round_trip_cost_rate:
+        target_distance_pct = exit_config.target_atr * atr_value / close
+        if target_distance_pct < settings.cost_multiple * settings.round_trip_cost_rate:
             stats["blocked_by_cost_gate"] += 1
             index += 1
             continue

@@ -40,7 +40,7 @@ const PRIMARY_NAV: NavItem[] = [
   { key: 'workspace', href: '/workspace', label: 'Workspace', labelMobile: 'Workspace' },
   { key: 'strategies', href: '/dashboard', label: 'Research', labelMobile: 'Research' },
   { key: 'models', href: '/models', label: 'Models', labelMobile: 'Models' },
-  { key: 'journal', href: '/paper-portfolio?view=journal', label: 'Journal', labelMobile: 'Journal' },
+  { key: 'journal', href: '/journal', label: 'Journal', labelMobile: 'Journal' },
 ];
 
 const TOOL_LINKS = [

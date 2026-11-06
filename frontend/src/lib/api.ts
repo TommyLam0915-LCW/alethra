@@ -1057,6 +1057,58 @@ export const api = {
     reorder: (watchlistId: string, symbols: string[]) =>
       apiFetch(`/api/v1/watchlists/${watchlistId}/reorder`, { method: 'POST', body: JSON.stringify({ symbols }) }),
   },
+  journal: {
+    trades: (params: Record<string, any>) => {
+      const qs = new URLSearchParams();
+      for (const [k, v] of Object.entries(params)) {
+        if (v !== undefined && v !== null && v !== '') qs.set(k, String(v));
+      }
+      const q = qs.toString();
+      return apiFetch(`/api/v1/journal/trades${q ? `?${q}` : ''}`);
+    },
+    tradesCsv: (params: Record<string, any>) => {
+      const qs = new URLSearchParams();
+      for (const [k, v] of Object.entries(params)) {
+        if (v !== undefined && v !== null && v !== '') qs.set(k, String(v));
+      }
+      const q = qs.toString();
+      return apiFetchText(`/api/v1/journal/trades.csv${q ? `?${q}` : ''}`);
+    },
+    filters: () => apiFetch('/api/v1/journal/filters'),
+    cumulativePnl: (params: Record<string, any>) => {
+      const qs = new URLSearchParams();
+      for (const [k, v] of Object.entries(params)) {
+        if (v !== undefined && v !== null && v !== '') qs.set(k, String(v));
+      }
+      const q = qs.toString();
+      return apiFetch(`/api/v1/journal/cumulative-pnl${q ? `?${q}` : ''}`);
+    },
+    equityCurve: (params: Record<string, any>) => {
+      const qs = new URLSearchParams();
+      for (const [k, v] of Object.entries(params)) {
+        if (v !== undefined && v !== null && v !== '') qs.set(k, String(v));
+      }
+      const q = qs.toString();
+      return apiFetch(`/api/v1/journal/equity-curve${q ? `?${q}` : ''}`);
+    },
+    skillAttribution: (params: Record<string, any>) => {
+      const qs = new URLSearchParams();
+      for (const [k, v] of Object.entries(params)) {
+        if (v !== undefined && v !== null && v !== '') qs.set(k, String(v));
+      }
+      const q = qs.toString();
+      return apiFetch(`/api/v1/journal/skill-attribution${q ? `?${q}` : ''}`);
+    },
+    skillHeatmap: (metric: string, params?: Record<string, any>) => {
+      const qs = new URLSearchParams({ metric });
+      if (params) {
+        for (const [k, v] of Object.entries(params)) {
+          if (v !== undefined && v !== null && v !== '') qs.set(k, String(v));
+        }
+      }
+      return apiFetch(`/api/v1/journal/skill-heatmap?${qs.toString()}`);
+    },
+  },
   layouts: {
     getWorkspace: () => apiFetch('/api/v1/layouts/workspace'),
     saveWorkspace: (layout: Record<string, unknown>) =>
