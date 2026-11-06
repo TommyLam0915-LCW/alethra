@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.auth.jwt import get_current_user
+from app.auth.jwt import require_admin
 from app.database import get_db
 from app.models.user import User
 from app.services.auto_collection import (
@@ -55,7 +55,7 @@ class CollectionRunResponse(BaseModel):
 
 @router.get("/collection/status", response_model=SchedulerStatusResponse)
 def collection_status(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_admin),
 ):
     """Get auto-collection scheduler status."""
     return get_scheduler_status()
@@ -63,7 +63,7 @@ def collection_status(
 
 @router.post("/collection/trigger", response_model=CollectionTriggerResponse)
 def collection_trigger(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     """Manually trigger a collection cycle."""
@@ -86,7 +86,7 @@ def collection_trigger(
 @router.get("/collection/history", response_model=list[CollectionRunResponse])
 def collection_history(
     limit: int = Query(default=20, ge=1, le=100),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     """Get history of collection runs."""
@@ -97,7 +97,7 @@ def collection_history(
 
 @router.post("/collection/start")
 def collection_start(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_admin),
 ):
     """Start the auto-collection scheduler."""
     database_url = os.environ.get('DATABASE_URL', 'postgresql://postgres:postgres@localhost:5432/ai_investment_lab')
@@ -114,7 +114,7 @@ def collection_start(
 
 @router.post("/collection/stop")
 def collection_stop(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_admin),
 ):
     """Stop the auto-collection scheduler."""
     stop_scheduler()

@@ -93,7 +93,16 @@ def get_current_user(
     raise credentials_exception
 
 
-def require_admin(current_user: User = Depends(get_current_user)) -> User:
+def require_admin(
+    request: Request,
+    current_user: User = Depends(get_current_user)
+) -> User:
+    auth_methods = getattr(request.state, "auth_amr", [])
+    if "bypass" in auth_methods:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin endpoints reject bypass authentication"
+        )
     if not current_user.is_admin:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
