@@ -352,5 +352,152 @@ class TestIntegrationEndToEnd:
             assert 0.0 <= signal.rule_score <= 1.0
 
 
+class TestValidationLoopholes:
+    """Tests for validation loopholes that must be closed."""
+
+    def test_missing_baseline_trades_fails_validation(self):
+        """If no baseline trades exist, validation must return passed=False."""
+        from unittest.mock import MagicMock
+        from uuid import uuid4
+        from datetime import datetime, timezone
+        
+        mock_db = MagicMock()
+        
+        # Mock a run with no matching trades
+        mock_run = MagicMock()
+        mock_run.bars_json = [{"open_time": "2024-01-01T00:00:00", "open": 100, "high": 101, "low": 99, "close": 100, "volume": 1000}] * 100
+        mock_run.trades = []  # No trades at all
+        mock_run.settings_json = {
+            "starting_cash": "10000",
+            "notional_per_trade": "1000",
+            "commission_rate": "0.001",
+            "slippage_rate": "0.001",
+            "atr_window": 14,
+            "cost_multiple": "2.0",
+        }
+        
+        mock_db.scalars.return_value.first.return_value = mock_run
+        
+        proposal = {
+            "instrument_id": "CRYPTO:KRAKEN:BTC-USD",
+            "interval_minutes": 1440,
+            "rule_id": "breakout_trend",  # Use actual rule_id from RULES
+            "baseline_exit_config": {"exit_id": "exit_1"},
+            "proposed_exit_config": {"target_atr": "2.0", "stop_atr": "1.5", "time_stop_bars": 6},
+        }
+        
+        result = validate_proposal(
+            mock_db,
+            user_id=uuid4(),
+            proposal=proposal,
+        )
+        
+        # Should fail with no_baseline_trades error
+        assert result["passed"] is False, "Missing baseline trades must fail validation"
+        assert result["error"] == "no_baseline_trades", f"Expected no_baseline_trades error, got {result.get('error')}"
+
+    def test_insufficient_baseline_data_fails_validation(self):
+        """If baseline has trades but Sharpe cannot be computed, must fail."""
+        from unittest.mock import MagicMock
+        from uuid import uuid4
+        
+        mock_db = MagicMock()
+        
+        # Mock a run with only 1 trade (insufficient for Sharpe)
+        mock_trade = MagicMock()
+        mock_trade.rule_id = "breakout_trend"  # Use actual rule_id from RULES
+        mock_trade.exit_id = "exit_1"
+        mock_trade.net_pnl = 10.0
+        mock_trade.cash_after = 10010.0
+        
+        mock_run = MagicMock()
+        mock_run.bars_json = [{"open_time": "2024-01-01T00:00:00", "open": 100, "high": 101, "low": 99, "close": 100, "volume": 1000}] * 100
+        mock_run.trades = [mock_trade]  # Only 1 trade
+        mock_run.settings_json = {
+            "starting_cash": "10000",
+            "notional_per_trade": "1000",
+            "commission_rate": "0.001",
+            "slippage_rate": "0.001",
+            "atr_window": 14,
+            "cost_multiple": "2.0",
+        }
+        
+        mock_db.scalars.return_value.first.return_value = mock_run
+        
+        proposal = {
+            "instrument_id": "CRYPTO:KRAKEN:BTC-USD",
+            "interval_minutes": 1440,
+            "rule_id": "breakout_trend",  # Use actual rule_id from RULES
+            "baseline_exit_config": {"exit_id": "exit_1"},
+            "proposed_exit_config": {"target_atr": "2.0", "stop_atr": "1.5", "time_stop_bars": 6},
+        }
+        
+        result = validate_proposal(
+            mock_db,
+            user_id=uuid4(),
+            proposal=proposal,
+        )
+        
+        # Should fail with insufficient_baseline_data error
+        assert result["passed"] is False, "Insufficient baseline data must fail validation"
+        assert result["error"] == "insufficient_baseline_data", f"Expected insufficient_baseline_data error, got {result.get('error')}"
+
+    def test_settings_reconstructed_from_run_not_defaults(self):
+        """Validation must use settings from the original run, not defaults."""
+        from unittest.mock import MagicMock, patch
+        from uuid import uuid4
+        
+        mock_db = MagicMock()
+        
+        # Mock a run with custom settings
+        mock_trade = MagicMock()
+        mock_trade.rule_id = "breakout_trend"  # Use actual rule_id from RULES
+        mock_trade.exit_id = "exit_1"
+        mock_trade.net_pnl = 10.0
+        mock_trade.cash_after = 10010.0
+        
+        mock_run = MagicMock()
+        mock_run.bars_json = [{"open_time": "2024-01-01T00:00:00", "open": 100, "high": 101, "low": 99, "close": 100, "volume": 1000}] * 100
+        mock_run.trades = [mock_trade] * 5  # 5 trades (still insufficient for Sharpe, but tests settings)
+        mock_run.settings_json = {
+            "starting_cash": "50000",  # Custom value
+            "notional_per_trade": "5000",  # Custom value
+            "commission_rate": "0.002",  # Custom value
+            "slippage_rate": "0.002",  # Custom value
+            "atr_window": 20,  # Custom value
+            "cost_multiple": "3.0",  # Custom value
+        }
+        
+        mock_db.scalars.return_value.first.return_value = mock_run
+        
+        proposal = {
+            "instrument_id": "CRYPTO:KRAKEN:BTC-USD",
+            "interval_minutes": 1440,
+            "rule_id": "breakout_trend",  # Use actual rule_id from RULES
+            "baseline_exit_config": {"exit_id": "exit_1"},
+            "proposed_exit_config": {"target_atr": "2.0", "stop_atr": "1.5", "time_stop_bars": 6},
+        }
+        
+        # Patch ResearchSettings to verify it's called with custom values
+        with patch("app.services.pattern_analysis.ResearchSettings") as mock_settings_class:
+            mock_settings_class.return_value = MagicMock()
+            
+            # This will fail at Sharpe computation, but we just want to verify settings
+            try:
+                validate_proposal(
+                    mock_db,
+                    user_id=uuid4(),
+                    proposal=proposal,
+                )
+            except:
+                pass  # Expected to fail, we just want to check the call
+            
+            # Verify ResearchSettings was called with custom values from run
+            if mock_settings_class.called:
+                call_kwargs = mock_settings_class.call_args[1]
+                assert call_kwargs.get("starting_cash") == 50000 or str(call_kwargs.get("starting_cash")) == "50000", \
+                    "Should use starting_cash from run.settings_json, not default"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

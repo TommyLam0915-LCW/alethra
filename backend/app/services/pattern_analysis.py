@@ -483,6 +483,14 @@ def validate_proposal(
         t for t in run.trades if t.rule_id == rule_id and t.exit_id == baseline_config.get("exit_id", "")
     ]
 
+    # Fail closed: if no baseline trades exist, cannot validate
+    if not baseline_trades:
+        return {
+            "passed": False,
+            "error": "no_baseline_trades",
+            "message": f"No baseline trades found for rule {rule_id} and exit {baseline_config.get('exit_id', '')}. Cannot validate without baseline data.",
+        }
+
     # Build a synthetic ExitConfig for the proposed parameters
     try:
         proposed_exit = ExitConfig(
@@ -507,14 +515,19 @@ def validate_proposal(
             "passed": False,
             "error": "unknown_rule",
             "message": f"Rule {rule_id} not in current registry. Cannot validate — rejecting.",
-            "sharpe_before": 0,
-            "sharpe_after": 0,
-            "max_dd_before": 0,
-            "max_dd_after": 0,
         }
 
-    # Run backtest with proposed config on the same bars
-    settings = ResearchSettings()
+    # Reconstruct ResearchSettings from the original run (not default)
+    # This ensures baseline and proposed use same costs, capital, windows
+    run_settings_dict = run.settings_json or {}
+    settings = ResearchSettings(
+        starting_cash=_decimal(run_settings_dict.get("starting_cash", "10000")),
+        notional_per_trade=_decimal(run_settings_dict.get("notional_per_trade", "1000")),
+        commission_rate=_decimal(run_settings_dict.get("commission_rate", "0.001")),
+        slippage_rate=_decimal(run_settings_dict.get("slippage_rate", "0.001")),
+        atr_window=int(run_settings_dict.get("atr_window", 14)),
+        cost_multiple=_decimal(run_settings_dict.get("cost_multiple", "2.0")),
+    )
     ind = prepare_indicators(bars, settings.atr_window)
     bounds = fold_bounds(len(bars), WARMUP_BARS, min(5, len(bars) // 30 or 1))
 
@@ -534,8 +547,8 @@ def validate_proposal(
     proposed_win_rate = _decimal(proposed_summary.get("win_rate", 0))
 
     # Compute baseline metrics
-    baseline_sharpe = _compute_sharpe(baseline_trades) if baseline_trades else None
-    baseline_max_dd = _compute_max_drawdown(baseline_trades) if baseline_trades else ZERO
+    baseline_sharpe = _compute_sharpe(baseline_trades)
+    baseline_max_dd = _compute_max_drawdown(baseline_trades)
     baseline_trades_list = list(baseline_trades)
     baseline_wr = (
         Decimal(len([t for t in baseline_trades_list if _decimal(t.net_pnl) > ZERO]))
@@ -544,9 +557,25 @@ def validate_proposal(
         else ZERO
     )
 
-    # Compare
-    sharpe_before = float(baseline_sharpe) if baseline_sharpe is not None else 0.0
-    sharpe_after = float(proposed_sharpe) if proposed_sharpe is not None else 0.0
+    # Fail closed: if baseline Sharpe cannot be computed (insufficient data), reject
+    if baseline_sharpe is None:
+        return {
+            "passed": False,
+            "error": "insufficient_baseline_data",
+            "message": f"Baseline has {len(baseline_trades_list)} trades but Sharpe cannot be computed (need >= 2 trades with variance). Cannot validate.",
+        }
+
+    # Fail closed: if proposed Sharpe cannot be computed, reject
+    if proposed_sharpe is None:
+        return {
+            "passed": False,
+            "error": "insufficient_proposed_data",
+            "message": f"Proposed config produced {len(proposed_trades_all)} trades but Sharpe cannot be computed. Cannot validate.",
+        }
+
+    # Compare — use actual computed values, not 0.0 fallbacks
+    sharpe_before = float(baseline_sharpe)
+    sharpe_after = float(proposed_sharpe)
     max_dd_before = float(baseline_max_dd)
     max_dd_after = float(proposed_max_dd)
 
