@@ -34,6 +34,8 @@ class StrategyType(Enum):
     BB_MEAN_REVERSION = "bb_mean_reversion_v1"
     MOMENTUM_RSI = "momentum_rsi_v1"
     RSI_BASIC = "rsi_basic_v1"
+    # Research-aligned strategy (same rule_id as strategy_research.py)
+    RANGE_FADE = "range_fade"
 
 
 STRATEGY_REGISTRY = {
@@ -53,6 +55,18 @@ STRATEGY_REGISTRY = {
         "display_name_zh": "基礎RSI策略",
         "generator_method": "_rsi_signal",
     },
+    # Research-aligned strategy
+    StrategyType.RANGE_FADE.value: {
+        "display_name_zh": "區間均值回歸",
+        "generator_method": "_range_fade_signal",
+        "research_rule_id": "range_fade",  # Explicit mapping to research rule
+    },
+}
+
+# Live-supported subset: strategies that have been validated for live trading
+# This is a subset of all research rules (RULE_BY_ID in strategy_research.py)
+LIVE_SUPPORTED_STRATEGIES = {
+    StrategyType.RANGE_FADE.value,  # First research-aligned strategy
 }
 
 
@@ -164,6 +178,42 @@ class TechnicalIndicators:
         
         return (upper, middle, lower)
 
+    @staticmethod
+    def zscore(prices: list[float], period: int = 20) -> Optional[float]:
+        """Calculate z-score for the most recent price."""
+        if len(prices) < period:
+            return None
+        
+        recent_prices = prices[-period:]
+        mean = sum(recent_prices) / period
+        variance = sum((p - mean) ** 2 for p in recent_prices) / period
+        std = variance ** 0.5
+        
+        if std == 0:
+            return 0.0
+        
+        current_price = prices[-1]
+        return (current_price - mean) / std
+
+    @staticmethod
+    def trend_strength(
+        prices: list[float],
+        highs: list[float],
+        lows: list[float],
+        ema_fast_period: int = 20,
+        ema_slow_period: int = 50,
+        atr_period: int = 14,
+    ) -> Optional[float]:
+        """Calculate trend strength: abs(EMA_fast - EMA_slow) / ATR."""
+        ema_fast = TechnicalIndicators.ema(prices, ema_fast_period)
+        ema_slow = TechnicalIndicators.ema(prices, ema_slow_period)
+        atr = TechnicalIndicators.atr(highs, lows, prices, atr_period)
+        
+        if ema_fast is None or ema_slow is None or atr is None or atr == 0:
+            return None
+        
+        return abs(ema_fast - ema_slow) / atr
+
 
 class SignalGenerator:
     """Generate trading signals from market bars."""
@@ -200,6 +250,10 @@ class SignalGenerator:
         self.interval_minutes = interval_minutes
         self.max_bars = max_bars
         self.generator_method = STRATEGY_REGISTRY[rule_id]["generator_method"]
+        
+        # Strategy-specific warmup periods (must match research WARMUP_BARS for parity)
+        # range_fade requires 60 bars to match research system
+        self.warmup_bars = 60 if rule_id == "range_fade" else 20
 
         # Bar history
         self.bars: deque[KrakenBar] = deque(maxlen=max_bars)
@@ -223,9 +277,9 @@ class SignalGenerator:
 
     def generate_signal(self) -> Optional[TradingSignal]:
         """Generate trading signal based on current market state."""
-        if len(self.prices) < 20:
+        if len(self.prices) < self.warmup_bars:
             if len(self.prices) % 5 == 0:
-                logger.info(f"📈 {self.skill} on {self.symbol}: {len(self.prices)}/20 bars collected")
+                logger.info(f"📈 {self.skill} on {self.symbol}: {len(self.prices)}/{self.warmup_bars} bars collected")
             return None
 
         current_price = self.prices[-1]
@@ -238,6 +292,12 @@ class SignalGenerator:
         bb = TechnicalIndicators.bollinger_bands(list(self.prices), period=20)
         atr = TechnicalIndicators.atr(
             list(self.highs), list(self.lows), list(self.prices), period=14
+        )
+        
+        # For range_fade strategy
+        zscore_val = TechnicalIndicators.zscore(list(self.prices), period=20)
+        trend_strength_val = TechnicalIndicators.trend_strength(
+            list(self.prices), list(self.highs), list(self.lows)
         )
 
         if rsi is None or bb is None or atr is None:
@@ -255,6 +315,10 @@ class SignalGenerator:
             return method(current_price, rsi, atr, timestamp)
         elif self.generator_method == "_rsi_signal":
             return method(current_price, rsi, atr, timestamp)
+        elif self.generator_method == "_range_fade_signal":
+            if zscore_val is None or trend_strength_val is None:
+                return None
+            return method(current_price, zscore_val, trend_strength_val, atr, timestamp)
         else:
             logger.error(f"Unknown generator method: {self.generator_method}")
             return None
@@ -519,6 +583,83 @@ class SignalGenerator:
                     price=price,
                     rule_score=0.7,
                     reason="RSI normalized (short)",
+                )
+
+        return None
+
+    def _range_fade_signal(
+        self,
+        price: float,
+        zscore: float,
+        trend_strength: float,
+        atr: float,
+        timestamp: datetime,
+    ) -> Optional[TradingSignal]:
+        """Generate range fade signal (research-aligned).
+        
+        Matches research rule 'range_fade' in strategy_research.py:
+        - Only trade when trend_strength <= 0.25 (range-bound market)
+        - Long when zscore <= -1.5 (oversold relative to 20-day mean)
+        - Short when zscore >= 1.5 (overbought relative to 20-day mean)
+        - Exit when zscore crosses zero (mean reversion complete)
+        """
+        # No signal in trending markets
+        if trend_strength > 0.25:
+            return None
+        
+        # Entry long when oversold in range-bound market
+        if not self.in_position and zscore <= -1.5:
+            self.in_position = True
+            self.position_side = "long"
+            self.entry_price = price
+            return TradingSignal(
+                signal_type=SignalType.ENTRY_LONG,
+                symbol=self.symbol,
+                timestamp=timestamp,
+                price=price,
+                rule_score=0.7,
+                reason=f"Range fade long: z={zscore:.2f}, trend={trend_strength:.2f}",
+                stop_loss=price - (2 * atr),
+                take_profit=price + (2 * atr),  # Target: mean reversion to z=0
+            )
+
+        # Entry short when overbought in range-bound market
+        elif not self.in_position and zscore >= 1.5:
+            self.in_position = True
+            self.position_side = "short"
+            self.entry_price = price
+            return TradingSignal(
+                signal_type=SignalType.ENTRY_SHORT,
+                symbol=self.symbol,
+                timestamp=timestamp,
+                price=price,
+                rule_score=0.7,
+                reason=f"Range fade short: z={zscore:.2f}, trend={trend_strength:.2f}",
+                stop_loss=price + (2 * atr),
+                take_profit=price - (2 * atr),  # Target: mean reversion to z=0
+            )
+
+        # Exit when mean reversion complete (z-score crosses zero)
+        elif self.in_position:
+            if self.position_side == "long" and zscore >= 0:
+                self.in_position = False
+                return TradingSignal(
+                    signal_type=SignalType.EXIT,
+                    symbol=self.symbol,
+                    timestamp=timestamp,
+                    price=price,
+                    rule_score=0.8,
+                    reason=f"Range fade exit long: z={zscore:.2f} (mean reached)",
+                )
+            elif self.position_side == "short" and zscore <= 0:
+                self.in_position = False
+                return TradingSignal(
+                    signal_type=SignalType.EXIT,
+                    symbol=self.symbol,
+                    timestamp=timestamp,
+                    price=price,
+                    rule_score=0.8,
+                    reason=f"Range fade exit short: z={zscore:.2f} (mean reached)",
                 )
 
         return None
