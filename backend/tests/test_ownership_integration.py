@@ -32,16 +32,60 @@ TEST_PG_USER = os.environ.get("ALETHRA_TEST_PG_USER", "postgres")
 TEST_PG_PASSWORD = os.environ.get("ALETHRA_TEST_PG_PASSWORD", "")
 TEST_PG_DB = os.environ.get("ALETHRA_TEST_PG_DB")  # REQUIRED, no default
 
+# Known production database names that must NEVER be used for testing
+PRODUCTION_DB_NAMES = {
+    "ai_investment_lab",
+    "alethra_production",
+    "alethra_prod",
+    "production",
+    "prod",
+}
+
 
 def is_test_db_configured() -> bool:
     """Check if test database is explicitly configured."""
     return TEST_PG_DB is not None and TEST_PG_DB != ""
 
 
-# Skip all tests if test database is not configured
+def validate_test_db_target() -> tuple[bool, str]:
+    """Validate that the configured test database is actually a test environment.
+    
+    Returns:
+        (is_valid, error_message)
+    
+    Checks:
+    1. DB name must contain 'test' (case-insensitive)
+    2. DB name must not be in known production list
+    3. DB name must not be a common production pattern
+    
+    This prevents accidental writes to production databases even if
+    the environment variable is set incorrectly.
+    """
+    if not is_test_db_configured():
+        return False, "ALETHRA_TEST_PG_DB not set"
+    
+    db_name_lower = TEST_PG_DB.lower()
+    
+    # Check against known production names
+    if TEST_PG_DB in PRODUCTION_DB_NAMES or db_name_lower in {n.lower() for n in PRODUCTION_DB_NAMES}:
+        return False, f"Database name '{TEST_PG_DB}' is a known production database. Refusing to use for testing."
+    
+    # Check that name contains 'test' (safety convention)
+    if "test" not in db_name_lower:
+        return False, (
+            f"Database name '{TEST_PG_DB}' does not contain 'test'. "
+            f"Test database names must contain 'test' to prevent accidental production use. "
+            f"Example: alethra_test, test_db, pg_test_01"
+        )
+    
+    return True, ""
+
+
+# Skip all tests if test database is not configured or not validated
+_test_db_valid, _test_db_error = validate_test_db_target()
 pytestmark = pytest.mark.skipif(
-    not is_test_db_configured(),
-    reason="Test database not configured. Set ALETHRA_TEST_PG_DB to run these tests."
+    not _test_db_valid,
+    reason=f"Test database not configured or invalid: {_test_db_error}"
 )
 
 
@@ -50,17 +94,19 @@ def test_db_connection():
     """Get a connection to the TEST database.
     
     This context manager:
-    1. Connects to the dedicated test database
-    2. Yields the connection
-    3. ALWAYS rolls back (never commits)
-    4. Closes the connection
+    1. Validates the test database target (not production)
+    2. Connects to the dedicated test database
+    3. Yields the connection
+    4. ALWAYS rolls back (never commits)
+    5. Closes the connection
     
     This ensures no test data persists, even if tests fail.
     """
-    if not is_test_db_configured():
+    is_valid, error_msg = validate_test_db_target()
+    if not is_valid:
         raise RuntimeError(
-            "Test database not configured. "
-            "Set ALETHRA_TEST_PG_DB environment variable."
+            f"Test database target validation failed: {error_msg}. "
+            f"Refusing to connect."
         )
     
     conn = psycopg2.connect(
