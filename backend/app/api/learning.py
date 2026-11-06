@@ -271,18 +271,26 @@ def deploy_proposal(
             },
         )
 
-    # Check evidence status: hypothesis proposals cannot be deployed
+    # Check evidence status: only validated_candidate can be deployed
+    # Explicit allow-list: reject all other statuses (unknown, descriptive, hypothesis, insufficient, unsupported)
     evidence_status = proposal.rationale_json.get("evidence_status", "unknown")
-    if evidence_status == "hypothesis":
+    if evidence_status != "validated_candidate":
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={
-                "reason": "proposal_is_hypothesis",
+                "reason": "proposal_not_validated",
                 "evidence_status": evidence_status,
+                "allowed_status": "validated_candidate",
                 "message": (
-                    "This proposal is marked as 'hypothesis' (parameter exploration, not validated). "
-                    "Hypothesis proposals cannot be deployed. "
-                    "They require formal validation to become validated_candidate status."
+                    f"This proposal has evidence_status='{evidence_status}'. "
+                    f"Only 'validated_candidate' proposals can be deployed. "
+                    f"Status meanings: "
+                    f"'unknown' (not assessed), "
+                    f"'descriptive' (historical description only), "
+                    f"'hypothesis' (parameter exploration), "
+                    f"'insufficient' (not enough data), "
+                    f"'unsupported' (evidence contradicts). "
+                    f"Requires formal validation to become validated_candidate."
                 ),
             },
         )
