@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 from decimal import Decimal
 from typing import Optional
 
@@ -109,7 +109,15 @@ class PaperTradingEngine:
         position_size_pct: float = 0.10,
         max_positions: int = 3,
     ) -> dict:
-        """Execute paper trading using historical data replay."""
+        """Execute paper trading using historical data replay.
+
+        Event-driven simulation: exits are processed before entries at the
+        same timestamp, so released capital is available for new positions
+        only after the exit settles.
+        """
+        if days_back is None or days_back <= 0:
+            raise ValueError(f"days_back must be a positive integer, got {days_back!r}")
+
         db = SessionLocal()
         try:
             # Get run details
@@ -127,6 +135,9 @@ class PaperTradingEngine:
             initial_capital = float(run.initial_capital)
 
             logger.info(f"Starting historical replay for {skill} on {instrument}")
+
+            # Compute UTC cutoff in Python — never embed bind param in INTERVAL string
+            cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
 
             # Get historical trades for this skill/instrument/interval/user
             trades = db.execute(
@@ -146,150 +157,208 @@ class PaperTradingEngine:
                   AND r.interval_minutes = :interval
                   AND t.rule_label_zh = :skill
                   AND r.user_id = :user_id
-                  AND t.entry_time >= NOW() - INTERVAL ':days_back days'
+                  AND t.entry_time >= :cutoff
                 ORDER BY t.entry_time ASC
             """),
-                {"instrument": instrument, "interval": interval, "skill": skill, "user_id": user_id, "days_back": days_back},
+                {
+                    "instrument": instrument,
+                    "interval": interval,
+                    "skill": skill,
+                    "user_id": user_id,
+                    "cutoff": cutoff,
+                },
             ).fetchall()
 
             logger.info(f"Found {len(trades)} historical trades to replay")
 
-            # Simulate trading
+            # Build event list: each trade produces an entry event and an exit event.
+            # Events are sorted by timestamp; at the same timestamp exits come first
+            # so released capital is available before new entries.
+            ENTRY = "entry"
+            EXIT = "exit"
+            events = []
+            for idx, trade in enumerate(trades):
+                entry_time, exit_time, entry_price, exit_price, net_pnl, direction, quantity, exit_reason = trade
+                events.append((entry_time, ENTRY, idx))
+                events.append((exit_time, EXIT, idx))
+
+            # Sort: by timestamp first, then exits before entries at same time
+            events.sort(key=lambda e: (e[0], 0 if e[1] == EXIT else 1))
+
+            # Simulation state
             current_capital = initial_capital
-            positions = []  # List of active positions with exit_time
+            active_positions = {}  # idx -> position dict
             executed_trades = []
             daily_pnl = {}
+            event_log = []  # For audit: (time, event_type, idx, positions_count, capital)
 
-            for trade in trades:
-                entry_time, exit_time, entry_price, exit_price, net_pnl, direction, quantity, exit_reason = trade
+            for event_time, event_type, idx in events:
+                trade = trades[idx]
+                entry_time, exit_time, entry_price, exit_price, orig_net_pnl, direction, quantity, exit_reason = trade
 
-                # Remove positions that have exited (exit_time <= entry_time means already exited)
-                # Keep positions that are still active (exit_time > entry_time)
-                positions = [p for p in positions if p["exit_time"] > entry_time]
+                if event_type == EXIT and idx in active_positions:
+                    # Process exit: settle PnL, release position
+                    pos = active_positions.pop(idx)
+                    trade_quantity = pos["quantity"]
+                    is_long = pos["is_long"]
 
-                # Check if we can open position
-                if len(positions) >= max_positions:
-                    continue
+                    if is_long:
+                        realized_pnl = trade_quantity * (float(exit_price) - pos["entry_price"])
+                    else:
+                        realized_pnl = trade_quantity * (pos["entry_price"] - float(exit_price))
 
-                # Calculate position size
-                position_value = current_capital * position_size_pct
-                trade_quantity = position_value / float(entry_price)
+                    current_capital += realized_pnl
 
-                # Recalculate PnL based on actual position size
-                is_long = (direction or "long").lower() in ["long", "buy"]
-                if is_long:
-                    recalculated_pnl = trade_quantity * (float(exit_price) - float(entry_price))
-                else:
-                    recalculated_pnl = trade_quantity * (float(entry_price) - float(exit_price))
+                    exit_date = exit_time.date() if isinstance(exit_time, datetime) else exit_time
+                    if exit_date not in daily_pnl:
+                        daily_pnl[exit_date] = {"pnl": 0, "trades": 0, "wins": 0}
+                    daily_pnl[exit_date]["pnl"] += realized_pnl
+                    daily_pnl[exit_date]["trades"] += 1
+                    if realized_pnl > 0:
+                        daily_pnl[exit_date]["wins"] += 1
 
-                # Execute entry
-                order_id = str(uuid.uuid4())
-                fill_id = str(uuid.uuid4())
-                decision_id = str(uuid.uuid4())
+                    executed_trades.append({
+                        "entry_time": pos["entry_time"].isoformat(),
+                        "exit_time": exit_time.isoformat(),
+                        "net_pnl": realized_pnl,
+                    })
 
-                # Map direction to order side enum
-                side = "BUY" if is_long else "SELL"
+                    event_log.append({
+                        "time": event_time.isoformat(),
+                        "event": "exit",
+                        "trade_idx": idx,
+                        "active_positions": len(active_positions),
+                        "capital": current_capital,
+                        "realized_pnl": realized_pnl,
+                    })
 
-                # Create decision record first (required by foreign key)
-                db.execute(
-                    text("""
-                    INSERT INTO decision_records (
-                        id, owner_id, actor_type, decision_type, decision_time,
-                        rationale, paper_portfolio_id
+                elif event_type == ENTRY and idx not in active_positions:
+                    # Process entry: check capacity, calculate size from available capital
+                    if len(active_positions) >= max_positions:
+                        event_log.append({
+                            "time": event_time.isoformat(),
+                            "event": "entry_blocked",
+                            "trade_idx": idx,
+                            "active_positions": len(active_positions),
+                            "capital": current_capital,
+                            "reason": "max_positions",
+                        })
+                        continue
+
+                    position_value = current_capital * position_size_pct
+                    trade_quantity = position_value / float(entry_price)
+                    is_long = (direction or "long").lower() in ["long", "buy"]
+                    side = "BUY" if is_long else "SELL"
+
+                    order_id = str(uuid.uuid4())
+                    fill_id = str(uuid.uuid4())
+                    decision_id = str(uuid.uuid4())
+
+                    # Create decision record
+                    db.execute(
+                        text("""
+                        INSERT INTO decision_records (
+                            id, owner_id, actor_type, decision_type, decision_time,
+                            rationale, paper_portfolio_id
+                        )
+                        VALUES (
+                            :id, :owner_id, 'paper_trading', 'entry', :time,
+                            'Paper trading signal', :portfolio_id
+                        )
+                    """),
+                        {
+                            "id": decision_id,
+                            "owner_id": user_id,
+                            "time": entry_time,
+                            "portfolio_id": run.portfolio_id,
+                        },
                     )
-                    VALUES (
-                        :id, :owner_id, 'paper_trading', 'entry', :time,
-                        'Paper trading signal', :portfolio_id
-                    )
-                """),
-                    {
-                        "id": decision_id,
-                        "owner_id": user_id,
-                        "time": entry_time,
-                        "portfolio_id": run.portfolio_id,
-                    },
-                )
 
-                db.execute(
-                    text("""
-                    INSERT INTO paper_orders (
-                        id, portfolio_id, decision_id, asset_id, side, quantity,
-                        order_type, created_at, status, actor_type
+                    db.execute(
+                        text("""
+                        INSERT INTO paper_orders (
+                            id, portfolio_id, decision_id, asset_id, side, quantity,
+                            order_type, created_at, status, actor_type
+                        )
+                        VALUES (
+                            :id, :portfolio_id, :decision_id, :asset_id, :side, :quantity,
+                            'market', :entry_time, 'filled', 'paper_trading'
+                        )
+                    """),
+                        {
+                            "id": order_id,
+                            "portfolio_id": run.portfolio_id,
+                            "decision_id": decision_id,
+                            "asset_id": instrument,
+                            "side": side,
+                            "quantity": trade_quantity,
+                            "entry_time": entry_time,
+                        },
                     )
-                    VALUES (
-                        :id, :portfolio_id, :decision_id, :asset_id, :side, :quantity,
-                        'market', :entry_time, 'filled', 'paper_trading'
-                    )
-                """),
-                    {
-                        "id": order_id,
-                        "portfolio_id": run.portfolio_id,
-                        "decision_id": decision_id,
-                        "asset_id": instrument,
-                        "side": side,
-                        "quantity": trade_quantity,
-                        "entry_time": entry_time,
-                    },
-                )
 
-                db.execute(
-                    text("""
-                    INSERT INTO paper_fills (
-                        id, paper_order_id, execution_date, observed_price,
-                        execution_price_before_costs, slippage_amount, commission_amount,
-                        quantity, gross_amount, net_cash_change, simulated_fill_reason, bar_timestamp
+                    db.execute(
+                        text("""
+                        INSERT INTO paper_fills (
+                            id, paper_order_id, execution_date, observed_price,
+                            execution_price_before_costs, slippage_amount, commission_amount,
+                            quantity, gross_amount, net_cash_change, simulated_fill_reason, bar_timestamp
+                        )
+                        VALUES (
+                            :id, :order_id, :exec_date, :obs_price,
+                            :exec_price, 0, 0,
+                            :quantity, :gross, :net, 'signal', :timestamp
+                        )
+                    """),
+                        {
+                            "id": fill_id,
+                            "order_id": order_id,
+                            "exec_date": entry_time.strftime("%Y-%m-%d"),
+                            "obs_price": float(entry_price),
+                            "exec_price": float(entry_price),
+                            "quantity": trade_quantity,
+                            "gross": trade_quantity * float(entry_price),
+                            "net": -trade_quantity * float(entry_price),
+                            "timestamp": entry_time,
+                        },
                     )
-                    VALUES (
-                        :id, :order_id, :exec_date, :obs_price,
-                        :exec_price, 0, 0,
-                        :quantity, :gross, :net, 'signal', :timestamp
-                    )
-                """),
-                    {
-                        "id": fill_id,
-                        "order_id": order_id,
-                        "exec_date": entry_time.strftime("%Y-%m-%d"),
-                        "obs_price": float(entry_price),
-                        "exec_price": float(entry_price),
-                        "quantity": trade_quantity,
-                        "gross": trade_quantity * float(entry_price),
-                        "net": -trade_quantity * float(entry_price),
-                        "timestamp": entry_time,
-                    },
-                )
 
-                positions.append(
-                    {
+                    active_positions[idx] = {
                         "order_id": order_id,
                         "entry_time": entry_time,
                         "exit_time": exit_time,
                         "entry_price": float(entry_price),
                         "exit_price": float(exit_price),
                         "quantity": trade_quantity,
-                        "net_pnl": recalculated_pnl,
+                        "is_long": is_long,
                     }
-                )
 
-                # Simulate exit with recalculated PnL
-                current_capital += recalculated_pnl
+                    event_log.append({
+                        "time": event_time.isoformat(),
+                        "event": "entry",
+                        "trade_idx": idx,
+                        "active_positions": len(active_positions),
+                        "capital": current_capital,
+                        "quantity": trade_quantity,
+                    })
 
-                # Track daily PnL
-                exit_date = exit_time.date() if isinstance(exit_time, datetime) else exit_time
-                if exit_date not in daily_pnl:
-                    daily_pnl[exit_date] = {"pnl": 0, "trades": 0, "wins": 0}
-
-                daily_pnl[exit_date]["pnl"] += recalculated_pnl
-                daily_pnl[exit_date]["trades"] += 1
-                if recalculated_pnl > 0:
-                    daily_pnl[exit_date]["wins"] += 1
-
-                executed_trades.append(
-                    {
-                        "entry_time": entry_time.isoformat(),
-                        "exit_time": exit_time.isoformat(),
-                        "net_pnl": recalculated_pnl,
-                    }
-                )
+            # Close out any positions still open at end (shouldn't happen with complete trade data)
+            for idx, pos in list(active_positions.items()):
+                logger.warning(f"Position {idx} still open at end of replay — forcing close")
+                trade = trades[idx]
+                exit_time = trade[1]
+                exit_price = float(pos["exit_price"])
+                trade_quantity = pos["quantity"]
+                if pos["is_long"]:
+                    realized_pnl = trade_quantity * (exit_price - pos["entry_price"])
+                else:
+                    realized_pnl = trade_quantity * (pos["entry_price"] - exit_price)
+                current_capital += realized_pnl
+                executed_trades.append({
+                    "entry_time": pos["entry_time"].isoformat(),
+                    "exit_time": exit_time.isoformat(),
+                    "net_pnl": realized_pnl,
+                })
+            active_positions.clear()
 
             # Store daily metrics
             cumulative_pnl = 0
@@ -379,6 +448,7 @@ class PaperTradingEngine:
                 "win_rate": win_rate,
                 "final_capital": current_capital,
                 "executed_trades": executed_trades,
+                "event_log": event_log,
             }
 
         except Exception as exc:

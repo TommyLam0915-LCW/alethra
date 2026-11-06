@@ -252,35 +252,60 @@ class TestPatternAnalysisUnknownRule:
             f"Test did not reach the unknown_rule branch!"
         )
 
-    def test_known_rule_can_pass_validation(self):
-        """Known rule_id should be able to pass validation if criteria met."""
-        # This test verifies that known rules are not automatically rejected
-        # The actual validation logic depends on backtest results
+    def test_known_rule_passes_registry_check(self):
+        """Known rule_id should pass the RULE_BY_ID registry check."""
+        # This test verifies that known rules are not rejected at the registry check.
+        # We mock a run with sufficient trades so validation reaches the registry check.
         from unittest.mock import MagicMock
         from uuid import uuid4
-        
+
         mock_db = MagicMock()
-        
-        # Mock no baseline run (will fail for different reason)
-        mock_db.scalars.return_value.first.return_value = None
-        
+
+        # Use a rule_id that actually exists in RULE_BY_ID (from strategy_research.py)
+        known_rule_id = "breakout_trend"
+
+        # Mock a run with enough trades for baseline
+        mock_trades = []
+        for i in range(10):
+            mock_trade = MagicMock()
+            mock_trade.rule_id = known_rule_id
+            mock_trade.exit_id = "exit_1"
+            mock_trade.net_pnl = float(10 + i)  # Varying PnL for non-zero std dev
+            mock_trade.cash_after = float(10000 + 10 * (i + 1))
+            mock_trades.append(mock_trade)
+
+        mock_run = MagicMock()
+        mock_run.bars_json = [{"open_time": "2024-01-01T00:00:00", "open": 100, "high": 101, "low": 99, "close": 100, "volume": 1000}] * 100
+        mock_run.trades = mock_trades
+        mock_run.settings_json = {
+            "starting_cash": "10000",
+            "notional_per_trade": "1000",
+            "commission_rate": "0.001",
+            "slippage_rate": "0.001",
+            "atr_window": 14,
+            "cost_multiple": "2.0",
+        }
+
+        mock_db.scalars.return_value.first.return_value = mock_run
+
         proposal = {
             "instrument_id": "CRYPTO:KRAKEN:BTC-USD",
             "interval_minutes": 1440,
-            "rule_id": StrategyType.MEAN_REVERSION_RSI_BB.value,  # Known rule
+            "rule_id": known_rule_id,  # Known rule in RULE_BY_ID
             "baseline_exit_config": {"exit_id": "exit_1"},
             "proposed_exit_config": {"target_atr": "2.0", "stop_atr": "1.5"},
         }
-        
+
         result = validate_proposal(
             mock_db,
             user_id=uuid4(),
             proposal=proposal,
         )
-        
-        # Should not fail with unknown_rule error
+
+        # Should NOT fail with unknown_rule error (known rule passes registry check)
         assert result.get("error") != "unknown_rule", (
-            "Known rule should not fail with unknown_rule error"
+            f"Known rule {known_rule_id} should not fail with unknown_rule error. "
+            f"Got: {result}"
         )
 
 
@@ -475,59 +500,91 @@ class TestValidationLoopholes:
 
     def test_settings_reconstructed_from_run_not_defaults(self):
         """Validation must use settings from the original run, not defaults."""
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import MagicMock, patch, call
         from uuid import uuid4
-        
+        from decimal import Decimal
+
         mock_db = MagicMock()
-        
-        # Mock a run with custom settings
-        mock_trade = MagicMock()
-        mock_trade.rule_id = "breakout_trend"  # Use actual rule_id from RULES
-        mock_trade.exit_id = "exit_1"
-        mock_trade.net_pnl = 10.0
-        mock_trade.cash_after = 10010.0
-        
+
+        # Mock a run with custom settings and enough trades for baseline
+        mock_trades = []
+        for i in range(10):
+            mock_trade = MagicMock()
+            mock_trade.rule_id = "breakout_trend"
+            mock_trade.exit_id = "exit_1"
+            mock_trade.net_pnl = float(10 + i)
+            mock_trade.cash_after = float(50000 + 10 * (i + 1))
+            mock_trades.append(mock_trade)
+
         mock_run = MagicMock()
         mock_run.bars_json = [{"open_time": "2024-01-01T00:00:00", "open": 100, "high": 101, "low": 99, "close": 100, "volume": 1000}] * 100
-        mock_run.trades = [mock_trade] * 5  # 5 trades (still insufficient for Sharpe, but tests settings)
-        mock_run.settings_json = {
-            "starting_cash": "50000",  # Custom value
-            "notional_per_trade": "5000",  # Custom value
-            "commission_rate": "0.002",  # Custom value
-            "slippage_rate": "0.002",  # Custom value
-            "atr_window": 20,  # Custom value
-            "cost_multiple": "3.0",  # Custom value
+        mock_run.trades = mock_trades
+        custom_settings = {
+            "starting_cash": "50000",
+            "notional_per_trade": "5000",
+            "commission_rate": "0.002",
+            "slippage_rate": "0.002",
+            "atr_window": 20,
+            "cost_multiple": "3.0",
         }
-        
+        mock_run.settings_json = custom_settings
+
         mock_db.scalars.return_value.first.return_value = mock_run
-        
+
         proposal = {
             "instrument_id": "CRYPTO:KRAKEN:BTC-USD",
             "interval_minutes": 1440,
-            "rule_id": "breakout_trend",  # Use actual rule_id from RULES
+            "rule_id": "breakout_trend",
             "baseline_exit_config": {"exit_id": "exit_1"},
             "proposed_exit_config": {"target_atr": "2.0", "stop_atr": "1.5", "time_stop_bars": 6},
         }
-        
-        # Patch ResearchSettings to verify it's called with custom values
+
+        # Patch ResearchSettings to capture what values it's called with
+        # Also patch downstream functions to avoid MagicMock formatting errors
         with patch("app.services.pattern_analysis.ResearchSettings") as mock_settings_class:
-            mock_settings_class.return_value = MagicMock()
-            
-            # This will fail at Sharpe computation, but we just want to verify settings
-            try:
-                validate_proposal(
-                    mock_db,
-                    user_id=uuid4(),
-                    proposal=proposal,
-                )
-            except:
-                pass  # Expected to fail, we just want to check the call
-            
-            # Verify ResearchSettings was called with custom values from run
-            if mock_settings_class.called:
-                call_kwargs = mock_settings_class.call_args[1]
-                assert call_kwargs.get("starting_cash") == 50000 or str(call_kwargs.get("starting_cash")) == "50000", \
-                    "Should use starting_cash from run.settings_json, not default"
+            # Make ResearchSettings return a mock with proper Decimal attributes
+            mock_settings_instance = MagicMock()
+            mock_settings_instance.starting_cash = Decimal("50000")
+            mock_settings_instance.notional_per_trade = Decimal("5000")
+            mock_settings_instance.commission_rate = Decimal("0.002")
+            mock_settings_instance.slippage_rate = Decimal("0.002")
+            mock_settings_instance.atr_window = 20
+            mock_settings_instance.cost_multiple = Decimal("3.0")
+            mock_settings_class.return_value = mock_settings_instance
+
+            with patch("app.services.pattern_analysis.prepare_indicators", return_value={}):
+                with patch("app.services.pattern_analysis.fold_bounds", return_value=[]):
+                    with patch("app.services.pattern_analysis.summarize", return_value={"win_rate": 0.5}):
+                        with patch("app.services.pattern_analysis._compute_sharpe_from_research_trades", return_value=Decimal("1.0")):
+                            with patch("app.services.pattern_analysis._compute_max_dd_from_research_trades", return_value=Decimal("100")):
+                                with patch("app.services.pattern_analysis._compute_sharpe", return_value=Decimal("0.5")):
+                                    with patch("app.services.pattern_analysis._compute_max_drawdown", return_value=Decimal("200")):
+                                        result = validate_proposal(
+                                            mock_db,
+                                            user_id=uuid4(),
+                                            proposal=proposal,
+                                        )
+
+            # ResearchSettings MUST have been called (reaches line 523 in pattern_analysis.py)
+            assert mock_settings_class.called, (
+                "ResearchSettings constructor must be called during validation. "
+                f"Result was: {result}"
+            )
+
+            # Verify it was called with custom values from run.settings_json
+            call_kwargs = mock_settings_class.call_args[1]
+            assert str(call_kwargs.get("starting_cash")) == "50000", (
+                f"Should use starting_cash=50000 from run.settings_json, got {call_kwargs.get('starting_cash')}"
+            )
+            assert str(call_kwargs.get("notional_per_trade")) == "5000", (
+                f"Should use notional_per_trade=5000 from run.settings_json, got {call_kwargs.get('notional_per_trade')}"
+            )
+            assert str(call_kwargs.get("commission_rate")) == "0.002", (
+                f"Should use commission_rate=0.002 from run.settings_json, got {call_kwargs.get('commission_rate')}"
+            )
+            assert call_kwargs.get("atr_window") == 20, (
+                f"Should use atr_window=20 from run.settings_json, got {call_kwargs.get('atr_window')}"
+            )
 
 
 class TestDaemonStartupState:
@@ -536,8 +593,8 @@ class TestDaemonStartupState:
     def test_daemon_aborts_when_all_skills_invalid(self):
         """Daemon must not start WebSocket if all skills are invalid."""
         import asyncio
-        from unittest.mock import MagicMock, patch
-        
+        from unittest.mock import MagicMock, AsyncMock, patch
+
         # Create daemon with all invalid skills
         daemon = LivePaperTradingDaemon(
             symbols=["XBT/USD"],
@@ -548,7 +605,7 @@ class TestDaemonStartupState:
                     "interval_minutes": 60,
                     "rule_id": "nonexistent_rule_1",
                     "exit_config": {},
-                    "user_id": uuid4(),
+                    "user_id": str(uuid4()),
                 },
                 {
                     "skill": "invalid_skill_2",
@@ -556,35 +613,28 @@ class TestDaemonStartupState:
                     "interval_minutes": 60,
                     "rule_id": "nonexistent_rule_2",
                     "exit_config": {},
-                    "user_id": uuid4(),
+                    "user_id": str(uuid4()),
                 },
             ],
         )
-        
-        # Mock KrakenWebSocketClient to track if start() is called
+
+        # Mock KrakenWebSocketClient with AsyncMock for start()
         with patch("app.services.live_trading_daemon.KrakenWebSocketClient") as mock_ws_class:
             mock_ws = MagicMock()
-            
-            # Create an async function for start()
-            async def mock_start():
-                pass
-            
-            mock_ws.start = mock_start
+            mock_ws.start = AsyncMock()
             mock_ws_class.return_value = mock_ws
-            
+
             # Run daemon start
             asyncio.run(daemon.start())
-            
-            # WebSocket should NOT have been started
-            assert not mock_ws_class.called or not hasattr(mock_ws, '_start_called'), (
-                "WebSocket must not start when all skills are invalid"
-            )
-            
+
+            # WebSocket start() must NOT have been awaited
+            mock_ws.start.assert_not_awaited()
+
             # Daemon should not be running
             assert daemon.running is False, (
                 "Daemon.running must be False after abort"
             )
-            
+
             # No portfolios should be created
             assert len(daemon.portfolio_ids) == 0, (
                 "No portfolios should be created for invalid skills"
