@@ -210,6 +210,92 @@ class PaperTradingEngine:
 
                     current_capital += realized_pnl
 
+                    # Create exit decision, order, and fill (mirror entry logic)
+                    exit_decision_id = str(uuid.uuid4())
+                    exit_order_id = str(uuid.uuid4())
+                    exit_fill_id = str(uuid.uuid4())
+                    exit_side = "SELL" if is_long else "BUY"  # Close position: sell long, buy short
+
+                    # Create exit decision record
+                    db.execute(
+                        text("""
+                        INSERT INTO decision_records (
+                            id, owner_id, actor_type, decision_type, decision_time,
+                            rationale, paper_portfolio_id
+                        )
+                        VALUES (
+                            :id, :owner_id, 'paper_trading', 'exit', :time,
+                            :rationale, :portfolio_id
+                        )
+                    """),
+                        {
+                            "id": exit_decision_id,
+                            "owner_id": user_id,
+                            "time": exit_time,
+                            "rationale": f"Exit {exit_reason or 'signal'}: realized PnL ${realized_pnl:.2f}",
+                            "portfolio_id": run.portfolio_id,
+                        },
+                    )
+
+                    # Create exit order
+                    db.execute(
+                        text("""
+                        INSERT INTO paper_orders (
+                            id, portfolio_id, decision_id, asset_id, side, quantity,
+                            order_type, created_at, status, actor_type
+                        )
+                        VALUES (
+                            :id, :portfolio_id, :decision_id, :asset_id, :side, :quantity,
+                            'market', :exit_time, 'filled', 'paper_trading'
+                        )
+                    """),
+                        {
+                            "id": exit_order_id,
+                            "portfolio_id": run.portfolio_id,
+                            "decision_id": exit_decision_id,
+                            "asset_id": instrument,
+                            "side": exit_side,
+                            "quantity": trade_quantity,
+                            "exit_time": exit_time,
+                        },
+                    )
+
+                    # Create exit fill
+                    # For exits: gross_amount is the proceeds (positive for cash inflow)
+                    # net_cash_change = gross_amount - commission - slippage
+                    exit_gross = trade_quantity * float(exit_price)
+                    exit_commission = 0.0  # TODO: implement commission model
+                    exit_slippage = 0.0  # TODO: implement slippage model
+                    exit_net = exit_gross - exit_commission - exit_slippage
+
+                    db.execute(
+                        text("""
+                        INSERT INTO paper_fills (
+                            id, paper_order_id, execution_date, observed_price,
+                            execution_price_before_costs, slippage_amount, commission_amount,
+                            quantity, gross_amount, net_cash_change, simulated_fill_reason, bar_timestamp
+                        )
+                        VALUES (
+                            :id, :order_id, :exec_date, :obs_price,
+                            :exec_price, :slippage, :commission,
+                            :quantity, :gross, :net, 'exit_signal', :timestamp
+                        )
+                    """),
+                        {
+                            "id": exit_fill_id,
+                            "order_id": exit_order_id,
+                            "exec_date": exit_time.strftime("%Y-%m-%d"),
+                            "obs_price": float(exit_price),
+                            "exec_price": float(exit_price),
+                            "slippage": exit_slippage,
+                            "commission": exit_commission,
+                            "quantity": trade_quantity,
+                            "gross": exit_gross,
+                            "net": exit_net,
+                            "timestamp": exit_time,
+                        },
+                    )
+
                     exit_date = exit_time.date() if isinstance(exit_time, datetime) else exit_time
                     if exit_date not in daily_pnl:
                         daily_pnl[exit_date] = {"pnl": 0, "trades": 0, "wins": 0}
