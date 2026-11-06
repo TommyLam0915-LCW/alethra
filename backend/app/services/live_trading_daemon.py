@@ -278,14 +278,19 @@ class LivePaperTradingDaemon:
                 self.portfolio_ids[key] = portfolio_id
                 self.run_ids[key] = run_id
 
-                # Create signal generator
-                self.signal_generators[key] = SignalGenerator(
-                    symbol=symbol,
-                    skill=skill,
-                    interval_minutes=interval_minutes,
-                )
-
-                logger.info(f"✅ Created portfolio for {skill} on {symbol}")
+                # Create signal generator using rule_id (not display name)
+                try:
+                    self.signal_generators[key] = SignalGenerator(
+                        symbol=symbol,
+                        rule_id=skill_config["rule_id"],
+                        skill=skill_config["skill"],  # Display name only
+                        interval_minutes=interval_minutes,
+                    )
+                    logger.info(f"✅ Created portfolio for {skill} (rule_id={skill_config['rule_id']}) on {symbol}")
+                except ValueError as e:
+                    logger.error(f"❌ Failed to create signal generator for {skill}: {e}")
+                    logger.error(f"   This skill will be skipped. Unknown strategies are rejected, not defaulted.")
+                    continue
 
         except Exception as exc:
             db.rollback()
@@ -378,6 +383,7 @@ def main():
         results = db.execute(
             text("""
             SELECT 
+                t.rule_id,
                 t.rule_label_zh as skill,
                 r.instrument_id,
                 r.interval_minutes,
@@ -385,7 +391,7 @@ def main():
                 r.user_id
             FROM strategy_study_trades t
             JOIN strategy_study_runs r ON t.run_id = r.id
-            GROUP BY t.rule_label_zh, r.instrument_id, r.interval_minutes, t.exit_id, r.user_id
+            GROUP BY t.rule_id, t.rule_label_zh, r.instrument_id, r.interval_minutes, t.exit_id, r.user_id
             HAVING SUM(t.net_pnl) > 0
             ORDER BY SUM(t.net_pnl) DESC
             LIMIT 5
@@ -394,16 +400,19 @@ def main():
 
         skills = [
             {
-                "skill": r[0],
-                "instrument_id": r[1],
-                "interval_minutes": r[2],
-                "exit_config": r[3],
-                "user_id": str(r[4]),
+                "rule_id": r[0],
+                "skill": r[1],  # Display name only
+                "instrument_id": r[2],
+                "interval_minutes": r[3],
+                "exit_config": r[4],
+                "user_id": str(r[5]),
             }
             for r in results
         ]
 
         logger.info(f"Loaded {len(skills)} profitable skills from database")
+        for s in skills:
+            logger.info(f"  rule_id={s['rule_id']}, display={s['skill']}, instrument={s['instrument_id']}")
 
     finally:
         db.close()
