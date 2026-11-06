@@ -128,7 +128,7 @@ class PaperTradingEngine:
 
             logger.info(f"Starting historical replay for {skill} on {instrument}")
 
-            # Get historical trades for this skill/instrument/interval
+            # Get historical trades for this skill/instrument/interval/user
             trades = db.execute(
                 text("""
                 SELECT
@@ -145,22 +145,26 @@ class PaperTradingEngine:
                 WHERE r.instrument_id = :instrument
                   AND r.interval_minutes = :interval
                   AND t.rule_label_zh = :skill
-                  AND t.entry_time >= NOW() - INTERVAL '365 days'
+                  AND r.user_id = :user_id
+                  AND t.entry_time >= NOW() - INTERVAL ':days_back days'
                 ORDER BY t.entry_time ASC
             """),
-                {"instrument": instrument, "interval": interval, "skill": skill},
+                {"instrument": instrument, "interval": interval, "skill": skill, "user_id": user_id, "days_back": days_back},
             ).fetchall()
 
             logger.info(f"Found {len(trades)} historical trades to replay")
 
             # Simulate trading
             current_capital = initial_capital
-            positions = []
+            positions = []  # List of active positions with exit_time
             executed_trades = []
             daily_pnl = {}
 
             for trade in trades:
                 entry_time, exit_time, entry_price, exit_price, net_pnl, direction, quantity, exit_reason = trade
+
+                # Remove positions that have exited
+                positions = [p for p in positions if p["exit_time"] <= entry_time]
 
                 # Check if we can open position
                 if len(positions) >= max_positions:
@@ -170,13 +174,20 @@ class PaperTradingEngine:
                 position_value = current_capital * position_size_pct
                 trade_quantity = position_value / float(entry_price)
 
+                # Recalculate PnL based on actual position size
+                is_long = (direction or "long").lower() in ["long", "buy"]
+                if is_long:
+                    recalculated_pnl = trade_quantity * (float(exit_price) - float(entry_price))
+                else:
+                    recalculated_pnl = trade_quantity * (float(entry_price) - float(exit_price))
+
                 # Execute entry
                 order_id = str(uuid.uuid4())
                 fill_id = str(uuid.uuid4())
                 decision_id = str(uuid.uuid4())
 
                 # Map direction to order side enum
-                side = "BUY" if (direction or "long").lower() in ["long", "buy"] else "SELL"
+                side = "BUY" if is_long else "SELL"
 
                 # Create decision record first (required by foreign key)
                 db.execute(
@@ -186,7 +197,7 @@ class PaperTradingEngine:
                         rationale, paper_portfolio_id
                     )
                     VALUES (
-                        :id, :owner_id, 'human', 'entry', :time,
+                        :id, :owner_id, 'paper_trading', 'entry', :time,
                         'Paper trading signal', :portfolio_id
                     )
                 """),
@@ -254,28 +265,28 @@ class PaperTradingEngine:
                         "entry_price": float(entry_price),
                         "exit_price": float(exit_price),
                         "quantity": trade_quantity,
-                        "net_pnl": float(net_pnl),
+                        "net_pnl": recalculated_pnl,
                     }
                 )
 
-                # Simulate exit
-                current_capital += float(net_pnl)
+                # Simulate exit with recalculated PnL
+                current_capital += recalculated_pnl
 
                 # Track daily PnL
                 exit_date = exit_time.date() if isinstance(exit_time, datetime) else exit_time
                 if exit_date not in daily_pnl:
                     daily_pnl[exit_date] = {"pnl": 0, "trades": 0, "wins": 0}
 
-                daily_pnl[exit_date]["pnl"] += float(net_pnl)
+                daily_pnl[exit_date]["pnl"] += recalculated_pnl
                 daily_pnl[exit_date]["trades"] += 1
-                if float(net_pnl) > 0:
+                if recalculated_pnl > 0:
                     daily_pnl[exit_date]["wins"] += 1
 
                 executed_trades.append(
                     {
                         "entry_time": entry_time.isoformat(),
                         "exit_time": exit_time.isoformat(),
-                        "net_pnl": float(net_pnl),
+                        "net_pnl": recalculated_pnl,
                     }
                 )
 
