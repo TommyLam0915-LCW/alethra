@@ -72,14 +72,18 @@ def session_factory():
     Tests must NOT override global SessionLocal. Use this factory to create
     independent sessions for concurrent operations.
     
-    Connection URL from environment variable ALETHRA_PG_TEST_URL or fallback to
-    verified test DB configuration (no hardcoded credentials in source).
+    FAIL CLOSED: No fallback URL. If ALETHRA_PG_TEST_URL not set, test fails.
+    This ensures tests never accidentally use wrong database.
     """
     import os
-    db_url = os.environ.get(
-        "ALETHRA_PG_TEST_URL",
-        "postgresql://alethra_test_runtime@localhost:5432/ai_investment_lab_test"
-    )
+    db_url = os.environ.get("ALETHRA_PG_TEST_URL")
+    if not db_url:
+        raise RuntimeError(
+            "ALETHRA_PG_TEST_URL environment variable not set. "
+            "Cannot proceed without explicit test database configuration. "
+            "Set: export ALETHRA_PG_TEST_URL='postgresql://role@host:port/db'"
+        )
+    
     engine = create_engine(db_url, pool_pre_ping=True)
     factory = sessionmaker(bind=engine)
     yield factory
@@ -271,7 +275,7 @@ class TestTwoPhaseCancelContract:
         # Use explicit session factory, not global SessionLocal
         session = session_factory()
         try:
-            pt_engine = PaperTradingEngine(session.bind.url.render_as_string(hide_password=False))
+            pt_engine = PaperTradingEngine(session_factory=session)
             
             # Move to running state
             session.execute(
@@ -303,7 +307,7 @@ class TestTwoPhaseCancelContract:
         
         session = session_factory()
         try:
-            pt_engine = PaperTradingEngine(session.bind.url.render_as_string(hide_password=False))
+            pt_engine = PaperTradingEngine(session_factory=session)
             
             # Setup: running state with cancel_requested=TRUE
             session.execute(
@@ -392,7 +396,7 @@ class TestTwoPhaseCancelContract:
         
         session = session_factory()
         try:
-            pt_engine = PaperTradingEngine(session.bind.url.render_as_string(hide_password=False))
+            pt_engine = PaperTradingEngine(session_factory=session)
             
             # Move to running state
             session.execute(
@@ -419,7 +423,7 @@ class TestTwoPhaseCancelContract:
         
         session = session_factory()
         try:
-            pt_engine = PaperTradingEngine(session.bind.url.render_as_string(hide_password=False))
+            pt_engine = PaperTradingEngine(session_factory=session)
             
             # Set status to completed
             session.execute(
@@ -447,7 +451,7 @@ class TestCancelConvergence:
         
         session = session_factory()
         try:
-            pt_engine = PaperTradingEngine(session.bind.url.render_as_string(hide_password=False))
+            pt_engine = PaperTradingEngine(session_factory=session)
             
             # Verify initial state: queued
             run = session.execute(
@@ -480,7 +484,7 @@ class TestCancelConvergence:
         
         session = session_factory()
         try:
-            pt_engine = PaperTradingEngine(session.bind.url.render_as_string(hide_password=False))
+            pt_engine = PaperTradingEngine(session_factory=session)
             
             # Move to pending
             session.execute(
@@ -504,7 +508,7 @@ class TestCancelConvergence:
         
         session = session_factory()
         try:
-            pt_engine = PaperTradingEngine(session.bind.url.render_as_string(hide_password=False))
+            pt_engine = PaperTradingEngine(session_factory=session)
             
             # Move to failed
             session.execute(
@@ -617,7 +621,7 @@ class TestRaceConditionsWithBarrier:
         def cancel_attempt(thread_id):
             session = session_factory()
             try:
-                pt_engine = PaperTradingEngine(session.bind.url.render_as_string(hide_password=False))
+                pt_engine = PaperTradingEngine(session_factory=session)
                 
                 # Move to running state (only first thread)
                 if thread_id == 0:
@@ -658,7 +662,7 @@ class TestRaceConditionsWithBarrier:
         def cancel_attempt():
             session = session_factory()
             try:
-                pt_engine = PaperTradingEngine(session.bind.url.render_as_string(hide_password=False))
+                pt_engine = PaperTradingEngine(session_factory=session)
                 
                 session.execute(
                     text("UPDATE paper_trading_runs SET status = 'running' WHERE id = :id"),
