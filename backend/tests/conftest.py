@@ -290,10 +290,16 @@ from app.database import get_db as _ORIGINAL_GET_DB
 def client():
     from app.main import app
 
-    app.dependency_overrides[_ORIGINAL_GET_DB] = override_get_db
-    with TestClient(app) as c:
-        yield c
-    app.dependency_overrides.clear()
+    # Save existing overrides before modifying
+    saved_overrides = app.dependency_overrides.copy()
+    try:
+        app.dependency_overrides[_ORIGINAL_GET_DB] = override_get_db
+        with TestClient(app) as c:
+            yield c
+    finally:
+        # Restore original state, not just clear
+        app.dependency_overrides.clear()
+        app.dependency_overrides.update(saved_overrides)
 
 
 @pytest.fixture()
