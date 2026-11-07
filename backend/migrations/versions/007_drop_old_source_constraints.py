@@ -30,7 +30,7 @@ from sqlalchemy import text
 
 # revision identifiers, used by Alembic.
 revision = 'drop_old_source_constraints'
-down_revision = 'fix_source_dedup_scope'
+down_revision = 'rm_residual_global_constraints'
 branch_labels = None
 depends_on = None
 
