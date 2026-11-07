@@ -13,13 +13,20 @@ from sqlalchemy import text
 
 
 # Approved test target configuration
-# P0 FIX: inet_server_addr() returns IP, not hostname
-# Separate URL hostname from actual server IP verification
+# Two connection modes supported:
+#   TCP: inet_server_addr() returns IP, inet_server_port() returns port
+#   Unix socket: both return NULL (only local socket connections)
 APPROVED_TEST_TARGET = {
     "db_name": "ai_investment_lab_test",
     "role": "alethra_test_runtime",
-    "server_ip": "127.0.0.1",  # inet_server_addr() returns IP, not hostname
-    "port": 5432,  # TCP port, must not be NULL
+    "tcp": {
+        "server_ip": "127.0.0.1",
+        "port": 5432,
+    },
+    "unix_socket": {
+        "approved_servers": {"localhost", "127.0.0.1", "::1", "", None},
+        "approved_ports": {None},
+    },
 }
 
 
@@ -30,79 +37,103 @@ class TargetGuardError(RuntimeError):
 
 def verify_test_target(session) -> dict:
     """Verify database session matches approved test target.
-    
-    Checks:
+
+    Supports two connection modes:
+    - TCP: inet_server_addr() returns IP, inet_server_port() returns port
+    - Unix socket: both return NULL (local socket only)
+
+    Checks (both modes):
     - current_database() == approved db_name
-    - current_user == approved role
-    - inet_server_addr() == approved server_ip (IP address, not hostname)
-    - inet_server_port() == approved port (TCP mode, must not be NULL)
-    
+    - current_user() == approved role
+
+    TCP mode checks:
+    - inet_server_addr() == approved server_ip
+    - inet_server_port() == approved port
+
+    Unix socket mode:
+    - NULL addr and NULL port are accepted (local-only)
+
     Args:
         session: SQLAlchemy session to verify
-        
+
     Returns:
         dict with actual target info if verification passes
-        
+
     Raises:
         TargetGuardError: If any check fails
     """
-    # Query actual target
     result = session.execute(text("""
-        SELECT 
+        SELECT
             current_database(),
             current_user,
             inet_server_addr(),
             inet_server_port()
     """)).fetchone()
-    
+
     if result is None:
         raise TargetGuardError("Failed to query database target information")
-    
-    actual_db, actual_role, actual_server_ip, actual_port = result
-    
-    # Convert port to int (may be string from DB)
-    # P0 FIX: TCP mode requires non-NULL port
+
+    actual_db, actual_role, actual_server_addr, actual_port = result
+
     try:
         actual_port = int(actual_port) if actual_port is not None else None
     except (ValueError, TypeError):
         actual_port = None
-    
-    # P0 FIX: Reject NULL port in TCP mode
-    if actual_port is None:
-        raise TargetGuardError(
-            f"Port is NULL: TCP mode requires explicit port. "
-            f"Expected {APPROVED_TEST_TARGET['port']}, got NULL. "
-            f"This may indicate a Unix socket connection, which is not approved."
-        )
-    
+
+    is_unix_socket = actual_server_addr is None and actual_port is None
+
     actual = {
         "db_name": actual_db,
         "role": actual_role,
-        "server_ip": actual_server_ip,  # IP address, not hostname
+        "server_addr": actual_server_addr,
         "port": actual_port,
+        "mode": "unix_socket" if is_unix_socket else "tcp",
     }
-    
-    # Verify each component
+
     errors = []
-    
+
     if actual_db != APPROVED_TEST_TARGET["db_name"]:
-        errors.append(f"DB name mismatch: expected {APPROVED_TEST_TARGET['db_name']!r}, got {actual_db!r}")
-    
+        errors.append(
+            f"DB name mismatch: expected {APPROVED_TEST_TARGET['db_name']!r}, "
+            f"got {actual_db!r}"
+        )
+
     if actual_role != APPROVED_TEST_TARGET["role"]:
-        errors.append(f"Role mismatch: expected {APPROVED_TEST_TARGET['role']!r}, got {actual_role!r}")
-    
-    # P0 FIX: Server IP check (inet_server_addr returns IP, not hostname)
-    if actual_server_ip != APPROVED_TEST_TARGET["server_ip"]:
-        errors.append(f"Server IP mismatch: expected {APPROVED_TEST_TARGET['server_ip']!r}, got {actual_server_ip!r}")
-    
-    # Port check: strict, no skip for None (already checked above)
-    if actual_port != APPROVED_TEST_TARGET["port"]:
-        errors.append(f"Port mismatch: expected {APPROVED_TEST_TARGET['port']}, got {actual_port}")
-    
+        errors.append(
+            f"Role mismatch: expected {APPROVED_TEST_TARGET['role']!r}, "
+            f"got {actual_role!r}"
+        )
+
+    if is_unix_socket:
+        unix_policy = APPROVED_TEST_TARGET["unix_socket"]
+        if actual_server_addr not in unix_policy["approved_servers"]:
+            errors.append(
+                f"Unix socket server mismatch: expected one of "
+                f"{unix_policy['approved_servers']}, got {actual_server_addr!r}"
+            )
+        if actual_port not in unix_policy["approved_ports"]:
+            errors.append(
+                f"Unix socket port mismatch: expected one of "
+                f"{unix_policy['approved_ports']}, got {actual_port!r}"
+            )
+    else:
+        tcp_policy = APPROVED_TEST_TARGET["tcp"]
+        if actual_server_addr != tcp_policy["server_ip"]:
+            errors.append(
+                f"Server IP mismatch: expected {tcp_policy['server_ip']!r}, "
+                f"got {actual_server_addr!r}"
+            )
+        if actual_port != tcp_policy["port"]:
+            errors.append(
+                f"Port mismatch: expected {tcp_policy['port']}, got {actual_port}"
+            )
+
     if errors:
-        error_msg = "Target guard verification failed:\n" + "\n".join(f"  - {e}" for e in errors)
+        error_msg = "Target guard verification failed:\n" + "\n".join(
+            f"  - {e}" for e in errors
+        )
         raise TargetGuardError(error_msg)
-    
+
     return actual
 
 

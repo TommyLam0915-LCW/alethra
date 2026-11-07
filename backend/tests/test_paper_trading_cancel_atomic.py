@@ -1857,7 +1857,7 @@ class TestTargetGuard:
         actual = verify_test_target(mock_session)
         assert actual["db_name"] == "ai_investment_lab_test"
         assert actual["role"] == "alethra_test_runtime"
-        assert actual["server_ip"] == "127.0.0.1"  # IP address, not hostname
+        assert actual["server_addr"] == "127.0.0.1"  # IP address, not hostname
         assert actual["port"] == 5432
     
     def test_target_guard_rejects_ipv6_variant(self):
@@ -1887,7 +1887,7 @@ class TestTargetGuard:
         mock_session.execute.return_value = mock_result
         
         # Should raise TargetGuardError
-        with pytest.raises(TargetGuardError, match="Port is NULL"):
+        with pytest.raises(TargetGuardError, match="Port mismatch"):
             verify_test_target(mock_session)
 
     def test_target_guard_zero_writes_before_verification(self):
@@ -2404,7 +2404,7 @@ class TestBatchAReverseOwnership:
                 INSERT INTO users (id, email, password_hash, display_name, user_type, is_active, is_admin, created_at, updated_at)
                 VALUES (:id, :email, :password, :name, 'individual', TRUE, FALSE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
             """),
-                {"id": user1_id, "email": "user1@test.com", "password": "hash", "name": "User 1"}
+                {"id": user1_id, "email": f"{user1_id[:8]}@test.com", "password": "hash", "name": "User 1"}
             )
             # Create user2
             setup_session.execute(
@@ -2412,7 +2412,7 @@ class TestBatchAReverseOwnership:
                 INSERT INTO users (id, email, password_hash, display_name, user_type, is_active, is_admin, created_at, updated_at)
                 VALUES (:id, :email, :password, :name, 'individual', TRUE, FALSE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
             """),
-                {"id": user2_id, "email": "user2@test.com", "password": "hash", "name": "User 2"}
+                {"id": user2_id, "email": f"{user2_id[:8]}@test.com", "password": "hash", "name": "User 2"}
             )
             # Create portfolio1 owned by user1
             setup_session.execute(
@@ -2433,16 +2433,16 @@ class TestBatchAReverseOwnership:
             # Create decision in user1's portfolio
             setup_session.execute(
                 text("""
-                INSERT INTO decision_records (id, paper_portfolio_id, decision_type, confidence, rule_scores, created_at)
-                VALUES (:id, :portfolio_id, 'trade', 0.8, '{"score": 0.8}'::jsonb, CURRENT_TIMESTAMP)
+                INSERT INTO decision_records (id, owner_id, paper_portfolio_id, actor_type, decision_type, decision_time, self_reported_confidence)
+                VALUES (:id, :owner_id, :portfolio_id, 'human', 'entry', CURRENT_TIMESTAMP, 'medium')
             """),
-                {"id": decision_id, "portfolio_id": portfolio1_id}
+                {"id": decision_id, "owner_id": user1_id, "portfolio_id": portfolio1_id}
             )
             # Create order in user2's portfolio but referencing user1's decision (cross-user!)
             setup_session.execute(
                 text("""
-                INSERT INTO paper_orders (id, portfolio_id, decision_id, symbol, side, quantity, price, order_type, status, created_at)
-                VALUES (:id, :portfolio_id, :decision_id, 'BTC-USD', 'buy', 1.0, 50000.0, 'market', 'pending', CURRENT_TIMESTAMP)
+                INSERT INTO paper_orders (id, portfolio_id, decision_id, asset_id, side, quantity, order_type, status, created_at, actor_type)
+                VALUES (:id, :portfolio_id, :decision_id, 'BTC-USD', 'BUY', 1.0, 'market', 'pending', CURRENT_TIMESTAMP, 'human')
             """),
                 {"id": order_id, "portfolio_id": portfolio2_id, "decision_id": decision_id}
             )
@@ -2610,7 +2610,7 @@ class TestBatchCGuardPrecision:
         
         # Verify result is correct
         assert result is not None
-        assert result["server_ip"] == "127.0.0.1"  # IP address
+        assert result["server_addr"] == "127.0.0.1"  # IP address
     
     def test_verified_factory_rejection_asserts_teardown(self):
         """P1 C7-8: No-DB test calls formal entry point with fake engine, asserts teardown on rejection."""
@@ -2709,7 +2709,7 @@ class TestBatchCGuardPrecision:
         
         # Formal entry point: guard check
         result = verify_test_target(mock_conn_pass)
-        assert result["server_ip"] == "127.0.0.1", "Guard should pass with correct IP"
+        assert result["server_addr"] == "127.0.0.1", "Guard should pass with correct IP"
         
         # Test 2: Guard rejects with wrong server IP
         mock_conn_reject = Mock()
