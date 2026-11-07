@@ -10,10 +10,10 @@ import logging
 import uuid
 from datetime import datetime, timedelta, date, timezone
 from decimal import Decimal
-from typing import Optional
+from typing import Optional, Callable
 
-from sqlalchemy import text
-from sqlalchemy.orm import Session
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import SessionLocal
 from app.services.paper_trading_exceptions import (
@@ -28,8 +28,31 @@ logger = logging.getLogger(__name__)
 class PaperTradingEngine:
     """Executes paper trades based on strategy signals."""
 
-    def __init__(self, database_url: str):
-        self.database_url = database_url
+    def __init__(
+        self,
+        database_url: Optional[str] = None,
+        session_factory: Optional[Callable[[], Session]] = None,
+    ):
+        """Initialize engine with real dependency injection.
+        
+        Args:
+            database_url: Database URL (legacy, creates default sessionmaker)
+            session_factory: Callable that returns Session instances (preferred)
+        
+        If session_factory is provided, it takes precedence over database_url.
+        If neither is provided, falls back to global SessionLocal (not recommended).
+        """
+        if session_factory is not None:
+            self.session_factory = session_factory
+        elif database_url is not None:
+            # Legacy path: create sessionmaker from URL
+            engine = create_engine(database_url)
+            self.session_factory = sessionmaker(bind=engine)
+        else:
+            # Fallback to global (should not be used in tests)
+            logger.warning("PaperTradingEngine using global SessionLocal - not isolated")
+            self.session_factory = SessionLocal
+        
         self.active_runs: dict[str, dict] = {}
 
     def create_portfolio(
@@ -42,7 +65,7 @@ class PaperTradingEngine:
         initial_capital: Decimal = Decimal("100000.00"),
     ) -> dict:
         """Create a new paper trading portfolio and run."""
-        db = SessionLocal()
+        db = self.session_factory()
         try:
             # Create portfolio
             portfolio_id = str(uuid.uuid4())
@@ -118,7 +141,7 @@ class PaperTradingEngine:
         Returns:
             True if cancel was requested, False otherwise
         """
-        db = SessionLocal()
+        db = self.session_factory()
         try:
             result = db.execute(
                 text("""
@@ -174,7 +197,7 @@ class PaperTradingEngine:
         if not isinstance(slippage_rate, Decimal) or slippage_rate < 0:
             raise ValueError(f"slippage_rate must be a non-negative Decimal, got {slippage_rate!r}")
 
-        db = SessionLocal()
+        db = self.session_factory()
         acquired_execution = False
         try:
             # Get run details
@@ -1021,7 +1044,7 @@ class PaperTradingEngine:
         - Worker detects flag → stops → status='cancelled' (cancel completed)
         - If status already 'completed'/'cancelled' → reject (409 Conflict)
         """
-        db = SessionLocal()
+        db = self.session_factory()
         try:
             # Get run and validate ownership
             run = db.execute(
@@ -1434,7 +1457,7 @@ class PaperTradingEngine:
         if report_date is None:
             report_date = date.today()
 
-        db = SessionLocal()
+        db = self.session_factory()
         try:
             # Get run details
             run = db.execute(
@@ -1490,7 +1513,7 @@ class PaperTradingEngine:
 
     def get_status(self, run_id: str) -> dict:
         """Get current status of a paper trading run."""
-        db = SessionLocal()
+        db = self.session_factory()
         try:
             run = db.execute(
                 text("SELECT * FROM paper_trading_runs WHERE id = :id"),
