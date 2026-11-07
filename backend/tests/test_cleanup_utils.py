@@ -107,20 +107,21 @@ def collect_user_resource_ids(db_session, user_id: str) -> dict:
         {"user_id": user_id}
     ).fetchall()]
     
-    # === OWNERSHIP VERIFICATION ===
-    # Verify fills belong to user's orders
-    if fill_ids:
-        stray_fills = db_session.execute(
-            text("SELECT COUNT(*) FROM paper_fills WHERE id = ANY(:fill_ids) "
-                 "AND paper_order_id NOT IN (SELECT id FROM paper_orders WHERE id = ANY(:order_ids))"),
-            {"fill_ids": fill_ids, "order_ids": order_ids}
+    # === OWNERSHIP VERIFICATION (BIDIRECTIONAL) ===
+    
+    # 1. Verify portfolio-based orders: orders.portfolio_id must point to user's portfolios
+    if order_ids_by_portfolio:
+        stray_portfolio_orders = db_session.execute(
+            text("SELECT COUNT(*) FROM paper_orders WHERE id = ANY(:order_ids) "
+                 "AND portfolio_id NOT IN (SELECT id FROM paper_portfolios WHERE owner_id = :user_id)"),
+            {"order_ids": order_ids_by_portfolio, "user_id": user_id}
         ).scalar()
-        if stray_fills > 0:
+        if stray_portfolio_orders > 0:
             raise RuntimeError(
-                f"Cleanup aborted: {stray_fills} fills found belonging to orders outside user's scope"
+                f"Cleanup aborted: {stray_portfolio_orders} portfolio-based orders link to portfolios outside user's scope"
             )
     
-    # Verify decision-based orders: orders with decision_id must link to user's decisions
+    # 2. Verify decision-based orders: orders.decision_id must point to user's decisions
     if order_ids_by_decision:
         stray_decision_orders = db_session.execute(
             text("SELECT COUNT(*) FROM paper_orders WHERE id = ANY(:order_ids) "
@@ -131,6 +132,66 @@ def collect_user_resource_ids(db_session, user_id: str) -> dict:
         if stray_decision_orders > 0:
             raise RuntimeError(
                 f"Cleanup aborted: {stray_decision_orders} decision-based orders link to decisions outside user's scope"
+            )
+    
+    # 3. Verify decisions: decisions.paper_portfolio_id must point to user's portfolios
+    if decision_ids:
+        stray_decisions = db_session.execute(
+            text("SELECT COUNT(*) FROM decision_records WHERE id = ANY(:decision_ids) "
+                 "AND paper_portfolio_id NOT IN (SELECT id FROM paper_portfolios WHERE owner_id = :user_id)"),
+            {"decision_ids": decision_ids, "user_id": user_id}
+        ).scalar()
+        if stray_decisions > 0:
+            raise RuntimeError(
+                f"Cleanup aborted: {stray_decisions} decisions link to portfolios outside user's scope"
+            )
+    
+    # 4. Verify fills: fills.paper_order_id must point to user's orders
+    if fill_ids:
+        stray_fills = db_session.execute(
+            text("SELECT COUNT(*) FROM paper_fills WHERE id = ANY(:fill_ids) "
+                 "AND paper_order_id NOT IN (SELECT id FROM paper_orders WHERE id = ANY(:order_ids))"),
+            {"fill_ids": fill_ids, "order_ids": order_ids}
+        ).scalar()
+        if stray_fills > 0:
+            raise RuntimeError(
+                f"Cleanup aborted: {stray_fills} fills link to orders outside user's scope"
+            )
+    
+    # 5. Verify runs: runs.portfolio_id must point to user's portfolios
+    if run_ids:
+        stray_runs = db_session.execute(
+            text("SELECT COUNT(*) FROM paper_trading_runs WHERE id = ANY(:run_ids) "
+                 "AND portfolio_id NOT IN (SELECT id FROM paper_portfolios WHERE owner_id = :user_id)"),
+            {"run_ids": run_ids, "user_id": user_id}
+        ).scalar()
+        if stray_runs > 0:
+            raise RuntimeError(
+                f"Cleanup aborted: {stray_runs} runs link to portfolios outside user's scope"
+            )
+    
+    # 6. Verify positions: positions.portfolio_id must point to user's portfolios
+    if position_ids:
+        stray_positions = db_session.execute(
+            text("SELECT COUNT(*) FROM paper_positions WHERE id = ANY(:position_ids) "
+                 "AND portfolio_id NOT IN (SELECT id FROM paper_portfolios WHERE owner_id = :user_id)"),
+            {"position_ids": position_ids, "user_id": user_id}
+        ).scalar()
+        if stray_positions > 0:
+            raise RuntimeError(
+                f"Cleanup aborted: {stray_positions} positions link to portfolios outside user's scope"
+            )
+    
+    # 7. Verify metrics: metrics.run_id must point to user's runs
+    if metric_ids:
+        stray_metrics = db_session.execute(
+            text("SELECT COUNT(*) FROM paper_trading_daily_metrics WHERE id = ANY(:metric_ids) "
+                 "AND run_id NOT IN (SELECT id FROM paper_trading_runs WHERE id = ANY(:run_ids))"),
+            {"metric_ids": metric_ids, "run_ids": run_ids}
+        ).scalar()
+        if stray_metrics > 0:
+            raise RuntimeError(
+                f"Cleanup aborted: {stray_metrics} metrics link to runs outside user's scope"
             )
     
     return {

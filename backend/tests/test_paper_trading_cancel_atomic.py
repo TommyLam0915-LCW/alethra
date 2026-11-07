@@ -988,9 +988,9 @@ class TestCleanupSafety:
         finally:
             verify_session.close()
 
-    def test_cleanup_rollback_on_delete_failure(self, session_factory, test_user_id):
-        """Delete failure after partial delete: transaction rollback restores all data."""
-        from test_cleanup_utils import collect_user_resource_ids
+    def test_cleanup_helper_rollback_on_injected_failure(self, session_factory, test_user_id, monkeypatch):
+        """Cleanup helper rollback: inject error during delete, verify all data restored."""
+        from test_cleanup_utils import unified_cleanup_user_data, delete_user_resources_in_transaction
         
         # Setup complete FK chain with child data
         setup_session = session_factory()
@@ -998,22 +998,25 @@ class TestCleanupSafety:
         run_id = str(uuid.uuid4())
         order_id = str(uuid.uuid4())
         fill_id = str(uuid.uuid4())
+        
+        # Register finalizer EARLY (before any writes)
+        def cleanup():
+            s = session_factory()
+            try:
+                # Delete in reverse FK order
+                s.execute(text("DELETE FROM paper_fills WHERE id = :id"), {"id": fill_id})
+                s.execute(text("DELETE FROM paper_orders WHERE id = :id"), {"id": order_id})
+                s.execute(text("DELETE FROM paper_trading_runs WHERE id = :id"), {"id": run_id})
+                s.execute(text("DELETE FROM paper_portfolios WHERE id = :id"), {"id": portfolio_id})
+                s.execute(text("DELETE FROM users WHERE id = :id"), {"id": test_user_id})
+                s.commit()
+            except Exception as e:
+                s.rollback()
+                raise RuntimeError(f"Cleanup failed: {e}") from e
+            finally:
+                s.close()
+        
         try:
-            # Register finalizer EARLY
-            def cleanup():
-                try:
-                    s = session_factory()
-                    # Delete in reverse FK order
-                    s.execute(text("DELETE FROM paper_fills WHERE id = :id"), {"id": fill_id})
-                    s.execute(text("DELETE FROM paper_orders WHERE id = :id"), {"id": order_id})
-                    s.execute(text("DELETE FROM paper_trading_runs WHERE id = :id"), {"id": run_id})
-                    s.execute(text("DELETE FROM paper_portfolios WHERE id = :id"), {"id": portfolio_id})
-                    s.execute(text("DELETE FROM users WHERE id = :id"), {"id": test_user_id})
-                    s.commit()
-                    s.close()
-                except Exception:
-                    pass
-            
             setup_session.execute(
                 text("""
                 INSERT INTO users (id, email, password_hash, display_name, user_type, is_active, is_admin, created_at, updated_at)
@@ -1053,36 +1056,32 @@ class TestCleanupSafety:
         finally:
             setup_session.close()
         
-        # Collect IDs
-        collect_session = session_factory()
-        try:
-            resource_ids = collect_user_resource_ids(collect_session, test_user_id)
-            assert len(resource_ids["fill_ids"]) == 1, "Should have 1 fill"
-            assert len(resource_ids["order_ids"]) == 1, "Should have 1 order"
-        finally:
-            collect_session.close()
+        # Monkey patch delete_user_resources_in_transaction to inject error after first DELETE
+        original_delete = delete_user_resources_in_transaction
+        delete_count = [0]
         
-        # Attempt delete with injected error AFTER first DELETE
-        delete_session = session_factory()
-        try:
+        def patched_delete(db_session, user_id, resource_ids):
+            """Patched delete that throws after first DELETE."""
             # Delete fills first (this should succeed)
             if resource_ids["fill_ids"]:
-                delete_session.execute(
+                db_session.execute(
                     text("DELETE FROM paper_fills WHERE id = ANY(:fill_ids)"),
                     {"fill_ids": resource_ids["fill_ids"]}
                 )
+                delete_count[0] += 1
             
-            # Inject error BEFORE completing all deletes
-            raise RuntimeError("Injected error: simulating failure mid-transaction")
+            # Inject error after first DELETE
+            if delete_count[0] > 0:
+                raise RuntimeError("Injected error: simulating failure after first DELETE")
             
-            # This would delete orders, but we never reach here
-            # delete_session.execute(...)
-            # delete_session.commit()
-        except RuntimeError as e:
-            assert "Injected error" in str(e)
-            delete_session.rollback()
-        finally:
-            delete_session.close()
+            # Continue with rest of deletes (won't reach here)
+            original_delete(db_session, user_id, resource_ids)
+        
+        monkeypatch.setattr("test_cleanup_utils.delete_user_resources_in_transaction", patched_delete)
+        
+        # Attempt cleanup - should fail and rollback
+        with pytest.raises(RuntimeError, match="Injected error"):
+            unified_cleanup_user_data(session_factory, test_user_id)
         
         # Verify rollback: ALL data should still exist (including fills that were deleted)
         verify_session = session_factory()
@@ -1320,9 +1319,9 @@ class TestCleanupSafety:
         finally:
             cleanup_session.close()
 
-    def test_cleanup_aborts_on_cross_user_fill(self, session_factory):
-        """Cross-user association: fill belongs to order from different user."""
-        from test_cleanup_utils import collect_user_resource_ids
+    def test_cleanup_user2_does_not_affect_user1_data(self, session_factory):
+        """User2 cleanup: verify it doesn't touch user1's data."""
+        from test_cleanup_utils import collect_user_resource_ids, unified_cleanup_user_data
         
         user1_id = str(uuid.uuid4())
         user2_id = str(uuid.uuid4())
@@ -1331,10 +1330,24 @@ class TestCleanupSafety:
         order1_id = str(uuid.uuid4())
         fill_id = str(uuid.uuid4())
         
-        # Setup: user1 owns portfolio1 with order, user2 owns portfolio2
-        # Fill in user2's scope references order in user1's portfolio (cross-user)
+        # Setup: user1 owns portfolio1 with order and fill, user2 owns portfolio2 (empty)
         setup_session = session_factory()
         try:
+            # Register finalizer EARLY
+            def cleanup():
+                try:
+                    s = session_factory()
+                    s.execute(text("DELETE FROM paper_fills WHERE id = :id"), {"id": fill_id})
+                    s.execute(text("DELETE FROM paper_orders WHERE id = :id"), {"id": order1_id})
+                    s.execute(text("DELETE FROM paper_portfolios WHERE id = :id"), {"id": portfolio1_id})
+                    s.execute(text("DELETE FROM paper_portfolios WHERE id = :id"), {"id": portfolio2_id})
+                    s.execute(text("DELETE FROM users WHERE id = :id"), {"id": user1_id})
+                    s.execute(text("DELETE FROM users WHERE id = :id"), {"id": user2_id})
+                    s.commit()
+                    s.close()
+                except Exception as e:
+                    raise RuntimeError(f"Cleanup failed: {e}") from e
+            
             # Create users
             setup_session.execute(
                 text("""
@@ -1373,7 +1386,7 @@ class TestCleanupSafety:
             """),
                 {"id": order1_id, "portfolio_id": portfolio1_id}
             )
-            # Create fill referencing user1's order (but we'll try to cleanup user2)
+            # Create fill referencing user1's order
             setup_session.execute(
                 text("""
                 INSERT INTO paper_fills (id, paper_order_id, quantity, price, fee, filled_at)
@@ -1385,18 +1398,21 @@ class TestCleanupSafety:
         finally:
             setup_session.close()
         
-        # Try to cleanup user2 - should succeed (user2 has no resources)
-        # But if we manually add user2's portfolio to the fill's order, it would fail
-        # For this test, we verify that user2's cleanup doesn't touch user1's data
+        # Collect user2's resources - should have portfolio2 but no orders/fills
         collect_session = session_factory()
         try:
             resource_ids = collect_user_resource_ids(collect_session, user2_id)
-            # User2 has no portfolios, so no resources
-            assert len(resource_ids["portfolio_ids"]) == 0
-            assert len(resource_ids["order_ids"]) == 0
-            assert len(resource_ids["fill_ids"]) == 0
+            # User2 has portfolio2
+            assert len(resource_ids["portfolio_ids"]) == 1, "User2 should have 1 portfolio"
+            assert portfolio2_id in resource_ids["portfolio_ids"], "User2's portfolio should be in the list"
+            # User2 has no orders or fills
+            assert len(resource_ids["order_ids"]) == 0, "User2 should have no orders"
+            assert len(resource_ids["fill_ids"]) == 0, "User2 should have no fills"
         finally:
             collect_session.close()
+        
+        # Cleanup user2
+        unified_cleanup_user_data(session_factory, user2_id)
         
         # Verify user1's data is unchanged
         verify_session = session_factory()
@@ -1414,21 +1430,18 @@ class TestCleanupSafety:
                 {"id": fill_id}
             ).scalar()
             assert fill_count == 1, "Fill should be unchanged"
+            
+            # User1 should still exist
+            user1_count = verify_session.execute(
+                text("SELECT COUNT(*) FROM users WHERE id = :id"),
+                {"id": user1_id}
+            ).scalar()
+            assert user1_count == 1, "User1 should still exist"
         finally:
             verify_session.close()
         
-        # Clean up manually
-        cleanup_session = session_factory()
-        try:
-            cleanup_session.execute(text("DELETE FROM paper_fills WHERE id = :id"), {"id": fill_id})
-            cleanup_session.execute(text("DELETE FROM paper_orders WHERE id = :id"), {"id": order1_id})
-            cleanup_session.execute(text("DELETE FROM paper_portfolios WHERE id = :id"), {"id": portfolio1_id})
-            cleanup_session.execute(text("DELETE FROM paper_portfolios WHERE id = :id"), {"id": portfolio2_id})
-            cleanup_session.execute(text("DELETE FROM users WHERE id = :id"), {"id": user1_id})
-            cleanup_session.execute(text("DELETE FROM users WHERE id = :id"), {"id": user2_id})
-            cleanup_session.commit()
-        finally:
-            cleanup_session.close()
+        # Clean up user1's data
+        cleanup()
 
 
 class TestWorkerAtomicTerminalState:
