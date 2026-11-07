@@ -2773,7 +2773,12 @@ class TestBatchBMinimalIntegration:
         request.addfinalizer(cleanup)
         
         # P1 B Commit 5: Create study trade matching formal schema
-        trade_time = datetime.now(timezone.utc)
+        # Trade must be completed BEFORE replay starts (exit_time <= as_of where as_of = now)
+        # Use times in the past to ensure the trade will be selected by historical query
+        trade_entry_time = datetime.now(timezone.utc) - timedelta(hours=2)
+        trade_exit_time = datetime.now(timezone.utc) - timedelta(hours=1)
+        trade_signal_time = trade_entry_time - timedelta(minutes=5)
+        
         setup_session = session_factory()
         try:
             # Create user
@@ -2801,11 +2806,13 @@ class TestBatchBMinimalIntegration:
                 {
                     "id": study_run_id, 
                     "user_id": user_id,
-                    "first_time": trade_time - timedelta(hours=1),
-                    "last_time": trade_time
+                    "first_time": trade_entry_time - timedelta(hours=1),
+                    "last_time": trade_exit_time
                 }
             )
             # Create study trade matching historical query requirements
+            # entry_time >= cutoff (now - 30 days) ✓
+            # exit_time <= as_of (now) ✓
             setup_session.execute(
                 text("""
                 INSERT INTO strategy_study_trades (
@@ -2825,16 +2832,24 @@ class TestBatchBMinimalIntegration:
                 {
                     "id": trade_id,
                     "run_id": study_run_id,
-                    "signal_time": trade_time - timedelta(minutes=5),
-                    "entry_time": trade_time,
-                    "exit_time": trade_time + timedelta(minutes=30)
+                    "signal_time": trade_signal_time,
+                    "entry_time": trade_entry_time,
+                    "exit_time": trade_exit_time
                 }
             )
-            # Create paper run in 'queued' state
+            # Create paper run in 'queued' state with all required fields for historical query
             setup_session.execute(
                 text("""
-                INSERT INTO paper_trading_runs (id, portfolio_id, user_id, strategy_name, status, cancel_requested, created_at, updated_at)
-                VALUES (:id, :portfolio_id, :user_id, 'test_strategy', 'queued', FALSE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                INSERT INTO paper_trading_runs (
+                    id, portfolio_id, user_id, strategy_name, skill, instrument_id,
+                    interval_minutes, initial_capital, status, cancel_requested,
+                    created_at, updated_at
+                )
+                VALUES (
+                    :id, :portfolio_id, :user_id, 'test_strategy', 'test_rule', 'BTC-USD',
+                    60, 100000.0, 'queued', FALSE,
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                )
             """),
                 {"id": paper_run_id, "portfolio_id": portfolio_id, "user_id": user_id}
             )
@@ -2851,6 +2866,10 @@ class TestBatchBMinimalIntegration:
         replay_completed = threading.Event()
         replay_failed = threading.Event()
         
+        # P1 B: Independent abort/release events (not success events)
+        abort_test = threading.Event()
+        release_all = threading.Event()
+        
         # Track results
         results = {
             "replay_exception": None,
@@ -2866,7 +2885,7 @@ class TestBatchBMinimalIntegration:
         
         # P1 B Commit 9: Hook session factory to detect acquisition and inject exception
         original_session_factory = session_factory
-        acquisition_detected = [False]
+        acquisition_query_detected = [False]
         
         def hooked_session_factory():
             session = original_session_factory()
@@ -2874,32 +2893,35 @@ class TestBatchBMinimalIntegration:
             original_commit = session.commit
             
             def hooked_execute(query, params=None):
+                # P1 B: Precise detection - check if this is the atomic acquisition UPDATE
+                query_str = str(query) if hasattr(query, '__str__') else ''
+                if (not acquisition_query_detected[0] and 
+                    'UPDATE paper_trading_runs' in query_str and
+                    'SET status = \'running\'' in query_str and
+                    'WHERE id = :id AND status IN' in query_str and
+                    'cancel_requested = FALSE' in query_str):
+                    # This is the actual acquisition query
+                    acquisition_query_detected[0] = True
+                
                 result = original_execute(query, params)
                 return result
             
             def hooked_commit():
                 original_commit()
-                # P1 B Commit 7: Detect acquisition success and signal once
-                if not acquisition_detected[0]:
-                    # Check if this is the acquisition commit (atomic UPDATE with RETURNING)
-                    # The acquisition happens in execute_historical_replay
-                    check_session = original_session_factory()
-                    try:
-                        status = check_session.execute(
-                            text("SELECT status FROM paper_trading_runs WHERE id = :id"),
-                            {"id": paper_run_id}
-                        ).scalar()
-                        if status == 'running' and not acquisition_detected[0]:
-                            acquisition_detected[0] = True
-                            acquisition_committed.set()
-                            # P1 B Commit 8: Wait for cancel to be committed
-                            if not cancel_committed.wait(timeout=5.0):
-                                acquisition_failed.set()
-                                return
-                            # P1 B Commit 9: Allow exception injection
-                            can_inject_exception.set()
-                    finally:
-                        check_session.close()
+                # P1 B: After commit, if we detected the acquisition query, signal success
+                if acquisition_query_detected[0] and not acquisition_committed.is_set():
+                    acquisition_committed.set()
+                    # Wait for cancel to be committed
+                    if not cancel_committed.wait(timeout=5.0):
+                        acquisition_failed.set()
+                        return
+                    # P1 B: Now inject exception to test formal handler preserves it
+                    # The exception should be raised on the next operation after cancel
+                    can_inject_exception.set()
+                    # Store the exception instance for later verification
+                    injected_error = RuntimeError("Injected after cancel committed")
+                    results["injected_exception"] = injected_error
+                    raise injected_error
             
             session.execute = hooked_execute
             session.commit = hooked_commit
@@ -2933,10 +2955,8 @@ class TestBatchBMinimalIntegration:
                 # Use hooked session factory for replay
                 engine.session_factory = hooked_session_factory
                 
-                # P1 B Commit 9: Wait for permission to inject exception
-                if not can_inject_exception.wait(timeout=5.0):
-                    replay_failed.set()
-                    return
+                # P1 B: Replay must start FIRST, then acquire execution
+                # Do NOT wait for can_inject_exception here - that would block replay from starting
                 
                 # P1 B Commit 6: Actually call execute_historical_replay
                 # This will query historical trades and process them
@@ -2971,21 +2991,20 @@ class TestBatchBMinimalIntegration:
         try:
             # P1 B Commit 12: Wait for completion with timeout
             if not replay_completed.wait(timeout=10.0):
+                # Timeout - abort test
+                abort_test.set()
+                release_all.set()
                 raise TimeoutError("Replay completion timeout")
             
-            # P1 B Commit 13: finally order - release → join → confirm stopped
-            # Release all events
-            acquisition_committed.set()
-            cancel_committed.set()
-            can_inject_exception.set()
-            
-            # Join threads
-            cancel_thread.join(timeout=5.0)
-            replay_thread.join(timeout=5.0)
-            
-            # Confirm all stopped
-            assert not cancel_thread.is_alive(), "Cancel thread should be stopped"
-            assert not replay_thread.is_alive(), "Replay thread should be stopped"
+            # P1 B Commit 13: Check all thread errors and success results
+            if results["replay_exception"]:
+                raise AssertionError(f"Replay thread failed: {results['replay_exception']}")
+            if results.get("cancel_thread_exception"):
+                raise AssertionError(f"Cancel thread failed: {results['cancel_thread_exception']}")
+            if not results["replay_thread_done"]:
+                raise AssertionError("Replay thread did not complete successfully")
+            if not results["cancel_thread_done"]:
+                raise AssertionError("Cancel thread did not complete successfully")
             
             # P1 B Commit 11: Verify terminal state
             verify_session = session_factory()
@@ -3002,6 +3021,14 @@ class TestBatchBMinimalIntegration:
                 assert final_state[1] == True, "cancel_requested should be True"
             finally:
                 verify_session.close()
+            
+            # P1 B: Verify same exception instance preserved by formal handler
+            if results.get("injected_exception") and results.get("caught_exception"):
+                assert results["caught_exception"] is results["injected_exception"], (
+                    f"Formal handler must preserve same exception instance. "
+                    f"Injected: {id(results['injected_exception'])}, "
+                    f"Caught: {id(results['caught_exception'])}"
+                )
             
             # P1 B Commit 14: After cleanup commit, independently verify complete zero residual
             # First, collect resource IDs
@@ -3022,9 +3049,21 @@ class TestBatchBMinimalIntegration:
                 verify_residual_session.close()
         
         finally:
-            # P1 B Commit 13: Ensure cleanup even on test failure
-            for thread in threads_started:
-                if thread.is_alive():
-                    thread.join(timeout=1.0)
+            # P1 B Commit 13: finally order - release → join → confirm stopped → cleanup
+            # Release all waiting threads (independent abort/release, not success events)
+            release_all.set()
+            acquisition_committed.set()
+            cancel_committed.set()
+            can_inject_exception.set()
+            
+            # Join threads
+            cancel_thread.join(timeout=5.0)
+            replay_thread.join(timeout=5.0)
+            
+            # Confirm all stopped
+            if cancel_thread.is_alive():
+                raise RuntimeError("Cancel thread still alive after join")
+            if replay_thread.is_alive():
+                raise RuntimeError("Replay thread still alive after join")
         
 # Updated test count: 31 + 7 + 2 + 1 + 3 + 1 = 45 methods across 14 classes
