@@ -222,46 +222,130 @@ def _cleanup_user_data(user_id: str):
     """Remove all paper trading data for a user in FK-safe order."""
     db = SessionLocal()
     try:
-        # Delete in FK-safe order
+        # Delete in FK-safe order (child tables first)
+        # paper_fills → paper_orders → paper_positions → decision_records →
         # paper_trading_daily_metrics → paper_trading_runs → paper_portfolios → users
+        
+        # Get portfolio IDs for this user
+        portfolio_ids_result = db.execute(
+            text("SELECT id FROM paper_portfolios WHERE owner_id = :user_id"),
+            {"user_id": user_id},
+        ).fetchall()
+        portfolio_ids = [str(row[0]) for row in portfolio_ids_result]
+        
+        if portfolio_ids:
+            # Delete paper_fills (child of paper_orders)
+            db.execute(
+                text("DELETE FROM paper_fills WHERE paper_order_id IN "
+                     "(SELECT id FROM paper_orders WHERE portfolio_id = ANY(:portfolio_ids))"),
+                {"portfolio_ids": portfolio_ids},
+            )
+            
+            # Delete paper_orders
+            db.execute(
+                text("DELETE FROM paper_orders WHERE portfolio_id = ANY(:portfolio_ids)"),
+                {"portfolio_ids": portfolio_ids},
+            )
+        
+        # Delete paper_positions
+        db.execute(
+            text("DELETE FROM paper_positions WHERE portfolio_id IN "
+                 "(SELECT id FROM paper_portfolios WHERE owner_id = :user_id)"),
+            {"user_id": user_id},
+        )
+        
+        # Delete decision_records
+        db.execute(
+            text("DELETE FROM decision_records WHERE paper_portfolio_id IN "
+                 "(SELECT id FROM paper_portfolios WHERE owner_id = :user_id)"),
+            {"user_id": user_id},
+        )
+        
+        # Delete paper_trading_daily_metrics
         db.execute(
             text("DELETE FROM paper_trading_daily_metrics WHERE run_id IN "
                  "(SELECT id FROM paper_trading_runs WHERE portfolio_id IN "
                  "(SELECT id FROM paper_portfolios WHERE owner_id = :user_id))"),
             {"user_id": user_id},
         )
-        db.execute(
-            text("DELETE FROM paper_positions WHERE portfolio_id IN "
-                 "(SELECT id FROM paper_portfolios WHERE owner_id = :user_id)"),
-            {"user_id": user_id},
-        )
-        db.execute(
-            text("DELETE FROM decision_records WHERE paper_portfolio_id IN "
-                 "(SELECT id FROM paper_portfolios WHERE owner_id = :user_id)"),
-            {"user_id": user_id},
-        )
+        
+        # Delete paper_trading_runs
         db.execute(
             text("DELETE FROM paper_trading_runs WHERE portfolio_id IN "
                  "(SELECT id FROM paper_portfolios WHERE owner_id = :user_id)"),
             {"user_id": user_id},
         )
+        
+        # Delete paper_portfolios
         db.execute(
             text("DELETE FROM paper_portfolios WHERE owner_id = :user_id"),
             {"user_id": user_id},
         )
+        
+        # Delete user
         db.execute(
             text("DELETE FROM users WHERE id = :user_id"),
             {"user_id": user_id},
         )
         db.commit()
         
-        # Verify cleanup succeeded
-        result = db.execute(
-            text("SELECT COUNT(*) FROM users WHERE id = :user_id"),
-            {"user_id": user_id},
-        )
-        count = result.scalar()
-        if count != 0:
-            raise RuntimeError(f"Cleanup verification failed: user {user_id} still exists (count={count})")
+        # Verify cleanup succeeded with comprehensive checks
+        _verify_zero_residual(db, user_id, portfolio_ids)
     finally:
         db.close()
+
+
+def _verify_zero_residual(db, user_id: str, portfolio_ids: list[str]):
+    """Verify zero residual data across all related tables."""
+    # Check user is gone
+    result = db.execute(
+        text("SELECT COUNT(*) FROM users WHERE id = :user_id"),
+        {"user_id": user_id},
+    ).scalar()
+    if result != 0:
+        raise RuntimeError(f"Cleanup verification failed: user {user_id} still exists (count={result})")
+    
+    # Check portfolios are gone
+    result = db.execute(
+        text("SELECT COUNT(*) FROM paper_portfolios WHERE owner_id = :user_id"),
+        {"user_id": user_id},
+    ).scalar()
+    if result != 0:
+        raise RuntimeError(f"Cleanup verification failed: {result} portfolios still exist for user {user_id}")
+    
+    # Check all child tables are empty for these portfolios
+    if portfolio_ids:
+        for table, fk_column in [
+            ("paper_fills", "paper_order_id"),
+            ("paper_orders", "portfolio_id"),
+            ("paper_positions", "portfolio_id"),
+            ("decision_records", "paper_portfolio_id"),
+        ]:
+            if table == "paper_fills":
+                # paper_fills joins through paper_orders
+                count_sql = text(f"""
+                    SELECT COUNT(*) FROM {table} WHERE {fk_column} IN 
+                    (SELECT id FROM paper_orders WHERE portfolio_id = ANY(:portfolio_ids))
+                """)
+            else:
+                count_sql = text(f"SELECT COUNT(*) FROM {table} WHERE {fk_column} = ANY(:portfolio_ids)")
+            
+            result = db.execute(count_sql, {"portfolio_ids": portfolio_ids}).scalar()
+            if result != 0:
+                raise RuntimeError(f"Cleanup verification failed: {table} has {result} residual rows for portfolios {portfolio_ids}")
+        
+        # Check runs and metrics
+        result = db.execute(
+            text("SELECT COUNT(*) FROM paper_trading_runs WHERE portfolio_id = ANY(:portfolio_ids)"),
+            {"portfolio_ids": portfolio_ids},
+        ).scalar()
+        if result != 0:
+            raise RuntimeError(f"Cleanup verification failed: paper_trading_runs has {result} residual rows")
+        
+        result = db.execute(
+            text("""SELECT COUNT(*) FROM paper_trading_daily_metrics WHERE run_id IN 
+                   (SELECT id FROM paper_trading_runs WHERE portfolio_id = ANY(:portfolio_ids))"""),
+            {"portfolio_ids": portfolio_ids},
+        ).scalar()
+        if result != 0:
+            raise RuntimeError(f"Cleanup verification failed: paper_trading_daily_metrics has {result} residual rows")

@@ -106,6 +106,40 @@ class PaperTradingEngine:
         finally:
             db.close()
 
+    def check_cancel_requested(self, run_id: str) -> bool:
+        """Check if cancellation has been requested for a run.
+        
+        Workers should call this periodically during long-running operations
+        to detect cancel requests and abort gracefully.
+        
+        Args:
+            run_id: The run ID to check
+            
+        Returns:
+            True if cancel was requested, False otherwise
+        """
+        db = SessionLocal()
+        try:
+            result = db.execute(
+                text("""
+                SELECT cancel_requested, status
+                FROM paper_trading_runs
+                WHERE id = :id
+            """),
+                {"id": run_id},
+            ).fetchone()
+            
+            if not result:
+                return False
+            
+            cancel_requested, status = result
+            
+            # Cancel is effective if flag is set OR status is already cancelled
+            return bool(cancel_requested) or status == "cancelled"
+            
+        finally:
+            db.close()
+
     def execute_historical_replay(
         self,
         run_id: str,
@@ -283,7 +317,36 @@ class PaperTradingEngine:
             # Track all cash flows for reconciliation (trading activities only, not initial deposit)
             cash_flows = []  # List of (time, flow_type, amount) for audit
 
+            # Cancel check counter - check every 100 events to avoid excessive DB queries
+            event_counter = 0
+            CANCEL_CHECK_INTERVAL = 100
+
             for event_time, event_type, idx in events:
+                # Periodic cancel check
+                event_counter += 1
+                if event_counter % CANCEL_CHECK_INTERVAL == 0:
+                    if self.check_cancel_requested(run_id):
+                        logger.info(f"Cancel requested detected at event {event_counter}, stopping worker")
+                        # Roll back any uncommitted work
+                        db.rollback()
+                        # Worker sets status='cancelled' after confirming it stopped
+                        # This is the atomic transition from "cancel requested" to "cancel completed"
+                        db.execute(
+                            text("""
+                            UPDATE paper_trading_runs
+                            SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP
+                            WHERE id = :id AND status = 'running'
+                        """),
+                            {"id": run_id},
+                        )
+                        db.commit()
+                        return {
+                            "run_id": run_id,
+                            "status": "cancelled",
+                            "message": "Worker stopped due to cancel request",
+                            "events_processed": event_counter,
+                        }
+                
                 trade = trades[idx]
                 # Unpack trade tuple with source pinning fields
                 (source_trade_id, entry_time, exit_time, entry_price, exit_price, 
@@ -781,6 +844,39 @@ class PaperTradingEngine:
             
             logger.info(f"✓ Cash reconciliation passed: equity={total_equity}, diff={reconciliation_diff}")
 
+            # Final commit protection: lock the run row to prevent cancel interference
+            # SELECT FOR UPDATE ensures no concurrent cancel can change status during commit
+            locked_run = db.execute(
+                text("""
+                SELECT id, status, cancel_requested
+                FROM paper_trading_runs
+                WHERE id = :id
+                FOR UPDATE
+            """),
+                {"id": run_id},
+            ).fetchone()
+
+            # Check if cancel was requested while we were processing
+            if locked_run and locked_run.cancel_requested:
+                logger.info(f"Cancel requested detected during final commit, worker stopping")
+                db.rollback()
+                # Worker sets status='cancelled' after confirming it stopped
+                db.execute(
+                    text("""
+                    UPDATE paper_trading_runs
+                    SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP
+                    WHERE id = :id AND status = 'running'
+                """),
+                    {"id": run_id},
+                )
+                db.commit()
+                return {
+                    "run_id": run_id,
+                    "status": "cancelled",
+                    "message": "Worker stopped during finalization due to cancel request",
+                    "events_processed": len(events),
+                }
+
             # Store daily metrics
             cumulative_pnl = 0
             for trade_date, metrics in sorted(daily_pnl.items()):
@@ -898,17 +994,26 @@ class PaperTradingEngine:
             db.close()
 
     def cancel_run(self, run_id: str, user_id: str) -> dict:
-        """Cancel a paper trading run.
+        """Request cancellation of a paper trading run.
         
-        Explicit stop contract: marks run as 'cancelled' and prevents restart.
-        Validates ownership before allowing cancellation.
+        Cancel contract: Sets cancel_requested flag atomically.
+        Worker detects flag and stops gracefully, then sets status='cancelled'.
+        
+        This distinguishes:
+        - Cancel REQUESTED (flag set, worker still processing)
+        - Cancel COMPLETED (worker stopped, status='cancelled')
         
         Args:
             run_id: The run ID to cancel
             user_id: The user ID (must match run owner)
             
         Returns:
-            Dict with cancellation result
+            Dict with cancel request result
+            
+        State transitions:
+        - cancel_requested=FALSE, status='running' → cancel_requested=TRUE, status='running' (request accepted)
+        - Worker detects flag → stops → status='cancelled' (cancel completed)
+        - If status already 'completed'/'cancelled' → reject (409 Conflict)
         """
         db = SessionLocal()
         try:
@@ -931,33 +1036,66 @@ class PaperTradingEngine:
                 owner_id = str(portfolio.owner_id) if portfolio else "unknown"
                 raise AuthorizationError(user_id, "run", run_id, owner_id)
 
-            # Check if run can be cancelled
+            # Check if run can be cancelled (reject if already terminal)
             if run.status in ("completed", "cancelled"):
                 raise InvalidStateError("Run", run_id, run.status, ["queued", "pending", "running", "failed"])
 
-            # Mark as cancelled
-            db.execute(
+            # Atomic conditional UPDATE: set cancel_requested flag
+            # Do NOT change status yet - worker will set status='cancelled' after stopping
+            # PostgreSQL re-checks WHERE condition on concurrent updates, preventing race
+            result = db.execute(
                 text("""
                 UPDATE paper_trading_runs
-                SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP
-                WHERE id = :id
+                SET cancel_requested = TRUE,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = :id AND status IN ('queued', 'pending', 'running', 'failed')
+                  AND cancel_requested = FALSE
+                RETURNING id
             """),
                 {"id": run_id},
             )
 
+            cancelled_row = result.fetchone()
+            
+            if not cancelled_row:
+                # Another cancel request succeeded, or status changed to terminal
+                current_run = db.execute(
+                    text("SELECT status, cancel_requested FROM paper_trading_runs WHERE id = :id"),
+                    {"id": run_id},
+                ).fetchone()
+                
+                if current_run:
+                    if current_run.cancel_requested:
+                        # Cancel already requested, return success (idempotent)
+                        return {
+                            "run_id": run_id,
+                            "status": current_run.status,
+                            "cancel_requested": True,
+                            "message": "Cancel already requested, worker will stop gracefully",
+                        }
+                    else:
+                        # Status changed to terminal
+                        raise InvalidStateError(
+                            "Run", run_id, current_run.status, 
+                            ["queued", "pending", "running", "failed"]
+                        )
+                else:
+                    raise ResourceNotFoundError("Run", run_id)
+
             db.commit()
 
-            logger.info(f"Cancelled run {run_id}")
+            logger.info(f"Cancel requested for run {run_id}, worker will stop gracefully")
 
             return {
                 "run_id": run_id,
-                "status": "cancelled",
-                "message": "Run cancelled successfully",
+                "status": run.status,  # Status unchanged - still running/queued/etc
+                "cancel_requested": True,
+                "message": "Cancel request accepted, worker will stop gracefully",
             }
 
         except Exception as exc:
             db.rollback()
-            logger.exception("Failed to cancel run")
+            logger.exception("Failed to request cancel")
             raise
         finally:
             db.close()
