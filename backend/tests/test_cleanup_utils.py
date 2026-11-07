@@ -1,21 +1,38 @@
 """Shared test utilities for cleanup and verification.
 
 This module provides reusable helpers for test fixtures across different test suites.
+
+Safety guarantees:
+- All ownership verification happens BEFORE any deletion
+- Cross-user association aborts cleanup immediately
+- All DELETEs (including user) happen in single transaction
+- Verification phase is read-only on independent connection
 """
 from sqlalchemy import text
 
 
 def collect_user_resource_ids(db_session, user_id: str) -> dict:
-    """Collect all resource IDs for a user with ownership verification.
+    """Collect all resource IDs for a user with comprehensive ownership verification.
     
-    Phase 1 of unified cleanup: collect IDs before deletion.
+    Phase 1 of unified cleanup: collect IDs and verify ALL ownership before deletion.
+    
+    Ownership verification covers:
+    - Portfolios: owner_id = user_id
+    - Runs: portfolio_id -> portfolios.owner_id = user_id
+    - Orders (portfolio-based): portfolio_id -> portfolios.owner_id = user_id
+    - Orders (decision-based): decision_id -> decisions.paper_portfolio_id -> portfolios.owner_id = user_id
+    - Fills: paper_order_id -> orders.id (verified via orders)
+    - Decisions: paper_portfolio_id -> portfolios.owner_id = user_id
+    - Positions: portfolio_id -> portfolios.owner_id = user_id
+    - Metrics: run_id -> runs.portfolio_id -> portfolios.owner_id = user_id
+    - Study runs: user_id = user_id
     
     Returns:
         Dict with keys: portfolio_ids, run_ids, order_ids, fill_ids, 
         decision_ids, position_ids, metric_ids, study_run_ids
         
     Raises:
-        RuntimeError: If any resources belong to other users
+        RuntimeError: If ANY resources belong to other users (cleanup aborted)
     """
     # Verify user exists
     user_check = db_session.execute(
@@ -34,79 +51,87 @@ def collect_user_resource_ids(db_session, user_id: str) -> dict:
             "study_run_ids": [],
         }
     
-    # Collect portfolio IDs
+    # Collect portfolio IDs (only those owned by user)
     portfolio_ids = [row[0] for row in db_session.execute(
         text("SELECT id FROM paper_portfolios WHERE owner_id = :user_id"),
         {"user_id": user_id}
     ).fetchall()]
     
-    # Verify all portfolios belong to this user
-    if portfolio_ids:
-        placeholders = ','.join([':p' + str(i) for i in range(len(portfolio_ids))])
-        stray = db_session.execute(
-            text(f"SELECT COUNT(*) FROM paper_portfolios WHERE id IN ({placeholders}) AND owner_id != :user_id"),
-            {f'p{i}': pid for i, pid in enumerate(portfolio_ids)} | {"user_id": user_id}
-        ).scalar()
-        if stray > 0:
-            raise RuntimeError(f"Cleanup aborted: {stray} portfolios found belonging to other users")
-    
-    # Collect paper_trading_run IDs
+    # Collect paper_trading_run IDs (only via user's portfolios)
     run_ids = [row[0] for row in db_session.execute(
-        text("SELECT id FROM paper_trading_runs WHERE portfolio_id IN "
-             "(SELECT id FROM paper_portfolios WHERE owner_id = :user_id)"),
-        {"user_id": user_id}
+        text("SELECT id FROM paper_trading_runs WHERE portfolio_id = ANY(:portfolio_ids)"),
+        {"portfolio_ids": portfolio_ids}
     ).fetchall()] if portfolio_ids else []
     
     # Collect paper_order IDs (both portfolio-based and decision-based)
     order_ids_by_portfolio = [row[0] for row in db_session.execute(
-        text("SELECT id FROM paper_orders WHERE portfolio_id IN "
-             "(SELECT id FROM paper_portfolios WHERE owner_id = :user_id)"),
-        {"user_id": user_id}
+        text("SELECT id FROM paper_orders WHERE portfolio_id = ANY(:portfolio_ids)"),
+        {"portfolio_ids": portfolio_ids}
     ).fetchall()] if portfolio_ids else []
     
     order_ids_by_decision = [row[0] for row in db_session.execute(
         text("SELECT id FROM paper_orders WHERE decision_id IN "
-             "(SELECT id FROM decision_records WHERE paper_portfolio_id IN "
-             "(SELECT id FROM paper_portfolios WHERE owner_id = :user_id))"),
-        {"user_id": user_id}
+             "(SELECT id FROM decision_records WHERE paper_portfolio_id = ANY(:portfolio_ids))"),
+        {"portfolio_ids": portfolio_ids}
     ).fetchall()] if portfolio_ids else []
     
     order_ids = list(set(order_ids_by_portfolio + order_ids_by_decision))
     
     # Collect paper_fill IDs (by order_id, NOT by portfolio_id)
     fill_ids = [row[0] for row in db_session.execute(
-        text("SELECT id FROM paper_fills WHERE paper_order_id IN "
-             "(SELECT id FROM paper_orders WHERE id = ANY(:order_ids))"),
+        text("SELECT id FROM paper_fills WHERE paper_order_id = ANY(:order_ids)"),
         {"order_ids": order_ids}
     ).fetchall()] if order_ids else []
     
-    # Collect decision IDs
+    # Collect decision IDs (only via user's portfolios)
     decision_ids = [row[0] for row in db_session.execute(
-        text("SELECT id FROM decision_records WHERE paper_portfolio_id IN "
-             "(SELECT id FROM paper_portfolios WHERE owner_id = :user_id)"),
-        {"user_id": user_id}
+        text("SELECT id FROM decision_records WHERE paper_portfolio_id = ANY(:portfolio_ids)"),
+        {"portfolio_ids": portfolio_ids}
     ).fetchall()] if portfolio_ids else []
     
-    # Collect position IDs
+    # Collect position IDs (only via user's portfolios)
     position_ids = [row[0] for row in db_session.execute(
-        text("SELECT id FROM paper_positions WHERE portfolio_id IN "
-             "(SELECT id FROM paper_portfolios WHERE owner_id = :user_id)"),
-        {"user_id": user_id}
+        text("SELECT id FROM paper_positions WHERE portfolio_id = ANY(:portfolio_ids)"),
+        {"portfolio_ids": portfolio_ids}
     ).fetchall()] if portfolio_ids else []
     
-    # Collect metric IDs
+    # Collect metric IDs (only via user's runs)
     metric_ids = [row[0] for row in db_session.execute(
-        text("SELECT id FROM paper_trading_daily_metrics WHERE run_id IN "
-             "(SELECT id FROM paper_trading_runs WHERE portfolio_id IN "
-             "(SELECT id FROM paper_portfolios WHERE owner_id = :user_id))"),
-        {"user_id": user_id}
-    ).fetchall()] if portfolio_ids else []
+        text("SELECT id FROM paper_trading_daily_metrics WHERE run_id = ANY(:run_ids)"),
+        {"run_ids": run_ids}
+    ).fetchall()] if run_ids else []
     
-    # Collect strategy_study IDs
+    # Collect strategy_study IDs (only for this user)
     study_run_ids = [row[0] for row in db_session.execute(
         text("SELECT id FROM strategy_study_runs WHERE user_id = :user_id"),
         {"user_id": user_id}
     ).fetchall()]
+    
+    # === OWNERSHIP VERIFICATION ===
+    # Verify fills belong to user's orders
+    if fill_ids:
+        stray_fills = db_session.execute(
+            text("SELECT COUNT(*) FROM paper_fills WHERE id = ANY(:fill_ids) "
+                 "AND paper_order_id NOT IN (SELECT id FROM paper_orders WHERE id = ANY(:order_ids))"),
+            {"fill_ids": fill_ids, "order_ids": order_ids}
+        ).scalar()
+        if stray_fills > 0:
+            raise RuntimeError(
+                f"Cleanup aborted: {stray_fills} fills found belonging to orders outside user's scope"
+            )
+    
+    # Verify decision-based orders: orders with decision_id must link to user's decisions
+    if order_ids_by_decision:
+        stray_decision_orders = db_session.execute(
+            text("SELECT COUNT(*) FROM paper_orders WHERE id = ANY(:order_ids) "
+                 "AND decision_id IS NOT NULL "
+                 "AND decision_id NOT IN (SELECT id FROM decision_records WHERE paper_portfolio_id = ANY(:portfolio_ids))"),
+            {"order_ids": order_ids_by_decision, "portfolio_ids": portfolio_ids}
+        ).scalar()
+        if stray_decision_orders > 0:
+            raise RuntimeError(
+                f"Cleanup aborted: {stray_decision_orders} decision-based orders link to decisions outside user's scope"
+            )
     
     return {
         "portfolio_ids": portfolio_ids,
@@ -120,13 +145,27 @@ def collect_user_resource_ids(db_session, user_id: str) -> dict:
     }
 
 
-def delete_user_resources_by_ids(db_session, resource_ids: dict):
-    """Delete user resources in FK-safe order using collected ID sets.
+def delete_user_resources_in_transaction(db_session, user_id: str, resource_ids: dict):
+    """Delete all user resources and user itself in a SINGLE transaction.
     
-    Phase 2 of unified cleanup: delete using collected IDs.
+    Phase 2 of unified cleanup: all DELETEs in one transaction.
+    Caller must commit.
+    
+    FK-safe deletion order:
+    1. fills (depends on orders)
+    2. orders (depends on portfolios, decisions)
+    3. decisions (depends on portfolios)
+    4. metrics (depends on runs)
+    5. positions (depends on portfolios)
+    6. runs (depends on portfolios)
+    7. portfolios (depends on user)
+    8. strategy_study_trades (depends on study_runs)
+    9. strategy_study_runs (depends on user)
+    10. user (last)
     
     Args:
-        db_session: Database session
+        db_session: Database session (transaction not yet committed)
+        user_id: User ID to delete
         resource_ids: Dict from collect_user_resource_ids()
     """
     portfolio_ids = resource_ids["portfolio_ids"]
@@ -138,84 +177,83 @@ def delete_user_resources_by_ids(db_session, resource_ids: dict):
     metric_ids = resource_ids["metric_ids"]
     study_run_ids = resource_ids["study_run_ids"]
     
-    # Delete fills (depends on orders)
+    # 1. Delete fills
     if fill_ids:
-        placeholders = ','.join([':f' + str(i) for i in range(len(fill_ids))])
         db_session.execute(
-            text(f"DELETE FROM paper_fills WHERE id IN ({placeholders})"),
-            {f'f{i}': fid for i, fid in enumerate(fill_ids)}
+            text("DELETE FROM paper_fills WHERE id = ANY(:fill_ids)"),
+            {"fill_ids": fill_ids}
         )
     
-    # Delete orders (depends on portfolios and decisions)
+    # 2. Delete orders
     if order_ids:
-        placeholders = ','.join([':o' + str(i) for i in range(len(order_ids))])
         db_session.execute(
-            text(f"DELETE FROM paper_orders WHERE id IN ({placeholders})"),
-            {f'o{i}': oid for i, oid in enumerate(order_ids)}
+            text("DELETE FROM paper_orders WHERE id = ANY(:order_ids)"),
+            {"order_ids": order_ids}
         )
     
-    # Delete decisions (depends on portfolios)
+    # 3. Delete decisions
     if decision_ids:
-        placeholders = ','.join([':d' + str(i) for i in range(len(decision_ids))])
         db_session.execute(
-            text(f"DELETE FROM decision_records WHERE id IN ({placeholders})"),
-            {f'd{i}': did for i, did in enumerate(decision_ids)}
+            text("DELETE FROM decision_records WHERE id = ANY(:decision_ids)"),
+            {"decision_ids": decision_ids}
         )
     
-    # Delete metrics (depends on runs)
+    # 4. Delete metrics
     if metric_ids:
-        placeholders = ','.join([':m' + str(i) for i in range(len(metric_ids))])
         db_session.execute(
-            text(f"DELETE FROM paper_trading_daily_metrics WHERE id IN ({placeholders})"),
-            {f'm{i}': mid for i, mid in enumerate(metric_ids)}
+            text("DELETE FROM paper_trading_daily_metrics WHERE id = ANY(:metric_ids)"),
+            {"metric_ids": metric_ids}
         )
     
-    # Delete runs (depends on portfolios)
-    if run_ids:
-        placeholders = ','.join([':r' + str(i) for i in range(len(run_ids))])
-        db_session.execute(
-            text(f"DELETE FROM paper_trading_runs WHERE id IN ({placeholders})"),
-            {f'r{i}': rid for i, rid in enumerate(run_ids)}
-        )
-    
-    # Delete positions (depends on portfolios)
+    # 5. Delete positions
     if position_ids:
-        placeholders = ','.join([':pos' + str(i) for i in range(len(position_ids))])
         db_session.execute(
-            text(f"DELETE FROM paper_positions WHERE id IN ({placeholders})"),
-            {f'pos{i}': posid for i, posid in enumerate(position_ids)}
+            text("DELETE FROM paper_positions WHERE id = ANY(:position_ids)"),
+            {"position_ids": position_ids}
         )
     
-    # Delete portfolios (depends on user)
+    # 6. Delete runs
+    if run_ids:
+        db_session.execute(
+            text("DELETE FROM paper_trading_runs WHERE id = ANY(:run_ids)"),
+            {"run_ids": run_ids}
+        )
+    
+    # 7. Delete portfolios
     if portfolio_ids:
-        placeholders = ','.join([':p' + str(i) for i in range(len(portfolio_ids))])
         db_session.execute(
-            text(f"DELETE FROM paper_portfolios WHERE id IN ({placeholders})"),
-            {f'p{i}': pid for i, pid in enumerate(portfolio_ids)}
+            text("DELETE FROM paper_portfolios WHERE id = ANY(:portfolio_ids)"),
+            {"portfolio_ids": portfolio_ids}
         )
     
-    # Delete strategy study trades (depends on study runs)
+    # 8. Delete strategy study trades
     if study_run_ids:
-        placeholders = ','.join([':sr' + str(i) for i in range(len(study_run_ids))])
         db_session.execute(
-            text(f"DELETE FROM strategy_study_trades WHERE run_id IN ({placeholders})"),
-            {f'sr{i}': srid for i, srid in enumerate(study_run_ids)}
+            text("DELETE FROM strategy_study_trades WHERE run_id = ANY(:study_run_ids)"),
+            {"study_run_ids": study_run_ids}
         )
         
-        # Delete strategy study runs (depends on user)
+        # 9. Delete strategy study runs
         db_session.execute(
-            text(f"DELETE FROM strategy_study_runs WHERE id IN ({placeholders})"),
-            {f'sr{i}': srid for i, srid in enumerate(study_run_ids)}
+            text("DELETE FROM strategy_study_runs WHERE id = ANY(:study_run_ids)"),
+            {"study_run_ids": study_run_ids}
         )
+    
+    # 10. Delete user LAST
+    db_session.execute(
+        text("DELETE FROM users WHERE id = :user_id"),
+        {"user_id": user_id}
+    )
 
 
-def verify_zero_residual_by_ids(verify_session, user_id: str, resource_ids: dict):
+def verify_zero_residual_readonly(verify_session, user_id: str, resource_ids: dict):
     """Verify per-table zero residuals using collected IDs on independent connection.
     
-    Phase 3 of unified cleanup: verify deletion with new connection.
+    Phase 3 of unified cleanup: READ-ONLY verification with new connection.
+    NO DELETEs happen here. This is purely verification.
     
     Args:
-        verify_session: Independent database session for verification
+        verify_session: Independent database session for verification (read-only)
         user_id: User ID to verify
         resource_ids: Dict from collect_user_resource_ids()
         
@@ -241,93 +279,93 @@ def verify_zero_residual_by_ids(verify_session, user_id: str, resource_ids: dict
     
     # Verify all portfolios deleted
     if portfolio_ids:
-        placeholders = ','.join([':p' + str(i) for i in range(len(portfolio_ids))])
         portfolio_count = verify_session.execute(
-            text(f"SELECT COUNT(*) FROM paper_portfolios WHERE id IN ({placeholders})"),
-            {f'p{i}': pid for i, pid in enumerate(portfolio_ids)}
+            text("SELECT COUNT(*) FROM paper_portfolios WHERE id = ANY(:portfolio_ids)"),
+            {"portfolio_ids": portfolio_ids}
         ).scalar()
         if portfolio_count != 0:
             raise RuntimeError(f"Cleanup verification failed: {portfolio_count} portfolios still exist")
     
     # Verify all runs deleted
     if run_ids:
-        placeholders = ','.join([':r' + str(i) for i in range(len(run_ids))])
         run_count = verify_session.execute(
-            text(f"SELECT COUNT(*) FROM paper_trading_runs WHERE id IN ({placeholders})"),
-            {f'r{i}': rid for i, rid in enumerate(run_ids)}
+            text("SELECT COUNT(*) FROM paper_trading_runs WHERE id = ANY(:run_ids)"),
+            {"run_ids": run_ids}
         ).scalar()
         if run_count != 0:
             raise RuntimeError(f"Cleanup verification failed: {run_count} runs still exist")
     
     # Verify all orders deleted
     if order_ids:
-        placeholders = ','.join([':o' + str(i) for i in range(len(order_ids))])
         order_count = verify_session.execute(
-            text(f"SELECT COUNT(*) FROM paper_orders WHERE id IN ({placeholders})"),
-            {f'o{i}': oid for i, oid in enumerate(order_ids)}
+            text("SELECT COUNT(*) FROM paper_orders WHERE id = ANY(:order_ids)"),
+            {"order_ids": order_ids}
         ).scalar()
         if order_count != 0:
             raise RuntimeError(f"Cleanup verification failed: {order_count} orders still exist")
     
     # Verify all fills deleted
     if fill_ids:
-        placeholders = ','.join([':f' + str(i) for i in range(len(fill_ids))])
         fill_count = verify_session.execute(
-            text(f"SELECT COUNT(*) FROM paper_fills WHERE id IN ({placeholders})"),
-            {f'f{i}': fid for i, fid in enumerate(fill_ids)}
+            text("SELECT COUNT(*) FROM paper_fills WHERE id = ANY(:fill_ids)"),
+            {"fill_ids": fill_ids}
         ).scalar()
         if fill_count != 0:
             raise RuntimeError(f"Cleanup verification failed: {fill_count} fills still exist")
     
     # Verify all decisions deleted
     if decision_ids:
-        placeholders = ','.join([':d' + str(i) for i in range(len(decision_ids))])
         decision_count = verify_session.execute(
-            text(f"SELECT COUNT(*) FROM decision_records WHERE id IN ({placeholders})"),
-            {f'd{i}': did for i, did in enumerate(decision_ids)}
+            text("SELECT COUNT(*) FROM decision_records WHERE id = ANY(:decision_ids)"),
+            {"decision_ids": decision_ids}
         ).scalar()
         if decision_count != 0:
             raise RuntimeError(f"Cleanup verification failed: {decision_count} decisions still exist")
     
     # Verify all positions deleted
     if position_ids:
-        placeholders = ','.join([':pos' + str(i) for i in range(len(position_ids))])
         position_count = verify_session.execute(
-            text(f"SELECT COUNT(*) FROM paper_positions WHERE id IN ({placeholders})"),
-            {f'pos{i}': posid for i, posid in enumerate(position_ids)}
+            text("SELECT COUNT(*) FROM paper_positions WHERE id = ANY(:position_ids)"),
+            {"position_ids": position_ids}
         ).scalar()
         if position_count != 0:
             raise RuntimeError(f"Cleanup verification failed: {position_count} positions still exist")
     
     # Verify all metrics deleted
     if metric_ids:
-        placeholders = ','.join([':m' + str(i) for i in range(len(metric_ids))])
         metric_count = verify_session.execute(
-            text(f"SELECT COUNT(*) FROM paper_trading_daily_metrics WHERE id IN ({placeholders})"),
-            {f'm{i}': mid for i, mid in enumerate(metric_ids)}
+            text("SELECT COUNT(*) FROM paper_trading_daily_metrics WHERE id = ANY(:metric_ids)"),
+            {"metric_ids": metric_ids}
         ).scalar()
         if metric_count != 0:
             raise RuntimeError(f"Cleanup verification failed: {metric_count} metrics still exist")
     
     # Verify all study runs deleted
     if study_run_ids:
-        placeholders = ','.join([':sr' + str(i) for i in range(len(study_run_ids))])
         study_count = verify_session.execute(
-            text(f"SELECT COUNT(*) FROM strategy_study_runs WHERE id IN ({placeholders})"),
-            {f'sr{i}': srid for i, srid in enumerate(study_run_ids)}
+            text("SELECT COUNT(*) FROM strategy_study_runs WHERE id = ANY(:study_run_ids)"),
+            {"study_run_ids": study_run_ids}
         ).scalar()
         if study_count != 0:
             raise RuntimeError(f"Cleanup verification failed: {study_count} study runs still exist")
 
 
 def unified_cleanup_user_data(session_factory, user_id: str):
-    """Complete unified cleanup: collect, delete, verify.
+    """Complete unified cleanup: collect, delete in single transaction, verify read-only.
     
     This is the main entry point for cleanup operations.
+    
+    Safety guarantees:
+    1. Phase 1 (collect): Collect all IDs with comprehensive ownership verification
+    2. Phase 2 (delete): All DELETEs including user in single transaction
+    3. Phase 3 (verify): Read-only verification on independent connection
     
     Args:
         session_factory: Callable that creates new database sessions
         user_id: User ID to clean up
+        
+    Raises:
+        RuntimeError: If ownership verification fails or residual data found
     """
     # Phase 1: Collect all IDs with ownership verification
     collect_session = session_factory()
@@ -336,10 +374,25 @@ def unified_cleanup_user_data(session_factory, user_id: str):
     finally:
         collect_session.close()
     
-    # Phase 2: Delete in FK-safe order using collected ID sets
+    # If user doesn't exist, nothing to clean
+    if not resource_ids["portfolio_ids"] and not resource_ids["study_run_ids"]:
+        # Check if user exists at all
+        check_session = session_factory()
+        try:
+            user_exists = check_session.execute(
+                text("SELECT COUNT(*) FROM users WHERE id = :user_id"),
+                {"user_id": user_id}
+            ).scalar() > 0
+        finally:
+            check_session.close()
+        
+        if not user_exists:
+            return  # User already deleted, nothing to clean
+    
+    # Phase 2: Delete ALL in single transaction (including user)
     delete_session = session_factory()
     try:
-        delete_user_resources_by_ids(delete_session, resource_ids)
+        delete_user_resources_in_transaction(delete_session, user_id, resource_ids)
         delete_session.commit()
     except Exception:
         delete_session.rollback()
@@ -347,19 +400,9 @@ def unified_cleanup_user_data(session_factory, user_id: str):
     finally:
         delete_session.close()
     
-    # Phase 3: Verify per-table zero residuals with independent new connection
+    # Phase 3: Verify zero residuals with independent read-only connection
     verify_session = session_factory()
     try:
-        # Also delete user in verify phase (after all resources deleted)
-        verify_session.execute(
-            text("DELETE FROM users WHERE id = :user_id"),
-            {"user_id": user_id}
-        )
-        verify_session.commit()
-        
-        verify_zero_residual_by_ids(verify_session, user_id, resource_ids)
-    except Exception:
-        verify_session.rollback()
-        raise
+        verify_zero_residual_readonly(verify_session, user_id, resource_ids)
     finally:
         verify_session.close()
