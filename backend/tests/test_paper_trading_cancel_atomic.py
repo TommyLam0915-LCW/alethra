@@ -2895,14 +2895,18 @@ class TestBatchBMinimalIntegration:
             "acquisition_hook_hit": False,
         }
         
-        # Create engine with injected session_factory
-        engine = PaperTradingEngine(session_factory=session_factory)
+        # Gap 三: Create TWO separate engine instances — replay and cancel
+        # Replay engine gets hooked session_factory; cancel engine gets formal un-hooked factory
+        replay_engine = PaperTradingEngine(session_factory=session_factory)
+        cancel_engine = PaperTradingEngine(session_factory=session_factory)
         
-        # Requirement 三: Hook session factory to detect acquisition and inject exception
+        # Gap 三: Hook session factory to detect acquisition and inject exception
+        # Only replay sessions get the narrow hook; cancel uses un-hooked factory
         original_session_factory = session_factory
         acquisition_query_detected = [False]
         
         def hooked_session_factory():
+            """Narrow hook for replay sessions only — tracks acquisition query."""
             session = original_session_factory()
             original_execute = session.execute
             original_commit = session.commit
@@ -2951,14 +2955,14 @@ class TestBatchBMinimalIntegration:
             session.commit = hooked_commit
             return session
         
-        # Requirement 三: Cancel thread calls formal cancel_run() instead of raw UPDATE
+        # Gap 三: Cancel thread uses formal un-hooked cancel_engine
         def submit_cancel():
             try:
                 if not acquisition_committed.wait(timeout=5.0):
                     cancel_failed.set()
                     return
-                # Call formal cancel_run method
-                cancel_result = engine.cancel_run(run_id=paper_run_id, user_id=user_id)
+                # Call formal cancel_run method on cancel_engine (un-hooked)
+                cancel_result = cancel_engine.cancel_run(run_id=paper_run_id, user_id=user_id)
                 results["cancel_thread_done"] = True
                 results["cancel_result"] = cancel_result
                 cancel_committed.set()
@@ -2967,14 +2971,14 @@ class TestBatchBMinimalIntegration:
                 cancel_failed.set()
                 cancel_committed.set()  # Release even on error
         
-        # Replay thread calls actual execute_historical_replay
+        # Gap 三: Replay thread uses replay_engine with hooked session_factory
         def execute_replay():
             try:
-                # Use hooked session factory for replay
-                engine.session_factory = hooked_session_factory
+                # Use hooked session factory for replay_engine only
+                replay_engine.session_factory = hooked_session_factory
                 
                 try:
-                    engine.execute_historical_replay(
+                    replay_engine.execute_historical_replay(
                         run_id=paper_run_id,
                         user_id=user_id,
                         days_back=30,
