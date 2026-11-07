@@ -223,7 +223,7 @@ class TestClientLifecycle:
         # Cleanup
         db = TestSession()
         try:
-            db.execute(text("DELETE FROM users WHERE id IN (:id1, :id2)"), 
+            db.execute(text("DELETE FROM users WHERE id = :id1 OR id = :id2"), 
                       {"id1": str(user1_id), "id2": str(user2_id)})
             db.commit()
         finally:
