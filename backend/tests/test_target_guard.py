@@ -130,19 +130,17 @@ def create_verified_session_factory(db_url: str):
     engine = create_engine(db_url)
     factory = sessionmaker(bind=engine)
     
-    # Verify target on first session
+    # Verify target on first session using context manager
     verify_session = factory()
     try:
         actual_target = verify_test_target(verify_session)
     except TargetGuardError:
         # P1 C8: On rejection, verify session is closed and engine is disposed
-        verify_session.close()
         engine.dispose()
         raise
     finally:
-        # Ensure session is closed after verification
-        if not verify_session.is_closed:
-            verify_session.close()
+        # P1 Commit 1.1: Use standard finally close, not is_closed check
+        verify_session.close()
     
     # P1 C9: Return factory that can create sessions
     def guarded_factory():

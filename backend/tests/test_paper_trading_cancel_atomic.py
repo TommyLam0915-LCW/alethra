@@ -2355,7 +2355,7 @@ class TestBatchAReverseOwnership:
         - Cleanup user2: Should ABORT (order references user1's decision)
         - After each abort, verify both sides' data unchanged
         """
-        from test_cleanup_utils import collect_user_resource_ids
+        from test_cleanup_utils import collect_user_resource_ids, unified_cleanup_user_data
         
         user1_id = str(uuid.uuid4())
         user2_id = str(uuid.uuid4())
@@ -2442,14 +2442,9 @@ class TestBatchAReverseOwnership:
         # Direction 1: Cleanup user1 (decision owner) - should ABORT
         # User1's decision is referenced by user2's order (cross-user association)
         # User2's order is in user2's portfolio, which is outside user1's scope
-        collect_session1 = session_factory()
-        try:
-            # This should raise RuntimeError because user2's order (in user2's portfolio)
-            # references user1's decision, and user2's portfolio is outside user1's scope
-            with pytest.raises(RuntimeError, match="orders link to portfolios outside user's scope"):
-                collect_user_resource_ids(collect_session1, user1_id)
-        finally:
-            collect_session1.close()
+        # P1 Commit 1.4: Use unified_cleanup_user_data to verify rejection
+        with pytest.raises(RuntimeError, match="orders link to portfolios outside user's scope"):
+            unified_cleanup_user_data(session_factory, user1_id)
         
         # Verify user1's data is unchanged after abort
         verify_session1 = session_factory()
@@ -2505,13 +2500,9 @@ class TestBatchAReverseOwnership:
         
         # Direction 2: Cleanup user2 (order owner) - should ABORT
         # User2's order references user1's decision (cross-user association)
-        collect_session2 = session_factory()
-        try:
-            # This should raise RuntimeError because order references a decision outside user2's scope
-            with pytest.raises(RuntimeError, match="orders link to decisions outside user's scope"):
-                collect_user_resource_ids(collect_session2, user2_id)
-        finally:
-            collect_session2.close()
+        # P1 Commit 1.4: Use unified_cleanup_user_data to verify rejection
+        with pytest.raises(RuntimeError, match="orders link to decisions outside user's scope"):
+            unified_cleanup_user_data(session_factory, user2_id)
         
         # Verify user2's data is unchanged after abort
         verify_session2 = session_factory()
@@ -2625,7 +2616,8 @@ class TestBatchCGuardPrecision:
             mock_result = Mock()
             mock_result.fetchone.return_value = ('ai_investment_lab_test', 'alethra_test_runtime', '192.168.1.100', 5432)
             mock_session.execute.return_value = mock_result
-            mock_session.is_closed = False
+            # P1 Commit 1.2: Don't add is_closed attribute; use standard close()
+            mock_session.close = Mock()
             return mock_session
         
         # Create fake engine
@@ -2659,10 +2651,9 @@ class TestBatchCGuardPrecision:
             mock_result = Mock()
             mock_result.fetchone.return_value = ('ai_investment_lab_test', 'alethra_test_runtime', '127.0.0.1', 5432)
             mock_session.execute.return_value = mock_result
-            mock_session.is_closed = False
+            # P1 Commit 1.2: Don't add is_closed attribute; use standard close()
             
             def close_session():
-                mock_session.is_closed = True
                 sessions_closed.append(mock_session)
             
             mock_session.close = close_session
