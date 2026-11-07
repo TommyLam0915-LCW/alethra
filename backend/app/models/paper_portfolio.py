@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Text, DateTime, Integer, Float, ForeignKey, Enum as SAEnum, Boolean, Index, text
+from sqlalchemy import Column, String, Text, DateTime, Integer, Float, ForeignKey, Enum as SAEnum, Boolean, Index, text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
 from app.database import Base
@@ -135,6 +135,10 @@ class PaperPosition(Base):
     status = Column(SAEnum(PositionStatus), default=PositionStatus.open)
     source_trade_id = Column(UUID(as_uuid=True), nullable=True, index=True)
 
+    __table_args__ = (
+        UniqueConstraint('portfolio_id', 'source_trade_id', name='uq_paper_positions_source_per_portfolio'),
+    )
+
     portfolio = relationship("PaperPortfolio", back_populates="positions")
 
 
@@ -230,6 +234,10 @@ class DecisionRecord(Base):
     source_data_version = Column(String(50), nullable=True)
     cutoff_timestamp = Column(DateTime(timezone=True), nullable=True)
     as_of_timestamp = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint('paper_portfolio_id', 'source_trade_id', 'decision_type', name='uq_decision_records_source_per_portfolio'),
+    )
 
     outcome_evaluation = relationship("OutcomeEvaluation", back_populates="decision", uselist=False)
 

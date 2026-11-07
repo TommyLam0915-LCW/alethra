@@ -16,6 +16,11 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
+from app.services.paper_trading_exceptions import (
+    AuthorizationError,
+    ResourceNotFoundError,
+    InvalidStateError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -145,7 +150,7 @@ class PaperTradingEngine:
             ).fetchone()
 
             if not run:
-                raise ValueError(f"Run {run_id} not found")
+                raise ResourceNotFoundError("Run", run_id)
 
             # Cross-user rejection: validate ownership via portfolio
             portfolio = db.execute(
@@ -154,16 +159,12 @@ class PaperTradingEngine:
             ).fetchone()
 
             if not portfolio or str(portfolio.owner_id) != user_id:
-                raise ValueError(
-                    f"Access denied: run {run_id} does not belong to user {user_id}"
-                )
+                owner_id = str(portfolio.owner_id) if portfolio else "unknown"
+                raise AuthorizationError(user_id, "run", run_id, owner_id)
 
             # Idempotency protection: reject re-run if already completed or cancelled
             if run.status in ("completed", "cancelled"):
-                raise ValueError(
-                    f"Run {run_id} already {run.status}. Cannot re-run historical replay. "
-                    f"Create a new run instead."
-                )
+                raise InvalidStateError("Run", run_id, run.status, ["queued", "pending", "failed"])
 
             skill = run.skill
             instrument = run.instrument_id
@@ -244,9 +245,9 @@ class PaperTradingEngine:
 
             if not acquired_row:
                 # Another task acquired execution rights, or status is not allowed
-                raise ValueError(
-                    f"Run {run_id} cannot be executed (current status: {run.status}). "
-                    f"Concurrent replays not allowed."
+                raise InvalidStateError(
+                    "Run", run_id, run.status, 
+                    ["queued", "pending", "failed"]
                 )
 
             acquired_execution = True
@@ -918,7 +919,7 @@ class PaperTradingEngine:
             ).fetchone()
 
             if not run:
-                raise ValueError(f"Run {run_id} not found")
+                raise ResourceNotFoundError("Run", run_id)
 
             # Cross-user rejection: validate ownership via portfolio
             portfolio = db.execute(
@@ -927,15 +928,12 @@ class PaperTradingEngine:
             ).fetchone()
 
             if not portfolio or str(portfolio.owner_id) != user_id:
-                raise ValueError(
-                    f"Access denied: run {run_id} does not belong to user {user_id}"
-                )
+                owner_id = str(portfolio.owner_id) if portfolio else "unknown"
+                raise AuthorizationError(user_id, "run", run_id, owner_id)
 
             # Check if run can be cancelled
             if run.status in ("completed", "cancelled"):
-                raise ValueError(
-                    f"Run {run_id} cannot be cancelled (status: {run.status})"
-                )
+                raise InvalidStateError("Run", run_id, run.status, ["queued", "pending", "running", "failed"])
 
             # Mark as cancelled
             db.execute(
@@ -1249,7 +1247,7 @@ class PaperTradingEngine:
             ).fetchone()
 
             if not run:
-                raise ValueError(f"Run {run_id} not found")
+                raise ResourceNotFoundError("Run", run_id)
 
             # Get daily metrics
             metrics = db.execute(
@@ -1304,7 +1302,7 @@ class PaperTradingEngine:
             ).fetchone()
 
             if not run:
-                raise ValueError(f"Run {run_id} not found")
+                raise ResourceNotFoundError("Run", run_id)
 
             portfolio = db.execute(
                 text("SELECT * FROM paper_portfolios WHERE id = :id"),

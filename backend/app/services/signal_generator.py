@@ -263,6 +263,14 @@ class SignalGenerator:
         self.highs: deque[float] = deque(maxlen=max_bars)
         self.lows: deque[float] = deque(maxlen=max_bars)
 
+        # All prices seen (for EMA initialization, not truncated by deque)
+        self.all_prices: list[float] = []
+
+        # Persistent EMA state (continuous recursion, not re-seeded from buffer)
+        # This matches research _ema_series contract for parity
+        self.ema20_state: Optional[float] = None
+        self.ema50_state: Optional[float] = None
+
         # Position tracking
         self.in_position = False
         self.position_side: Optional[str] = None
@@ -274,6 +282,40 @@ class SignalGenerator:
         self.prices.append(bar.close)
         self.highs.append(bar.high)
         self.lows.append(bar.low)
+        self.all_prices.append(bar.close)
+        
+        # Update persistent EMA state (continuous recursion)
+        # EMA20
+        if len(self.all_prices) < 20:
+            # Not enough bars yet
+            self.ema20_state = None
+        elif len(self.all_prices) == 20:
+            # First EMA value: SMA of first 20 bars
+            self.ema20_state = sum(self.all_prices[:20]) / 20
+        else:
+            # Recursive update: EMA = (price - EMA_prev) * multiplier + EMA_prev
+            multiplier = 2 / (20 + 1)
+            self.ema20_state = (bar.close - self.ema20_state) * multiplier + self.ema20_state
+        
+        # EMA50
+        if len(self.all_prices) < 50:
+            # Not enough bars yet
+            self.ema50_state = None
+        elif len(self.all_prices) == 50:
+            # First EMA value: SMA of first 50 bars
+            self.ema50_state = sum(self.all_prices[:50]) / 50
+        else:
+            # Recursive update
+            multiplier = 2 / (50 + 1)
+            self.ema50_state = (bar.close - self.ema50_state) * multiplier + self.ema50_state
+
+    def get_ema20(self) -> Optional[float]:
+        """Get current EMA20 from persistent state."""
+        return self.ema20_state
+
+    def get_ema50(self) -> Optional[float]:
+        """Get current EMA50 from persistent state."""
+        return self.ema50_state
 
     def generate_signal(self) -> Optional[TradingSignal]:
         """Generate trading signal based on current market state."""
@@ -296,9 +338,15 @@ class SignalGenerator:
         
         # For range_fade strategy
         zscore_val = TechnicalIndicators.zscore(list(self.prices), period=20)
-        trend_strength_val = TechnicalIndicators.trend_strength(
-            list(self.prices), list(self.highs), list(self.lows)
-        )
+        
+        # Calculate trend_strength using persistent EMA state (not recalculated from buffer)
+        # This ensures parity with research _ema_series contract
+        ema_fast = self.get_ema20()
+        ema_slow = self.get_ema50()
+        if ema_fast is not None and ema_slow is not None and atr is not None and atr != 0:
+            trend_strength_val = abs(ema_fast - ema_slow) / atr
+        else:
+            trend_strength_val = None
 
         if rsi is None or bb is None or atr is None:
             return None

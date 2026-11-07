@@ -13,6 +13,7 @@ from sqlalchemy import text
 
 from app.database import engine as db_engine, SessionLocal
 from app.services.paper_trading import PaperTradingEngine
+from app.services.paper_trading_exceptions import AuthorizationError
 
 
 @pytest.fixture
@@ -162,7 +163,7 @@ class TestOwnerVerification:
             db.close()
         
         # User B attempts to execute user A's run - should be rejected
-        with pytest.raises(ValueError) as exc_info:
+        with pytest.raises(AuthorizationError) as exc_info:
             engine.execute_historical_replay(
                 run_id=run_id,
                 user_id=user_b_id,  # Wrong user!
@@ -170,8 +171,11 @@ class TestOwnerVerification:
                 position_size_pct=0.10,
             )
         
-        # Verify error message mentions authorization
-        assert "not authorized" in str(exc_info.value).lower()
+        # Verify error contract: exception carries structured context
+        assert exc_info.value.user_id == user_b_id
+        assert exc_info.value.resource_type == "run"
+        assert exc_info.value.resource_id == run_id
+        assert exc_info.value.owner_id == user_a_id
         
         # Verify NO side effects: status unchanged, cash unchanged, no records created
         db = SessionLocal()
@@ -251,9 +255,30 @@ class TestOwnerVerification:
             position_size_pct=0.10,
         )
         
-        # Verify execution succeeded
+        # Verify execution succeeded with exact counts
         assert replay_result["status"] == "completed"
-        assert replay_result["total_trades"] >= 0
+        assert replay_result["total_trades"] == 1, "Should execute exactly 1 trade from seeded data"
+        
+        # Verify DB state: 2 fills (entry + exit), 1 closed position
+        db = SessionLocal()
+        try:
+            fill_count = db.execute(
+                text("""
+                    SELECT COUNT(*) FROM paper_fills f
+                    JOIN paper_orders o ON f.paper_order_id = o.id
+                    WHERE o.portfolio_id = :id
+                """),
+                {"id": portfolio_id}
+            ).scalar()
+            assert fill_count == 2, f"Should have 2 fills (entry + exit), got {fill_count}"
+            
+            position_count = db.execute(
+                text("SELECT COUNT(*) FROM paper_positions WHERE portfolio_id = :id AND status = 'closed'"),
+                {"id": portfolio_id}
+            ).scalar()
+            assert position_count == 1, f"Should have 1 closed position, got {position_count}"
+        finally:
+            db.close()
         
         # Cleanup
         db = SessionLocal()
