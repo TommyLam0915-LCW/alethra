@@ -74,7 +74,7 @@ def is_loopback_host(host: str | None) -> bool:
 
 
 def is_local_database_url(url: str) -> bool:
-    """A sqlite file or a loopback PostgreSQL URL is local; anything else is not."""
+    """A sqlite file, a loopback PostgreSQL URL, or a Unix socket connection is local."""
     raw = (url or "").strip()
     if not raw:
         return False
@@ -84,4 +84,12 @@ def is_local_database_url(url: str) -> bool:
     parsed = urlsplit(cleaned)
     if parsed.scheme not in ("postgresql", "mysql"):
         return False
+    # Unix socket: hostname is None/empty and host query param is a path
+    if not parsed.hostname:
+        from urllib.parse import parse_qs
+        query_params = parse_qs(parsed.query)
+        socket_host = query_params.get("host", [None])[0]
+        # Unix socket paths start with / or are empty (default socket)
+        if socket_host is None or socket_host.startswith("/"):
+            return True
     return (parsed.hostname or "") in LOCAL_DATABASE_HOSTS

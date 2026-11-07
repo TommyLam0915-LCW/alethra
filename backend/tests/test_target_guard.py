@@ -24,7 +24,9 @@ APPROVED_TEST_TARGET = {
         "port": 5432,
     },
     "unix_socket": {
-        "approved_servers": {"localhost", "127.0.0.1", "::1", "", None},
+        # Approved Unix socket paths (from connection URL host parameter)
+        "approved_socket_paths": {"/tmp", "/var/run/postgresql", ""},
+        # Socket file must exist for these paths (empty string = default)
         "approved_ports": {None},
     },
 }
@@ -35,7 +37,7 @@ class TargetGuardError(RuntimeError):
     pass
 
 
-def verify_test_target(session) -> dict:
+def verify_test_target(session, db_url: str = None) -> dict:
     """Verify database session matches approved test target.
 
     Supports two connection modes:
@@ -51,10 +53,13 @@ def verify_test_target(session) -> dict:
     - inet_server_port() == approved port
 
     Unix socket mode:
-    - NULL addr and NULL port are accepted (local-only)
+    - NULL addr and NULL port are necessary but NOT sufficient
+    - db_url host parameter must match approved socket path
+    - Socket file must exist on disk
 
     Args:
         session: SQLAlchemy session to verify
+        db_url: Connection URL string (required for Unix socket validation)
 
     Returns:
         dict with actual target info if verification passes
@@ -105,17 +110,36 @@ def verify_test_target(session) -> dict:
         )
 
     if is_unix_socket:
-        unix_policy = APPROVED_TEST_TARGET["unix_socket"]
-        if actual_server_addr not in unix_policy["approved_servers"]:
+        # Unix socket mode: must validate the socket instance, not just accept NULL
+        import os
+        from urllib.parse import urlparse
+
+        if db_url is None:
             errors.append(
-                f"Unix socket server mismatch: expected one of "
-                f"{unix_policy['approved_servers']}, got {actual_server_addr!r}"
+                "Unix socket mode requires db_url for socket path validation"
             )
-        if actual_port not in unix_policy["approved_ports"]:
-            errors.append(
-                f"Unix socket port mismatch: expected one of "
-                f"{unix_policy['approved_ports']}, got {actual_port!r}"
-            )
+        else:
+            parsed = urlparse(db_url)
+            socket_host = parsed.hostname or ""
+
+            unix_policy = APPROVED_TEST_TARGET["unix_socket"]
+            approved_paths = unix_policy["approved_socket_paths"]
+
+            if socket_host not in approved_paths:
+                errors.append(
+                    f"Unix socket path not approved: {socket_host!r}. "
+                    f"Approved: {approved_paths}"
+                )
+            elif socket_host and not os.path.exists(socket_host):
+                errors.append(
+                    f"Unix socket path does not exist: {socket_host!r}"
+                )
+
+            if actual_port not in unix_policy["approved_ports"]:
+                errors.append(
+                    f"Unix socket port mismatch: expected one of "
+                    f"{unix_policy['approved_ports']}, got {actual_port!r}"
+                )
     else:
         tcp_policy = APPROVED_TEST_TARGET["tcp"]
         if actual_server_addr != tcp_policy["server_ip"]:
@@ -161,10 +185,10 @@ def create_verified_session_factory(db_url: str):
     engine = create_engine(db_url)
     factory = sessionmaker(bind=engine)
     
-    # Verify target on first session using context manager
+    # Verify target on first session
     verify_session = factory()
     try:
-        actual_target = verify_test_target(verify_session)
+        actual_target = verify_test_target(verify_session, db_url=db_url)
     except TargetGuardError:
         # P1 C8: On rejection, verify session is closed and engine is disposed
         engine.dispose()

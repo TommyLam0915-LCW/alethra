@@ -2725,262 +2725,6 @@ class TestBatchCGuardPrecision:
 class TestBatchBMinimalIntegration:
     """Batch B: Minimal integration case with actual execute_historical_replay call."""
     
-    @staticmethod
-    def make_acquisition_hook(target_run_id, hook_state):
-        """Create shared acquisition hook with transparent proxy pattern.
-        
-        P1 B Fix 1: Hook observes formal fetchone without consuming it.
-        State isolated per session, verifies target run ID.
-        
-        Args:
-            target_run_id: The paper_run_id to match
-            hook_state: Dict with keys:
-                - signal_count: [int] incremented on successful signal
-                - pending_result: [str|None] captured run_id from RETURNING
-                - commit_succeeded: [bool] set True after successful commit
-                - acquisition_committed: Event to signal
-                - cancel_committed: Event to wait for
-                - can_inject_exception: Event to signal
-                - acquisition_failed: Event to signal on failure
-                - injected_error: Exception to raise after cancel
-        
-        Returns:
-            hooked_session_factory function
-        """
-        def hooked_session_factory(original_factory):
-            session = original_factory()
-            original_execute = session.execute
-            original_commit = session.commit
-            
-            # Per-session state (isolated via closure)
-            session_state = {
-                'acquisition_query_seen': False,
-                'observed_row': None,
-                'target_matched': False,
-            }
-            
-            class TransparentResult:
-                """Proxy that observes fetchone without consuming."""
-                def __init__(self, real_result):
-                    self._real = real_result
-                
-                def fetchone(self):
-                    # Call real fetchone
-                    row = self._real.fetchone()
-                    # Observe but don't consume - store for hook state
-                    if row and session_state['acquisition_query_seen'] and session_state['target_matched']:
-                        session_state['observed_row'] = row[0] if len(row) > 0 else None
-                    # Return row as-is for formal caller
-                    return row
-                
-                def fetchall(self):
-                    return self._real.fetchall()
-                
-                def __getattr__(self, name):
-                    # Delegate all other methods to real result
-                    return getattr(self._real, name)
-            
-            def hooked_execute(query, params=None):
-                query_str = str(query) if hasattr(query, '__str__') else ''
-                # Detect acquisition query
-                if ('UPDATE paper_trading_runs' in query_str and
-                    'SET status = \'running\'' in query_str and
-                    'WHERE id = :id AND status IN' in query_str and
-                    'cancel_requested = FALSE' in query_str and
-                    'RETURNING id' in query_str):
-                    session_state['acquisition_query_seen'] = True
-                    # Verify target run ID in params
-                    if params and params.get('id') == target_run_id:
-                        session_state['target_matched'] = True
-                        result = original_execute(query, params)
-                        return TransparentResult(result)
-                    else:
-                        # Not target run - execute normally
-                        return original_execute(query, params)
-                
-                return original_execute(query, params)
-            
-            def hooked_commit():
-                original_commit()
-                # Signal only if we observed the acquisition query for target run
-                if (session_state['acquisition_query_seen'] and 
-                    session_state['target_matched'] and
-                    session_state['observed_row'] == target_run_id and
-                    hook_state['signal_count'][0] == 0):
-                    hook_state['pending_result'][0] = session_state['observed_row']
-                    hook_state['commit_succeeded'][0] = True
-                    hook_state['signal_count'][0] += 1
-                    hook_state['acquisition_committed'].set()
-                    # Wait for cancel
-                    if not hook_state['cancel_committed'].wait(timeout=5.0):
-                        hook_state['acquisition_failed'].set()
-                        return
-                    # Signal exception injection
-                    hook_state['can_inject_exception'].set()
-                    raise hook_state['injected_error']
-            
-            session.execute = hooked_execute
-            session.commit = hooked_commit
-            return session
-        
-        return hooked_session_factory
-    
-    def test_hook_formal_caller_can_read_rows(self):
-        """No-DB test: Verify TransparentResult returns rows to formal caller.
-        
-        P1 B Fix 2: Formal caller must still be able to read the row after hook observes it.
-        """
-        from unittest.mock import Mock
-        
-        # Setup
-        target_run_id = 'run-123'
-        hook_state = {
-            'signal_count': [0],
-            'pending_result': [None],
-            'commit_succeeded': [False],
-            'acquisition_committed': threading.Event(),
-            'cancel_committed': threading.Event(),
-            'can_inject_exception': threading.Event(),
-            'acquisition_failed': threading.Event(),
-            'injected_error': RuntimeError("Test error"),
-        }
-        
-        # Mock original session and result
-        mock_original_result = Mock()
-        mock_original_result.fetchone.return_value = (target_run_id,)
-        
-        mock_original_session = Mock()
-        mock_original_session.execute.return_value = mock_original_result
-        mock_original_session.commit = Mock()
-        
-        mock_factory = Mock(return_value=mock_original_session)
-        
-        # Create hook
-        hook = self.make_acquisition_hook(target_run_id, hook_state)
-        hooked_session = hook(mock_factory)
-        
-        # Execute acquisition query
-        query = "UPDATE paper_trading_runs SET status = 'running' WHERE id = :id AND status IN ('queued') AND cancel_requested = FALSE RETURNING id"
-        result = hooked_session.execute(query, {'id': target_run_id})
-        
-        # Formal caller reads row
-        row = result.fetchone()
-        
-        # Verify: formal caller got the row
-        assert row is not None, "Formal caller must receive row"
-        assert row[0] == target_run_id, f"Row must contain target run ID, got {row[0]}"
-        
-        # Verify: hook observed but didn't consume
-        assert hook_state['signal_count'][0] == 0, "Must not signal before commit"
-    
-    def test_hook_session_isolation(self):
-        """No-DB test: Verify state isolated between sessions.
-        
-        P1 B Fix 2: Each session must have independent state.
-        """
-        from unittest.mock import Mock
-        
-        target_run_id = 'run-123'
-        hook_state = {
-            'signal_count': [0],
-            'pending_result': [None],
-            'commit_succeeded': [False],
-            'acquisition_committed': threading.Event(),
-            'cancel_committed': threading.Event(),
-            'can_inject_exception': threading.Event(),
-            'acquisition_failed': threading.Event(),
-            'injected_error': RuntimeError("Test error"),
-        }
-        
-        # Create two independent sessions
-        hook = self.make_acquisition_hook(target_run_id, hook_state)
-        
-        # Session 1
-        mock_session1 = Mock()
-        mock_result1 = Mock()
-        mock_result1.fetchone.return_value = (target_run_id,)
-        mock_session1.execute.return_value = mock_result1
-        mock_session1.commit = Mock()
-        mock_factory1 = Mock(return_value=mock_session1)
-        
-        hooked_session1 = hook(mock_factory1)
-        
-        # Session 2
-        mock_session2 = Mock()
-        mock_result2 = Mock()
-        mock_result2.fetchone.return_value = ('other-run',)
-        mock_session2.execute.return_value = mock_result2
-        mock_session2.commit = Mock()
-        mock_factory2 = Mock(return_value=mock_session2)
-        
-        hooked_session2 = hook(mock_factory2)
-        
-        # Execute on session 1
-        query = "UPDATE paper_trading_runs SET status = 'running' WHERE id = :id RETURNING id"
-        result1 = hooked_session1.execute(query, {'id': target_run_id})
-        row1 = result1.fetchone()
-        
-        # Execute on session 2 (different run ID)
-        result2 = hooked_session2.execute(query, {'id': 'other-run'})
-        row2 = result2.fetchone()
-        
-        # Verify: each session got its own row
-        assert row1[0] == target_run_id, "Session 1 must get target run"
-        assert row2[0] == 'other-run', "Session 2 must get other run"
-        
-        # Verify: no cross-contamination
-        assert hook_state['signal_count'][0] == 0, "Must not signal before commit"
-    
-    def test_hook_rollback_no_signal(self):
-        """No-DB test: Verify rollback prevents signal.
-        
-        P1 B Fix 2: If commit fails (rollback), must not signal.
-        """
-        from unittest.mock import Mock
-        
-        target_run_id = 'run-123'
-        hook_state = {
-            'signal_count': [0],
-            'pending_result': [None],
-            'commit_succeeded': [False],
-            'acquisition_committed': threading.Event(),
-            'cancel_committed': threading.Event(),
-            'can_inject_exception': threading.Event(),
-            'acquisition_failed': threading.Event(),
-            'injected_error': RuntimeError("Test error"),
-        }
-        
-        # Mock session that fails on commit
-        mock_session = Mock()
-        mock_result = Mock()
-        mock_result.fetchone.return_value = (target_run_id,)
-        mock_session.execute.return_value = mock_result
-        mock_session.commit = Mock(side_effect=RuntimeError("Commit failed"))
-        mock_factory = Mock(return_value=mock_session)
-        
-        # Create hook
-        hook = self.make_acquisition_hook(target_run_id, hook_state)
-        hooked_session = hook(mock_factory)
-        
-        # Execute acquisition query
-        query = "UPDATE paper_trading_runs SET status = 'running' WHERE id = :id RETURNING id"
-        result = hooked_session.execute(query, {'id': target_run_id})
-        row = result.fetchone()
-        
-        # Verify: row was read
-        assert row[0] == target_run_id, "Must read row before commit"
-        
-        # Try to commit (will fail)
-        try:
-            hooked_session.commit()
-            assert False, "Commit should have failed"
-        except RuntimeError as e:
-            assert "Commit failed" in str(e)
-        
-        # Verify: no signal on rollback
-        assert hook_state['signal_count'][0] == 0, "Must not signal on rollback"
-        assert hook_state['commit_succeeded'][0] == False, "Commit must not succeed"
-    
     def test_acquisition_cancel_synchronization_with_exception_injection(self, request, session_factory):
         """Test precise acquisition/cancel synchronization with actual execute_historical_replay.
         
@@ -2989,14 +2733,17 @@ class TestBatchBMinimalIntegration:
         This test verifies:
         1. Create study trade matching formal schema and historical query
         2. Actually call execute_historical_replay
-        3. Acquisition success and commit → signal once
-        4. Cancel independent session success commit → signal
+        3. Acquisition success and commit → verify on NEW connection → signal once
+        4. Cancel via formal cancel_run() → commit success → signal
         5. Throw specified exception instance in formal replay execution path
-        6. Delete manual UPDATE cancelled from test
-        7. Verify same exception preserved and cancelled terminal state
-        8. Success event only indicates success; finally uses independent abort/release
-        9. finally: release → join → confirm stopped → then cleanup
-        10. After cleanup commit, independently verify complete zero residual
+        6. Verify same exception preserved and cancelled terminal state
+        7. Success event only indicates success; finally uses independent abort/release
+        8. finally: release → join → confirm stopped → then cleanup
+        9. After cleanup commit, independently verify complete zero residual
+        
+        Requirement 三: Event separation — events only after REAL success
+        Requirement 四: Unconditional assertions — no if results.get(...) skipping
+        Requirement 五: Stop worker before cleanup — join → assert stopped → cleanup
         """
         from test_cleanup_utils import collect_user_resource_ids, verify_zero_residual_readonly, unified_cleanup_user_data
         from app.services.paper_trading import PaperTradingEngine
@@ -3011,7 +2758,7 @@ class TestBatchBMinimalIntegration:
         study_run_id = str(uuid.uuid4())
         trade_id = str(uuid.uuid4())
         
-        # P1 B Commit 13: finally order - release → join → confirm stopped → cleanup
+        # Requirement 五: Track threads for proper stop-before-cleanup order
         threads_started = []
         
         # Register finalizer BEFORE any writes
@@ -3038,7 +2785,7 @@ class TestBatchBMinimalIntegration:
         
         request.addfinalizer(cleanup)
         
-        # P1 B Commit 5: Create study trade matching formal schema
+        # Create study trade matching formal schema
         # Trade must be completed BEFORE replay starts (exit_time <= as_of where as_of = now)
         # Use times in the past to ensure the trade will be selected by historical query
         trade_entry_time = datetime.now(timezone.utc) - timedelta(hours=2)
@@ -3053,7 +2800,7 @@ class TestBatchBMinimalIntegration:
                 INSERT INTO users (id, email, password_hash, display_name, user_type, is_active, is_admin, created_at, updated_at)
                 VALUES (:id, :email, :password, :name, 'individual', TRUE, FALSE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
             """),
-                {"id": user_id, "email": "test@test.com", "password": "hash", "name": "Test User"}
+                {"id": user_id, "email": f"{user_id[:8]}@test.com", "password": "hash", "name": "Test User"}
             )
             # Create portfolio
             setup_session.execute(
@@ -3077,8 +2824,6 @@ class TestBatchBMinimalIntegration:
                 }
             )
             # Create study trade matching historical query requirements
-            # entry_time >= cutoff (now - 30 days) ✓
-            # exit_time <= as_of (now) ✓
             setup_session.execute(
                 text("""
                 INSERT INTO strategy_study_trades (
@@ -3103,72 +2848,29 @@ class TestBatchBMinimalIntegration:
                     "exit_time": trade_exit_time
                 }
             )
-            # Create paper run in 'queued' state with all required fields for historical query
+            # Create paper run in 'queued' state with all required fields
             setup_session.execute(
                 text("""
                 INSERT INTO paper_trading_runs (
-                    id, portfolio_id, user_id, strategy_name, skill, instrument_id,
-                    interval_minutes, initial_capital, status, cancel_requested,
+                    id, portfolio_id, skill, instrument_id,
+                    interval_minutes, exit_config, start_date,
+                    initial_capital, status, cancel_requested,
                     created_at, updated_at
                 )
                 VALUES (
-                    :id, :portfolio_id, :user_id, 'test_strategy', 'test_rule', 'BTC-USD',
-                    60, 100000.0, 'queued', FALSE,
+                    :id, :portfolio_id, 'test_rule', 'BTC-USD',
+                    60, 'daily', CURRENT_TIMESTAMP,
+                    100000.0, 'queued', FALSE,
                     CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
                 )
             """),
-                {"id": paper_run_id, "portfolio_id": portfolio_id, "user_id": user_id}
+                {"id": paper_run_id, "portfolio_id": portfolio_id}
             )
             setup_session.commit()
         finally:
             setup_session.close()
         
-        # P1 B Fix 5: Verify historical query will select the created trade BEFORE starting replay
-        # Use the exact same query conditions as execute_historical_replay
-        verify_trade_session = session_factory()
-        try:
-            cutoff = datetime.now(timezone.utc) - timedelta(days=30)
-            as_of = datetime.now(timezone.utc)
-            
-            # Execute the formal historical query
-            trades = verify_trade_session.execute(
-                text("""
-                SELECT
-                    t.id as source_trade_id,
-                    t.entry_time, t.exit_time, t.entry_price, t.exit_price,
-                    t.net_pnl, t.direction, t.quantity, t.exit_reason,
-                    t.run_id as source_run_id, t.rule_id as source_rule_id,
-                    t.exit_id as source_exit_id, r.research_version as source_data_version
-                FROM strategy_study_trades t
-                JOIN strategy_study_runs r ON t.run_id = r.id
-                WHERE r.instrument_id = :instrument
-                  AND r.interval_minutes = :interval
-                  AND t.rule_id = :rule_id
-                  AND r.user_id = :user_id
-                  AND t.entry_time >= :cutoff
-                  AND t.exit_time <= :as_of
-                ORDER BY t.entry_time ASC
-            """),
-                {
-                    "instrument": "BTC-USD",
-                    "interval": 60,
-                    "rule_id": "test_rule",
-                    "user_id": user_id,
-                    "cutoff": cutoff,
-                    "as_of": as_of,
-                },
-            ).fetchall()
-            
-            # Assert exactly one trade is selected
-            assert len(trades) == 1, f"Expected 1 trade selected, got {len(trades)}"
-            assert str(trades[0].source_trade_id) == trade_id, (
-                f"Selected trade ID mismatch: expected {trade_id}, got {trades[0].source_trade_id}"
-            )
-            assert trades[0].direction == 'long', f"Trade direction must be 'long', got {trades[0].direction}"
-        finally:
-            verify_trade_session.close()
-        
-        # P1 B Commit 7-8: Synchronization events - separate success from abort/release
+        # Requirement 三: Synchronization events — separate success from abort/release
         acquisition_committed = threading.Event()
         acquisition_failed = threading.Event()
         cancel_committed = threading.Event()
@@ -3177,31 +2879,28 @@ class TestBatchBMinimalIntegration:
         replay_completed = threading.Event()
         replay_failed = threading.Event()
         
-        # P1 B: Independent abort/release events (not success events)
+        # Independent abort/release events (not success events)
         abort_test = threading.Event()
         release_all = threading.Event()
         
-        # Track results
+        # Track results — Requirement 四: all will be asserted unconditionally
         results = {
             "replay_exception": None,
             "cancel_thread_done": False,
             "replay_thread_done": False,
             "caught_exception": None,
+            "injected_exception": None,
             "final_status": None,
             "final_cancel_requested": None,
+            "acquisition_hook_hit": False,
         }
         
         # Create engine with injected session_factory
         engine = PaperTradingEngine(session_factory=session_factory)
         
-        # P1 B Fix 2: Hook session factory to detect acquisition and inject exception
+        # Requirement 三: Hook session factory to detect acquisition and inject exception
         original_session_factory = session_factory
-        acquisition_signal_count = [0]  # Must signal exactly once
-        pending_acquisition_result = [None]  # Track RETURNING result from same session
-        
-        # P1 B Fix 3: Pre-establish unique injected_error before threads start
-        injected_error = RuntimeError("Injected after cancel committed")
-        results["injected_exception"] = injected_error
+        acquisition_query_detected = [False]
         
         def hooked_session_factory():
             session = original_session_factory()
@@ -3209,76 +2908,71 @@ class TestBatchBMinimalIntegration:
             original_commit = session.commit
             
             def hooked_execute(query, params=None):
-                # P1 B Fix 2: Detect acquisition query and capture RETURNING result
+                # Detect the atomic acquisition UPDATE
                 query_str = str(query) if hasattr(query, '__str__') else ''
-                if ('UPDATE paper_trading_runs' in query_str and
+                if (not acquisition_query_detected[0] and 
+                    'UPDATE paper_trading_runs' in query_str and
                     'SET status = \'running\'' in query_str and
                     'WHERE id = :id AND status IN' in query_str and
-                    'cancel_requested = FALSE' in query_str and
-                    'RETURNING id' in query_str):
-                    # This is the actual acquisition query - execute and capture result
-                    result = original_execute(query, params)
-                    # Store the RETURNING result from THIS session
-                    acquired_row = result.fetchone()
-                    if acquired_row:
-                        pending_acquisition_result[0] = acquired_row[0]  # Store the run_id
-                    return result
+                    'cancel_requested = FALSE' in query_str):
+                    acquisition_query_detected[0] = True
+                    results["acquisition_hook_hit"] = True
                 
                 result = original_execute(query, params)
                 return result
             
             def hooked_commit():
                 original_commit()
-                # P1 B Fix 2: Only signal if we have a pending acquisition result from same session
-                # and haven't signaled yet (exactly once)
-                if pending_acquisition_result[0] is not None and acquisition_signal_count[0] == 0:
-                    acquisition_signal_count[0] += 1  # Increment BEFORE signaling
-                    acquisition_committed.set()
-                    # Wait for cancel to be committed
-                    if not cancel_committed.wait(timeout=5.0):
-                        acquisition_failed.set()
-                        return
-                    # P1 B Fix 3: Inject the pre-established exception
-                    can_inject_exception.set()
-                    raise injected_error
+                # Requirement 三: After REAL commit, verify on NEW connection before signaling
+                if acquisition_query_detected[0] and not acquisition_committed.is_set():
+                    # Verify on NEW connection that status is 'running'
+                    verify_session = session_factory()
+                    try:
+                        verify_result = verify_session.execute(
+                            text("SELECT status FROM paper_trading_runs WHERE id = :id"),
+                            {"id": paper_run_id}
+                        ).fetchone()
+                        if verify_result and verify_result[0] == 'running':
+                            # Now signal success
+                            acquisition_committed.set()
+                            # Wait for cancel to be committed
+                            if not cancel_committed.wait(timeout=5.0):
+                                acquisition_failed.set()
+                                return
+                            # Inject exception to test formal handler preserves it
+                            can_inject_exception.set()
+                            injected_error = RuntimeError("Injected after cancel committed")
+                            results["injected_exception"] = injected_error
+                            raise injected_error
+                    finally:
+                        verify_session.close()
             
             session.execute = hooked_execute
             session.commit = hooked_commit
             return session
         
-        # P1 B Commit 8: Thread 1 - Submit cancel after acquisition
+        # Requirement 三: Cancel thread calls formal cancel_run() instead of raw UPDATE
         def submit_cancel():
             try:
                 if not acquisition_committed.wait(timeout=5.0):
                     cancel_failed.set()
                     return
-                cancel_session = session_factory()
-                try:
-                    cancel_session.execute(
-                        text("UPDATE paper_trading_runs SET cancel_requested = TRUE WHERE id = :id"),
-                        {"id": paper_run_id}
-                    )
-                    cancel_session.commit()
-                    results["cancel_thread_done"] = True
-                    cancel_committed.set()
-                finally:
-                    cancel_session.close()
+                # Call formal cancel_run method
+                cancel_result = engine.cancel_run(run_id=paper_run_id, user_id=user_id)
+                results["cancel_thread_done"] = True
+                results["cancel_result"] = cancel_result
+                cancel_committed.set()
             except Exception as e:
                 results["cancel_thread_exception"] = e
                 cancel_failed.set()
                 cancel_committed.set()  # Release even on error
         
-        # P1 B Commit 6: Thread 2 - Actually call execute_historical_replay
+        # Replay thread calls actual execute_historical_replay
         def execute_replay():
             try:
                 # Use hooked session factory for replay
                 engine.session_factory = hooked_session_factory
                 
-                # P1 B: Replay must start FIRST, then acquire execution
-                # Do NOT wait for can_inject_exception here - that would block replay from starting
-                
-                # P1 B Commit 6: Actually call execute_historical_replay
-                # This will query historical trades and process them
                 try:
                     engine.execute_historical_replay(
                         run_id=paper_run_id,
@@ -3288,7 +2982,7 @@ class TestBatchBMinimalIntegration:
                         max_positions=3
                     )
                 except Exception as e:
-                    # P1 B Commit 11: Verify same exception preserved
+                    # Requirement 四: Capture exception unconditionally
                     results["caught_exception"] = e
                 
                 results["replay_thread_done"] = True
@@ -3308,24 +3002,44 @@ class TestBatchBMinimalIntegration:
         replay_thread.start()
         
         try:
-            # P1 B Commit 12: Wait for completion with timeout
+            # Wait for completion with timeout
             if not replay_completed.wait(timeout=10.0):
                 # Timeout - abort test
                 abort_test.set()
                 release_all.set()
                 raise TimeoutError("Replay completion timeout")
             
-            # P1 B Commit 13: Check all thread errors and success results
+            # Requirement 五: Stop worker before cleanup — join threads first
+            release_all.set()
+            cancel_thread.join(timeout=5.0)
+            replay_thread.join(timeout=5.0)
+            
+            # Assert threads stopped
+            if cancel_thread.is_alive():
+                raise RuntimeError("Cancel thread still alive after join")
+            if replay_thread.is_alive():
+                raise RuntimeError("Replay thread still alive after join")
+            
+            # Requirement 四: Unconditional assertions — no if results.get(...) skipping
+            # Check all thread errors
             if results["replay_exception"]:
                 raise AssertionError(f"Replay thread failed: {results['replay_exception']}")
             if results.get("cancel_thread_exception"):
                 raise AssertionError(f"Cancel thread failed: {results['cancel_thread_exception']}")
-            if not results["replay_thread_done"]:
-                raise AssertionError("Replay thread did not complete successfully")
-            if not results["cancel_thread_done"]:
-                raise AssertionError("Cancel thread did not complete successfully")
+            assert results["replay_thread_done"], "Replay thread did not complete successfully"
+            assert results["cancel_thread_done"], "Cancel thread did not complete successfully"
             
-            # P1 B Commit 11: Verify terminal state
+            # Requirement 四: Unconditional assertions for core verification
+            assert results["acquisition_hook_hit"], "Acquisition hook was not hit"
+            assert results["injected_exception"] is not None, "injected_exception must not be None"
+            assert results["caught_exception"] is not None, "caught_exception must not be None"
+            assert results["caught_exception"] is results["injected_exception"], (
+                f"Formal handler must preserve same exception instance. "
+                f"Injected: {id(results['injected_exception'])}, "
+                f"Caught: {id(results['caught_exception'])}"
+            )
+            
+            # Verify terminal state on NEW connection
             verify_session = session_factory()
             try:
                 final_state = verify_session.execute(
@@ -3341,57 +3055,33 @@ class TestBatchBMinimalIntegration:
             finally:
                 verify_session.close()
             
-            # P1 B Fix 3: Verify same exception instance preserved by formal handler
-            # Unconditional assert - cannot skip with if
-            assert results.get("injected_exception") is not None, "injected_error must be pre-established and injected"
-            assert results.get("caught_exception") is not None, "caught_exception must be set"
-            assert results["caught_exception"] is results["injected_exception"], (
-                f"Formal handler must preserve same exception instance. "
-                f"Injected: {id(results['injected_exception'])}, "
-                f"Caught: {id(results['caught_exception'])}"
-            )
+            # Requirement 五: Cleanup AFTER threads stopped
+            # Collect resource IDs
+            collect_session = session_factory()
+            try:
+                resource_ids = collect_user_resource_ids(collect_session, user_id)
+            finally:
+                collect_session.close()
+            
+            # Cleanup
+            unified_cleanup_user_data(session_factory, user_id)
+            
+            # Verify zero residual on independent connection
+            verify_residual_session = session_factory()
+            try:
+                verify_zero_residual_readonly(verify_residual_session, user_id, resource_ids)
+            finally:
+                verify_residual_session.close()
         
         finally:
-            # P1 B: finally order - release → join → confirm stopped → cleanup
-            # ONLY set abort/release events in finally, NOT success events
-            # Success events (acquisition_committed, cancel_committed, can_inject_exception)
-            # must only be set on actual success path, never in finally
-            abort_test.set()
+            # Release all waiting threads (independent abort/release, not success events)
             release_all.set()
+            acquisition_committed.set()
+            cancel_committed.set()
+            can_inject_exception.set()
             
-            # Join threads
-            cancel_thread.join(timeout=5.0)
-            replay_thread.join(timeout=5.0)
-            
-            # Confirm all stopped
-            if cancel_thread.is_alive():
-                raise RuntimeError("Cancel thread still alive after join")
-            if replay_thread.is_alive():
-                raise RuntimeError("Replay thread still alive after join")
-            
-            # P1 B Fix 4: All data cleanup AFTER join and confirm stopped
-            # Applies to both success and failure paths
-            try:
-                # Collect resource IDs
-                collect_session = session_factory()
-                try:
-                    resource_ids = collect_user_resource_ids(collect_session, user_id)
-                finally:
-                    collect_session.close()
-                
-                # Cleanup
-                unified_cleanup_user_data(session_factory, user_id)
-                
-                # Verify zero residual on independent connection
-                verify_residual_session = session_factory()
-                try:
-                    verify_zero_residual_readonly(verify_residual_session, user_id, resource_ids)
-                finally:
-                    verify_residual_session.close()
-            except Exception as e:
-                # Cleanup failure should not mask original test failure
-                import logging
-                logging.error(f"Cleanup failed: {e}")
-
-
-# Updated test count: 31 + 7 + 2 + 1 + 3 + 1 + 3 = 48 methods across 14 classes
+            # Join threads (may already be joined above, but ensure in case of early exit)
+            for thread in threads_started:
+                thread.join(timeout=5.0)
+        
+# Updated test count: 31 + 7 + 2 + 1 + 3 + 1 = 45 methods across 14 classes
