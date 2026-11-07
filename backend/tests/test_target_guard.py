@@ -85,7 +85,8 @@ def verify_test_target(session) -> dict:
     if actual_server not in approved_servers:
         errors.append(f"Server mismatch: expected one of {approved_servers}, got {actual_server!r}")
     
-    if actual_port != APPROVED_TEST_TARGET["port"]:
+    # Port check: skip if None (Unix socket connections don't have a TCP port)
+    if actual_port is not None and actual_port != APPROVED_TEST_TARGET["port"]:
         errors.append(f"Port mismatch: expected {APPROVED_TEST_TARGET['port']}, got {actual_port}")
     
     if errors:

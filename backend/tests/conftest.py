@@ -1,7 +1,22 @@
 import os
-# Concurrent sessions in this worktree share backend/test.db, which corrupts
-# parallel pytest runs ("table already exists"). Override the DB file per run:
-#   ALETHRA_TEST_DB=sqlite:///./test-<session>.db
+
+# === 一、對齊執行基線：unify env vars ===
+# ALETHRA_TEST_DB and ALETHRA_PG_TEST_URL are aliases for the same PG test URL.
+# If both are set and differ, refuse to proceed before any connection.
+_env_a = os.environ.get("ALETHRA_TEST_DB")
+_env_b = os.environ.get("ALETHRA_PG_TEST_URL")
+if _env_a and _env_b and _env_a != _env_b:
+    raise RuntimeError(
+        f"SAFETY: ALETHRA_TEST_DB and ALETHRA_PG_TEST_URL are both set but differ.\n"
+        f"  ALETHRA_TEST_DB    = {_env_a!r}\n"
+        f"  ALETHRA_PG_TEST_URL = {_env_b!r}\n"
+        f"Unify to a single value before running tests."
+    )
+if _env_a and not _env_b:
+    os.environ["ALETHRA_PG_TEST_URL"] = _env_a
+elif _env_b and not _env_a:
+    os.environ["ALETHRA_TEST_DB"] = _env_b
+
 _TEST_DB_PATH = os.environ.get("ALETHRA_TEST_DB", "sqlite:///./test.db")
 os.environ["DATABASE_URL"] = _TEST_DB_PATH
 

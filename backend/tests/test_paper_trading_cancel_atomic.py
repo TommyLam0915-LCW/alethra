@@ -965,10 +965,10 @@ class TestCleanupSafety:
             )
             setup_session.execute(
                 text("""
-                INSERT INTO paper_portfolios (id, owner_id, name, strategy_type, created_at, updated_at)
-                VALUES (:id, :owner_id, :name, 'test_strategy', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                INSERT INTO paper_portfolios (id, owner_id, currency, initial_virtual_cash, current_virtual_cash, status, created_at)
+                VALUES (:id, :owner_id, 'USD', 100000.0, 100000.0, 'active', CURRENT_TIMESTAMP)
             """),
-                {"id": str(uuid.uuid4()), "owner_id": test_user_id, "name": "Partial Portfolio"}
+                {"id": str(uuid.uuid4()), "owner_id": test_user_id}
             )
             setup_session.commit()
         finally:
@@ -1026,15 +1026,22 @@ class TestCleanupSafety:
             )
             setup_session.execute(
                 text("""
-                INSERT INTO paper_portfolios (id, owner_id, name, strategy_type, created_at, updated_at)
-                VALUES (:id, :owner_id, :name, 'test_strategy', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                INSERT INTO paper_portfolios (id, owner_id, currency, initial_virtual_cash, current_virtual_cash, status, created_at)
+                VALUES (:id, :owner_id, 'USD', 100000.0, 100000.0, 'active', CURRENT_TIMESTAMP)
             """),
-                {"id": portfolio_id, "owner_id": test_user_id, "name": "Rollback Portfolio"}
+                {"id": portfolio_id, "owner_id": test_user_id}
             )
             setup_session.execute(
                 text("""
-                INSERT INTO paper_trading_runs (id, portfolio_id, status, created_at, updated_at)
-                VALUES (:id, :portfolio_id, 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                INSERT INTO paper_trading_runs (
+                    id, portfolio_id, skill, instrument_id, interval_minutes, exit_config,
+                    start_date, initial_capital, status, cancel_requested, run_type, created_at, updated_at
+                )
+                VALUES (
+                    :id, :portfolio_id, 'test_skill', 'BTC-USD', 1, 'test_exit',
+                    CURRENT_TIMESTAMP, 100000.0, 'queued', FALSE, 'historical_simulation',
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                )
             """),
                 {"id": run_id, "portfolio_id": portfolio_id}
             )
@@ -1161,10 +1168,10 @@ class TestCleanupSafety:
             )
             setup_session.execute(
                 text("""
-                INSERT INTO paper_portfolios (id, owner_id, name, strategy_type, created_at, updated_at)
-                VALUES (:id, :owner_id, :name, 'test_strategy', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                INSERT INTO paper_portfolios (id, owner_id, currency, initial_virtual_cash, current_virtual_cash, status, created_at)
+                VALUES (:id, :owner_id, 'USD', 100000.0, 100000.0, 'active', CURRENT_TIMESTAMP)
             """),
-                {"id": portfolio_id, "owner_id": test_user_id, "name": "Residual Portfolio"}
+                {"id": portfolio_id, "owner_id": test_user_id}
             )
             setup_session.execute(
                 text("""
@@ -1246,18 +1253,18 @@ class TestCleanupSafety:
             # Create portfolio1 owned by user1
             setup_session.execute(
                 text("""
-                INSERT INTO paper_portfolios (id, owner_id, name, strategy_type, created_at, updated_at)
-                VALUES (:id, :owner_id, :name, 'test_strategy', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                INSERT INTO paper_portfolios (id, owner_id, currency, initial_virtual_cash, current_virtual_cash, status, created_at)
+                VALUES (:id, :owner_id, 'USD', 100000.0, 100000.0, 'active', CURRENT_TIMESTAMP)
             """),
-                {"id": portfolio1_id, "owner_id": user1_id, "name": "User1 Portfolio"}
+                {"id": portfolio1_id, "owner_id": user1_id}
             )
             # Create portfolio2 owned by user2
             setup_session.execute(
                 text("""
-                INSERT INTO paper_portfolios (id, owner_id, name, strategy_type, created_at, updated_at)
-                VALUES (:id, :owner_id, :name, 'test_strategy', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                INSERT INTO paper_portfolios (id, owner_id, currency, initial_virtual_cash, current_virtual_cash, status, created_at)
+                VALUES (:id, :owner_id, 'USD', 100000.0, 100000.0, 'active', CURRENT_TIMESTAMP)
             """),
-                {"id": portfolio2_id, "owner_id": user2_id, "name": "User2 Portfolio"}
+                {"id": portfolio2_id, "owner_id": user2_id}
             )
             # Create decision in user1's portfolio
             setup_session.execute(
@@ -1366,17 +1373,17 @@ class TestCleanupSafety:
             # Create portfolios
             setup_session.execute(
                 text("""
-                INSERT INTO paper_portfolios (id, owner_id, name, strategy_type, created_at, updated_at)
-                VALUES (:id, :owner_id, :name, 'test_strategy', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                INSERT INTO paper_portfolios (id, owner_id, currency, initial_virtual_cash, current_virtual_cash, status, created_at)
+                VALUES (:id, :owner_id, 'USD', 100000.0, 100000.0, 'active', CURRENT_TIMESTAMP)
             """),
-                {"id": portfolio1_id, "owner_id": user1_id, "name": "User1 Portfolio"}
+                {"id": portfolio1_id, "owner_id": user1_id}
             )
             setup_session.execute(
                 text("""
-                INSERT INTO paper_portfolios (id, owner_id, name, strategy_type, created_at, updated_at)
-                VALUES (:id, :owner_id, :name, 'test_strategy', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                INSERT INTO paper_portfolios (id, owner_id, currency, initial_virtual_cash, current_virtual_cash, status, created_at)
+                VALUES (:id, :owner_id, 'USD', 100000.0, 100000.0, 'active', CURRENT_TIMESTAMP)
             """),
-                {"id": portfolio2_id, "owner_id": user2_id, "name": "User2 Portfolio"}
+                {"id": portfolio2_id, "owner_id": user2_id}
             )
             # Create order in user1's portfolio
             setup_session.execute(

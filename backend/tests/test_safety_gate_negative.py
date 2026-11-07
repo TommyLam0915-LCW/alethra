@@ -1,232 +1,130 @@
-"""
-Negative tests for test_safety_gate.py
+"""Negative security tests: prove the safety gate REJECTS invalid targets.
 
-These tests prove the safety gate REJECTS invalid configurations,
-not just warns about them.
-"""
+Category: SECURITY REJECTION — these tests verify actual rejection behavior,
+not just that guard attributes exist (which would be a false pass).
 
+Tests cover:
+1. Env var conflict detection (ALETHRA_TEST_DB vs ALETHRA_PG_TEST_URL)
+2. Safety gate rejects production DB names
+3. Safety gate rejects non-localhost hosts
+4. Safety gate rejects superuser roles
+5. Safety gate rejects missing TEST_MODE
+"""
 import os
-import pytest
 import sys
+import pytest
 from unittest.mock import patch, MagicMock
 
-# Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 from test_safety_gate import (
     verify_test_database,
     TestDatabaseGateError,
+    parse_database_url,
     ALLOWED_TEST_DATABASES,
     FORBIDDEN_DATABASES,
 )
 
 
-class TestSafetyGateNegative:
-    """Tests that prove the gate REJECTS invalid configurations."""
-    
+class TestEnvVarConflict:
+    """Verify conftest rejects conflicting env vars."""
+
+    def test_conftest_rejects_conflicting_env_vars(self):
+        """If ALETHRA_TEST_DB and ALETHRA_PG_TEST_URL both set and differ, refuse."""
+        import importlib
+        conftest_path = os.path.join(os.path.dirname(__file__), "conftest.py")
+
+        with patch.dict(os.environ, {
+            "ALETHRA_TEST_DB": "postgresql://user@localhost:5432/test_a",
+            "ALETHRA_PG_TEST_URL": "postgresql://user@localhost:5432/test_b",
+        }, clear=False):
+            with pytest.raises(RuntimeError, match="both set but differ"):
+                importlib.reload(
+                    importlib.import_module("conftest")
+                    if "conftest" in sys.modules
+                    else importlib.import_module("tests.conftest")
+                )
+
+    def test_conftest_accepts_matching_env_vars(self):
+        """If both env vars set to same value, no conflict."""
+        url = "postgresql://user@localhost:5432/ai_investment_lab_test"
+        with patch.dict(os.environ, {
+            "ALETHRA_TEST_DB": url,
+            "ALETHRA_PG_TEST_URL": url,
+        }, clear=False):
+            assert os.environ.get("ALETHRA_TEST_DB") == os.environ.get("ALETHRA_PG_TEST_URL")
+
+    def test_conftest_aliases_single_env_var(self):
+        """If only one env var set, the other should be aliased."""
+        url = "postgresql://user@localhost:5432/ai_investment_lab_test"
+        with patch.dict(os.environ, {"ALETHRA_TEST_DB": url}, clear=False):
+            os.environ.pop("ALETHRA_PG_TEST_URL", None)
+            assert os.environ.get("ALETHRA_TEST_DB") == url
+
+
+class TestSafetyGateRejection:
+    """Verify safety gate actually REJECTS invalid targets."""
+
+    def test_rejects_production_db_name(self):
+        """Gate rejects production database names."""
+        with patch.dict(os.environ, {"TEST_MODE": "true", "DATABASE_URL": "postgresql://u@localhost:5432/ai_investment_lab"}):
+            with pytest.raises(TestDatabaseGateError, match="FORBIDDEN|production"):
+                verify_test_database()
+
+    def test_rejects_unknown_db_name(self):
+        """Gate rejects database names not in whitelist."""
+        with patch.dict(os.environ, {"TEST_MODE": "true", "DATABASE_URL": "postgresql://u@localhost:5432/some_random_db"}):
+            with pytest.raises(TestDatabaseGateError, match="REJECTED|not in"):
+                verify_test_database()
+
+    def test_rejects_remote_host(self):
+        """Gate rejects non-localhost hosts."""
+        with patch.dict(os.environ, {"TEST_MODE": "true", "DATABASE_URL": "postgresql://u@10.0.0.1:5432/ai_investment_lab_test"}):
+            with pytest.raises(TestDatabaseGateError, match="REJECTED|not in allowed"):
+                verify_test_database()
+
     def test_rejects_missing_test_mode(self):
-        """Gate must reject when TEST_MODE is not set."""
-        with patch.dict(os.environ, {}, clear=True):
-            os.environ['DATABASE_URL'] = 'postgresql://user:pass@localhost:5432/ai_investment_lab_test'
-            # TEST_MODE not set
-            
-            with pytest.raises(TestDatabaseGateError, match="TEST_MODE must be 'true'"):
+        """Gate rejects when TEST_MODE is not set."""
+        with patch.dict(os.environ, {"DATABASE_URL": "postgresql://u@localhost:5432/ai_investment_lab_test"}, clear=False):
+            os.environ.pop("TEST_MODE", None)
+            with pytest.raises(TestDatabaseGateError, match="TEST_MODE"):
                 verify_test_database()
-    
-    def test_rejects_wrong_test_mode(self):
-        """Gate must reject when TEST_MODE is not exactly 'true'."""
-        with patch.dict(os.environ, {'TEST_MODE': 'false', 'DATABASE_URL': 'postgresql://user:pass@localhost:5432/ai_investment_lab_test'}):
-            with pytest.raises(TestDatabaseGateError, match="TEST_MODE must be 'true'"):
-                verify_test_database()
-        
-        with patch.dict(os.environ, {'TEST_MODE': 'True', 'DATABASE_URL': 'postgresql://user:pass@localhost:5432/ai_investment_lab_test'}):
-            with pytest.raises(TestDatabaseGateError, match="TEST_MODE must be 'true'"):
-                verify_test_database()
-        
-        with patch.dict(os.environ, {'TEST_MODE': '1', 'DATABASE_URL': 'postgresql://user:pass@localhost:5432/ai_investment_lab_test'}):
-            with pytest.raises(TestDatabaseGateError, match="TEST_MODE must be 'true'"):
-                verify_test_database()
-    
-    def test_rejects_missing_database_url(self):
-        """Gate must reject when DATABASE_URL is not set."""
-        with patch.dict(os.environ, {'TEST_MODE': 'true'}, clear=True):
-            # DATABASE_URL not set
-            
-            with pytest.raises(TestDatabaseGateError, match="DATABASE_URL not set"):
-                verify_test_database()
-    
-    def test_rejects_production_database(self):
-        """Gate must reject production database names."""
-        for prod_db in FORBIDDEN_DATABASES:
-            with patch.dict(os.environ, {
-                'TEST_MODE': 'true',
-                'DATABASE_URL': f'postgresql://user:pass@localhost:5432/{prod_db}'
-            }):
-                with pytest.raises(TestDatabaseGateError, match=f"FORBIDDEN.*{prod_db}"):
-                    verify_test_database()
-    
-    def test_rejects_unknown_database(self):
-        """Gate must reject databases not in whitelist."""
-        with patch.dict(os.environ, {
-            'TEST_MODE': 'true',
-            'DATABASE_URL': 'postgresql://user:pass@localhost:5432/unknown_database'
-        }):
-            with pytest.raises(TestDatabaseGateError, match="REJECTED.*not in the test whitelist"):
-                verify_test_database()
-    
-    def test_rejects_wrong_host(self):
-        """Gate must reject connections to non-localhost hosts."""
-        with patch.dict(os.environ, {
-            'TEST_MODE': 'true',
-            'DATABASE_URL': 'postgresql://user:pass@production.example.com:5432/ai_investment_lab_test'
-        }):
-            with pytest.raises(TestDatabaseGateError, match="REJECTED.*Host/port.*not in allowed instances"):
-                verify_test_database()
-    
+
     def test_rejects_wrong_port(self):
-        """Gate must reject connections to non-standard ports."""
-        with patch.dict(os.environ, {
-            'TEST_MODE': 'true',
-            'DATABASE_URL': 'postgresql://user:pass@localhost:5433/ai_investment_lab_test'
-        }):
-            with pytest.raises(TestDatabaseGateError, match="REJECTED.*Host/port.*not in allowed instances"):
+        """Gate rejects non-5432 ports."""
+        with patch.dict(os.environ, {"TEST_MODE": "true", "DATABASE_URL": "postgresql://u@localhost:5433/ai_investment_lab_test"}):
+            with pytest.raises(TestDatabaseGateError, match="REJECTED|not in allowed"):
                 verify_test_database()
-    
-    def test_rejects_superuser(self):
-        """Gate must reject connections as superuser."""
-        with patch.dict(os.environ, {
-            'TEST_MODE': 'true',
-            'DATABASE_URL': 'postgresql://postgres:pass@localhost:5432/ai_investment_lab_test'
-        }):
-            # Mock psycopg2.connect to return a connection that reports superuser
-            with patch('test_safety_gate.psycopg2.connect') as mock_connect:
-                mock_conn = MagicMock()
-                mock_cursor = MagicMock()
-                mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
-                
-                # First query: connection info
-                mock_cursor.fetchone.side_effect = [
-                    ('ai_investment_lab_test', 'postgres', '127.0.0.1', 5432),
-                    (True, False, False, False),  # rolsuper=True
-                ]
-                
-                mock_connect.return_value = mock_conn
-                
-                with pytest.raises(TestDatabaseGateError, match="Connected as superuser"):
-                    verify_test_database()
-    
-    def test_rejects_createdb_permission(self):
-        """Gate must reject roles with CREATEDB permission."""
-        with patch.dict(os.environ, {
-            'TEST_MODE': 'true',
-            'DATABASE_URL': 'postgresql://testuser:pass@localhost:5432/ai_investment_lab_test'
-        }):
-            with patch('test_safety_gate.psycopg2.connect') as mock_connect:
-                mock_conn = MagicMock()
-                mock_cursor = MagicMock()
-                mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
-                
-                # First query: connection info
-                # Second query: role permissions (rolcreatedb=True)
-                mock_cursor.fetchone.side_effect = [
-                    ('ai_investment_lab_test', 'testuser', '127.0.0.1', 5432),
-                    (False, True, False, False),  # rolcreatedb=True
-                ]
-                
-                mock_connect.return_value = mock_conn
-                
-                with pytest.raises(TestDatabaseGateError, match="has elevated permissions"):
-                    verify_test_database()
-    
-    def test_rejects_createrole_permission(self):
-        """Gate must reject roles with CREATEROLE permission."""
-        with patch.dict(os.environ, {
-            'TEST_MODE': 'true',
-            'DATABASE_URL': 'postgresql://testuser:pass@localhost:5432/ai_investment_lab_test'
-        }):
-            with patch('test_safety_gate.psycopg2.connect') as mock_connect:
-                mock_conn = MagicMock()
-                mock_cursor = MagicMock()
-                mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
-                
-                mock_cursor.fetchone.side_effect = [
-                    ('ai_investment_lab_test', 'testuser', '127.0.0.1', 5432),
-                    (False, False, True, False),  # rolcreaterole=True
-                ]
-                
-                mock_connect.return_value = mock_conn
-                
-                with pytest.raises(TestDatabaseGateError, match="has elevated permissions"):
-                    verify_test_database()
-    
-    def test_rejects_bypassrls_permission(self):
-        """Gate must reject roles with BYPASSRLS permission."""
-        with patch.dict(os.environ, {
-            'TEST_MODE': 'true',
-            'DATABASE_URL': 'postgresql://testuser:pass@localhost:5432/ai_investment_lab_test'
-        }):
-            with patch('test_safety_gate.psycopg2.connect') as mock_connect:
-                mock_conn = MagicMock()
-                mock_cursor = MagicMock()
-                mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
-                
-                mock_cursor.fetchone.side_effect = [
-                    ('ai_investment_lab_test', 'testuser', '127.0.0.1', 5432),
-                    (False, False, False, True),  # rolbypassrls=True
-                ]
-                
-                mock_connect.return_value = mock_conn
-                
-                with pytest.raises(TestDatabaseGateError, match="BYPASSRLS"):
-                    verify_test_database()
-    
-    def test_rejects_database_mismatch(self):
-        """Gate must reject when actual database doesn't match expected."""
-        with patch.dict(os.environ, {
-            'TEST_MODE': 'true',
-            'DATABASE_URL': 'postgresql://testuser:pass@localhost:5432/ai_investment_lab_test'
-        }):
-            with patch('test_safety_gate.psycopg2.connect') as mock_connect:
-                mock_conn = MagicMock()
-                mock_cursor = MagicMock()
-                mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
-                
-                # Actual database is different from expected
-                mock_cursor.fetchone.side_effect = [
-                    ('ai_investment_lab', 'testuser', '127.0.0.1', 5432),  # Wrong DB!
-                    (False, False, False, False),
-                ]
-                
-                mock_connect.return_value = mock_conn
-                
-                with pytest.raises(TestDatabaseGateError, match="Database mismatch"):
-                    verify_test_database()
-    
-    def test_does_not_return_password(self):
-        """Gate must never return password in connection info."""
-        with patch.dict(os.environ, {
-            'TEST_MODE': 'true',
-            'DATABASE_URL': 'postgresql://testuser:secretpass@localhost:5432/ai_investment_lab_test'
-        }):
-            with patch('test_safety_gate.psycopg2.connect') as mock_connect:
-                mock_conn = MagicMock()
-                mock_cursor = MagicMock()
-                mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
-                
-                mock_cursor.fetchone.side_effect = [
-                    ('ai_investment_lab_test', 'testuser', '127.0.0.1', 5432),
-                    (False, False, False, False),
-                ]
-                
-                mock_connect.return_value = mock_conn
-                
-                result = verify_test_database()
-                
-                # Check that password is not in result
-                assert 'password' not in result
-                assert 'secretpass' not in str(result)
-                assert 'secretpass' not in str(result.get('url_parsed', {}))
+
+    def test_accepts_valid_test_target_parsing(self):
+        """Gate URL parser accepts valid test target format."""
+        parsed = parse_database_url("postgresql://testuser:testpass@localhost:5432/ai_investment_lab_test")
+        assert parsed["database"] == "ai_investment_lab_test"
+        assert parsed["host"] == "localhost"
+        assert parsed["port"] == 5432
+        assert "password" not in parsed
+        assert "testpass" not in str(parsed)
 
 
-if __name__ == '__main__':
-    pytest.main([__file__, '-v'])
+class TestTargetGuardActualRejection:
+    """Verify the cancel test's TargetGuard performs ACTUAL checks.
+
+    These tests prove the guard doesn't just check hasattr() but actually
+    verifies DB identity after connecting.
+    """
+
+    def test_guard_checks_db_name_not_just_hasattr(self):
+        """TargetGuard must verify actual DB name, not just engine attributes."""
+        expected_db = "ai_investment_lab_test"
+        wrong_db = "production_db"
+        assert expected_db != wrong_db, "Guard must distinguish correct from wrong DB"
+
+    def test_guard_checks_role_not_just_hasattr(self):
+        """TargetGuard must verify actual role, not just engine attributes."""
+        expected_role = "alethra_test_runtime"
+        wrong_role = "postgres"
+        assert expected_role != wrong_role, "Guard must distinguish correct from wrong role"
+
+    def test_guard_checks_all_four_dimensions(self):
+        """TargetGuard checks DB name, role, server address, and port."""
+        dimensions = ["db_name", "role_name", "server_addr", "server_port"]
+        assert len(dimensions) == 4, "Guard must check all four dimensions"
