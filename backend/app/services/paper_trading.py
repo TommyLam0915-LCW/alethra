@@ -108,13 +108,13 @@ class PaperTradingEngine:
 
     def check_cancel_requested(self, run_id: str) -> bool:
         """Check if cancellation has been requested for a run.
-        
+
         Workers should call this periodically during long-running operations
         to detect cancel requests and abort gracefully.
-        
+
         Args:
             run_id: The run ID to check
-            
+
         Returns:
             True if cancel was requested, False otherwise
         """
@@ -128,15 +128,15 @@ class PaperTradingEngine:
             """),
                 {"id": run_id},
             ).fetchone()
-            
+
             if not result:
                 return False
-            
+
             cancel_requested, status = result
-            
+
             # Cancel is effective if flag is set OR status is already cancelled
             return bool(cancel_requested) or status == "cancelled"
-            
+
         finally:
             db.close()
 
@@ -155,7 +155,7 @@ class PaperTradingEngine:
         Event-driven simulation: exits are processed before entries at the
         same timestamp, so released capital is available for new positions
         only after the exit settles.
-        
+
         Args:
             run_id: The paper trading run ID
             user_id: The user ID (must match run owner)
@@ -167,7 +167,7 @@ class PaperTradingEngine:
         """
         if days_back is None or days_back <= 0:
             raise ValueError(f"days_back must be a positive integer, got {days_back!r}")
-        
+
         # Validate commission and slippage rates are non-negative Decimals
         if not isinstance(commission_rate, Decimal) or commission_rate < 0:
             raise ValueError(f"commission_rate must be a non-negative Decimal, got {commission_rate!r}")
@@ -209,7 +209,7 @@ class PaperTradingEngine:
 
             # Compute UTC cutoff in Python — never embed bind param in INTERVAL string
             cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
-            
+
             # Set as_of BEFORE query: only replay trades fully completed before this timestamp
             as_of = datetime.now(timezone.utc)
 
@@ -254,7 +254,7 @@ class PaperTradingEngine:
             ).fetchall()
 
             logger.info(f"Found {len(trades)} historical trades to replay")
-            
+
             # Long-only enforcement: reject any short positions
             for trade in trades:
                 direction = trade.direction or "long"
@@ -280,7 +280,7 @@ class PaperTradingEngine:
             if not acquired_row:
                 # Another task acquired execution rights, or status is not allowed
                 raise InvalidStateError(
-                    "Run", run_id, run.status, 
+                    "Run", run_id, run.status,
                     ["queued", "pending", "failed"]
                 )
 
@@ -294,8 +294,8 @@ class PaperTradingEngine:
             EXIT = "exit"
             events = []
             for idx, trade in enumerate(trades):
-                # trade tuple: (source_trade_id, entry_time, exit_time, entry_price, exit_price, 
-                #               net_pnl, direction, quantity, exit_reason, source_run_id, 
+                # trade tuple: (source_trade_id, entry_time, exit_time, entry_price, exit_price,
+                #               net_pnl, direction, quantity, exit_reason, source_run_id,
                 #               source_rule_id, source_exit_id, source_data_version)
                 entry_time = trade.entry_time
                 exit_time = trade.exit_time
@@ -346,13 +346,13 @@ class PaperTradingEngine:
                             "message": "Worker stopped due to cancel request",
                             "events_processed": event_counter,
                         }
-                
+
                 trade = trades[idx]
                 # Unpack trade tuple with source pinning fields
-                (source_trade_id, entry_time, exit_time, entry_price, exit_price, 
+                (source_trade_id, entry_time, exit_time, entry_price, exit_price,
                  orig_net_pnl, direction, quantity, exit_reason, source_run_id,
                  source_rule_id, source_exit_id, source_data_version) = trade
-                
+
                 # Convert prices and quantity to Decimal for precision
                 entry_price_dec = Decimal(str(entry_price))
                 exit_price_dec = Decimal(str(exit_price))
@@ -375,13 +375,13 @@ class PaperTradingEngine:
                         realized_pnl = trade_quantity * (exit_price_dec - entry_price)
                     else:
                         realized_pnl = trade_quantity * (entry_price - exit_price_dec)
-                    
+
                     # Apply exit commission and slippage
                     exit_gross_dec = trade_quantity * exit_price_dec
                     exit_commission = exit_gross_dec * commission_rate
                     exit_slippage = exit_gross_dec * slippage_rate
                     exit_total_costs = exit_commission + exit_slippage
-                    
+
                     # Full round-trip net PnL: gross - entry costs - exit costs
                     full_net_pnl = realized_pnl - entry_total_costs_stored - exit_total_costs
 
@@ -391,7 +391,7 @@ class PaperTradingEngine:
                     position_cost = trade_quantity * entry_price
                     available_cash += position_cost + realized_pnl - exit_total_costs
                     position_value -= position_cost
-                    
+
                     # Track cash flows: gross proceeds, then separate exit costs (for audit)
                     cash_flows.append((event_time, "exit_proceeds_gross", position_cost + realized_pnl))
                     cash_flows.append((event_time, "exit_commission", -exit_commission))
@@ -549,7 +549,7 @@ class PaperTradingEngine:
                 elif event_type == ENTRY and idx not in active_positions:
                     # Process entry: check capacity and exposure limits
                     total_equity = available_cash + position_value
-                    
+
                     if len(active_positions) >= max_positions:
                         event_log.append({
                             "time": event_time.isoformat(),
@@ -638,7 +638,7 @@ class PaperTradingEngine:
                     trade_quantity = entry_position_value / entry_price_dec
                     is_long = (direction or "long").lower() in ["long", "buy"]
                     side = "BUY" if is_long else "SELL"
-                    
+
                     # Apply entry commission and slippage (non-zero costs)
                     entry_commission = entry_position_value * commission_rate
                     entry_slippage = entry_position_value * slippage_rate
@@ -798,23 +798,23 @@ class PaperTradingEngine:
                 trade_quantity = Decimal(str(pos["quantity"]))
                 entry_price = Decimal(str(pos["entry_price"]))
                 entry_total_costs_stored = Decimal(str(pos["entry_total_costs"]))
-                
+
                 if pos["is_long"]:
                     realized_pnl = trade_quantity * (exit_price - entry_price)
                 else:
                     realized_pnl = trade_quantity * (entry_price - exit_price)
-                
+
                 # Full net PnL: gross - entry costs (no exit costs applied for forced close)
                 forced_net_pnl = realized_pnl - entry_total_costs_stored
-                
+
                 # Return position value + gross PnL to available cash
                 # (entry costs were already deducted at entry time)
                 position_cost = trade_quantity * entry_price
                 available_cash += position_cost + realized_pnl
                 position_value -= position_cost
-                
+
                 cash_flows.append((exit_time, "forced_exit_proceeds", position_cost + realized_pnl))
-                
+
                 executed_trades.append({
                     "entry_time": pos["entry_time"].isoformat(),
                     "exit_time": exit_time.isoformat(),
@@ -829,7 +829,7 @@ class PaperTradingEngine:
             total_equity = available_cash + position_value
             net_cash_flows = sum(flow[2] for flow in cash_flows)
             expected_equity = Decimal(str(initial_capital)) + net_cash_flows
-            
+
             # Allow small floating point tolerance
             reconciliation_diff = abs(total_equity - expected_equity)
             if reconciliation_diff > Decimal("0.01"):
@@ -841,7 +841,7 @@ class PaperTradingEngine:
                     f"Cash reconciliation failed: equity {total_equity} != expected {expected_equity} "
                     f"(diff: {reconciliation_diff})"
                 )
-            
+
             logger.info(f"✓ Cash reconciliation passed: equity={total_equity}, diff={reconciliation_diff}")
 
             # Final commit protection: lock the run row to prevent cancel interference
@@ -995,21 +995,21 @@ class PaperTradingEngine:
 
     def cancel_run(self, run_id: str, user_id: str) -> dict:
         """Request cancellation of a paper trading run.
-        
+
         Cancel contract: Sets cancel_requested flag atomically.
         Worker detects flag and stops gracefully, then sets status='cancelled'.
-        
+
         This distinguishes:
         - Cancel REQUESTED (flag set, worker still processing)
         - Cancel COMPLETED (worker stopped, status='cancelled')
-        
+
         Args:
             run_id: The run ID to cancel
             user_id: The user ID (must match run owner)
-            
+
         Returns:
             Dict with cancel request result
-            
+
         State transitions:
         - cancel_requested=FALSE, status='running' → cancel_requested=TRUE, status='running' (request accepted)
         - Worker detects flag → stops → status='cancelled' (cancel completed)
@@ -1056,14 +1056,14 @@ class PaperTradingEngine:
             )
 
             cancelled_row = result.fetchone()
-            
+
             if not cancelled_row:
                 # Another cancel request succeeded, or status changed to terminal
                 current_run = db.execute(
                     text("SELECT status, cancel_requested FROM paper_trading_runs WHERE id = :id"),
                     {"id": run_id},
                 ).fetchone()
-                
+
                 if current_run:
                     if current_run.cancel_requested:
                         # Cancel already requested, return success (idempotent)
@@ -1076,7 +1076,7 @@ class PaperTradingEngine:
                     else:
                         # Status changed to terminal
                         raise InvalidStateError(
-                            "Run", run_id, current_run.status, 
+                            "Run", run_id, current_run.status,
                             ["queued", "pending", "running", "failed"]
                         )
                 else:

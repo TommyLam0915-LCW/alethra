@@ -16,17 +16,17 @@ from tests.conftest import TestSession
 @contextmanager
 def api_test_fixtures(email: str):
     """Context manager that creates and cleans up API test fixtures.
-    
+
     Creates in order:
     1. User
     2. Strategy study run
     3. Strategy study trades
-    
+
     Cleans up in reverse order (even if creation fails partway):
     1. Delete trades
     2. Delete run
     3. Delete user (+ all paper trading data)
-    
+
     Usage:
         with api_test_fixtures("test@example.com") as (auth_headers, user_id, run_id):
             # Use fixtures
@@ -37,21 +37,21 @@ def api_test_fixtures(email: str):
     from app.models.user import User
     from datetime import datetime, timezone, timedelta
     from uuid import uuid4
-    
+
     # Pre-generate all IDs before any database operations
     user_id = str(uuid4())
     study_run_id = str(uuid4())
-    
+
     # Register cleanup responsibilities BEFORE any writes
     # This ensures cleanup runs even if commit/refresh/token fails
     created_resources = []
     test_body_exception = None
-    
+
     try:
         # Step 1: Create user
         # Register BEFORE commit so cleanup runs even if commit fails
         created_resources.append(("user", user_id))
-        
+
         db = TestSession()
         try:
             user = User(
@@ -69,14 +69,14 @@ def api_test_fixtures(email: str):
             auth_headers = {"Authorization": f"Bearer {token}"}
         finally:
             db.close()
-        
+
         # Step 2: Create strategy study run
         created_resources.append(("run", study_run_id))
-        
+
         db = SessionLocal()
         try:
             now = datetime.now(timezone.utc)
-            
+
             db.execute(
                 text("""
                     INSERT INTO strategy_study_runs (
@@ -94,14 +94,14 @@ def api_test_fixtures(email: str):
             db.commit()
         finally:
             db.close()
-        
+
         # Step 3: Create strategy study trades
         created_resources.append(("trades", study_run_id))
-        
+
         db = SessionLocal()
         try:
             now = datetime.now(timezone.utc)
-            
+
             # Trade 1: Buy @ $100, sell @ $110 → profitable
             trade1_id = str(uuid4())
             entry_time_1 = now - timedelta(days=5)
@@ -125,7 +125,7 @@ def api_test_fixtures(email: str):
                     "entry_time": entry_time_1, "exit_time": exit_time_1, "now": now,
                 },
             )
-            
+
             # Trade 2: Buy @ $100, sell @ $90 → loss
             trade2_id = str(uuid4())
             entry_time_2 = now - timedelta(days=3)
@@ -149,18 +149,18 @@ def api_test_fixtures(email: str):
                     "entry_time": entry_time_2, "exit_time": exit_time_2, "now": now,
                 },
             )
-            
+
             db.commit()
         finally:
             db.close()
-        
+
         # Yield control to test
         yield auth_headers, user_id, study_run_id
-        
+
     except Exception as e:
         # Capture test body exception to propagate later
         test_body_exception = e
-    
+
     finally:
         # Cleanup in reverse order
         cleanup_errors = []
@@ -190,7 +190,7 @@ def api_test_fixtures(email: str):
                 cleanup_errors.append((resource_type, resource_id, e))
                 import sys
                 print(f"ERROR: Cleanup failed for {resource_type} {resource_id}: {e}", file=sys.stderr)
-        
+
         # Propagate errors
         if cleanup_errors:
             if test_body_exception:
@@ -212,7 +212,7 @@ def api_test_fixtures(email: str):
                         f"{len(cleanup_errors)} cleanups failed: {error_summary}",
                         all_exceptions
                     )
-        
+
         # If no cleanup errors but test body failed, propagate test body exception
         if test_body_exception:
             raise test_body_exception
@@ -225,14 +225,14 @@ def _cleanup_user_data(user_id: str):
         # Delete in FK-safe order (child tables first)
         # paper_fills → paper_orders → paper_positions → decision_records →
         # paper_trading_daily_metrics → paper_trading_runs → paper_portfolios → users
-        
+
         # Get portfolio IDs for this user
         portfolio_ids_result = db.execute(
             text("SELECT id FROM paper_portfolios WHERE owner_id = :user_id"),
             {"user_id": user_id},
         ).fetchall()
         portfolio_ids = [str(row[0]) for row in portfolio_ids_result]
-        
+
         if portfolio_ids:
             # Delete paper_fills (child of paper_orders)
             db.execute(
@@ -240,27 +240,27 @@ def _cleanup_user_data(user_id: str):
                      "(SELECT id FROM paper_orders WHERE portfolio_id = ANY(:portfolio_ids))"),
                 {"portfolio_ids": portfolio_ids},
             )
-            
+
             # Delete paper_orders
             db.execute(
                 text("DELETE FROM paper_orders WHERE portfolio_id = ANY(:portfolio_ids)"),
                 {"portfolio_ids": portfolio_ids},
             )
-        
+
         # Delete paper_positions
         db.execute(
             text("DELETE FROM paper_positions WHERE portfolio_id IN "
                  "(SELECT id FROM paper_portfolios WHERE owner_id = :user_id)"),
             {"user_id": user_id},
         )
-        
+
         # Delete decision_records
         db.execute(
             text("DELETE FROM decision_records WHERE paper_portfolio_id IN "
                  "(SELECT id FROM paper_portfolios WHERE owner_id = :user_id)"),
             {"user_id": user_id},
         )
-        
+
         # Delete paper_trading_daily_metrics
         db.execute(
             text("DELETE FROM paper_trading_daily_metrics WHERE run_id IN "
@@ -268,27 +268,27 @@ def _cleanup_user_data(user_id: str):
                  "(SELECT id FROM paper_portfolios WHERE owner_id = :user_id))"),
             {"user_id": user_id},
         )
-        
+
         # Delete paper_trading_runs
         db.execute(
             text("DELETE FROM paper_trading_runs WHERE portfolio_id IN "
                  "(SELECT id FROM paper_portfolios WHERE owner_id = :user_id)"),
             {"user_id": user_id},
         )
-        
+
         # Delete paper_portfolios
         db.execute(
             text("DELETE FROM paper_portfolios WHERE owner_id = :user_id"),
             {"user_id": user_id},
         )
-        
+
         # Delete user
         db.execute(
             text("DELETE FROM users WHERE id = :user_id"),
             {"user_id": user_id},
         )
         db.commit()
-        
+
         # Verify cleanup succeeded with comprehensive checks
         _verify_zero_residual(db, user_id, portfolio_ids)
     finally:
@@ -304,7 +304,7 @@ def _verify_zero_residual(db, user_id: str, portfolio_ids: list[str]):
     ).scalar()
     if result != 0:
         raise RuntimeError(f"Cleanup verification failed: user {user_id} still exists (count={result})")
-    
+
     # Check portfolios are gone
     result = db.execute(
         text("SELECT COUNT(*) FROM paper_portfolios WHERE owner_id = :user_id"),
@@ -312,7 +312,7 @@ def _verify_zero_residual(db, user_id: str, portfolio_ids: list[str]):
     ).scalar()
     if result != 0:
         raise RuntimeError(f"Cleanup verification failed: {result} portfolios still exist for user {user_id}")
-    
+
     # Check all child tables are empty for these portfolios
     if portfolio_ids:
         for table, fk_column in [
@@ -324,16 +324,16 @@ def _verify_zero_residual(db, user_id: str, portfolio_ids: list[str]):
             if table == "paper_fills":
                 # paper_fills joins through paper_orders
                 count_sql = text(f"""
-                    SELECT COUNT(*) FROM {table} WHERE {fk_column} IN 
+                    SELECT COUNT(*) FROM {table} WHERE {fk_column} IN
                     (SELECT id FROM paper_orders WHERE portfolio_id = ANY(:portfolio_ids))
                 """)
             else:
                 count_sql = text(f"SELECT COUNT(*) FROM {table} WHERE {fk_column} = ANY(:portfolio_ids)")
-            
+
             result = db.execute(count_sql, {"portfolio_ids": portfolio_ids}).scalar()
             if result != 0:
                 raise RuntimeError(f"Cleanup verification failed: {table} has {result} residual rows for portfolios {portfolio_ids}")
-        
+
         # Check runs and metrics
         result = db.execute(
             text("SELECT COUNT(*) FROM paper_trading_runs WHERE portfolio_id = ANY(:portfolio_ids)"),
@@ -341,9 +341,9 @@ def _verify_zero_residual(db, user_id: str, portfolio_ids: list[str]):
         ).scalar()
         if result != 0:
             raise RuntimeError(f"Cleanup verification failed: paper_trading_runs has {result} residual rows")
-        
+
         result = db.execute(
-            text("""SELECT COUNT(*) FROM paper_trading_daily_metrics WHERE run_id IN 
+            text("""SELECT COUNT(*) FROM paper_trading_daily_metrics WHERE run_id IN
                    (SELECT id FROM paper_trading_runs WHERE portfolio_id = ANY(:portfolio_ids))"""),
             {"portfolio_ids": portfolio_ids},
         ).scalar()
