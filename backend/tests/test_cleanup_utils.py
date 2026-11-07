@@ -315,13 +315,15 @@ def verify_zero_residual_readonly(verify_session, user_id: str, resource_ids: di
     Phase 3 of unified cleanup: READ-ONLY verification with new connection.
     NO DELETEs happen here. This is purely verification.
     
+    Aggregates ALL residual errors before raising, so caller sees complete picture.
+    
     Args:
         verify_session: Independent database session for verification (read-only)
         user_id: User ID to verify
         resource_ids: Dict from collect_user_resource_ids()
         
     Raises:
-        RuntimeError: If any resources still exist
+        RuntimeError: If any resources still exist (aggregated message)
     """
     portfolio_ids = resource_ids["portfolio_ids"]
     run_ids = resource_ids["run_ids"]
@@ -332,13 +334,15 @@ def verify_zero_residual_readonly(verify_session, user_id: str, resource_ids: di
     metric_ids = resource_ids["metric_ids"]
     study_run_ids = resource_ids["study_run_ids"]
     
+    residuals = []
+    
     # Verify user deleted
     user_count = verify_session.execute(
         text("SELECT COUNT(*) FROM users WHERE id = :user_id"),
         {"user_id": user_id}
     ).scalar()
     if user_count != 0:
-        raise RuntimeError(f"Cleanup verification failed: user {user_id} still exists (count={user_count})")
+        residuals.append(f"user still exists")
     
     # Verify all portfolios deleted
     if portfolio_ids:
@@ -347,7 +351,7 @@ def verify_zero_residual_readonly(verify_session, user_id: str, resource_ids: di
             {"portfolio_ids": portfolio_ids}
         ).scalar()
         if portfolio_count != 0:
-            raise RuntimeError(f"Cleanup verification failed: {portfolio_count} portfolios still exist")
+            residuals.append(f"{portfolio_count} portfolios still exist")
     
     # Verify all runs deleted
     if run_ids:
@@ -356,7 +360,7 @@ def verify_zero_residual_readonly(verify_session, user_id: str, resource_ids: di
             {"run_ids": run_ids}
         ).scalar()
         if run_count != 0:
-            raise RuntimeError(f"Cleanup verification failed: {run_count} runs still exist")
+            residuals.append(f"{run_count} runs still exist")
     
     # Verify all orders deleted
     if order_ids:
@@ -365,7 +369,7 @@ def verify_zero_residual_readonly(verify_session, user_id: str, resource_ids: di
             {"order_ids": order_ids}
         ).scalar()
         if order_count != 0:
-            raise RuntimeError(f"Cleanup verification failed: {order_count} orders still exist")
+            residuals.append(f"{order_count} orders still exist")
     
     # Verify all fills deleted
     if fill_ids:
@@ -374,7 +378,7 @@ def verify_zero_residual_readonly(verify_session, user_id: str, resource_ids: di
             {"fill_ids": fill_ids}
         ).scalar()
         if fill_count != 0:
-            raise RuntimeError(f"Cleanup verification failed: {fill_count} fills still exist")
+            residuals.append(f"{fill_count} fills still exist")
     
     # Verify all decisions deleted
     if decision_ids:
@@ -383,7 +387,7 @@ def verify_zero_residual_readonly(verify_session, user_id: str, resource_ids: di
             {"decision_ids": decision_ids}
         ).scalar()
         if decision_count != 0:
-            raise RuntimeError(f"Cleanup verification failed: {decision_count} decisions still exist")
+            residuals.append(f"{decision_count} decisions still exist")
     
     # Verify all positions deleted
     if position_ids:
@@ -392,7 +396,7 @@ def verify_zero_residual_readonly(verify_session, user_id: str, resource_ids: di
             {"position_ids": position_ids}
         ).scalar()
         if position_count != 0:
-            raise RuntimeError(f"Cleanup verification failed: {position_count} positions still exist")
+            residuals.append(f"{position_count} positions still exist")
     
     # Verify all metrics deleted
     if metric_ids:
@@ -401,7 +405,7 @@ def verify_zero_residual_readonly(verify_session, user_id: str, resource_ids: di
             {"metric_ids": metric_ids}
         ).scalar()
         if metric_count != 0:
-            raise RuntimeError(f"Cleanup verification failed: {metric_count} metrics still exist")
+            residuals.append(f"{metric_count} metrics still exist")
     
     # Verify all study runs deleted
     if study_run_ids:
@@ -410,7 +414,13 @@ def verify_zero_residual_readonly(verify_session, user_id: str, resource_ids: di
             {"study_run_ids": study_run_ids}
         ).scalar()
         if study_count != 0:
-            raise RuntimeError(f"Cleanup verification failed: {study_count} study runs still exist")
+            residuals.append(f"{study_count} study runs still exist")
+    
+    # Raise aggregated error if any residuals found
+    if residuals:
+        raise RuntimeError(
+            f"Cleanup verification failed: {'; '.join(residuals)}"
+        )
 
 
 def unified_cleanup_user_data(session_factory, user_id: str):
