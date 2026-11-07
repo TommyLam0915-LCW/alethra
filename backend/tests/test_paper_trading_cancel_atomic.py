@@ -1805,18 +1805,18 @@ class TestTargetGuard:
             verify_test_target(mock_session)
 
     def test_target_guard_rejects_wrong_address(self):
-        """Target guard rejects wrong server address."""
+        """Target guard rejects wrong server IP address."""
         from unittest.mock import Mock
         from test_target_guard import verify_test_target, TargetGuardError
         
-        # Mock session that returns wrong server address
+        # Mock session that returns wrong server IP
         mock_session = Mock()
         mock_result = Mock()
         mock_result.fetchone.return_value = ("ai_investment_lab_test", "alethra_test_runtime", "192.168.1.100", 5432)
         mock_session.execute.return_value = mock_result
         
         # Should raise TargetGuardError
-        with pytest.raises(TargetGuardError, match="Server mismatch"):
+        with pytest.raises(TargetGuardError, match="Server IP mismatch"):
             verify_test_target(mock_session)
 
     def test_target_guard_rejects_wrong_port(self):
@@ -1835,36 +1835,51 @@ class TestTargetGuard:
             verify_test_target(mock_session)
 
     def test_target_guard_accepts_correct_target(self):
-        """Target guard accepts correct DB/role/server/port with narrowed config."""
+        """Target guard accepts correct DB/role/server_ip/port."""
         from unittest.mock import Mock
         from test_target_guard import verify_test_target
         
-        # Mock session that returns correct target (narrowed: only 'localhost')
+        # P0 FIX: Mock returns realistic data (IP address, not hostname)
         mock_session = Mock()
         mock_result = Mock()
-        mock_result.fetchone.return_value = ("ai_investment_lab_test", "alethra_test_runtime", "localhost", 5432)
+        mock_result.fetchone.return_value = ("ai_investment_lab_test", "alethra_test_runtime", "127.0.0.1", 5432)
         mock_session.execute.return_value = mock_result
         
         # Should succeed and return actual target
         actual = verify_test_target(mock_session)
         assert actual["db_name"] == "ai_investment_lab_test"
         assert actual["role"] == "alethra_test_runtime"
-        assert actual["server"] == "localhost"
+        assert actual["server_ip"] == "127.0.0.1"  # IP address, not hostname
         assert actual["port"] == 5432
     
-    def test_target_guard_rejects_ip_variant_127_0_0_1(self):
-        """Target guard rejects 127.0.0.1 (narrowed config only allows 'localhost')."""
+    def test_target_guard_rejects_ipv6_variant(self):
+        """Target guard rejects ::1 (IPv6 loopback, only 127.0.0.1 approved)."""
         from unittest.mock import Mock
         from test_target_guard import verify_test_target, TargetGuardError
         
-        # Mock session that returns 127.0.0.1 (previously accepted, now rejected)
+        # Mock session that returns ::1 (IPv6 loopback)
         mock_session = Mock()
         mock_result = Mock()
-        mock_result.fetchone.return_value = ("ai_investment_lab_test", "alethra_test_runtime", "127.0.0.1", 5432)
+        mock_result.fetchone.return_value = ("ai_investment_lab_test", "alethra_test_runtime", "::1", 5432)
         mock_session.execute.return_value = mock_result
         
-        # Should raise TargetGuardError (narrowed config)
-        with pytest.raises(TargetGuardError, match="Server mismatch"):
+        # Should raise TargetGuardError
+        with pytest.raises(TargetGuardError, match="Server IP mismatch"):
+            verify_test_target(mock_session)
+    
+    def test_target_guard_rejects_null_port(self):
+        """Target guard rejects NULL port (TCP mode requires explicit port)."""
+        from unittest.mock import Mock
+        from test_target_guard import verify_test_target, TargetGuardError
+        
+        # Mock session that returns NULL port (Unix socket)
+        mock_session = Mock()
+        mock_result = Mock()
+        mock_result.fetchone.return_value = ("ai_investment_lab_test", "alethra_test_runtime", "127.0.0.1", None)
+        mock_session.execute.return_value = mock_result
+        
+        # Should raise TargetGuardError
+        with pytest.raises(TargetGuardError, match="Port is NULL"):
             verify_test_target(mock_session)
 
     def test_target_guard_zero_writes_before_verification(self):
@@ -2328,17 +2343,19 @@ class TestResidualAggregation:
 
 
 class TestBatchAReverseOwnership:
-    """Batch A: Real cross-user fixture testing both directions."""
+    """Batch A: Real cross-user fixture testing both directions abort."""
     
-    def test_cross_user_cleanup_both_directions(self, request, session_factory):
-        """Test cleanup in both directions: user1 (decision owner) and user2 (order owner).
+    def test_cross_user_cleanup_both_directions_abort(self, request, session_factory):
+        """Test cleanup in both directions: BOTH should abort due to cross-user association.
+        
+        P1 FIX: Both decision owner and order owner cleanup should abort.
         
         Setup: user1 owns decision, user2 owns order that references user1's decision.
-        - Cleanup user1: Should succeed (owns the decision, order is in user2's scope)
-        - Cleanup user2: Should fail with ownership rejection (order references user1's decision)
-        - Verify both sides' data unchanged after failed cleanup
+        - Cleanup user1: Should ABORT (decision is referenced by user2's order)
+        - Cleanup user2: Should ABORT (order references user1's decision)
+        - After each abort, verify both sides' data unchanged
         """
-        from test_cleanup_utils import collect_user_resource_ids, unified_cleanup_user_data
+        from test_cleanup_utils import collect_user_resource_ids
         
         user1_id = str(uuid.uuid4())
         user2_id = str(uuid.uuid4())
@@ -2422,40 +2439,70 @@ class TestBatchAReverseOwnership:
         finally:
             setup_session.close()
         
-        # Direction 1: Cleanup user1 (decision owner) - should succeed
-        # User1 owns the decision, but the order is in user2's portfolio
-        # So user1's cleanup should only collect user1's resources (portfolio1, decision)
-        unified_cleanup_user_data(session_factory, user1_id)
+        # Direction 1: Cleanup user1 (decision owner) - should ABORT
+        # User1's decision is referenced by user2's order (cross-user association)
+        collect_session1 = session_factory()
+        try:
+            # This should raise RuntimeError because decision is referenced by order outside user1's scope
+            with pytest.raises(RuntimeError, match="decisions link to portfolios outside user's scope|orders link to decisions outside user's scope"):
+                collect_user_resource_ids(collect_session1, user1_id)
+        finally:
+            collect_session1.close()
         
-        # Verify user1's cleanup succeeded
+        # Verify user1's data is unchanged after abort
         verify_session1 = session_factory()
         try:
-            # User1 should be deleted
+            # User1 should still exist
             user1_exists = verify_session1.execute(
                 text("SELECT COUNT(*) FROM users WHERE id = :id"),
                 {"id": user1_id}
             ).scalar()
-            assert user1_exists == 0, "User1 should be deleted"
+            assert user1_exists == 1, "User1 should still exist after abort"
             
-            # User1's portfolio should be deleted
+            # User1's portfolio should still exist
             portfolio1_exists = verify_session1.execute(
                 text("SELECT COUNT(*) FROM paper_portfolios WHERE id = :id"),
                 {"id": portfolio1_id}
             ).scalar()
-            assert portfolio1_exists == 0, "User1's portfolio should be deleted"
+            assert portfolio1_exists == 1, "User1's portfolio should be unchanged after abort"
             
-            # User1's decision should be deleted
+            # User1's decision should still exist
             decision_exists = verify_session1.execute(
                 text("SELECT COUNT(*) FROM decision_records WHERE id = :id"),
                 {"id": decision_id}
             ).scalar()
-            assert decision_exists == 0, "User1's decision should be deleted"
+            assert decision_exists == 1, "User1's decision should be unchanged after abort"
         finally:
             verify_session1.close()
         
-        # Direction 2: Cleanup user2 (order owner) - should fail with ownership rejection
-        # User2's order references user1's decision (which is now deleted)
-        # But the order still exists, so cleanup should detect the broken reference
+        # Verify user2's data is also unchanged (cross-user association preserved)
+        verify_session1b = session_factory()
+        try:
+            # User2 should still exist
+            user2_exists = verify_session1b.execute(
+                text("SELECT COUNT(*) FROM users WHERE id = :id"),
+                {"id": user2_id}
+            ).scalar()
+            assert user2_exists == 1, "User2 should still exist after user1 abort"
+            
+            # User2's portfolio should still exist
+            portfolio2_exists = verify_session1b.execute(
+                text("SELECT COUNT(*) FROM paper_portfolios WHERE id = :id"),
+                {"id": portfolio2_id}
+            ).scalar()
+            assert portfolio2_exists == 1, "User2's portfolio should be unchanged after user1 abort"
+            
+            # User2's order should still exist
+            order_exists = verify_session1b.execute(
+                text("SELECT COUNT(*) FROM paper_orders WHERE id = :id"),
+                {"id": order_id}
+            ).scalar()
+            assert order_exists == 1, "User2's order should be unchanged after user1 abort"
+        finally:
+            verify_session1b.close()
+        
+        # Direction 2: Cleanup user2 (order owner) - should ABORT
+        # User2's order references user1's decision (cross-user association)
         collect_session2 = session_factory()
         try:
             # This should raise RuntimeError because order references a decision outside user2's scope
@@ -2464,7 +2511,7 @@ class TestBatchAReverseOwnership:
         finally:
             collect_session2.close()
         
-        # Verify user2's data is unchanged after failed cleanup
+        # Verify user2's data is unchanged after abort
         verify_session2 = session_factory()
         try:
             # User2 should still exist
@@ -2472,27 +2519,53 @@ class TestBatchAReverseOwnership:
                 text("SELECT COUNT(*) FROM users WHERE id = :id"),
                 {"id": user2_id}
             ).scalar()
-            assert user2_exists == 1, "User2 should still exist"
+            assert user2_exists == 1, "User2 should still exist after abort"
             
             # User2's portfolio should still exist
             portfolio2_exists = verify_session2.execute(
                 text("SELECT COUNT(*) FROM paper_portfolios WHERE id = :id"),
                 {"id": portfolio2_id}
             ).scalar()
-            assert portfolio2_exists == 1, "User2's portfolio should be unchanged"
+            assert portfolio2_exists == 1, "User2's portfolio should be unchanged after abort"
             
             # User2's order should still exist
             order_exists = verify_session2.execute(
                 text("SELECT COUNT(*) FROM paper_orders WHERE id = :id"),
                 {"id": order_id}
             ).scalar()
-            assert order_exists == 1, "User2's order should be unchanged"
+            assert order_exists == 1, "User2's order should be unchanged after abort"
         finally:
             verify_session2.close()
+        
+        # Verify user1's data is also unchanged (cross-user association preserved)
+        verify_session2b = session_factory()
+        try:
+            # User1 should still exist
+            user1_exists = verify_session2b.execute(
+                text("SELECT COUNT(*) FROM users WHERE id = :id"),
+                {"id": user1_id}
+            ).scalar()
+            assert user1_exists == 1, "User1 should still exist after user2 abort"
+            
+            # User1's portfolio should still exist
+            portfolio1_exists = verify_session2b.execute(
+                text("SELECT COUNT(*) FROM paper_portfolios WHERE id = :id"),
+                {"id": portfolio1_id}
+            ).scalar()
+            assert portfolio1_exists == 1, "User1's portfolio should be unchanged after user2 abort"
+            
+            # User1's decision should still exist
+            decision_exists = verify_session2b.execute(
+                text("SELECT COUNT(*) FROM decision_records WHERE id = :id"),
+                {"id": decision_id}
+            ).scalar()
+            assert decision_exists == 1, "User1's decision should be unchanged after user2 abort"
+        finally:
+            verify_session2b.close()
 
 
 class TestBatchCGuardPrecision:
-    """Batch C: Precise guard with narrowed configuration and verified factory flow."""
+    """Batch C: Precise guard with IP-based configuration and verified factory flow."""
     
     def test_guard_with_recording_fake_verifies_identity_query(self):
         """Recording fake verifies guard executes actual identity query statement."""
@@ -2505,9 +2578,9 @@ class TestBatchCGuardPrecision:
         class RecordingFake:
             def execute(self, query, params=None):
                 executed_queries.append(str(query))
-                # Return approved target (narrowed: only 'localhost')
+                # P0 FIX: Return realistic data (IP address, not hostname)
                 mock_result = Mock()
-                mock_result.fetchone.return_value = ('ai_investment_lab_test', 'alethra_test_runtime', 'localhost', 5432)
+                mock_result.fetchone.return_value = ('ai_investment_lab_test', 'alethra_test_runtime', '127.0.0.1', 5432)
                 return mock_result
         
         fake_conn = RecordingFake()
@@ -2533,7 +2606,7 @@ class TestBatchCGuardPrecision:
         
         # Verify result is correct
         assert result is not None
-        assert result["server"] == "localhost"
+        assert result["server_ip"] == "127.0.0.1"  # IP address
     
     def test_guard_rejection_zero_setup_calls_and_resources_released(self):
         """When guard rejects, setup spy has zero calls and resources are released."""
@@ -2542,10 +2615,10 @@ class TestBatchCGuardPrecision:
         import tempfile
         import os
         
-        # Create fake that returns narrowed-violating address (127.0.0.1 instead of localhost)
+        # P0 FIX: Create fake that returns wrong server IP
         mock_conn = Mock()
         mock_result = Mock()
-        mock_result.fetchone.return_value = ('ai_investment_lab_test', 'alethra_test_runtime', '127.0.0.1', 5432)
+        mock_result.fetchone.return_value = ('ai_investment_lab_test', 'alethra_test_runtime', '192.168.1.100', 5432)
         mock_conn.execute.return_value = mock_result
         
         # Track setup factory calls with spy
@@ -2555,8 +2628,8 @@ class TestBatchCGuardPrecision:
             setup_calls.append("factory_called")
             return mock_conn
         
-        # Call formal entry point (should reject due to narrowed server check)
-        with pytest.raises(TargetGuardError, match="Server mismatch"):
+        # Call formal entry point (should reject due to wrong server IP)
+        with pytest.raises(TargetGuardError, match="Server IP mismatch"):
             verify_test_target(mock_conn)
         
         # Verify guard rejected early
@@ -2575,10 +2648,10 @@ class TestBatchCGuardPrecision:
         from unittest.mock import Mock, patch
         import tempfile
         
-        # Test 1: Guard passes with narrowed configuration (only 'localhost')
+        # Test 1: Guard passes with correct IP
         mock_conn_pass = Mock()
         mock_result_pass = Mock()
-        mock_result_pass.fetchone.return_value = ('ai_investment_lab_test', 'alethra_test_runtime', 'localhost', 5432)
+        mock_result_pass.fetchone.return_value = ('ai_investment_lab_test', 'alethra_test_runtime', '127.0.0.1', 5432)
         mock_conn_pass.execute.return_value = mock_result_pass
         
         factory_called = []
@@ -2588,16 +2661,16 @@ class TestBatchCGuardPrecision:
         
         # Formal entry point: guard check
         result = verify_test_target(mock_conn_pass)
-        assert result["server"] == "localhost", "Guard should pass with narrowed config"
+        assert result["server_ip"] == "127.0.0.1", "Guard should pass with correct IP"
         
         # Factory can be used after guard passes
         session = factory()
         assert len(factory_called) == 1, "Factory should be called after guard passes"
         
-        # Test 2: Guard rejects with narrowed-violating address
+        # Test 2: Guard rejects with wrong server IP
         mock_conn_reject = Mock()
         mock_result_reject = Mock()
-        mock_result_reject.fetchone.return_value = ('ai_investment_lab_test', 'alethra_test_runtime', '127.0.0.1', 5432)
+        mock_result_reject.fetchone.return_value = ('ai_investment_lab_test', 'alethra_test_runtime', '192.168.1.100', 5432)
         mock_conn_reject.execute.return_value = mock_result_reject
         
         factory_called_2 = []
@@ -2606,7 +2679,7 @@ class TestBatchCGuardPrecision:
             return mock_conn_reject
         
         # Formal entry point: guard check (should reject)
-        with pytest.raises(TargetGuardError, match="Server mismatch"):
+        with pytest.raises(TargetGuardError, match="Server IP mismatch"):
             verify_test_target(mock_conn_reject)
         
         # Factory should NOT be called (guard rejected before factory use)

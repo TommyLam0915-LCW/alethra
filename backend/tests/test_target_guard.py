@@ -13,12 +13,13 @@ from sqlalchemy import text
 
 
 # Approved test target configuration
-# NARROWED: Only allow explicit localhost, not IP variants or Unix socket
+# P0 FIX: inet_server_addr() returns IP, not hostname
+# Separate URL hostname from actual server IP verification
 APPROVED_TEST_TARGET = {
     "db_name": "ai_investment_lab_test",
     "role": "alethra_test_runtime",
-    "server": "localhost",  # Only 'localhost', not '127.0.0.1', '::1', or empty
-    "port": 5432,
+    "server_ip": "127.0.0.1",  # inet_server_addr() returns IP, not hostname
+    "port": 5432,  # TCP port, must not be NULL
 }
 
 
@@ -33,8 +34,8 @@ def verify_test_target(session) -> dict:
     Checks:
     - current_database() == approved db_name
     - current_user == approved role
-    - inet_server_addr() == approved server
-    - inet_server_port() == approved port
+    - inet_server_addr() == approved server_ip (IP address, not hostname)
+    - inet_server_port() == approved port (TCP mode, must not be NULL)
     
     Args:
         session: SQLAlchemy session to verify
@@ -57,18 +58,27 @@ def verify_test_target(session) -> dict:
     if result is None:
         raise TargetGuardError("Failed to query database target information")
     
-    actual_db, actual_role, actual_server, actual_port = result
+    actual_db, actual_role, actual_server_ip, actual_port = result
     
     # Convert port to int (may be string from DB)
+    # P0 FIX: TCP mode requires non-NULL port
     try:
-        actual_port = int(actual_port) if actual_port else None
+        actual_port = int(actual_port) if actual_port is not None else None
     except (ValueError, TypeError):
         actual_port = None
+    
+    # P0 FIX: Reject NULL port in TCP mode
+    if actual_port is None:
+        raise TargetGuardError(
+            f"Port is NULL: TCP mode requires explicit port. "
+            f"Expected {APPROVED_TEST_TARGET['port']}, got NULL. "
+            f"This may indicate a Unix socket connection, which is not approved."
+        )
     
     actual = {
         "db_name": actual_db,
         "role": actual_role,
-        "server": actual_server,
+        "server_ip": actual_server_ip,  # IP address, not hostname
         "port": actual_port,
     }
     
@@ -81,13 +91,12 @@ def verify_test_target(session) -> dict:
     if actual_role != APPROVED_TEST_TARGET["role"]:
         errors.append(f"Role mismatch: expected {APPROVED_TEST_TARGET['role']!r}, got {actual_role!r}")
     
-    # Server check: NARROWED to only allow explicit 'localhost'
-    # Reject IP variants (127.0.0.1, ::1) and Unix socket (empty string)
-    if actual_server != APPROVED_TEST_TARGET["server"]:
-        errors.append(f"Server mismatch: expected {APPROVED_TEST_TARGET['server']!r}, got {actual_server!r}")
+    # P0 FIX: Server IP check (inet_server_addr returns IP, not hostname)
+    if actual_server_ip != APPROVED_TEST_TARGET["server_ip"]:
+        errors.append(f"Server IP mismatch: expected {APPROVED_TEST_TARGET['server_ip']!r}, got {actual_server_ip!r}")
     
-    # Port check: skip if None (Unix socket connections don't have a TCP port)
-    if actual_port is not None and actual_port != APPROVED_TEST_TARGET["port"]:
+    # Port check: strict, no skip for None (already checked above)
+    if actual_port != APPROVED_TEST_TARGET["port"]:
         errors.append(f"Port mismatch: expected {APPROVED_TEST_TARGET['port']}, got {actual_port}")
     
     if errors:
