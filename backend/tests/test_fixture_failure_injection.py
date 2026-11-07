@@ -124,13 +124,23 @@ def test_both_body_and_cleanup_fail_both_visible():
     
     # Mock cleanup to fail
     with patch('tests.api_test_fixtures._cleanup_user_data') as mock_cleanup:
-        mock_cleanup.side_effect = RuntimeError("Simulated cleanup failure")
+        cleanup_error = RuntimeError("Simulated cleanup failure")
+        mock_cleanup.side_effect = cleanup_error
         
-        with pytest.raises(ValueError, match="Test body failure"):
+        body_error = ValueError("Test body failure")
+        
+        # Should raise ExceptionGroup containing both errors
+        with pytest.raises(ExceptionGroup) as exc_info:
             with api_test_fixtures(test_email) as (auth, user_id, run_id):
-                raise ValueError("Test body failure")
+                raise body_error
         
-        # Verify cleanup was attempted and failed
+        # Verify both errors are in the ExceptionGroup
+        exceptions = exc_info.value.exceptions
+        assert len(exceptions) == 2, f"Expected 2 exceptions, got {len(exceptions)}"
+        assert body_error in exceptions, "Body error not in ExceptionGroup"
+        assert cleanup_error in exceptions, "Cleanup error not in ExceptionGroup"
+        
+        # Verify cleanup was attempted
         assert mock_cleanup.called
     
     # Manual cleanup
@@ -143,3 +153,47 @@ def test_both_body_and_cleanup_fail_both_visible():
         db.commit()
     finally:
         db.close()
+
+
+def test_db_commit_failure_during_cleanup():
+    """Prove cleanup failure propagates when DB commit fails."""
+    test_email = f"commit_fail_{uuid4().hex[:8]}@example.com"
+    captured_user_id = None
+    
+    # Mock SessionLocal().commit to fail during cleanup
+    original_commit = SessionLocal().commit
+    commit_call_count = [0]
+    
+    def mock_commit(self):
+        commit_call_count[0] += 1
+        # Fail on the second commit (which is the cleanup commit)
+        if commit_call_count[0] >= 2:
+            raise RuntimeError("Simulated DB commit failure during cleanup")
+        return original_commit()
+    
+    with patch('sqlalchemy.orm.Session.commit', new=mock_commit):
+        with pytest.raises(ExceptionGroup) as exc_info:
+            with api_test_fixtures(test_email) as (auth, user_id, run_id):
+                captured_user_id = user_id
+                # Test body succeeds
+        
+        # Verify the exception is about cleanup failure
+        # ExceptionGroup message contains "cleanup(s) failed"
+        assert "cleanup" in str(exc_info.value).lower() and "failed" in str(exc_info.value).lower()
+        
+        # Verify at least one sub-exception is about commit failure
+        exceptions = exc_info.value.exceptions
+        commit_errors = [e for e in exceptions if "commit" in str(e).lower()]
+        assert len(commit_errors) > 0, f"No commit-related errors found in {exceptions}"
+    
+    # User should still exist because cleanup failed
+    if captured_user_id:
+        assert _count_user(captured_user_id) == 1, "User should still exist after cleanup failure"
+        
+        # Manual cleanup
+        db = SessionLocal()
+        try:
+            db.execute(text("DELETE FROM users WHERE id = :id"), {"id": captured_user_id})
+            db.commit()
+        finally:
+            db.close()

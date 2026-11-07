@@ -193,15 +193,25 @@ def api_test_fixtures(email: str):
         
         # Propagate errors
         if cleanup_errors:
-            error_summary = "; ".join(f"{t} {i}: {e}" for t, i, e in cleanup_errors)
             if test_body_exception:
-                # Both test body and cleanup failed - show both
-                import sys
-                print(f"CLEANUP ERRORS (test body also failed): {error_summary}", file=sys.stderr)
-                raise test_body_exception
+                # Both test body and cleanup failed - use ExceptionGroup to preserve both
+                all_exceptions = [test_body_exception] + [e for _, _, e in cleanup_errors]
+                raise ExceptionGroup(
+                    f"Test body failed AND {len(cleanup_errors)} cleanup(s) failed",
+                    all_exceptions
+                )
             else:
                 # Test body succeeded but cleanup failed - fail the test
-                raise RuntimeError(f"Cleanup failed: {error_summary}") from cleanup_errors[0][2]
+                error_summary = "; ".join(f"{t} {i}: {e}" for t, i, e in cleanup_errors)
+                if len(cleanup_errors) == 1:
+                    raise RuntimeError(f"Cleanup failed: {error_summary}") from cleanup_errors[0][2]
+                else:
+                    # Multiple cleanup failures - use ExceptionGroup
+                    all_exceptions = [e for _, _, e in cleanup_errors]
+                    raise ExceptionGroup(
+                        f"{len(cleanup_errors)} cleanups failed: {error_summary}",
+                        all_exceptions
+                    )
         
         # If no cleanup errors but test body failed, propagate test body exception
         if test_body_exception:
