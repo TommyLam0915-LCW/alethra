@@ -1002,43 +1002,43 @@ class PaperTradingEngine:
         except Exception as exc:
             db.rollback()
             # Handle worker terminal state after exception
-            # If cancel was requested, set status='cancelled' (worker exited due to exception after cancel)
-            # If cancel was NOT requested, set status='failed' (normal failure)
-            # This prevents leaving run in permanent 'running' state when worker exits
+            # Atomic UPDATE: decide cancelled/failed in single statement based on cancel_requested
+            # No SELECT-then-UPDATE race window
+            # Restrict to status='running' (worker ownership) to prevent overriding other states
             if acquired_execution:
                 try:
-                    # Check if cancel was requested
-                    cancel_state = db.execute(
-                        text("SELECT cancel_requested FROM paper_trading_runs WHERE id = :id"),
+                    # Atomic conditional UPDATE:
+                    # - If cancel_requested=TRUE → status='cancelled'
+                    # - If cancel_requested=FALSE → status='failed'
+                    # Only applies if status='running' (worker ownership check)
+                    result = db.execute(
+                        text("""
+                        UPDATE paper_trading_runs
+                        SET status = CASE
+                                WHEN cancel_requested = TRUE THEN 'cancelled'
+                                ELSE 'failed'
+                            END,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = :id AND status = 'running'
+                        RETURNING id, status, cancel_requested
+                    """),
                         {"id": run_id},
-                    ).fetchone()
+                    )
 
-                    if cancel_state and cancel_state[0]:
-                        # Cancel was requested, worker exited due to exception
-                        # Set status='cancelled' to avoid permanent 'running' state
-                        db.execute(
-                            text("""
-                            UPDATE paper_trading_runs
-                            SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP
-                            WHERE id = :id AND cancel_requested = TRUE
-                        """),
-                            {"id": run_id},
-                        )
-                        db.commit()
-                        logger.info(f"Run {run_id} marked as 'cancelled' after exception (cancel was requested)")
+                    row = result.fetchone()
+                    if row:
+                        final_status, cancel_flag = row[1], row[2]
+                        if cancel_flag:
+                            logger.info(f"Run {run_id} atomically marked as 'cancelled' after exception (cancel was requested)")
+                        else:
+                            logger.info(f"Run {run_id} atomically marked as 'failed' after exception (no cancel requested)")
                     else:
-                        # Cancel was NOT requested, normal failure
-                        db.execute(
-                            text("""
-                            UPDATE paper_trading_runs
-                            SET status = 'failed', updated_at = CURRENT_TIMESTAMP
-                            WHERE id = :id AND cancel_requested = FALSE
-                        """),
-                            {"id": run_id},
-                        )
-                        db.commit()
+                        # No rows updated: status was not 'running' (already changed by another process)
+                        logger.warning(f"Run {run_id} status not 'running' during exception handling, no terminal state set")
+
+                    db.commit()
                 except Exception:
-                    logger.exception("Failed to update run status after exception")
+                    logger.exception("Failed to atomically update run status after exception")
             logger.exception("Historical replay failed")
             raise
         finally:
