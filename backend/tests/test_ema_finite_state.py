@@ -12,7 +12,7 @@ from decimal import Decimal
 
 from app.services.kraken_websocket import KrakenBar
 from app.services.signal_generator import SignalGenerator, TechnicalIndicators
-from app.services.strategy_research import LabBar
+from app.services.strategy_research import LabBar, _ema_series, prepare_indicators
 
 
 def create_price_sequence(prices: list[float]) -> list[KrakenBar]:
@@ -84,7 +84,7 @@ class TestEMAFiniteState:
                 assert ema50_diff < 100, f"EMA50 jumped {ema50_diff:.2f} at buffer wrap"
 
     def test_ema20_parity_with_research(self):
-        """Live EMA20 should match research ema_series exactly."""
+        """Live EMA20 should match research _ema_series exactly."""
         gen = SignalGenerator("BTC-USD", "range_fade", 1)
         
         # Use 25 bars to get EMA20 after warmup
@@ -96,20 +96,22 @@ class TestEMAFiniteState:
         for bar in bars:
             gen.on_bar(bar)
         
-        # Calculate research EMA20
-        research_ema20_final = TechnicalIndicators.ema(prices, 20)
+        # Calculate research EMA20 using actual research-side function
+        decimal_prices = [Decimal(str(p)) for p in prices]
+        research_ema20_series = _ema_series(decimal_prices, 20)
+        research_ema20_final = research_ema20_series[-1]
         live_ema20 = gen.get_ema20()
         
         # Compare with actual precision, not formatted output
-        max_error = abs(research_ema20_final - live_ema20)
+        max_error = abs(float(research_ema20_final) - live_ema20)
         
         assert max_error < 1e-10, (
-            f"EMA20 mismatch: research={research_ema20_final:.15f}, "
+            f"EMA20 mismatch: research={research_ema20_final}, "
             f"live={live_ema20:.15f}, max_error={max_error:.2e}"
         )
 
     def test_ema50_parity_with_research(self):
-        """Live EMA50 should match research ema_series exactly."""
+        """Live EMA50 should match research _ema_series exactly."""
         gen = SignalGenerator("BTC-USD", "range_fade", 1)
         
         # Use 60 bars to get EMA50 after warmup
@@ -119,20 +121,22 @@ class TestEMAFiniteState:
         for bar in bars:
             gen.on_bar(bar)
         
-        # Calculate research EMA50
-        research_ema50_final = TechnicalIndicators.ema(prices, 50)
+        # Calculate research EMA50 using actual research-side function
+        decimal_prices = [Decimal(str(p)) for p in prices]
+        research_ema50_series = _ema_series(decimal_prices, 50)
+        research_ema50_final = research_ema50_series[-1]
         live_ema50 = gen.get_ema50()
         
         # Compare with actual precision
-        max_error = abs(research_ema50_final - live_ema50)
+        max_error = abs(float(research_ema50_final) - live_ema50)
         
         assert max_error < 1e-10, (
-            f"EMA50 mismatch: research={research_ema50_final:.15f}, "
+            f"EMA50 mismatch: research={research_ema50_final}, "
             f"live={live_ema50:.15f}, max_error={max_error:.2e}"
         )
 
-    def test_200bar完整事件比較(self):
-        """200-bar test: verify EMA values at actual bar indices, not signal sequence."""
+    def test_ema_indicator_parity_all_bars(self):
+        """200-bar test: verify EMA indicator parity at all bars after warmup, using research-side _ema_series."""
         gen = SignalGenerator("BTC-USD", "range_fade", 1)
         
         # Create 200 bars with realistic pattern
@@ -159,22 +163,25 @@ class TestEMAFiniteState:
                     "price": signal.price,
                 })
                 
-                # Compare EMA values after warmup
+                # Compare EMA values after warmup using research-side function
                 if bar_idx >= 50:
                     live_ema20 = gen.get_ema20()
                     live_ema50 = gen.get_ema50()
                     
-                    # Calculate research EMA using same prices up to this bar
-                    research_ema20 = TechnicalIndicators.ema(prices[:bar_idx+1], 20)
-                    research_ema50 = TechnicalIndicators.ema(prices[:bar_idx+1], 50)
+                    # Calculate research EMA using actual research-side _ema_series
+                    decimal_prices = [Decimal(str(p)) for p in prices[:bar_idx+1]]
+                    research_ema20_series = _ema_series(decimal_prices, 20)
+                    research_ema50_series = _ema_series(decimal_prices, 50)
+                    research_ema20 = research_ema20_series[-1]
+                    research_ema50 = research_ema50_series[-1]
                     
                     if research_ema20 is not None and live_ema20 is not None:
-                        error = abs(research_ema20 - live_ema20)
+                        error = abs(float(research_ema20) - live_ema20)
                         max_ema20_error = max(max_ema20_error, error)
                         ema_comparisons.append(("ema20", bar_idx, error))
                     
                     if research_ema50 is not None and live_ema50 is not None:
-                        error = abs(research_ema50 - live_ema50)
+                        error = abs(float(research_ema50) - live_ema50)
                         max_ema50_error = max(max_ema50_error, error)
                         ema_comparisons.append(("ema50", bar_idx, error))
         
