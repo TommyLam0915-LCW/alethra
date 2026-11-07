@@ -109,29 +109,31 @@ def collect_user_resource_ids(db_session, user_id: str) -> dict:
     
     # === OWNERSHIP VERIFICATION (BIDIRECTIONAL) ===
     
-    # 1. Verify portfolio-based orders: orders.portfolio_id must point to user's portfolios
-    if order_ids_by_portfolio:
+    # 1. Verify ALL orders (union of portfolio-based and decision-based):
+    #    - portfolio_id must point to user's portfolios
+    #    - If decision_id is not null, it must point to user's decisions
+    if order_ids:
+        # Check portfolio ownership for all orders
         stray_portfolio_orders = db_session.execute(
             text("SELECT COUNT(*) FROM paper_orders WHERE id = ANY(:order_ids) "
                  "AND portfolio_id NOT IN (SELECT id FROM paper_portfolios WHERE owner_id = :user_id)"),
-            {"order_ids": order_ids_by_portfolio, "user_id": user_id}
+            {"order_ids": order_ids, "user_id": user_id}
         ).scalar()
         if stray_portfolio_orders > 0:
             raise RuntimeError(
-                f"Cleanup aborted: {stray_portfolio_orders} portfolio-based orders link to portfolios outside user's scope"
+                f"Cleanup aborted: {stray_portfolio_orders} orders link to portfolios outside user's scope"
             )
-    
-    # 2. Verify decision-based orders: orders.decision_id must point to user's decisions
-    if order_ids_by_decision:
+        
+        # Check decision ownership for orders with decision_id
         stray_decision_orders = db_session.execute(
             text("SELECT COUNT(*) FROM paper_orders WHERE id = ANY(:order_ids) "
                  "AND decision_id IS NOT NULL "
                  "AND decision_id NOT IN (SELECT id FROM decision_records WHERE paper_portfolio_id = ANY(:portfolio_ids))"),
-            {"order_ids": order_ids_by_decision, "portfolio_ids": portfolio_ids}
+            {"order_ids": order_ids, "portfolio_ids": portfolio_ids}
         ).scalar()
         if stray_decision_orders > 0:
             raise RuntimeError(
-                f"Cleanup aborted: {stray_decision_orders} decision-based orders link to decisions outside user's scope"
+                f"Cleanup aborted: {stray_decision_orders} orders link to decisions outside user's scope"
             )
     
     # 3. Verify decisions: decisions.paper_portfolio_id must point to user's portfolios
