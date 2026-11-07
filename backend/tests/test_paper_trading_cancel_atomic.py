@@ -2243,4 +2243,73 @@ class TestThreadPrecision:
         assert all(r == "completed" for r in results.values()), "All threads must complete successfully"
 
 
-# Updated test count: 31 + 7 = 38 methods across 10 classes
+class TestResidualAggregation:
+    """Verify residual aggregation logic without DB."""
+    
+    def test_aggregation_collects_all_residuals(self):
+        """Mock all table counts, verify aggregation collects all residuals."""
+        from unittest.mock import Mock
+        from test_cleanup_utils import verify_zero_residual_readonly
+        
+        # Mock session that returns non-zero counts for all tables
+        mock_session = Mock()
+        mock_result = Mock()
+        mock_result.scalar.return_value = 1  # All tables have 1 residual
+        mock_session.execute.return_value = mock_result
+        
+        user_id = str(uuid.uuid4())
+        resource_ids = {
+            "portfolio_ids": [str(uuid.uuid4())],
+            "run_ids": [str(uuid.uuid4())],
+            "order_ids": [str(uuid.uuid4())],
+            "fill_ids": [str(uuid.uuid4())],
+            "decision_ids": [str(uuid.uuid4())],
+            "position_ids": [str(uuid.uuid4())],
+            "metric_ids": [str(uuid.uuid4())],
+            "study_run_ids": [str(uuid.uuid4())],
+        }
+        
+        # Should raise with aggregated message containing all residuals
+        with pytest.raises(RuntimeError) as exc_info:
+            verify_zero_residual_readonly(mock_session, user_id, resource_ids)
+        
+        error_msg = str(exc_info.value)
+        # Verify all table types appear in aggregated message
+        assert "user still exists" in error_msg
+        assert "portfolios still exist" in error_msg
+        assert "runs still exist" in error_msg
+        assert "orders still exist" in error_msg
+        assert "fills still exist" in error_msg
+        assert "decisions still exist" in error_msg
+        assert "positions still exist" in error_msg
+        assert "metrics still exist" in error_msg
+        assert "study runs still exist" in error_msg
+    
+    def test_aggregation_all_zeros_no_error(self):
+        """Mock all table counts as zero, verify no error raised."""
+        from unittest.mock import Mock
+        from test_cleanup_utils import verify_zero_residual_readonly
+        
+        # Mock session that returns zero counts for all tables
+        mock_session = Mock()
+        mock_result = Mock()
+        mock_result.scalar.return_value = 0  # All tables have 0 residuals
+        mock_session.execute.return_value = mock_result
+        
+        user_id = str(uuid.uuid4())
+        resource_ids = {
+            "portfolio_ids": [str(uuid.uuid4())],
+            "run_ids": [str(uuid.uuid4())],
+            "order_ids": [str(uuid.uuid4())],
+            "fill_ids": [str(uuid.uuid4())],
+            "decision_ids": [str(uuid.uuid4())],
+            "position_ids": [str(uuid.uuid4())],
+            "metric_ids": [str(uuid.uuid4())],
+            "study_run_ids": [str(uuid.uuid4())],
+        }
+        
+        # Should NOT raise any error
+        verify_zero_residual_readonly(mock_session, user_id, resource_ids)
+
+
+# Updated test count: 31 + 7 + 2 = 40 methods across 11 classes
