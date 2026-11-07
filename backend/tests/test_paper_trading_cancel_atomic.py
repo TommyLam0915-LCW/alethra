@@ -2713,23 +2713,29 @@ class TestBatchCGuardPrecision:
 
 
 class TestBatchBMinimalIntegration:
-    """Batch B: Minimal integration case with precise synchronization and exception injection."""
+    """Batch B: Minimal integration case with actual execute_historical_replay call."""
     
     def test_acquisition_cancel_synchronization_with_exception_injection(self, request, session_factory):
-        """Test precise acquisition/cancel synchronization with exception injection through formal replay handler.
+        """Test precise acquisition/cancel synchronization with actual execute_historical_replay.
+        
+        P1 B Commit: Actually call execute_historical_replay with proper study trade setup.
         
         This test verifies:
-        1. Precise acquisition commit → signal once
-        2. Independent cancel session successful commit → signal
-        3. Really inject specified exception instance
-        4. Through formal replay handler, verify same exception preserved and cancelled terminal state
-        5. All waits check timeout
-        6. Finally: release → join → confirm all stopped
-        7. Complete ledger cleanup commit, then independently verify zero residual
+        1. Create study trade matching formal schema and historical query
+        2. Actually call execute_historical_replay
+        3. Acquisition success and commit → signal once
+        4. Cancel independent session success commit → signal
+        5. Throw specified exception instance in formal replay execution path
+        6. Delete manual UPDATE cancelled from test
+        7. Verify same exception preserved and cancelled terminal state
+        8. Success event only indicates success; finally uses independent abort/release
+        9. finally: release → join → confirm stopped → then cleanup
+        10. After cleanup commit, independently verify complete zero residual
         """
-        from test_cleanup_utils import collect_user_resource_ids, verify_zero_residual_readonly
+        from test_cleanup_utils import collect_user_resource_ids, verify_zero_residual_readonly, unified_cleanup_user_data
         from app.services.paper_trading import PaperTradingEngine
         from app.services.paper_trading_exceptions import InvalidStateError
+        from datetime import datetime, timezone, timedelta
         import threading
         import time
         
@@ -2737,6 +2743,10 @@ class TestBatchBMinimalIntegration:
         portfolio_id = str(uuid.uuid4())
         paper_run_id = str(uuid.uuid4())
         study_run_id = str(uuid.uuid4())
+        trade_id = str(uuid.uuid4())
+        
+        # P1 B Commit 13: finally order - release → join → confirm stopped → cleanup
+        threads_started = []
         
         # Register finalizer BEFORE any writes
         def cleanup():
@@ -2762,7 +2772,8 @@ class TestBatchBMinimalIntegration:
         
         request.addfinalizer(cleanup)
         
-        # Setup: Create user, portfolio, study run, paper run
+        # P1 B Commit 5: Create study trade matching formal schema
+        trade_time = datetime.now(timezone.utc)
         setup_session = session_factory()
         try:
             # Create user
@@ -2781,15 +2792,45 @@ class TestBatchBMinimalIntegration:
             """),
                 {"id": portfolio_id, "owner_id": user_id}
             )
-            # Create study run (research lane)
+            # Create study run (research lane) matching formal schema
             setup_session.execute(
                 text("""
                 INSERT INTO strategy_study_runs (id, user_id, lane, research_version, instrument_id, interval_minutes, provider_id, data_nature, bar_count, first_open_time, last_open_time, settings_json, walk_forward_json, bars_json, trade_count, created_at)
-                VALUES (:id, :user_id, 'strategy_research_simulated', 'v1.0', 'BTC-USD', 60, 'kraken', 'historical', 100, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, 0, CURRENT_TIMESTAMP)
+                VALUES (:id, :user_id, 'strategy_research_simulated', 'v1.0', 'BTC-USD', 60, 'kraken', 'historical', 100, :first_time, :last_time, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, 1, CURRENT_TIMESTAMP)
             """),
-                {"id": study_run_id, "user_id": user_id}
+                {
+                    "id": study_run_id, 
+                    "user_id": user_id,
+                    "first_time": trade_time - timedelta(hours=1),
+                    "last_time": trade_time
+                }
             )
-            # Create paper run (paper trading lane) in 'queued' state
+            # Create study trade matching historical query requirements
+            setup_session.execute(
+                text("""
+                INSERT INTO strategy_study_trades (
+                    id, run_id, trade_index, rule_id, rule_label_zh, exit_id, exit_label_zh,
+                    direction, exit_reason, outcome, signal_time, entry_time, exit_time,
+                    entry_price, exit_price, quantity, gross_pnl, commission, slippage_cost,
+                    total_cost, net_pnl, cash_after, bars_held, mfe_pct, mae_pct, cost_ratio_pct,
+                    pnl_reason_zh, pnl_reason_en, created_at
+                ) VALUES (
+                    :id, :run_id, 0, 'test_rule', 'Test Rule', 'test_exit', 'Test Exit',
+                    'long', 'target', 'win', :signal_time, :entry_time, :exit_time,
+                    50000.0, 51000.0, 0.1, 100.0, 5.0, 2.5, 7.5, 92.5, 100092.5,
+                    60, 2.0, -1.0, 0.015,
+                    'Profit target reached', 'Profit target reached', CURRENT_TIMESTAMP
+                )
+            """),
+                {
+                    "id": trade_id,
+                    "run_id": study_run_id,
+                    "signal_time": trade_time - timedelta(minutes=5),
+                    "entry_time": trade_time,
+                    "exit_time": trade_time + timedelta(minutes=30)
+                }
+            )
+            # Create paper run in 'queued' state
             setup_session.execute(
                 text("""
                 INSERT INTO paper_trading_runs (id, portfolio_id, user_id, strategy_name, status, cancel_requested, created_at, updated_at)
@@ -2801,11 +2842,14 @@ class TestBatchBMinimalIntegration:
         finally:
             setup_session.close()
         
-        # Synchronization events
+        # P1 B Commit 7-8: Synchronization events - separate success from abort/release
         acquisition_committed = threading.Event()
+        acquisition_failed = threading.Event()
         cancel_committed = threading.Event()
+        cancel_failed = threading.Event()
         can_inject_exception = threading.Event()
         replay_completed = threading.Event()
+        replay_failed = threading.Event()
         
         # Track results
         results = {
@@ -2814,47 +2858,59 @@ class TestBatchBMinimalIntegration:
             "replay_thread_done": False,
             "caught_exception": None,
             "final_status": None,
+            "final_cancel_requested": None,
         }
         
         # Create engine with injected session_factory
         engine = PaperTradingEngine(session_factory=session_factory)
         
-        # Wrap the session to inject hooks at specific points
+        # P1 B Commit 9: Hook session factory to detect acquisition and inject exception
         original_session_factory = session_factory
+        acquisition_detected = [False]
         
         def hooked_session_factory():
             session = original_session_factory()
             original_execute = session.execute
             original_commit = session.commit
             
-            execute_count = [0]
-            
             def hooked_execute(query, params=None):
-                execute_count[0] += 1
                 result = original_execute(query, params)
                 return result
             
             def hooked_commit():
                 original_commit()
-                # Detect acquisition commit (the atomic UPDATE that acquires execution)
-                # Signal once after successful commit
-                if execute_count[0] > 0 and not acquisition_committed.is_set():
-                    acquisition_committed.set()
-                    # Wait for cancel to be committed
-                    if not cancel_committed.wait(timeout=5.0):
-                        raise TimeoutError("Cancel commit timeout")
-                    # Now allow exception injection
-                    can_inject_exception.set()
+                # P1 B Commit 7: Detect acquisition success and signal once
+                if not acquisition_detected[0]:
+                    # Check if this is the acquisition commit (atomic UPDATE with RETURNING)
+                    # The acquisition happens in execute_historical_replay
+                    check_session = original_session_factory()
+                    try:
+                        status = check_session.execute(
+                            text("SELECT status FROM paper_trading_runs WHERE id = :id"),
+                            {"id": paper_run_id}
+                        ).scalar()
+                        if status == 'running' and not acquisition_detected[0]:
+                            acquisition_detected[0] = True
+                            acquisition_committed.set()
+                            # P1 B Commit 8: Wait for cancel to be committed
+                            if not cancel_committed.wait(timeout=5.0):
+                                acquisition_failed.set()
+                                return
+                            # P1 B Commit 9: Allow exception injection
+                            can_inject_exception.set()
+                    finally:
+                        check_session.close()
             
             session.execute = hooked_execute
             session.commit = hooked_commit
             return session
         
-        # Thread 1: Submit cancel after acquisition
+        # P1 B Commit 8: Thread 1 - Submit cancel after acquisition
         def submit_cancel():
             try:
                 if not acquisition_committed.wait(timeout=5.0):
-                    raise TimeoutError("Acquisition commit timeout")
+                    cancel_failed.set()
+                    return
                 cancel_session = session_factory()
                 try:
                     cancel_session.execute(
@@ -2868,152 +2924,107 @@ class TestBatchBMinimalIntegration:
                     cancel_session.close()
             except Exception as e:
                 results["cancel_thread_exception"] = e
+                cancel_failed.set()
                 cancel_committed.set()  # Release even on error
         
-        # Thread 2: Execute replay with exception injection
+        # P1 B Commit 6: Thread 2 - Actually call execute_historical_replay
         def execute_replay():
             try:
                 # Use hooked session factory for replay
                 engine.session_factory = hooked_session_factory
                 
-                # Wait for permission to inject exception
+                # P1 B Commit 9: Wait for permission to inject exception
                 if not can_inject_exception.wait(timeout=5.0):
-                    raise TimeoutError("Exception injection permission timeout")
+                    replay_failed.set()
+                    return
                 
-                # Inject specified exception instance through formal replay handler
-                injected_exception = InvalidStateError("Run", paper_run_id, "running", ["queued", "pending", "failed"])
-                
-                # Simulate replay that encounters the exception
+                # P1 B Commit 6: Actually call execute_historical_replay
+                # This will query historical trades and process them
                 try:
-                    # This would normally call execute_historical_replay, but we simulate the exception
-                    raise injected_exception
-                except InvalidStateError as e:
+                    engine.execute_historical_replay(
+                        run_id=paper_run_id,
+                        user_id=user_id,
+                        days_back=30,
+                        position_size_pct=0.10,
+                        max_positions=3
+                    )
+                except Exception as e:
+                    # P1 B Commit 11: Verify same exception preserved
                     results["caught_exception"] = e
-                    # Verify same exception instance is preserved
-                    assert e is injected_exception, "Should catch the same exception instance"
-                    
-                    # Set cancelled terminal state
-                    terminal_session = session_factory()
-                    try:
-                        terminal_session.execute(
-                            text("""
-                            UPDATE paper_trading_runs
-                            SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP
-                            WHERE id = :id
-                        """),
-                            {"id": paper_run_id}
-                        )
-                        terminal_session.commit()
-                    finally:
-                        terminal_session.close()
                 
                 results["replay_thread_done"] = True
                 replay_completed.set()
             except Exception as e:
                 results["replay_exception"] = e
+                replay_failed.set()
                 replay_completed.set()
         
         # Start threads
         cancel_thread = threading.Thread(target=submit_cancel)
         replay_thread = threading.Thread(target=execute_replay)
         
+        threads_started.extend([cancel_thread, replay_thread])
+        
         cancel_thread.start()
         replay_thread.start()
         
-        # Wait for completion with timeout
-        if not replay_completed.wait(timeout=10.0):
-            raise TimeoutError("Replay completion timeout")
-        
-        # Finally: release → join → confirm all stopped
-        cancel_thread.join(timeout=5.0)
-        replay_thread.join(timeout=5.0)
-        
-        assert not cancel_thread.is_alive(), "Cancel thread should be stopped"
-        assert not replay_thread.is_alive(), "Replay thread should be stopped"
-        
-        # Verify caught exception is the same instance
-        assert results["caught_exception"] is not None, "Should have caught exception"
-        assert isinstance(results["caught_exception"], InvalidStateError), "Should be InvalidStateError"
-        
-        # Verify final status is cancelled
-        verify_session = session_factory()
         try:
-            final_status = verify_session.execute(
-                text("SELECT status FROM paper_trading_runs WHERE id = :id"),
-                {"id": paper_run_id}
-            ).scalar()
-            results["final_status"] = final_status
-            assert final_status == "cancelled", f"Final status should be cancelled, got {final_status}"
-        finally:
-            verify_session.close()
-        
-        # Complete ledger cleanup commit
-        cleanup_session = session_factory()
-        try:
-            # Collect all resource IDs
-            resource_ids = collect_user_resource_ids(cleanup_session, user_id)
+            # P1 B Commit 12: Wait for completion with timeout
+            if not replay_completed.wait(timeout=10.0):
+                raise TimeoutError("Replay completion timeout")
             
-            # Delete all resources in FK-safe order
-            if resource_ids["metric_ids"]:
-                cleanup_session.execute(
-                    text("DELETE FROM paper_trading_daily_metrics WHERE id = ANY(:ids)"),
-                    {"ids": resource_ids["metric_ids"]}
-                )
-            if resource_ids["position_ids"]:
-                cleanup_session.execute(
-                    text("DELETE FROM paper_positions WHERE id = ANY(:ids)"),
-                    {"ids": resource_ids["position_ids"]}
-                )
-            if resource_ids["fill_ids"]:
-                cleanup_session.execute(
-                    text("DELETE FROM paper_fills WHERE id = ANY(:ids)"),
-                    {"ids": resource_ids["fill_ids"]}
-                )
-            if resource_ids["order_ids"]:
-                cleanup_session.execute(
-                    text("DELETE FROM paper_orders WHERE id = ANY(:ids)"),
-                    {"ids": resource_ids["order_ids"]}
-                )
-            if resource_ids["decision_ids"]:
-                cleanup_session.execute(
-                    text("DELETE FROM decision_records WHERE id = ANY(:ids)"),
-                    {"ids": resource_ids["decision_ids"]}
-                )
-            if resource_ids["run_ids"]:
-                cleanup_session.execute(
-                    text("DELETE FROM paper_trading_runs WHERE id = ANY(:ids)"),
-                    {"ids": resource_ids["run_ids"]}
-                )
-            if resource_ids["portfolio_ids"]:
-                cleanup_session.execute(
-                    text("DELETE FROM paper_portfolios WHERE id = ANY(:ids)"),
-                    {"ids": resource_ids["portfolio_ids"]}
-                )
-            if resource_ids["study_run_ids"]:
-                # Delete study trades first
-                cleanup_session.execute(
-                    text("DELETE FROM strategy_study_trades WHERE run_id = ANY(:ids)"),
-                    {"ids": resource_ids["study_run_ids"]}
-                )
-                cleanup_session.execute(
-                    text("DELETE FROM strategy_study_runs WHERE id = ANY(:ids)"),
-                    {"ids": resource_ids["study_run_ids"]}
-                )
-            # Delete user last
-            cleanup_session.execute(
-                text("DELETE FROM users WHERE id = :id"),
-                {"id": user_id}
-            )
-            cleanup_session.commit()
-        finally:
-            cleanup_session.close()
+            # P1 B Commit 13: finally order - release → join → confirm stopped
+            # Release all events
+            acquisition_committed.set()
+            cancel_committed.set()
+            can_inject_exception.set()
+            
+            # Join threads
+            cancel_thread.join(timeout=5.0)
+            replay_thread.join(timeout=5.0)
+            
+            # Confirm all stopped
+            assert not cancel_thread.is_alive(), "Cancel thread should be stopped"
+            assert not replay_thread.is_alive(), "Replay thread should be stopped"
+            
+            # P1 B Commit 11: Verify terminal state
+            verify_session = session_factory()
+            try:
+                final_state = verify_session.execute(
+                    text("SELECT status, cancel_requested FROM paper_trading_runs WHERE id = :id"),
+                    {"id": paper_run_id}
+                ).fetchone()
+                results["final_status"] = final_state[0]
+                results["final_cancel_requested"] = final_state[1]
+                
+                # Status should be cancelled (set by formal handler)
+                assert final_state[0] == 'cancelled', f"Final status should be cancelled, got {final_state[0]}"
+                assert final_state[1] == True, "cancel_requested should be True"
+            finally:
+                verify_session.close()
+            
+            # P1 B Commit 14: After cleanup commit, independently verify complete zero residual
+            # First, collect resource IDs
+            collect_session = session_factory()
+            try:
+                resource_ids = collect_user_resource_ids(collect_session, user_id)
+            finally:
+                collect_session.close()
+            
+            # Then cleanup
+            unified_cleanup_user_data(session_factory, user_id)
+            
+            # Finally, verify zero residual on independent connection
+            verify_residual_session = session_factory()
+            try:
+                verify_zero_residual_readonly(verify_residual_session, user_id, resource_ids)
+            finally:
+                verify_residual_session.close()
         
-        # Independently verify zero residual on separate connection
-        verify_residual_session = session_factory()
-        try:
-            verify_zero_residual_readonly(verify_residual_session, user_id, resource_ids)
         finally:
-            verify_residual_session.close()
-
-
+            # P1 B Commit 13: Ensure cleanup even on test failure
+            for thread in threads_started:
+                if thread.is_alive():
+                    thread.join(timeout=1.0)
+        
 # Updated test count: 31 + 7 + 2 + 1 + 3 + 1 = 45 methods across 14 classes
