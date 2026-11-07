@@ -2441,10 +2441,12 @@ class TestBatchAReverseOwnership:
         
         # Direction 1: Cleanup user1 (decision owner) - should ABORT
         # User1's decision is referenced by user2's order (cross-user association)
+        # User2's order is in user2's portfolio, which is outside user1's scope
         collect_session1 = session_factory()
         try:
-            # This should raise RuntimeError because decision is referenced by order outside user1's scope
-            with pytest.raises(RuntimeError, match="decisions link to portfolios outside user's scope|orders link to decisions outside user's scope"):
+            # This should raise RuntimeError because user2's order (in user2's portfolio)
+            # references user1's decision, and user2's portfolio is outside user1's scope
+            with pytest.raises(RuntimeError, match="orders link to portfolios outside user's scope"):
                 collect_user_resource_ids(collect_session1, user1_id)
         finally:
             collect_session1.close()
@@ -2608,45 +2610,94 @@ class TestBatchCGuardPrecision:
         assert result is not None
         assert result["server_ip"] == "127.0.0.1"  # IP address
     
-    def test_guard_rejection_zero_setup_calls_and_resources_released(self):
-        """When guard rejects, setup spy has zero calls and resources are released."""
-        from test_target_guard import verify_test_target, TargetGuardError, create_verified_session_factory
+    def test_verified_factory_rejection_asserts_teardown(self):
+        """P1 C7-8: No-DB test calls formal entry point with fake engine, asserts teardown on rejection."""
+        from test_target_guard import create_verified_session_factory, TargetGuardError
         from unittest.mock import Mock, patch
-        import tempfile
-        import os
         
-        # P0 FIX: Create fake that returns wrong server IP
-        mock_conn = Mock()
-        mock_result = Mock()
-        mock_result.fetchone.return_value = ('ai_investment_lab_test', 'alethra_test_runtime', '192.168.1.100', 5432)
-        mock_conn.execute.return_value = mock_result
+        # P1 C7: Inject fake engine/sessionmaker
+        setup_callback_calls = []
         
-        # Track setup factory calls with spy
-        setup_calls = []
+        def setup_callback():
+            setup_callback_calls.append("called")
+            # Return fake session that will fail guard
+            mock_session = Mock()
+            mock_result = Mock()
+            mock_result.fetchone.return_value = ('ai_investment_lab_test', 'alethra_test_runtime', '192.168.1.100', 5432)
+            mock_session.execute.return_value = mock_result
+            mock_session.is_closed = False
+            return mock_session
         
-        def tracked_factory():
-            setup_calls.append("factory_called")
-            return mock_conn
+        # Create fake engine
+        fake_engine = Mock()
+        fake_engine.dispose = Mock()
         
-        # Call formal entry point (should reject due to wrong server IP)
-        with pytest.raises(TargetGuardError, match="Server IP mismatch"):
-            verify_test_target(mock_conn)
+        # P1 C7: Call formal entry point with patched create_engine and sessionmaker
+        with patch('sqlalchemy.create_engine', return_value=fake_engine):
+            with patch('sqlalchemy.orm.sessionmaker', side_effect=lambda **kwargs: setup_callback):
+                # P1 C8: On rejection, assert setup callback zero calls (after initial verify)
+                with pytest.raises(TargetGuardError, match="Server IP mismatch"):
+                    create_verified_session_factory("postgresql://fake")
         
-        # Verify guard rejected early
-        assert mock_conn.execute.call_count == 1, "Guard should query once then reject"
+        # P1 C8: Assert setup callback was called once (for initial verify)
+        assert len(setup_callback_calls) == 1, "Setup callback should be called once for initial verify"
         
-        # Verify setup factory was NOT called (guard rejected before factory use)
-        assert len(setup_calls) == 0, "Setup factory should not be called when guard rejects"
+        # P1 C8: Assert engine.dispose was called on rejection
+        fake_engine.dispose.assert_called_once(), "Engine should be disposed on rejection"
+    
+    def test_verified_factory_success_path_with_teardown(self):
+        """P1 C9: Success path verifies can create session, with explicit teardown/dispose."""
+        from test_target_guard import create_verified_session_factory
+        from unittest.mock import Mock, patch
         
-        # Verify resources are released (mock connection is closed)
-        # In real scenario, create_verified_session_factory would close the session
-        # Here we verify the pattern: guard rejects → no factory → no writable session returned
+        # Track session creation and closure
+        sessions_created = []
+        sessions_closed = []
+        
+        def setup_callback():
+            mock_session = Mock()
+            mock_result = Mock()
+            mock_result.fetchone.return_value = ('ai_investment_lab_test', 'alethra_test_runtime', '127.0.0.1', 5432)
+            mock_session.execute.return_value = mock_result
+            mock_session.is_closed = False
+            
+            def close_session():
+                mock_session.is_closed = True
+                sessions_closed.append(mock_session)
+            
+            mock_session.close = close_session
+            sessions_created.append(mock_session)
+            return mock_session
+        
+        # Create fake engine
+        fake_engine = Mock()
+        dispose_called = []
+        def fake_dispose():
+            dispose_called.append(True)
+        fake_engine.dispose = fake_dispose
+        
+        # P1 C9: Call formal entry point
+        with patch('sqlalchemy.create_engine', return_value=fake_engine):
+            with patch('sqlalchemy.orm.sessionmaker', side_effect=lambda **kwargs: setup_callback):
+                guarded_factory, engine = create_verified_session_factory("postgresql://fake")
+        
+        # P1 C9: Verify can create session
+        session = guarded_factory()
+        assert session is not None, "Should be able to create session"
+        assert len(sessions_created) == 2, "Should have created 2 sessions (verify + factory)"
+        
+        # P1 C9: Explicit teardown
+        session.close()
+        # Both verify session and factory session should be closed
+        assert len(sessions_closed) >= 1, "At least one session should be closed"
+        
+        engine.dispose()
+        assert len(dispose_called) == 1, "Engine should be disposed"
     
     def test_verified_factory_flow_shared_between_fixtures(self):
         """Both test fixtures use the same formal entry point with verified factory flow."""
-        from test_target_guard import verify_test_target, TargetGuardError, create_verified_session_factory
-        from unittest.mock import Mock, patch
-        import tempfile
+        from test_target_guard import verify_test_target, TargetGuardError
+        from unittest.mock import Mock
         
         # Test 1: Guard passes with correct IP
         mock_conn_pass = Mock()
@@ -2654,18 +2705,9 @@ class TestBatchCGuardPrecision:
         mock_result_pass.fetchone.return_value = ('ai_investment_lab_test', 'alethra_test_runtime', '127.0.0.1', 5432)
         mock_conn_pass.execute.return_value = mock_result_pass
         
-        factory_called = []
-        def factory():
-            factory_called.append("called")
-            return mock_conn_pass
-        
         # Formal entry point: guard check
         result = verify_test_target(mock_conn_pass)
         assert result["server_ip"] == "127.0.0.1", "Guard should pass with correct IP"
-        
-        # Factory can be used after guard passes
-        session = factory()
-        assert len(factory_called) == 1, "Factory should be called after guard passes"
         
         # Test 2: Guard rejects with wrong server IP
         mock_conn_reject = Mock()
@@ -2673,20 +2715,9 @@ class TestBatchCGuardPrecision:
         mock_result_reject.fetchone.return_value = ('ai_investment_lab_test', 'alethra_test_runtime', '192.168.1.100', 5432)
         mock_conn_reject.execute.return_value = mock_result_reject
         
-        factory_called_2 = []
-        def factory_2():
-            factory_called_2.append("called")
-            return mock_conn_reject
-        
         # Formal entry point: guard check (should reject)
         with pytest.raises(TargetGuardError, match="Server IP mismatch"):
             verify_test_target(mock_conn_reject)
-        
-        # Factory should NOT be called (guard rejected before factory use)
-        assert len(factory_called_2) == 0, "Factory should not be called when guard rejects"
-        
-        # Verify no writable factory is returned
-        # (In real scenario, create_verified_session_factory would raise before returning)
 
 
 class TestBatchBMinimalIntegration:

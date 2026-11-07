@@ -109,6 +109,9 @@ def verify_test_target(session) -> dict:
 def create_verified_session_factory(db_url: str):
     """Create session factory with target guard verification.
     
+    P1 C5: Extracted shared verified-factory creation flow.
+    Both fixtures and tests use this same entry point.
+    
     The first session created will verify the target. If verification fails,
     no sessions are returned and RuntimeError is raised.
     
@@ -116,7 +119,7 @@ def create_verified_session_factory(db_url: str):
         db_url: Database URL
         
     Returns:
-        Callable that returns verified sessions
+        Tuple of (guarded_factory, engine) for explicit teardown
         
     Raises:
         TargetGuardError: If initial verification fails
@@ -131,17 +134,23 @@ def create_verified_session_factory(db_url: str):
     verify_session = factory()
     try:
         actual_target = verify_test_target(verify_session)
-    finally:
+    except TargetGuardError:
+        # P1 C8: On rejection, verify session is closed and engine is disposed
         verify_session.close()
+        engine.dispose()
+        raise
+    finally:
+        # Ensure session is closed after verification
+        if not verify_session.is_closed:
+            verify_session.close()
     
-    # Return factory that verifies on each session creation
+    # P1 C9: Return factory that can create sessions
     def guarded_factory():
         session = factory()
-        # Optional: verify on each session (for extra safety)
-        # For performance, we only verify on creation
         return session
     
-    return guarded_factory
+    # P1 C9: Return both factory and engine for explicit teardown
+    return guarded_factory, engine
 
 
 def get_test_db_url() -> str:
