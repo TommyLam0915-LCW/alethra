@@ -157,10 +157,11 @@ def get_status(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"reason": "not_found", "message": str(exc)},
         )
-    except AuthorizationError as exc:
+    except AuthorizationError:
+        # Return 404 to avoid information leakage about resource existence/ownership
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={"reason": "authorization_failed", "message": str(exc)},
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"reason": "not_found", "message": "Run not found"},
         )
     except InvalidStateError as exc:
         raise HTTPException(
@@ -203,10 +204,11 @@ def get_daily_report(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"reason": "not_found", "message": str(exc)},
         )
-    except AuthorizationError as exc:
+    except AuthorizationError:
+        # Return 404 to avoid information leakage about resource existence/ownership
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={"reason": "authorization_failed", "message": str(exc)},
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"reason": "not_found", "message": "Run not found"},
         )
     except InvalidStateError as exc:
         raise HTTPException(
@@ -252,10 +254,11 @@ def execute_replay(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"reason": "not_found", "message": str(exc)},
         )
-    except AuthorizationError as exc:
+    except AuthorizationError:
+        # Return 404 to avoid information leakage about resource existence/ownership
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={"reason": "authorization_failed", "message": str(exc)},
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"reason": "not_found", "message": "Run not found"},
         )
     except InvalidStateError as exc:
         raise HTTPException(
@@ -293,10 +296,11 @@ def stop_run(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"reason": "not_found", "message": str(exc)},
         )
-    except AuthorizationError as exc:
+    except AuthorizationError:
+        # Return 404 to avoid information leakage about resource existence/ownership
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={"reason": "authorization_failed", "message": str(exc)},
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"reason": "not_found", "message": "Run not found"},
         )
     except InvalidStateError as exc:
         raise HTTPException(
