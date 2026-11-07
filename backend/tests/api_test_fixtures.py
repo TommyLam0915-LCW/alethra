@@ -2,6 +2,10 @@
 
 Ensures that even if fixture creation fails partway through,
 all successfully created resources are cleaned up in reverse order.
+
+Cleanup errors propagate:
+- Test body succeeds, cleanup fails → test FAILS
+- Test body fails, cleanup fails → both errors visible
 """
 from contextlib import contextmanager
 from sqlalchemy import text
@@ -34,13 +38,24 @@ def api_test_fixtures(email: str):
     from datetime import datetime, timezone, timedelta
     from uuid import uuid4
     
-    created_resources = []  # Track what was created for cleanup
+    # Pre-generate all IDs before any database operations
+    user_id = str(uuid4())
+    study_run_id = str(uuid4())
+    
+    # Register cleanup responsibilities BEFORE any writes
+    # This ensures cleanup runs even if commit/refresh/token fails
+    created_resources = []
+    test_body_exception = None
     
     try:
         # Step 1: Create user
+        # Register BEFORE commit so cleanup runs even if commit fails
+        created_resources.append(("user", user_id))
+        
         db = TestSession()
         try:
             user = User(
+                id=user_id,  # Use pre-generated ID
                 email=email,
                 password_hash=get_password_hash("testpass123"),
                 display_name=email.split("@")[0],
@@ -50,17 +65,16 @@ def api_test_fixtures(email: str):
             db.add(user)
             db.commit()
             db.refresh(user)
-            user_id = str(user.id)
             token = create_access_token(data={"sub": user_id})
             auth_headers = {"Authorization": f"Bearer {token}"}
-            created_resources.append(("user", user_id))
         finally:
             db.close()
         
         # Step 2: Create strategy study run
+        created_resources.append(("run", study_run_id))
+        
         db = SessionLocal()
         try:
-            study_run_id = str(uuid4())
             now = datetime.now(timezone.utc)
             
             db.execute(
@@ -78,11 +92,12 @@ def api_test_fixtures(email: str):
                 {"id": study_run_id, "user_id": user_id, "now": now},
             )
             db.commit()
-            created_resources.append(("run", study_run_id))
         finally:
             db.close()
         
         # Step 3: Create strategy study trades
+        created_resources.append(("trades", study_run_id))
+        
         db = SessionLocal()
         try:
             now = datetime.now(timezone.utc)
@@ -136,13 +151,16 @@ def api_test_fixtures(email: str):
             )
             
             db.commit()
-            created_resources.append(("trades", study_run_id))
         finally:
             db.close()
         
         # Yield control to test
         yield auth_headers, user_id, study_run_id
         
+    except Exception as e:
+        # Capture test body exception to propagate later
+        test_body_exception = e
+    
     finally:
         # Cleanup in reverse order
         cleanup_errors = []
@@ -169,17 +187,25 @@ def api_test_fixtures(email: str):
                     _cleanup_user_data(resource_id)
             except Exception as e:
                 # Collect cleanup errors but continue cleanup
-                cleanup_errors.append((resource_type, resource_id, str(e)))
+                cleanup_errors.append((resource_type, resource_id, e))
                 import sys
                 print(f"ERROR: Cleanup failed for {resource_type} {resource_id}: {e}", file=sys.stderr)
         
-        # If cleanup had errors, raise them to fail the test
+        # Propagate errors
         if cleanup_errors:
-            import sys
             error_summary = "; ".join(f"{t} {i}: {e}" for t, i, e in cleanup_errors)
-            print(f"CLEANUP ERRORS: {error_summary}", file=sys.stderr)
-            # Don't raise — we're in finally block and test may have already failed
-            # The errors are logged for diagnosis
+            if test_body_exception:
+                # Both test body and cleanup failed - show both
+                import sys
+                print(f"CLEANUP ERRORS (test body also failed): {error_summary}", file=sys.stderr)
+                raise test_body_exception
+            else:
+                # Test body succeeded but cleanup failed - fail the test
+                raise RuntimeError(f"Cleanup failed: {error_summary}") from cleanup_errors[0][2]
+        
+        # If no cleanup errors but test body failed, propagate test body exception
+        if test_body_exception:
+            raise test_body_exception
 
 
 def _cleanup_user_data(user_id: str):
