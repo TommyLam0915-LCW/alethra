@@ -265,12 +265,14 @@ class PaperTradingEngine:
                     )
 
             # Atomic conditional UPDATE: only acquire execution rights if status allows
-            # PostgreSQL re-checks WHERE condition on concurrent updates, so this prevents race
+            # AND cancel has not been requested. PostgreSQL re-checks WHERE condition on
+            # concurrent updates, so this prevents race between cancel and execution acquisition.
             result = db.execute(
                 text("""
                 UPDATE paper_trading_runs
                 SET status = 'running', updated_at = CURRENT_TIMESTAMP
                 WHERE id = :id AND status IN ('queued', 'pending', 'failed')
+                  AND cancel_requested = FALSE
                 RETURNING id
             """),
                 {"id": run_id},
@@ -921,6 +923,9 @@ class PaperTradingEngine:
                 else 0
             )
 
+            # Final completion: only set status='completed' if cancel was NOT requested.
+            # If cancel was requested, worker already set status='cancelled' in the cancel check block.
+            # This prevents completion handler from overriding cancel status.
             db.execute(
                 text("""
                 UPDATE paper_trading_runs
@@ -931,7 +936,7 @@ class PaperTradingEngine:
                     total_trades = :trades,
                     win_rate = :wr,
                     updated_at = CURRENT_TIMESTAMP
-                WHERE id = :id
+                WHERE id = :id AND cancel_requested = FALSE
             """),
                 {
                     "final": float(total_equity),
@@ -973,15 +978,16 @@ class PaperTradingEngine:
 
         except Exception as exc:
             db.rollback()
-            # Only mark run as 'failed' if we acquired execution rights
-            # Rejection (before acquiring) should have no side effects
+            # Only mark run as 'failed' if we acquired execution rights AND cancel was NOT requested.
+            # If cancel was requested, worker already set status='cancelled' in the cancel check block.
+            # This prevents failure handler from overriding cancel status.
             if acquired_execution:
                 try:
                     db.execute(
                         text("""
                         UPDATE paper_trading_runs
                         SET status = 'failed', updated_at = CURRENT_TIMESTAMP
-                        WHERE id = :id
+                        WHERE id = :id AND cancel_requested = FALSE
                     """),
                         {"id": run_id},
                     )
@@ -1040,6 +1046,58 @@ class PaperTradingEngine:
             if run.status in ("completed", "cancelled"):
                 raise InvalidStateError("Run", run_id, run.status, ["queued", "pending", "running", "failed"])
 
+            # Convergence policy: queued/pending/failed have no worker, so cancel completes immediately.
+            # Only 'running' state uses two-phase contract (worker detects flag and completes cancel).
+            if run.status in ("queued", "pending", "failed"):
+                # No worker running, complete cancel immediately
+                result = db.execute(
+                    text("""
+                    UPDATE paper_trading_runs
+                    SET status = 'cancelled',
+                        cancel_requested = TRUE,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = :id AND status IN ('queued', 'pending', 'failed')
+                      AND cancel_requested = FALSE
+                    RETURNING id
+                """),
+                    {"id": run_id},
+                )
+
+                cancelled_row = result.fetchone()
+
+                if not cancelled_row:
+                    # Another cancel succeeded or status changed
+                    current_run = db.execute(
+                        text("SELECT status, cancel_requested FROM paper_trading_runs WHERE id = :id"),
+                        {"id": run_id},
+                    ).fetchone()
+
+                    if current_run and current_run.status == "cancelled":
+                        # Idempotent: already cancelled
+                        db.commit()
+                        return {
+                            "run_id": run_id,
+                            "status": "cancelled",
+                            "cancel_requested": True,
+                            "message": "Run already cancelled",
+                        }
+                    else:
+                        # Status changed to running or completed by another operation
+                        db.commit()
+                        raise InvalidStateError(
+                            "Run", run_id, current_run.status if current_run else "unknown",
+                            ["queued", "pending", "failed"]
+                        )
+
+                db.commit()
+                return {
+                    "run_id": run_id,
+                    "status": "cancelled",
+                    "cancel_requested": True,
+                    "message": "Cancel completed immediately (no worker running)",
+                }
+
+            # Running state: two-phase contract
             # Atomic conditional UPDATE: set cancel_requested flag
             # Do NOT change status yet - worker will set status='cancelled' after stopping
             # PostgreSQL re-checks WHERE condition on concurrent updates, preventing race
@@ -1048,7 +1106,7 @@ class PaperTradingEngine:
                 UPDATE paper_trading_runs
                 SET cancel_requested = TRUE,
                     updated_at = CURRENT_TIMESTAMP
-                WHERE id = :id AND status IN ('queued', 'pending', 'running', 'failed')
+                WHERE id = :id AND status = 'running'
                   AND cancel_requested = FALSE
                 RETURNING id
             """),
