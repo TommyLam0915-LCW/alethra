@@ -67,6 +67,23 @@ _IS_SQLITE = _TEST_DB_PATH.startswith("sqlite")
 
 if not _IS_SQLITE:
     _validate_pg_test_target(_TEST_DB_PATH)
+    
+    # Integrate comprehensive safety gate for PostgreSQL connections
+    # This enforces TEST_MODE, role permissions, and actual database identity
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from test_safety_gate import verify_test_database, TestDatabaseGateError
+    
+    try:
+        _conn_info = verify_test_database(_TEST_DB_PATH)
+        print(f"✓ Safety gate passed: database={_conn_info['database']}, user={_conn_info['user']}")
+    except TestDatabaseGateError as e:
+        raise RuntimeError(
+            f"SAFETY: Test database safety gate rejected connection.\n"
+            f"Error: {e}\n"
+            f"DSN: {_safe_dsn(_TEST_DB_PATH)}\n"
+            f"Ensure TEST_MODE=true and DATABASE_URL targets an allowed test database."
+        ) from e
 
 
 @compiles(JSONB, "sqlite")
@@ -156,7 +173,11 @@ def setup_db():
     from app.database import engine as _orig_engine
     import app.database as db_mod
     db_mod.engine = TEST_ENGINE
-    Base.metadata.create_all(bind=TEST_ENGINE, checkfirst=True)
+    # PostgreSQL schema is created by migrations, not create_all.
+    # Limited-permission runtime role cannot execute DDL (CREATE TYPE, etc.).
+    # Only run create_all for SQLite where migrations don't apply.
+    if _IS_SQLITE:
+        Base.metadata.create_all(bind=TEST_ENGINE, checkfirst=True)
     yield
     # Return every connection before destructive DDL. Force-close all still-live
     # TestSession instances (rolling back any open transaction) so a session
@@ -186,21 +207,10 @@ def setup_db():
                 conn.exec_driver_sql(f'DROP TABLE IF EXISTS "{table.name}"')
             conn.commit()
     else:
-        with TEST_ENGINE.connect() as conn:
-            for table in reversed(Base.metadata.sorted_tables):
-                conn.exec_driver_sql(f'DROP TABLE IF EXISTS "{table.name}" CASCADE')
-            conn.commit()
-        # Table drops leave native enum types behind; create_all would then fail
-        # on the next test with "type ... already exists".
-        with TEST_ENGINE.connect() as conn:
-            types = conn.exec_driver_sql(
-                "SELECT t.typname FROM pg_type t "
-                "JOIN pg_namespace n ON n.oid = t.typnamespace "
-                "WHERE n.nspname = current_schema() AND t.typtype = 'e'"
-            ).fetchall()
-            for (typname,) in types:
-                conn.exec_driver_sql(f'DROP TYPE IF EXISTS "{typname}" CASCADE')
-            conn.commit()
+        # PostgreSQL: skip teardown DDL. Schema is managed by migrations,
+        # and limited-permission runtime role cannot execute DROP TABLE/TYPE.
+        # Test data is cleaned by transaction rollback in TestSession.close().
+        pass
     db_mod.engine = _orig_engine
 
 

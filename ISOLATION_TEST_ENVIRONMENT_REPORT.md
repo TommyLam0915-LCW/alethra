@@ -190,25 +190,28 @@ $ TEST_MODE=true \
 
 **檔案：** `backend/.env.test`
 ```
-DATABASE_URL=postgresql://postgres:postgres@localhost:5432/ai_investment_lab_test
+DATABASE_URL=postgresql://alethra_test_runtime:***@localhost:5432/ai_investment_lab_test
 LIVE_TRADING_ENABLED=false
 TEST_MODE=true
 ENABLE_LEARNING_SCHEDULER=false
 AUTO_COLLECTION_ENABLED=false
 ```
 
-**注意：** 未修改共用 `.env`
+**注意：** 
+- 未修改共用 `.env`
+- 密碼透過環境變數注入，不寫入版本庫
 
 ### 測試角色
 
 **Runtime 角色：** `alethra_test_runtime`
-- 密碼：`test_runtime_pass`（測試環境專用）
+- 密碼：透過環境變數 `ALETHRA_TEST_RUNTIME_PASSWORD` 注入
 - 權限：最小 DML（SELECT, INSERT, UPDATE, DELETE）
 - 限制：非 superuser，無 DDL 權限
 
 **Migration 角色：** `postgres`（僅用於 migration 執行）
 - 需要 DDL 權限建立/修改 schema
 - 不應在 runtime 使用
+- 密碼：不記錄，按本地安全管理
 
 ---
 
