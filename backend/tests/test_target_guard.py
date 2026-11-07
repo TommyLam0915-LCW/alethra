@@ -9,6 +9,8 @@ Safety guarantees:
 - Guard is shared between fixtures and tests
 """
 import os
+import stat
+from urllib.parse import urlparse, parse_qs
 from sqlalchemy import text
 
 
@@ -24,10 +26,11 @@ APPROVED_TEST_TARGET = {
         "port": 5432,
     },
     "unix_socket": {
-        # Approved Unix socket paths (from connection URL host parameter)
-        "approved_socket_paths": {"/tmp", "/var/run/postgresql", ""},
-        # Socket file must exist for these paths (empty string = default)
-        "approved_ports": {None},
+        # Approved Unix socket directory paths (from URL query host parameter)
+        # Empty string is NOT approved — ambiguous default socket is rejected
+        "approved_socket_dirs": {"/tmp"},
+        # PostgreSQL default port for socket file name
+        "socket_port": 5432,
     },
 }
 
@@ -35,6 +38,56 @@ APPROVED_TEST_TARGET = {
 class TargetGuardError(RuntimeError):
     """Raised when target guard verification fails."""
     pass
+
+
+def _extract_socket_dir_from_url(db_url: str):
+    """Extract socket directory from PostgreSQL connection URL.
+
+    Handles formats:
+    - postgresql://user@/db?host=/tmp  → '/tmp'
+    - postgresql://user@/db?host=/var/run/postgresql  → '/var/run/postgresql'
+    - postgresql://user@/db  → None (no host specified)
+    - postgresql://user@localhost:5432/db  → None (TCP, not socket)
+
+    Returns None if no socket host parameter found.
+    Returns empty string if host= is explicitly empty (will be rejected).
+    Raises TargetGuardError if multiple conflicting host values found.
+    """
+    parsed = urlparse(db_url)
+
+    # If hostname is present, this is TCP mode, not Unix socket
+    if parsed.hostname:
+        return None
+
+    # Parse query parameters for host=
+    query_params = parse_qs(parsed.query, keep_blank_values=True)
+    host_values = query_params.get("host", [])
+
+    if not host_values:
+        return None
+
+    if len(host_values) > 1:
+        raise TargetGuardError(
+            f"Multiple host parameters in URL: {host_values!r}. "
+            f"Ambiguous socket target rejected."
+        )
+
+    return host_values[0]
+
+
+def _verify_socket_file_exists(socket_dir: str, port: int = 5432) -> bool:
+    """Verify that a PostgreSQL socket file exists at the given directory.
+
+    Checks for .s.PGSQL.{port} file and verifies it's a socket type.
+    """
+    socket_path = os.path.join(socket_dir, f".s.PGSQL.{port}")
+    if not os.path.exists(socket_path):
+        return False
+    try:
+        mode = os.stat(socket_path).st_mode
+        return stat.S_ISSOCK(mode)
+    except OSError:
+        return False
 
 
 def verify_test_target(session, db_url: str = None) -> dict:
@@ -110,36 +163,42 @@ def verify_test_target(session, db_url: str = None) -> dict:
         )
 
     if is_unix_socket:
-        # Unix socket mode: must validate the socket instance, not just accept NULL
-        import os
-        from urllib.parse import urlparse
-
+        # Unix socket mode: strict validation required
         if db_url is None:
             errors.append(
-                "Unix socket mode requires db_url for socket path validation"
+                "Unix socket detected (NULL addr/port) but db_url not provided. "
+                "Cannot validate socket instance without connection URL."
             )
         else:
-            parsed = urlparse(db_url)
-            socket_host = parsed.hostname or ""
-
             unix_policy = APPROVED_TEST_TARGET["unix_socket"]
-            approved_paths = unix_policy["approved_socket_paths"]
+            approved_dirs = unix_policy["approved_socket_dirs"]
+            socket_port = unix_policy["socket_port"]
 
-            if socket_host not in approved_paths:
-                errors.append(
-                    f"Unix socket path not approved: {socket_host!r}. "
-                    f"Approved: {approved_paths}"
-                )
-            elif socket_host and not os.path.exists(socket_host):
-                errors.append(
-                    f"Unix socket path does not exist: {socket_host!r}"
-                )
-
-            if actual_port not in unix_policy["approved_ports"]:
-                errors.append(
-                    f"Unix socket port mismatch: expected one of "
-                    f"{unix_policy['approved_ports']}, got {actual_port!r}"
-                )
+            try:
+                socket_dir = _extract_socket_dir_from_url(db_url)
+            except TargetGuardError as e:
+                errors.append(str(e))
+            else:
+                if socket_dir is None:
+                    errors.append(
+                        f"Unix socket mode but no host= query parameter in URL. "
+                        f"Ambiguous socket target rejected. URL: {db_url!r}"
+                    )
+                elif socket_dir == "":
+                    errors.append(
+                        "Unix socket host= is empty string. "
+                        "Default/ambiguous socket path rejected."
+                    )
+                elif socket_dir not in approved_dirs:
+                    errors.append(
+                        f"Unix socket directory not approved: {socket_dir!r}. "
+                        f"Approved: {approved_dirs}"
+                    )
+                elif not _verify_socket_file_exists(socket_dir, socket_port):
+                    errors.append(
+                        f"PostgreSQL socket file not found or not a socket at "
+                        f"{socket_dir}/.s.PGSQL.{socket_port}"
+                    )
     else:
         tcp_policy = APPROVED_TEST_TARGET["tcp"]
         if actual_server_addr != tcp_policy["server_ip"]:
@@ -225,3 +284,113 @@ def get_test_db_url() -> str:
             "This is a safety feature to prevent accidental writes to wrong database."
         )
     return db_url
+
+
+# === Unit tests for socket validation helpers ===
+
+def test_extract_socket_dir_valid():
+    """Valid Unix socket URL extracts directory correctly."""
+    url = "postgresql://user@/db?host=/tmp"
+    assert _extract_socket_dir_from_url(url) == "/tmp"
+
+
+def test_extract_socket_dir_tcp_returns_none():
+    """TCP URL (with hostname) returns None."""
+    url = "postgresql://user@localhost:5432/db"
+    assert _extract_socket_dir_from_url(url) is None
+
+
+def test_extract_socket_dir_no_host_param_returns_none():
+    """URL without host= query param returns None."""
+    url = "postgresql://user@/db"
+    assert _extract_socket_dir_from_url(url) is None
+
+
+def test_extract_socket_dir_empty_host_returns_empty_string():
+    """URL with host= (empty value) returns empty string."""
+    url = "postgresql://user@/db?host="
+    assert _extract_socket_dir_from_url(url) == ""
+
+
+def test_extract_socket_dir_multiple_hosts_rejected():
+    """URL with multiple host= params raises TargetGuardError."""
+    url = "postgresql://user@/db?host=/tmp&host=/var/run/postgresql"
+    try:
+        _extract_socket_dir_from_url(url)
+        assert False, "Should have raised TargetGuardError"
+    except TargetGuardError as e:
+        assert "Multiple host parameters" in str(e)
+
+
+def test_verify_socket_file_exists_approved_dir():
+    """Socket file exists in approved directory."""
+    assert _verify_socket_file_exists("/tmp", 5432) is True
+
+
+def test_verify_socket_file_exists_wrong_dir():
+    """Socket file doesn't exist in unapproved directory."""
+    assert _verify_socket_file_exists("/evil", 5432) is False
+
+
+def test_verify_socket_file_exists_wrong_port():
+    """Socket file doesn't exist for wrong port."""
+    assert _verify_socket_file_exists("/tmp", 9999) is False
+
+
+# === Tests for is_local_database_url (Gap 二) ===
+
+def test_is_local_database_url_sqlite():
+    """SQLite URLs are local."""
+    from app.auth.candidate_access import is_local_database_url
+    assert is_local_database_url("sqlite:///./test.db") is True
+    assert is_local_database_url("sqlite:///:memory:") is True
+
+
+def test_is_local_database_url_loopback_tcp():
+    """Loopback TCP URLs are local."""
+    from app.auth.candidate_access import is_local_database_url
+    assert is_local_database_url("postgresql://user@127.0.0.1:5432/db") is True
+    assert is_local_database_url("postgresql://user@localhost:5432/db") is True
+    assert is_local_database_url("postgresql://user@[::1]:5432/db") is True
+
+
+def test_is_local_database_url_remote_tcp():
+    """Remote TCP URLs are NOT local."""
+    from app.auth.candidate_access import is_local_database_url
+    assert is_local_database_url("postgresql://user@remotehost:5432/db") is False
+    assert is_local_database_url("postgresql://user@192.168.1.100:5432/db") is False
+
+
+def test_is_local_database_url_unix_socket_with_path():
+    """Unix socket URLs with explicit path are local."""
+    from app.auth.candidate_access import is_local_database_url
+    assert is_local_database_url("postgresql://user@/db?host=/tmp") is True
+    assert is_local_database_url("postgresql://user@/db?host=/var/run/postgresql") is True
+
+
+def test_is_local_database_url_unix_socket_no_host_param():
+    """Unix socket URLs without host= param are local (default socket)."""
+    from app.auth.candidate_access import is_local_database_url
+    assert is_local_database_url("postgresql://user@/db") is True
+
+
+def test_is_local_database_url_unix_socket_empty_host():
+    """Unix socket URLs with empty host= are local (default socket)."""
+    from app.auth.candidate_access import is_local_database_url
+    assert is_local_database_url("postgresql://user@/db?host=") is True
+
+
+def test_is_local_database_url_hostname_takes_precedence():
+    """When hostname is present, query host= is ignored (TCP mode)."""
+    from app.auth.candidate_access import is_local_database_url
+    # TCP to loopback with query host= → local (TCP wins)
+    assert is_local_database_url("postgresql://user@127.0.0.1/db?host=/tmp") is True
+    # TCP to remote with query host= → NOT local (TCP wins)
+    assert is_local_database_url("postgresql://user@remotehost/db?host=/tmp") is False
+
+
+def test_is_local_database_url_empty_string():
+    """Empty URL is not local."""
+    from app.auth.candidate_access import is_local_database_url
+    assert is_local_database_url("") is False
+    assert is_local_database_url(None) is False
