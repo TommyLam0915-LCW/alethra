@@ -138,104 +138,40 @@ def db_session(session_factory):
     session.close()
 
 
+import sys
+import os
+sys.path.insert(0, os.path.dirname(__file__))
+from test_cleanup_utils import unified_cleanup_user_data
+
+
 @pytest.fixture
 def complete_fk_setup(request, session_factory, test_user_id, test_portfolio_id, test_run_id):
     """Set up complete FK chain: users → portfolios → runs.
 
     Uses real schema with all required columns.
     Registers finalizer early to ensure cleanup even if setup fails.
-    Uses new session for cleanup and new independent connection for verification.
+    Uses unified cleanup pattern: collect IDs, delete by IDs, verify zero residual.
     """
     # Track what has been created
-    created_resources = {"user_id": test_user_id, "portfolio_id": test_portfolio_id, "run_id": test_run_id, "setup_completed": False}
+    created_resources = {"user_id": test_user_id, "portfolio_id": test_portfolio_id, "run_id": test_run_id}
 
     def cleanup():
-        """Remove all test data in FK-safe order using NEW session."""
-        if not created_resources.get("setup_completed"):
-            # Setup didn't complete, nothing to clean up
-            return
-
-        # Use NEW session for cleanup (not the same as setup session)
-        cleanup_session = session_factory()
+        """Remove all test data using unified cleanup pattern.
+        
+        Always attempts cleanup, even if setup didn't complete.
+        Uses independent connections for each phase.
+        Preserves error evidence for all failure scenarios.
+        """
+        user_id = created_resources["user_id"]
+        
         try:
-            user_id = created_resources["user_id"]
-
-            # Get portfolio IDs for this user
-            portfolio_ids_result = cleanup_session.execute(
-                text("SELECT id FROM paper_portfolios WHERE owner_id = :user_id"),
-                {"user_id": user_id},
-            ).fetchall()
-            portfolio_ids = [str(row[0]) for row in portfolio_ids_result]
-
-            # Delete in FK-safe order (child tables first)
-            # paper_fills → paper_orders → paper_positions → decision_records →
-            # paper_trading_daily_metrics → paper_trading_runs → paper_portfolios → users
-
-            if portfolio_ids:
-                # Delete paper_fills (child of paper_orders)
-                cleanup_session.execute(
-                    text("DELETE FROM paper_fills WHERE paper_order_id IN "
-                         "(SELECT id FROM paper_orders WHERE portfolio_id = ANY(:portfolio_ids))"),
-                    {"portfolio_ids": portfolio_ids},
-                )
-
-                # Delete paper_orders
-                cleanup_session.execute(
-                    text("DELETE FROM paper_orders WHERE portfolio_id = ANY(:portfolio_ids)"),
-                    {"portfolio_ids": portfolio_ids},
-                )
-
-            # Delete paper_positions
-            cleanup_session.execute(
-                text("DELETE FROM paper_positions WHERE portfolio_id IN "
-                     "(SELECT id FROM paper_portfolios WHERE owner_id = :user_id)"),
-                {"user_id": user_id},
-            )
-
-            # Delete decision_records (FK: paper_portfolio_id → paper_portfolios.id)
-            cleanup_session.execute(
-                text("DELETE FROM decision_records WHERE paper_portfolio_id IN "
-                     "(SELECT id FROM paper_portfolios WHERE owner_id = :user_id)"),
-                {"user_id": user_id},
-            )
-
-            # Delete paper_trading_daily_metrics (FK: run_id → paper_trading_runs.id)
-            cleanup_session.execute(
-                text("DELETE FROM paper_trading_daily_metrics WHERE run_id IN "
-                     "(SELECT id FROM paper_trading_runs WHERE portfolio_id IN "
-                     "(SELECT id FROM paper_portfolios WHERE owner_id = :user_id))"),
-                {"user_id": user_id},
-            )
-
-            # Delete paper_trading_runs (FK: portfolio_id → paper_portfolios.id)
-            cleanup_session.execute(
-                text("DELETE FROM paper_trading_runs WHERE portfolio_id IN "
-                     "(SELECT id FROM paper_portfolios WHERE owner_id = :user_id)"),
-                {"user_id": user_id},
-            )
-
-            # Delete paper_portfolios (FK: owner_id → users.id)
-            cleanup_session.execute(
-                text("DELETE FROM paper_portfolios WHERE owner_id = :user_id"),
-                {"user_id": user_id},
-            )
-
-            # Delete user
-            cleanup_session.execute(
-                text("DELETE FROM users WHERE id = :user_id"),
-                {"user_id": user_id},
-            )
-
-            cleanup_session.commit()
-
-            # Verify zero residual using NEW INDEPENDENT connection
-            _verify_zero_residual_independent(session_factory, user_id, portfolio_ids, created_resources["run_id"])
-
+            # Use unified cleanup: collect, delete, verify
+            unified_cleanup_user_data(session_factory, user_id)
         except Exception as e:
-            cleanup_session.rollback()
-            raise RuntimeError(f"Cleanup failed: {e}") from e
-        finally:
-            cleanup_session.close()
+            # Preserve error evidence - don't swallow exceptions
+            import traceback
+            error_details = traceback.format_exc()
+            raise RuntimeError(f"Cleanup failed for user {user_id}: {e}\n{error_details}") from e
 
     # Register finalizer EARLY - before any DB operations
     # This ensures cleanup runs even if setup fails partway through
@@ -287,11 +223,13 @@ def complete_fk_setup(request, session_factory, test_user_id, test_portfolio_id,
         )
 
         setup_session.commit()
-        created_resources["setup_completed"] = True
 
     except Exception as e:
         setup_session.rollback()
-        raise RuntimeError(f"Setup failed: {e}") from e
+        # Preserve error evidence
+        import traceback
+        error_details = traceback.format_exc()
+        raise RuntimeError(f"Setup failed: {e}\n{error_details}") from e
     finally:
         setup_session.close()
 
