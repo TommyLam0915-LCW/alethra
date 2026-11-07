@@ -20,6 +20,14 @@ from fastapi.testclient import TestClient
 from app.database import Base, get_db
 from app.models import *
 
+# CRITICAL: Import app.main at conftest load time, BEFORE any fixtures run.
+# This ensures all route modules (e.g., app.api.auth) import the ORIGINAL
+# get_db function object. Later monkey-patching by setup_db won't affect
+# the function objects already captured by Depends(get_db) at route definition.
+# Without this, dependency_overrides[_ORIGINAL_GET_DB] would target a different
+# function object than what the routes use, causing the override to silently fail.
+from app.main import app as _app
+
 
 def _safe_dsn(url_str: str) -> str:
     """Return a loggable DSN with password redacted."""
@@ -273,13 +281,16 @@ def reset_rate_limits():
     reset_default_limiter()
 
 
+# Import the ORIGINAL get_db at module load time, before any fixture replaces it.
+# This ensures dependency_overrides targets the correct function.
+from app.database import get_db as _ORIGINAL_GET_DB
+
+
 @pytest.fixture()
 def client():
     from app.main import app
-    from app.api import api_router
-    from app.database import get_db as orig_get_db
 
-    app.dependency_overrides[orig_get_db] = override_get_db
+    app.dependency_overrides[_ORIGINAL_GET_DB] = override_get_db
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()

@@ -16,6 +16,9 @@ from tests.conftest import TestSession
 def api_test_fixtures(email: str):
     """Context manager that creates and cleans up API test fixtures.
     
+    Args:
+        email: Test user email
+    
     Creates in order:
     1. User
     2. Strategy study run
@@ -36,11 +39,10 @@ def api_test_fixtures(email: str):
     from app.models.user import User
     from datetime import datetime, timezone, timedelta
     from uuid import uuid4, UUID
-    
-    # Pre-generate all IDs before any database operations
-    user_id = uuid4()  # UUID object, not string
-    study_run_id = uuid4()  # UUID object, not string
-    
+
+    user_id = uuid4()
+    study_run_id = uuid4()
+
     # Register cleanup responsibilities BEFORE any writes
     # This ensures cleanup runs even if commit/refresh/token fails
     created_resources = []
@@ -221,8 +223,6 @@ def _cleanup_user_data(user_id: str):
     """Remove all paper trading data for a user in FK-safe order."""
     db = TestSession()
     try:
-        # Delete in FK-safe order
-        # paper_fills → paper_orders → decision_records → paper_trading_daily_metrics → paper_trading_runs → paper_positions → paper_portfolios → users
         db.execute(
             text("""
                 DELETE FROM paper_fills WHERE paper_order_id IN (
@@ -237,6 +237,16 @@ def _cleanup_user_data(user_id: str):
             text("""
                 DELETE FROM paper_orders WHERE portfolio_id IN (
                     SELECT id FROM paper_portfolios WHERE owner_id = :user_id
+                )
+            """),
+            {"user_id": user_id},
+        )
+        db.execute(
+            text("""
+                DELETE FROM paper_orders WHERE decision_id IN (
+                    SELECT id FROM decision_records WHERE paper_portfolio_id IN (
+                        SELECT id FROM paper_portfolios WHERE owner_id = :user_id
+                    )
                 )
             """),
             {"user_id": user_id},
@@ -271,8 +281,7 @@ def _cleanup_user_data(user_id: str):
             {"user_id": user_id},
         )
         db.commit()
-        
-        # Verify cleanup succeeded
+
         result = db.execute(
             text("SELECT COUNT(*) FROM users WHERE id = :user_id"),
             {"user_id": user_id},
