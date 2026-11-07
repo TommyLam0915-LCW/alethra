@@ -34,11 +34,11 @@ class PaperTradingEngine:
         session_factory: Optional[Callable[[], Session]] = None,
     ):
         """Initialize engine with real dependency injection.
-        
+
         Args:
             database_url: Database URL (legacy, creates default sessionmaker)
             session_factory: Callable that returns Session instances (preferred)
-        
+
         If session_factory is provided, it takes precedence over database_url.
         If neither is provided, falls back to global SessionLocal (not recommended).
         """
@@ -52,7 +52,7 @@ class PaperTradingEngine:
             # Fallback to global (should not be used in tests)
             logger.warning("PaperTradingEngine using global SessionLocal - not isolated")
             self.session_factory = SessionLocal
-        
+
         self.active_runs: dict[str, dict] = {}
 
     def create_portfolio(
@@ -1001,22 +1001,44 @@ class PaperTradingEngine:
 
         except Exception as exc:
             db.rollback()
-            # Only mark run as 'failed' if we acquired execution rights AND cancel was NOT requested.
-            # If cancel was requested, worker already set status='cancelled' in the cancel check block.
-            # This prevents failure handler from overriding cancel status.
+            # Handle worker terminal state after exception
+            # If cancel was requested, set status='cancelled' (worker exited due to exception after cancel)
+            # If cancel was NOT requested, set status='failed' (normal failure)
+            # This prevents leaving run in permanent 'running' state when worker exits
             if acquired_execution:
                 try:
-                    db.execute(
-                        text("""
-                        UPDATE paper_trading_runs
-                        SET status = 'failed', updated_at = CURRENT_TIMESTAMP
-                        WHERE id = :id AND cancel_requested = FALSE
-                    """),
+                    # Check if cancel was requested
+                    cancel_state = db.execute(
+                        text("SELECT cancel_requested FROM paper_trading_runs WHERE id = :id"),
                         {"id": run_id},
-                    )
-                    db.commit()
+                    ).fetchone()
+
+                    if cancel_state and cancel_state[0]:
+                        # Cancel was requested, worker exited due to exception
+                        # Set status='cancelled' to avoid permanent 'running' state
+                        db.execute(
+                            text("""
+                            UPDATE paper_trading_runs
+                            SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP
+                            WHERE id = :id AND cancel_requested = TRUE
+                        """),
+                            {"id": run_id},
+                        )
+                        db.commit()
+                        logger.info(f"Run {run_id} marked as 'cancelled' after exception (cancel was requested)")
+                    else:
+                        # Cancel was NOT requested, normal failure
+                        db.execute(
+                            text("""
+                            UPDATE paper_trading_runs
+                            SET status = 'failed', updated_at = CURRENT_TIMESTAMP
+                            WHERE id = :id AND cancel_requested = FALSE
+                        """),
+                            {"id": run_id},
+                        )
+                        db.commit()
                 except Exception:
-                    logger.exception("Failed to update run status to 'failed'")
+                    logger.exception("Failed to update run status after exception")
             logger.exception("Historical replay failed")
             raise
         finally:
