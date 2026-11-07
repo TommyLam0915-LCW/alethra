@@ -1,7 +1,7 @@
 """add cancel_requested to paper_trading_runs
 
 Revision ID: c9d0e1f2a3b4
-Revises: p4p5t6r7n8g9
+Revises: add_sacrificial_test_table
 Create Date: 2026-11-07 10:00:00.000000
 
 """
