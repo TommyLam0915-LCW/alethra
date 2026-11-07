@@ -9,9 +9,11 @@ Tests cover:
 3. Safety gate rejects non-localhost hosts
 4. Safety gate rejects superuser roles
 5. Safety gate rejects missing TEST_MODE
+6. Fake password never leaks in stdout/stderr/exception
 """
 import os
 import sys
+import subprocess
 import pytest
 from unittest.mock import patch, MagicMock
 
@@ -25,40 +27,124 @@ from test_safety_gate import (
 )
 
 
+class TestCredentialLeakage:
+    """Verify passwords never leak in error messages or output."""
+
+    def test_fake_password_not_in_conflict_error(self):
+        """Env var conflict error must not contain password."""
+        fake_password = "SuperSecret123!"
+        url_with_password = f"postgresql://user:{fake_password}@localhost:5432/test_db"
+        
+        # Run conftest import in subprocess to capture all output
+        result = subprocess.run(
+            [sys.executable, "-c", f"""
+import os
+os.environ['ALETHRA_TEST_DB'] = '{url_with_password}'
+os.environ['ALETHRA_PG_TEST_URL'] = 'postgresql://user@localhost:5432/other_db'
+try:
+    import sys
+    sys.path.insert(0, '{os.path.dirname(os.path.dirname(os.path.abspath(__file__)))}')
+    import tests.conftest
+except RuntimeError as e:
+    print(str(e))
+    raise
+"""],
+            capture_output=True,
+            text=True,
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        )
+        
+        # Check stdout, stderr, and exception message
+        combined_output = result.stdout + result.stderr
+        assert fake_password not in combined_output, (
+            f"FAKE PASSWORD LEAKED in output:\n{combined_output}"
+        )
+        assert "***" in combined_output or "unparseable" in combined_output.lower(), (
+            "Password should be masked with *** or marked as unparseable"
+        )
+
+
 class TestEnvVarConflict:
     """Verify conftest rejects conflicting env vars."""
 
     def test_conftest_rejects_conflicting_env_vars(self):
         """If ALETHRA_TEST_DB and ALETHRA_PG_TEST_URL both set and differ, refuse."""
-        import importlib
-        conftest_path = os.path.join(os.path.dirname(__file__), "conftest.py")
-
-        with patch.dict(os.environ, {
-            "ALETHRA_TEST_DB": "postgresql://user@localhost:5432/test_a",
-            "ALETHRA_PG_TEST_URL": "postgresql://user@localhost:5432/test_b",
-        }, clear=False):
-            with pytest.raises(RuntimeError, match="both set but differ"):
-                importlib.reload(
-                    importlib.import_module("conftest")
-                    if "conftest" in sys.modules
-                    else importlib.import_module("tests.conftest")
-                )
+        # Use subprocess to test startup rejection (don't reload running conftest)
+        result = subprocess.run(
+            [sys.executable, "-c", """
+import os
+os.environ['ALETHRA_TEST_DB'] = 'postgresql://user@localhost:5432/test_a'
+os.environ['ALETHRA_PG_TEST_URL'] = 'postgresql://user@localhost:5432/test_b'
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath('__file__'))))
+import tests.conftest
+"""],
+            capture_output=True,
+            text=True,
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        )
+        
+        assert result.returncode != 0, "Should fail with conflicting env vars"
+        assert "both set but differ" in result.stderr or "both set but differ" in result.stdout, (
+            f"Should report conflict error. stderr: {result.stderr}"
+        )
 
     def test_conftest_accepts_matching_env_vars(self):
         """If both env vars set to same value, no conflict."""
-        url = "postgresql://user@localhost:5432/ai_investment_lab_test"
-        with patch.dict(os.environ, {
-            "ALETHRA_TEST_DB": url,
-            "ALETHRA_PG_TEST_URL": url,
-        }, clear=False):
-            assert os.environ.get("ALETHRA_TEST_DB") == os.environ.get("ALETHRA_PG_TEST_URL")
+        # Use the actual test DB URL from environment
+        test_db_url = os.environ.get("ALETHRA_TEST_DB", "postgresql://alethra_test_runtime@localhost:5432/ai_investment_lab_test?host=/tmp")
+        
+        # Use subprocess to verify actual parsing
+        result = subprocess.run(
+            [sys.executable, "-c", f"""
+import os
+os.environ['ALETHRA_TEST_DB'] = '{test_db_url}'
+os.environ['ALETHRA_PG_TEST_URL'] = '{test_db_url}'
+os.environ['TEST_MODE'] = 'true'
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath('__file__'))))
+import tests.conftest
+# Verify both are still set to the same value
+assert os.environ.get('ALETHRA_TEST_DB') == os.environ.get('ALETHRA_PG_TEST_URL')
+print("MATCHING_OK")
+"""],
+            capture_output=True,
+            text=True,
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            env={**os.environ, "TEST_MODE": "true"}
+        )
+        
+        assert result.returncode == 0, f"Should accept matching env vars. stderr: {result.stderr}"
+        assert "MATCHING_OK" in result.stdout, "Should verify aliasing succeeded"
 
     def test_conftest_aliases_single_env_var(self):
         """If only one env var set, the other should be aliased."""
-        url = "postgresql://user@localhost:5432/ai_investment_lab_test"
-        with patch.dict(os.environ, {"ALETHRA_TEST_DB": url}, clear=False):
-            os.environ.pop("ALETHRA_PG_TEST_URL", None)
-            assert os.environ.get("ALETHRA_TEST_DB") == url
+        # Use the actual test DB URL from environment
+        test_db_url = os.environ.get("ALETHRA_TEST_DB", "postgresql://alethra_test_runtime@localhost:5432/ai_investment_lab_test?host=/tmp")
+        
+        # Use subprocess to verify actual aliasing behavior
+        result = subprocess.run(
+            [sys.executable, "-c", f"""
+import os
+os.environ['ALETHRA_TEST_DB'] = '{test_db_url}'
+os.environ.pop('ALETHRA_PG_TEST_URL', None)
+os.environ['TEST_MODE'] = 'true'
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath('__file__'))))
+import tests.conftest
+# Verify ALETHRA_PG_TEST_URL was aliased from ALETHRA_TEST_DB
+aliased = os.environ.get('ALETHRA_PG_TEST_URL')
+assert aliased == '{test_db_url}', f"Expected alias to be set, got {{aliased}}"
+print("ALIAS_OK")
+"""],
+            capture_output=True,
+            text=True,
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            env={**os.environ, "TEST_MODE": "true"}
+        )
+        
+        assert result.returncode == 0, f"Should alias single env var. stderr: {result.stderr}"
+        assert "ALIAS_OK" in result.stdout, "Should verify aliasing succeeded"
 
 
 class TestSafetyGateRejection:

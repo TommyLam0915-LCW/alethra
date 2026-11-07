@@ -1,4 +1,15 @@
 import os
+from urllib.parse import urlparse
+
+def _safe_db_diagnostic(url: str) -> str:
+    """Extract password-free diagnostic info from database URL."""
+    try:
+        parsed = urlparse(url)
+        # Return scheme://user@host:port/database (no password)
+        password_masked = parsed._replace(password='***')
+        return password_masked.geturl()
+    except Exception:
+        return "<unparseable URL>"
 
 # === 一、對齊執行基線：unify env vars ===
 # ALETHRA_TEST_DB and ALETHRA_PG_TEST_URL are aliases for the same PG test URL.
@@ -8,8 +19,8 @@ _env_b = os.environ.get("ALETHRA_PG_TEST_URL")
 if _env_a and _env_b and _env_a != _env_b:
     raise RuntimeError(
         f"SAFETY: ALETHRA_TEST_DB and ALETHRA_PG_TEST_URL are both set but differ.\n"
-        f"  ALETHRA_TEST_DB    = {_env_a!r}\n"
-        f"  ALETHRA_PG_TEST_URL = {_env_b!r}\n"
+        f"  ALETHRA_TEST_DB    = {_safe_db_diagnostic(_env_a)}\n"
+        f"  ALETHRA_PG_TEST_URL = {_safe_db_diagnostic(_env_b)}\n"
         f"Unify to a single value before running tests."
     )
 if _env_a and not _env_b:
