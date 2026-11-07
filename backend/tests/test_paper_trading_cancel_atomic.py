@@ -2715,6 +2715,262 @@ class TestBatchCGuardPrecision:
 class TestBatchBMinimalIntegration:
     """Batch B: Minimal integration case with actual execute_historical_replay call."""
     
+    @staticmethod
+    def make_acquisition_hook(target_run_id, hook_state):
+        """Create shared acquisition hook with transparent proxy pattern.
+        
+        P1 B Fix 1: Hook observes formal fetchone without consuming it.
+        State isolated per session, verifies target run ID.
+        
+        Args:
+            target_run_id: The paper_run_id to match
+            hook_state: Dict with keys:
+                - signal_count: [int] incremented on successful signal
+                - pending_result: [str|None] captured run_id from RETURNING
+                - commit_succeeded: [bool] set True after successful commit
+                - acquisition_committed: Event to signal
+                - cancel_committed: Event to wait for
+                - can_inject_exception: Event to signal
+                - acquisition_failed: Event to signal on failure
+                - injected_error: Exception to raise after cancel
+        
+        Returns:
+            hooked_session_factory function
+        """
+        def hooked_session_factory(original_factory):
+            session = original_factory()
+            original_execute = session.execute
+            original_commit = session.commit
+            
+            # Per-session state (isolated via closure)
+            session_state = {
+                'acquisition_query_seen': False,
+                'observed_row': None,
+                'target_matched': False,
+            }
+            
+            class TransparentResult:
+                """Proxy that observes fetchone without consuming."""
+                def __init__(self, real_result):
+                    self._real = real_result
+                
+                def fetchone(self):
+                    # Call real fetchone
+                    row = self._real.fetchone()
+                    # Observe but don't consume - store for hook state
+                    if row and session_state['acquisition_query_seen'] and session_state['target_matched']:
+                        session_state['observed_row'] = row[0] if len(row) > 0 else None
+                    # Return row as-is for formal caller
+                    return row
+                
+                def fetchall(self):
+                    return self._real.fetchall()
+                
+                def __getattr__(self, name):
+                    # Delegate all other methods to real result
+                    return getattr(self._real, name)
+            
+            def hooked_execute(query, params=None):
+                query_str = str(query) if hasattr(query, '__str__') else ''
+                # Detect acquisition query
+                if ('UPDATE paper_trading_runs' in query_str and
+                    'SET status = \'running\'' in query_str and
+                    'WHERE id = :id AND status IN' in query_str and
+                    'cancel_requested = FALSE' in query_str and
+                    'RETURNING id' in query_str):
+                    session_state['acquisition_query_seen'] = True
+                    # Verify target run ID in params
+                    if params and params.get('id') == target_run_id:
+                        session_state['target_matched'] = True
+                        result = original_execute(query, params)
+                        return TransparentResult(result)
+                    else:
+                        # Not target run - execute normally
+                        return original_execute(query, params)
+                
+                return original_execute(query, params)
+            
+            def hooked_commit():
+                original_commit()
+                # Signal only if we observed the acquisition query for target run
+                if (session_state['acquisition_query_seen'] and 
+                    session_state['target_matched'] and
+                    session_state['observed_row'] == target_run_id and
+                    hook_state['signal_count'][0] == 0):
+                    hook_state['pending_result'][0] = session_state['observed_row']
+                    hook_state['commit_succeeded'][0] = True
+                    hook_state['signal_count'][0] += 1
+                    hook_state['acquisition_committed'].set()
+                    # Wait for cancel
+                    if not hook_state['cancel_committed'].wait(timeout=5.0):
+                        hook_state['acquisition_failed'].set()
+                        return
+                    # Signal exception injection
+                    hook_state['can_inject_exception'].set()
+                    raise hook_state['injected_error']
+            
+            session.execute = hooked_execute
+            session.commit = hooked_commit
+            return session
+        
+        return hooked_session_factory
+    
+    def test_hook_formal_caller_can_read_rows(self):
+        """No-DB test: Verify TransparentResult returns rows to formal caller.
+        
+        P1 B Fix 2: Formal caller must still be able to read the row after hook observes it.
+        """
+        from unittest.mock import Mock
+        
+        # Setup
+        target_run_id = 'run-123'
+        hook_state = {
+            'signal_count': [0],
+            'pending_result': [None],
+            'commit_succeeded': [False],
+            'acquisition_committed': threading.Event(),
+            'cancel_committed': threading.Event(),
+            'can_inject_exception': threading.Event(),
+            'acquisition_failed': threading.Event(),
+            'injected_error': RuntimeError("Test error"),
+        }
+        
+        # Mock original session and result
+        mock_original_result = Mock()
+        mock_original_result.fetchone.return_value = (target_run_id,)
+        
+        mock_original_session = Mock()
+        mock_original_session.execute.return_value = mock_original_result
+        mock_original_session.commit = Mock()
+        
+        mock_factory = Mock(return_value=mock_original_session)
+        
+        # Create hook
+        hook = self.make_acquisition_hook(target_run_id, hook_state)
+        hooked_session = hook(mock_factory)
+        
+        # Execute acquisition query
+        query = "UPDATE paper_trading_runs SET status = 'running' WHERE id = :id AND status IN ('queued') AND cancel_requested = FALSE RETURNING id"
+        result = hooked_session.execute(query, {'id': target_run_id})
+        
+        # Formal caller reads row
+        row = result.fetchone()
+        
+        # Verify: formal caller got the row
+        assert row is not None, "Formal caller must receive row"
+        assert row[0] == target_run_id, f"Row must contain target run ID, got {row[0]}"
+        
+        # Verify: hook observed but didn't consume
+        assert hook_state['signal_count'][0] == 0, "Must not signal before commit"
+    
+    def test_hook_session_isolation(self):
+        """No-DB test: Verify state isolated between sessions.
+        
+        P1 B Fix 2: Each session must have independent state.
+        """
+        from unittest.mock import Mock
+        
+        target_run_id = 'run-123'
+        hook_state = {
+            'signal_count': [0],
+            'pending_result': [None],
+            'commit_succeeded': [False],
+            'acquisition_committed': threading.Event(),
+            'cancel_committed': threading.Event(),
+            'can_inject_exception': threading.Event(),
+            'acquisition_failed': threading.Event(),
+            'injected_error': RuntimeError("Test error"),
+        }
+        
+        # Create two independent sessions
+        hook = self.make_acquisition_hook(target_run_id, hook_state)
+        
+        # Session 1
+        mock_session1 = Mock()
+        mock_result1 = Mock()
+        mock_result1.fetchone.return_value = (target_run_id,)
+        mock_session1.execute.return_value = mock_result1
+        mock_session1.commit = Mock()
+        mock_factory1 = Mock(return_value=mock_session1)
+        
+        hooked_session1 = hook(mock_factory1)
+        
+        # Session 2
+        mock_session2 = Mock()
+        mock_result2 = Mock()
+        mock_result2.fetchone.return_value = ('other-run',)
+        mock_session2.execute.return_value = mock_result2
+        mock_session2.commit = Mock()
+        mock_factory2 = Mock(return_value=mock_session2)
+        
+        hooked_session2 = hook(mock_factory2)
+        
+        # Execute on session 1
+        query = "UPDATE paper_trading_runs SET status = 'running' WHERE id = :id RETURNING id"
+        result1 = hooked_session1.execute(query, {'id': target_run_id})
+        row1 = result1.fetchone()
+        
+        # Execute on session 2 (different run ID)
+        result2 = hooked_session2.execute(query, {'id': 'other-run'})
+        row2 = result2.fetchone()
+        
+        # Verify: each session got its own row
+        assert row1[0] == target_run_id, "Session 1 must get target run"
+        assert row2[0] == 'other-run', "Session 2 must get other run"
+        
+        # Verify: no cross-contamination
+        assert hook_state['signal_count'][0] == 0, "Must not signal before commit"
+    
+    def test_hook_rollback_no_signal(self):
+        """No-DB test: Verify rollback prevents signal.
+        
+        P1 B Fix 2: If commit fails (rollback), must not signal.
+        """
+        from unittest.mock import Mock
+        
+        target_run_id = 'run-123'
+        hook_state = {
+            'signal_count': [0],
+            'pending_result': [None],
+            'commit_succeeded': [False],
+            'acquisition_committed': threading.Event(),
+            'cancel_committed': threading.Event(),
+            'can_inject_exception': threading.Event(),
+            'acquisition_failed': threading.Event(),
+            'injected_error': RuntimeError("Test error"),
+        }
+        
+        # Mock session that fails on commit
+        mock_session = Mock()
+        mock_result = Mock()
+        mock_result.fetchone.return_value = (target_run_id,)
+        mock_session.execute.return_value = mock_result
+        mock_session.commit = Mock(side_effect=RuntimeError("Commit failed"))
+        mock_factory = Mock(return_value=mock_session)
+        
+        # Create hook
+        hook = self.make_acquisition_hook(target_run_id, hook_state)
+        hooked_session = hook(mock_factory)
+        
+        # Execute acquisition query
+        query = "UPDATE paper_trading_runs SET status = 'running' WHERE id = :id RETURNING id"
+        result = hooked_session.execute(query, {'id': target_run_id})
+        row = result.fetchone()
+        
+        # Verify: row was read
+        assert row[0] == target_run_id, "Must read row before commit"
+        
+        # Try to commit (will fail)
+        try:
+            hooked_session.commit()
+            assert False, "Commit should have failed"
+        except RuntimeError as e:
+            assert "Commit failed" in str(e)
+        
+        # Verify: no signal on rollback
+        assert hook_state['signal_count'][0] == 0, "Must not signal on rollback"
+        assert hook_state['commit_succeeded'][0] == False, "Commit must not succeed"
+    
     def test_acquisition_cancel_synchronization_with_exception_injection(self, request, session_factory):
         """Test precise acquisition/cancel synchronization with actual execute_historical_replay.
         
@@ -3126,138 +3382,6 @@ class TestBatchBMinimalIntegration:
                 # Cleanup failure should not mask original test failure
                 import logging
                 logging.error(f"Cleanup failed: {e}")
-    
-    def test_acquisition_hook_zero_row_no_signal(self):
-        """No-DB test: acquisition hook must not signal when RETURNING returns zero rows.
-        
-        P1 B Fix 2: Verify signal count remains 0 when acquisition UPDATE affects 0 rows.
-        """
-        from unittest.mock import Mock, MagicMock
-        
-        # Mock session that returns zero rows for acquisition query
-        mock_session = Mock()
-        mock_result = Mock()
-        mock_result.fetchone.return_value = None  # Zero rows acquired
-        
-        def mock_execute(query, params=None):
-            query_str = str(query) if hasattr(query, '__str__') else ''
-            if ('UPDATE paper_trading_runs' in query_str and
-                'RETURNING id' in query_str):
-                return mock_result
-            return Mock()
-        
-        mock_session.execute = mock_execute
-        mock_session.commit = Mock()
-        
-        # Simulate acquisition hook logic
-        acquisition_signal_count = [0]
-        pending_acquisition_result = [None]
-        
-        result = mock_session.execute("UPDATE paper_trading_runs ... RETURNING id")
-        acquired_row = result.fetchone()
-        if acquired_row:
-            pending_acquisition_result[0] = acquired_row[0]
-        
-        mock_session.commit()
-        
-        # Signal only if we have pending result
-        if pending_acquisition_result[0] is not None and acquisition_signal_count[0] == 0:
-            acquisition_signal_count[0] += 1
-        
-        # Verify: zero rows → no signal
-        assert acquisition_signal_count[0] == 0, "Must not signal when zero rows acquired"
-        assert pending_acquisition_result[0] is None, "Pending result must remain None"
-    
-    def test_acquisition_hook_commit_failure_no_signal(self):
-        """No-DB test: acquisition hook must not signal when commit fails.
-        
-        P1 B Fix 2: Verify signal count remains 0 when commit raises exception.
-        """
-        from unittest.mock import Mock
-        
-        # Mock session that succeeds execute but fails commit
-        mock_session = Mock()
-        mock_result = Mock()
-        mock_result.fetchone.return_value = ('run-123',)  # One row acquired
-        
-        execute_called = [False]
-        def mock_execute(query, params=None):
-            execute_called[0] = True
-            return mock_result
-        
-        def mock_commit():
-            raise RuntimeError("Commit failed")
-        
-        mock_session.execute = mock_execute
-        mock_session.commit = mock_commit
-        
-        # Simulate acquisition hook logic with commit failure
-        acquisition_signal_count = [0]
-        pending_acquisition_result = [None]
-        commit_succeeded = [False]
-        
-        try:
-            result = mock_session.execute("UPDATE paper_trading_runs ... RETURNING id")
-            acquired_row = result.fetchone()
-            if acquired_row:
-                pending_acquisition_result[0] = acquired_row[0]
-            
-            mock_session.commit()
-            commit_succeeded[0] = True
-        except RuntimeError:
-            # Commit failed - do not signal
-            pass
-        
-        # Signal only if commit succeeded
-        if commit_succeeded[0] and pending_acquisition_result[0] is not None and acquisition_signal_count[0] == 0:
-            acquisition_signal_count[0] += 1
-        
-        # Verify: commit failure → no signal
-        assert acquisition_signal_count[0] == 0, "Must not signal when commit fails"
-        assert pending_acquisition_result[0] == 'run-123', "Pending result should be captured"
-        assert commit_succeeded[0] == False, "Commit should have failed"
-    
-    def test_acquisition_hook_signals_exactly_once(self):
-        """No-DB test: acquisition hook must signal exactly once even with multiple commits.
-        
-        P1 B Fix 2: Verify signal count equals 1 after multiple commit attempts.
-        """
-        from unittest.mock import Mock
-        
-        # Mock session
-        mock_session = Mock()
-        mock_result = Mock()
-        mock_result.fetchone.return_value = ('run-123',)
-        
-        mock_session.execute = Mock(return_value=mock_result)
-        mock_session.commit = Mock()
-        
-        # Simulate acquisition hook logic with multiple commits
-        acquisition_signal_count = [0]
-        pending_acquisition_result = [None]
-        
-        # First commit
-        result = mock_session.execute("UPDATE ...")
-        acquired_row = result.fetchone()
-        if acquired_row:
-            pending_acquisition_result[0] = acquired_row[0]
-        mock_session.commit()
-        
-        if pending_acquisition_result[0] is not None and acquisition_signal_count[0] == 0:
-            acquisition_signal_count[0] += 1
-        
-        # Second commit (should not signal again)
-        mock_session.commit()
-        if pending_acquisition_result[0] is not None and acquisition_signal_count[0] == 0:
-            acquisition_signal_count[0] += 1
-        
-        # Third commit (should not signal again)
-        mock_session.commit()
-        if pending_acquisition_result[0] is not None and acquisition_signal_count[0] == 0:
-            acquisition_signal_count[0] += 1
-        
-        # Verify: exactly one signal
-        assert acquisition_signal_count[0] == 1, f"Must signal exactly once, got {acquisition_signal_count[0]}"
 
 
 # Updated test count: 31 + 7 + 2 + 1 + 3 + 1 + 3 = 48 methods across 14 classes
