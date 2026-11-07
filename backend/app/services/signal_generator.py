@@ -263,8 +263,9 @@ class SignalGenerator:
         self.highs: deque[float] = deque(maxlen=max_bars)
         self.lows: deque[float] = deque(maxlen=max_bars)
 
-        # All prices seen (for EMA initialization, not truncated by deque)
-        self.all_prices: list[float] = []
+        # Finite seed buffer for EMA initialization (max 50 bars)
+        self.seed_prices: deque[float] = deque(maxlen=50)
+        self.bars_seen: int = 0
 
         # Persistent EMA state (continuous recursion, not re-seeded from buffer)
         # This matches research _ema_series contract for parity
@@ -282,28 +283,29 @@ class SignalGenerator:
         self.prices.append(bar.close)
         self.highs.append(bar.high)
         self.lows.append(bar.low)
-        self.all_prices.append(bar.close)
+        self.seed_prices.append(bar.close)
+        self.bars_seen += 1
         
         # Update persistent EMA state (continuous recursion)
         # EMA20
-        if len(self.all_prices) < 20:
+        if self.bars_seen < 20:
             # Not enough bars yet
             self.ema20_state = None
-        elif len(self.all_prices) == 20:
+        elif self.bars_seen == 20:
             # First EMA value: SMA of first 20 bars
-            self.ema20_state = sum(self.all_prices[:20]) / 20
+            self.ema20_state = sum(list(self.seed_prices)[:20]) / 20
         else:
             # Recursive update: EMA = (price - EMA_prev) * multiplier + EMA_prev
             multiplier = 2 / (20 + 1)
             self.ema20_state = (bar.close - self.ema20_state) * multiplier + self.ema20_state
         
         # EMA50
-        if len(self.all_prices) < 50:
+        if self.bars_seen < 50:
             # Not enough bars yet
             self.ema50_state = None
-        elif len(self.all_prices) == 50:
+        elif self.bars_seen == 50:
             # First EMA value: SMA of first 50 bars
-            self.ema50_state = sum(self.all_prices[:50]) / 50
+            self.ema50_state = sum(list(self.seed_prices)[:50]) / 50
         else:
             # Recursive update
             multiplier = 2 / (50 + 1)

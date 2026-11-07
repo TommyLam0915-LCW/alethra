@@ -93,19 +93,18 @@ if _IS_SQLITE:
         cursor.close()
 else:
     # PostgreSQL-backed disposable run: real connections, real row locks.
+    # Integrate safety gate before creating engine - must pass before any DB writes
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from test_safety_gate import verify_test_database, TestDatabaseGateError
+    
+    try:
+        gate_info = verify_test_database(_TEST_DB_PATH)
+        print(f"✓ Safety gate passed: {gate_info['database']} on {gate_info['server_addr']}:{gate_info['server_port']}")
+    except TestDatabaseGateError as e:
+        raise RuntimeError(f"SAFETY GATE FAILED: {e}") from e
+    
     TEST_ENGINE = create_engine(_TEST_DB_PATH, pool_pre_ping=True)
-
-    # Verify actual database target after connection — not just URL parsing.
-    # This catches misconfigured URLs where the parsed name differs from the
-    # actual database the server connects to.
-    _expected_db = make_url(_TEST_DB_PATH).database or ""
-    with TEST_ENGINE.connect() as _verify_conn:
-        _actual_db = _verify_conn.execute(text("SELECT current_database()")).scalar()
-        if _actual_db != _expected_db:
-            raise RuntimeError(
-                f"SAFETY: Connected database {_actual_db!r} does not match "
-                f"expected {_expected_db!r}. Refusing to proceed."
-            )
 
     @event.listens_for(TEST_ENGINE, "connect")
     def _set_pg_disposable_timeouts(dbapi_connection, connection_record):

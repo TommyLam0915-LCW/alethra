@@ -19,6 +19,11 @@ from app.auth.jwt import get_current_user, require_admin
 from app.database import get_db
 from app.models.user import User
 from app.services.paper_trading import get_engine
+from app.services.paper_trading_exceptions import (
+    AuthorizationError,
+    InvalidStateError,
+    ResourceNotFoundError,
+)
 
 router = APIRouter(prefix="/paper-trading", tags=["paper-trading"])
 logger = logging.getLogger(__name__)
@@ -147,6 +152,21 @@ def get_status(
     try:
         _verify_run_ownership(db, run_id, str(current_user.id))
         return engine.get_status(run_id)
+    except ResourceNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"reason": "not_found", "message": str(exc)},
+        )
+    except AuthorizationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"reason": "authorization_failed", "message": str(exc)},
+        )
+    except InvalidStateError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"reason": "invalid_state", "message": str(exc)},
+        )
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -178,6 +198,21 @@ def get_daily_report(
             parsed_date = datetime.strptime(report_date, "%Y-%m-%d").date()
 
         return engine.generate_daily_report(run_id, parsed_date)
+    except ResourceNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"reason": "not_found", "message": str(exc)},
+        )
+    except AuthorizationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"reason": "authorization_failed", "message": str(exc)},
+        )
+    except InvalidStateError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"reason": "invalid_state", "message": str(exc)},
+        )
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -212,6 +247,21 @@ def execute_replay(
             max_positions=request.max_positions,
         )
         return result
+    except ResourceNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"reason": "not_found", "message": str(exc)},
+        )
+    except AuthorizationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"reason": "authorization_failed", "message": str(exc)},
+        )
+    except InvalidStateError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"reason": "invalid_state", "message": str(exc)},
+        )
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -232,21 +282,27 @@ def stop_run(
     db: Session = Depends(get_db),
 ):
     """Stop a running paper trading run."""
-    from sqlalchemy import text
+    database_url = os.environ.get('DATABASE_URL', 'postgresql://postgres:postgres@localhost:5432/ai_investment_lab')
+    engine = get_engine(database_url)
 
     try:
-        _verify_run_ownership(db, run_id, str(current_user.id))
-        db.execute(
-            text("""
-            UPDATE paper_trading_runs
-            SET status = 'stopped', end_date = CURRENT_DATE, updated_at = NOW()
-            WHERE id = :id
-        """),
-            {"id": run_id},
+        result = engine.cancel_run(run_id, str(current_user.id))
+        return result
+    except ResourceNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"reason": "not_found", "message": str(exc)},
         )
-        db.commit()
-
-        return {"status": "stopped", "run_id": run_id}
+    except AuthorizationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"reason": "authorization_failed", "message": str(exc)},
+        )
+    except InvalidStateError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"reason": "invalid_state", "message": str(exc)},
+        )
     except ValueError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

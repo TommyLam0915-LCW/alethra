@@ -87,10 +87,28 @@ if [ "$MODE" = "pg" ]; then
   export ALETHRA_PG_DATABASE_URL="$ALETHRA_PG_TEST_URL"
   export ALETHRA_TEST_POSTGRES_URL="$ALETHRA_PG_TEST_URL"
   export ALETHRA_TEST_REQUIRED_DB_PREFIX=${ALETHRA_TEST_REQUIRED_DB_PREFIX:-alethra_}
+  export TEST_MODE=true
   echo "backend suite — layer: pg (PostgreSQL; pass the PostgreSQL-required test paths)"
   echo "interpreter: $PYTHON"
   preflight || {
     echo "preflight rejected the environment; pytest was not started." >&2
+    exit 3
+  }
+  # Integrate safety gate before any DB writes
+  "$PYTHON" -c '
+import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from test_safety_gate import verify_test_database, TestDatabaseGateError
+
+try:
+    gate_info = verify_test_database()
+    print(f"✓ Safety gate passed: {gate_info[\"database\"]} on {gate_info[\"server_addr\"]}:{gate_info[\"server_port\"]}")
+except TestDatabaseGateError as e:
+    print(f"SAFETY GATE FAILED: {e}", file=sys.stderr)
+    sys.exit(1)
+' || {
+    echo "safety gate rejected the database connection; pytest was not started." >&2
     exit 3
   }
   "$PYTHON" -c '

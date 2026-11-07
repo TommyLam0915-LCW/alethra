@@ -27,7 +27,12 @@ depends_on = None
 
 
 def upgrade():
-    # Drop the table-wide unique indexes from migration 005
+    # Drop the table-wide UNIQUE constraints from migration 005
+    # These prevented different portfolios from using the same source trade
+    op.drop_constraint('uq_decision_records_source_trade_type', 'decision_records', type_='unique')
+    op.drop_constraint('uq_paper_positions_source_trade', 'paper_positions', type_='unique')
+    
+    # Optional: drop the lookup indexes (will recreate below)
     op.drop_index('idx_decision_records_source_trade', table_name='decision_records')
     op.drop_index('idx_paper_positions_source_trade', table_name='paper_positions')
     
@@ -59,10 +64,24 @@ def downgrade():
     op.drop_index('idx_paper_positions_source_trade', table_name='paper_positions')
     op.drop_index('idx_decision_records_source_trade', table_name='decision_records')
     
-    # Drop the composite unique constraints
+    # Drop the portfolio-scoped unique constraints
     op.drop_constraint('uq_paper_positions_source_per_portfolio', 'paper_positions', type_='unique')
     op.drop_constraint('uq_decision_records_source_per_portfolio', 'decision_records', type_='unique')
     
-    # Recreate the table-wide unique indexes (incorrect scope, but reversible)
-    op.create_index('idx_paper_positions_source_trade', 'paper_positions', ['source_trade_id'], unique=True)
-    op.create_index('idx_decision_records_source_trade', 'decision_records', ['source_trade_id'], unique=True)
+    # Recreate the table-wide unique constraints from migration 005
+    # decision_records: unique on (source_trade_id, decision_type)
+    op.create_unique_constraint(
+        'uq_decision_records_source_trade_type',
+        'decision_records',
+        ['source_trade_id', 'decision_type']
+    )
+    # paper_positions: unique on source_trade_id
+    op.create_unique_constraint(
+        'uq_paper_positions_source_trade',
+        'paper_positions',
+        ['source_trade_id']
+    )
+    
+    # Recreate lookup indexes
+    op.create_index('idx_decision_records_source_trade', 'decision_records', ['source_trade_id'])
+    op.create_index('idx_paper_positions_source_trade', 'paper_positions', ['source_trade_id'])
