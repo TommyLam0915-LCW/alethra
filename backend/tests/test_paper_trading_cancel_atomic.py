@@ -1221,7 +1221,7 @@ class TestCleanupSafety:
         # Verify should detect residual orders
         verify_session = session_factory()
         try:
-            with pytest.raises(RuntimeError, match="user.*still exists"):
+            with pytest.raises(RuntimeError, match="orders still exist"):
                 verify_zero_residual_readonly(verify_session, test_user_id, resource_ids)
         finally:
             verify_session.close()
@@ -1297,10 +1297,10 @@ class TestCleanupSafety:
         finally:
             collect_session.close()
         
-        # Verify should detect residual fills (and all other resources)
+        # Verify should detect residual fills (user still exists, so check fills first)
         verify_session = session_factory()
         try:
-            with pytest.raises(RuntimeError, match="user.*still exists"):
+            with pytest.raises(RuntimeError, match="fills still exist"):
                 verify_zero_residual_readonly(verify_session, test_user_id, resource_ids)
         finally:
             verify_session.close()
