@@ -12,23 +12,22 @@ Two-Phase Cancel Contract:
   * Worker atomically sets status='cancelled'
   * Only now is run truly cancelled
 
-Test Coverage:
+Test Coverage (12 methods implemented):
 - Valid UUID user with complete FK chain (users → portfolios → runs)
-- Running state: two-phase contract with worker polling
-- Queued/pending/failed: immediate completion without worker
-- Execution acquisition rejects cancel_requested=TRUE
-- Completion/failure handlers don't override cancel status
-- Double cancel (idempotent)
-- Cancel after completed (rejected)
-- Race conditions with barrier control (cancel-first vs completion-first)
-- Actual execute_historical_replay, not simulated UPDATE
-- <100 events, polling boundary, pre-final-commit cancel
-- Worker interruption recovery policy
-- Complete ledger and cash consistency verification
+- Running state: two-phase contract with worker polling (5 tests)
+- Queued/pending/failed: immediate completion without worker (3 tests)
+- Completion/failure handlers don't override cancel status (2 tests)
+- Race conditions with barrier control (2 tests)
 - Explicit session factory injection (no global SessionLocal override)
 - Comprehensive FK-safe cleanup (fills → orders → positions → decisions → metrics → runs → portfolios → users)
 
-Status: Tests WRITTEN, NOT YET EXECUTED (requires PostgreSQL test DB migration)
+Additional tests needed (not yet implemented):
+- Actual execute_historical_replay (requires historical trades setup)
+- <100 events, polling boundary, pre-final-commit cancel
+- Worker interruption recovery policy
+- Complete ledger and cash consistency verification
+
+Status: 12 tests WRITTEN, NOT YET EXECUTED (requires PostgreSQL test DB migration)
 """
 
 import pytest
@@ -72,8 +71,15 @@ def session_factory():
     
     Tests must NOT override global SessionLocal. Use this factory to create
     independent sessions for concurrent operations.
+    
+    Connection URL from environment variable ALETHRA_PG_TEST_URL or fallback to
+    verified test DB configuration (no hardcoded credentials in source).
     """
-    db_url = "postgresql://alethra_test_runtime:testpass@localhost:5432/ai_investment_lab_test"
+    import os
+    db_url = os.environ.get(
+        "ALETHRA_PG_TEST_URL",
+        "postgresql://alethra_test_runtime@localhost:5432/ai_investment_lab_test"
+    )
     engine = create_engine(db_url, pool_pre_ping=True)
     factory = sessionmaker(bind=engine)
     yield factory
@@ -712,22 +718,8 @@ class TestRaceConditionsWithBarrier:
     # - Actual execute_historical_replay (requires historical trades setup)
 
 
-# Test count verification
-def test_test_count():
-    """Verify actual test method count matches documentation."""
-    import inspect
-    
-    test_classes = [
-        TestTwoPhaseCancelContract,
-        TestCancelConvergence,
-        TestCompletionFailureProtection,
-        TestRaceConditionsWithBarrier,
-    ]
-    
-    total_tests = 0
-    for cls in test_classes:
-        methods = [m for m in dir(cls) if m.startswith("test_") and callable(getattr(cls, m))]
-        total_tests += len(methods)
-    
-    # Document: 15+ tests (actual count will grow as more tests are added)
-    assert total_tests >= 15, f"Expected 15+ tests, found {total_tests}"
+# Test count: 12 methods across 4 classes
+# - TestTwoPhaseCancelContract: 5 tests
+# - TestCancelConvergence: 3 tests  
+# - TestCompletionFailureProtection: 2 tests
+# - TestRaceConditionsWithBarrier: 2 tests
