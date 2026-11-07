@@ -178,7 +178,52 @@ def setup_db():
     # Only run create_all for SQLite where migrations don't apply.
     if _IS_SQLITE:
         Base.metadata.create_all(bind=TEST_ENGINE, checkfirst=True)
-    yield
+        yield
+    else:
+        # PostgreSQL: wrap test in transaction for isolation.
+        # All commits (including from API/service code) will be rolled back.
+        # This proves data isolation between tests.
+        connection = TEST_ENGINE.connect()
+        transaction = connection.begin()
+        
+        # Create a session bound to this connection
+        test_session = _TrackedSession(bind=connection)
+        
+        # Override get_db to return our transactional session
+        import app.database as app_db_mod
+        original_get_db = app_db_mod.get_db
+        
+        def transactional_get_db():
+            try:
+                yield test_session
+            finally:
+                pass  # Don't close yet; teardown will handle it
+        
+        app_db_mod.get_db = transactional_get_db
+        
+        try:
+            yield
+        finally:
+            # Restore original get_db
+            app_db_mod.get_db = original_get_db
+            
+            # Rollback transaction (undoes all commits from this test)
+            # This is the key to data isolation
+            try:
+                transaction.rollback()
+            except Exception:
+                pass  # Transaction may already be closed
+            
+            try:
+                test_session.close()
+            except Exception:
+                pass
+            
+            try:
+                connection.close()
+            except Exception:
+                pass
+    
     # Return every connection before destructive DDL. Force-close all still-live
     # TestSession instances (rolling back any open transaction) so a session
     # leaked idle-in-transaction cannot hold a lock that blocks the DROP below.
