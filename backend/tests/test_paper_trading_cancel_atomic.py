@@ -3078,6 +3078,7 @@ class TestBatchBMinimalIntegration:
                 verify_residual_session.close()
         
         finally:
+            # Gap 四: All paths stop worker before cleanup
             # Release all waiting threads (independent abort/release, not success events)
             release_all.set()
             acquisition_committed.set()
@@ -3087,5 +3088,17 @@ class TestBatchBMinimalIntegration:
             # Join threads (may already be joined above, but ensure in case of early exit)
             for thread in threads_started:
                 thread.join(timeout=5.0)
+            
+            # Gap 四: Assert threads stopped — never proceed with live workers
+            live_threads = [t for t in threads_started if t.is_alive()]
+            if live_threads:
+                # Report error with precise isolated resources
+                thread_names = [t.name for t in live_threads]
+                raise RuntimeError(
+                    f"Gap 四 VIOLATION: Threads still alive after join timeout: {thread_names}. "
+                    f"Resources: user_id={user_id}, paper_run_id={paper_run_id}, "
+                    f"portfolio_id={portfolio_id}, study_run_id={study_run_id}. "
+                    f"Cannot proceed to cleanup with live workers."
+                )
         
 # Updated test count: 31 + 7 + 2 + 1 + 3 + 1 = 45 methods across 14 classes
