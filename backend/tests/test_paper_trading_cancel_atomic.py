@@ -75,6 +75,9 @@ from test_target_guard import verify_test_target, TargetGuardError, get_test_db_
 def session_factory():
     """Create explicit session factory for test isolation.
 
+    P1 C Commit: Actually use shared verified factory from test_target_guard.
+    Both atomic and historical fixtures use this same entry point.
+
     Tests must NOT override global SessionLocal. Use this factory to create
     independent sessions for concurrent operations.
 
@@ -84,20 +87,18 @@ def session_factory():
     TARGET GUARD: Verifies actual DB/role/server before any write.
     Stops if target doesn't match approved test environment.
     """
+    from test_target_guard import create_verified_session_factory
+    
     db_url = get_test_db_url()
-    engine = create_engine(db_url, pool_pre_ping=True)
-
-    # TARGET GUARD: Verify actual DB/role/server before any write
-    with engine.connect() as conn:
-        try:
-            actual_target = verify_test_target(conn)
-        except TargetGuardError as e:
-            engine.dispose()
-            raise RuntimeError(f"TARGET GUARD FAILED: {e}") from e
-
-    factory = sessionmaker(bind=engine)
-    yield factory
-    engine.dispose()
+    
+    # P1 C Commit 1: Actually call shared verified factory
+    guarded_factory, engine = create_verified_session_factory(db_url)
+    
+    try:
+        yield guarded_factory
+    finally:
+        # P1 C Commit 2: Complete resource release on both success and failure
+        engine.dispose()
 
 
 @pytest.fixture
