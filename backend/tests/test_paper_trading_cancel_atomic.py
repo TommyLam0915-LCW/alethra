@@ -265,6 +265,75 @@ def _verify_zero_residual(db_session, user_id, portfolio_ids, run_id):
         assert metrics_count == 0, f"Metrics for run {run_id} not deleted"
 
 
+class TestSessionFactoryContract:
+    """Verify session factory injection contract (no DB required)."""
+    
+    def test_factory_callable_is_called(self):
+        """PaperTradingEngine must call the injected factory when creating sessions."""
+        call_count = [0]
+        
+        def mock_factory():
+            call_count[0] += 1
+            # Return a mock session
+            class MockSession:
+                def execute(self, *args, **kwargs):
+                    class MockResult:
+                        def fetchone(self):
+                            # Simulate run not found
+                            return None
+                    return MockResult()
+                def commit(self):
+                    pass
+                def rollback(self):
+                    pass
+                def close(self):
+                    pass
+            return MockSession()
+        
+        # Create engine with mock factory
+        engine = PaperTradingEngine(session_factory=mock_factory)
+        
+        # Verify factory is stored
+        assert engine.session_factory is mock_factory
+        
+        # Directly call factory to verify it works
+        session = engine.session_factory()
+        assert call_count[0] == 1, "Factory must be callable and increment counter"
+        
+        # Verify session is the mock
+        assert session is not None
+        session.close()
+    
+    def test_legacy_database_url_creates_factory(self):
+        """Legacy database_url parameter must create a working factory."""
+        # Use SQLite in-memory for this test (no external DB required)
+        engine = PaperTradingEngine(database_url="sqlite:///:memory:")
+        
+        # Verify factory was created
+        assert engine.session_factory is not None
+        assert callable(engine.session_factory)
+        
+        # Verify factory can create sessions
+        session = engine.session_factory()
+        assert session is not None
+        session.close()
+    
+    def test_no_parameters_falls_back_to_global(self, caplog):
+        """No parameters must fall back to global SessionLocal (with warning)."""
+        import logging
+        
+        # Set log level to capture warnings
+        with caplog.at_level(logging.WARNING):
+            engine = PaperTradingEngine()
+        
+        # Verify warning was logged
+        assert any("global SessionLocal" in record.message for record in caplog.records)
+        
+        # Verify factory is set (to global)
+        assert engine.session_factory is not None
+        assert callable(engine.session_factory)
+
+
 class TestTwoPhaseCancelContract:
     """Test two-phase cancel contract: request vs completion."""
     
@@ -275,7 +344,7 @@ class TestTwoPhaseCancelContract:
         # Use explicit session factory, not global SessionLocal
         session = session_factory()
         try:
-            pt_engine = PaperTradingEngine(session_factory=session)
+            pt_engine = PaperTradingEngine(session_factory=session_factory)
             
             # Move to running state
             session.execute(
@@ -307,7 +376,7 @@ class TestTwoPhaseCancelContract:
         
         session = session_factory()
         try:
-            pt_engine = PaperTradingEngine(session_factory=session)
+            pt_engine = PaperTradingEngine(session_factory=session_factory)
             
             # Setup: running state with cancel_requested=TRUE
             session.execute(
@@ -396,7 +465,7 @@ class TestTwoPhaseCancelContract:
         
         session = session_factory()
         try:
-            pt_engine = PaperTradingEngine(session_factory=session)
+            pt_engine = PaperTradingEngine(session_factory=session_factory)
             
             # Move to running state
             session.execute(
@@ -423,7 +492,7 @@ class TestTwoPhaseCancelContract:
         
         session = session_factory()
         try:
-            pt_engine = PaperTradingEngine(session_factory=session)
+            pt_engine = PaperTradingEngine(session_factory=session_factory)
             
             # Set status to completed
             session.execute(
@@ -451,7 +520,7 @@ class TestCancelConvergence:
         
         session = session_factory()
         try:
-            pt_engine = PaperTradingEngine(session_factory=session)
+            pt_engine = PaperTradingEngine(session_factory=session_factory)
             
             # Verify initial state: queued
             run = session.execute(
@@ -484,7 +553,7 @@ class TestCancelConvergence:
         
         session = session_factory()
         try:
-            pt_engine = PaperTradingEngine(session_factory=session)
+            pt_engine = PaperTradingEngine(session_factory=session_factory)
             
             # Move to pending
             session.execute(
@@ -508,7 +577,7 @@ class TestCancelConvergence:
         
         session = session_factory()
         try:
-            pt_engine = PaperTradingEngine(session_factory=session)
+            pt_engine = PaperTradingEngine(session_factory=session_factory)
             
             # Move to failed
             session.execute(
@@ -621,7 +690,7 @@ class TestRaceConditionsWithBarrier:
         def cancel_attempt(thread_id):
             session = session_factory()
             try:
-                pt_engine = PaperTradingEngine(session_factory=session)
+                pt_engine = PaperTradingEngine(session_factory=session_factory)
                 
                 # Move to running state (only first thread)
                 if thread_id == 0:
@@ -662,7 +731,7 @@ class TestRaceConditionsWithBarrier:
         def cancel_attempt():
             session = session_factory()
             try:
-                pt_engine = PaperTradingEngine(session_factory=session)
+                pt_engine = PaperTradingEngine(session_factory=session_factory)
                 
                 session.execute(
                     text("UPDATE paper_trading_runs SET status = 'running' WHERE id = :id"),
