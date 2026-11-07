@@ -132,7 +132,7 @@ class TestEMAFiniteState:
         )
 
     def test_200bar完整事件比較(self):
-        """200-bar test: verify all events match between live and research."""
+        """200-bar test: verify EMA values at actual bar indices, not signal sequence."""
         gen = SignalGenerator("BTC-USD", "range_fade", 1)
         
         # Create 200 bars with realistic pattern
@@ -143,59 +143,57 @@ class TestEMAFiniteState:
         
         bars = create_price_sequence(prices)
         
-        # Feed bars to live system
+        # Feed bars to live system, tracking ACTUAL bar index
         live_signals = []
-        for bar in bars:
+        ema_comparisons = []
+        max_ema20_error = 0.0
+        max_ema50_error = 0.0
+        
+        for bar_idx, bar in enumerate(bars):
             gen.on_bar(bar)
             signal = gen.generate_signal()
             if signal is not None:
                 live_signals.append({
-                    "bar_index": len(live_signals),
+                    "bar_index": bar_idx,  # ACTUAL bar index, not signal sequence
                     "type": signal.signal_type.value,
                     "price": signal.price,
-                    "ema20": gen.get_ema20(),
-                    "ema50": gen.get_ema50(),
                 })
-        
-        # Calculate research signals
-        lab_bars = [
-            LabBar(
-                open_time=datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(minutes=i),
-                interval_minutes=1,
-                open=Decimal(str(p)),
-                high=Decimal(str(p + 50)),
-                low=Decimal(str(p - 50)),
-                close=Decimal(str(p)),
-                volume=Decimal("1000"),
-            )
-            for i, p in enumerate(prices)
-        ]
-        
-        # Verify EMA values at each signal point
-        for sig in live_signals:
-            bar_idx = sig["bar_index"]
-            if bar_idx >= 50:  # Only check after both EMAs are warm
-                research_ema20 = TechnicalIndicators.ema(prices[:bar_idx+1], 20)
-                research_ema50 = TechnicalIndicators.ema(prices[:bar_idx+1], 50)
                 
-                ema20_error = abs(sig["ema20"] - research_ema20)
-                ema50_error = abs(sig["ema50"] - research_ema50)
-                
-                assert ema20_error < 1e-8, (
-                    f"Bar {bar_idx}: EMA20 error {ema20_error:.2e} "
-                    f"(live={sig['ema20']:.8f}, research={research_ema20:.8f})"
-                )
-                assert ema50_error < 1e-8, (
-                    f"Bar {bar_idx}: EMA50 error {ema50_error:.2e} "
-                    f"(live={sig['ema50']:.8f}, research={research_ema50:.8f})"
-                )
+                # Compare EMA values after warmup
+                if bar_idx >= 50:
+                    live_ema20 = gen.get_ema20()
+                    live_ema50 = gen.get_ema50()
+                    
+                    # Calculate research EMA using same prices up to this bar
+                    research_ema20 = TechnicalIndicators.ema(prices[:bar_idx+1], 20)
+                    research_ema50 = TechnicalIndicators.ema(prices[:bar_idx+1], 50)
+                    
+                    if research_ema20 is not None and live_ema20 is not None:
+                        error = abs(research_ema20 - live_ema20)
+                        max_ema20_error = max(max_ema20_error, error)
+                        ema_comparisons.append(("ema20", bar_idx, error))
+                    
+                    if research_ema50 is not None and live_ema50 is not None:
+                        error = abs(research_ema50 - live_ema50)
+                        max_ema50_error = max(max_ema50_error, error)
+                        ema_comparisons.append(("ema50", bar_idx, error))
         
-        # Report statistics
+        # ASSERT that comparisons were actually executed
+        assert len(ema_comparisons) > 0, "No EMA comparisons executed - bar_index bug"
+        # 28 signals × 2 EMAs = 56 comparisons (after bar 50 warmup)
+        assert len(ema_comparisons) >= 50, f"Expected >= 50 comparisons, got {len(ema_comparisons)}"
+        
+        # ASSERT actual precision, not hardcoded threshold
+        assert max_ema20_error < 1e-8, f"EMA20 max error {max_ema20_error:.2e} exceeds 1e-8"
+        assert max_ema50_error < 1e-8, f"EMA50 max error {max_ema50_error:.2e} exceeds 1e-8"
+        
+        # Report actual statistics
         print(f"\n200-bar test statistics:")
         print(f"  Total bars: 200")
         print(f"  Total signals: {len(live_signals)}")
-        print(f"  EMA20 max error: < 1e-8")
-        print(f"  EMA50 max error: < 1e-8")
+        print(f"  EMA comparisons executed: {len(ema_comparisons)}")
+        print(f"  EMA20 max error: {max_ema20_error:.2e}")
+        print(f"  EMA50 max error: {max_ema50_error:.2e}")
         print(f"  Seed buffer size: {len(gen.seed_prices)}")
         print(f"  Bars seen: {gen.bars_seen}")
 
