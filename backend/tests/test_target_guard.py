@@ -13,10 +13,11 @@ from sqlalchemy import text
 
 
 # Approved test target configuration
+# NARROWED: Only allow explicit localhost, not IP variants or Unix socket
 APPROVED_TEST_TARGET = {
     "db_name": "ai_investment_lab_test",
     "role": "alethra_test_runtime",
-    "server": "localhost",
+    "server": "localhost",  # Only 'localhost', not '127.0.0.1', '::1', or empty
     "port": 5432,
 }
 
@@ -80,10 +81,10 @@ def verify_test_target(session) -> dict:
     if actual_role != APPROVED_TEST_TARGET["role"]:
         errors.append(f"Role mismatch: expected {APPROVED_TEST_TARGET['role']!r}, got {actual_role!r}")
     
-    # Server check: localhost can be '127.0.0.1', '::1', or empty string (Unix socket)
-    approved_servers = {"localhost", "127.0.0.1", "::1", "", None}
-    if actual_server not in approved_servers:
-        errors.append(f"Server mismatch: expected one of {approved_servers}, got {actual_server!r}")
+    # Server check: NARROWED to only allow explicit 'localhost'
+    # Reject IP variants (127.0.0.1, ::1) and Unix socket (empty string)
+    if actual_server != APPROVED_TEST_TARGET["server"]:
+        errors.append(f"Server mismatch: expected {APPROVED_TEST_TARGET['server']!r}, got {actual_server!r}")
     
     # Port check: skip if None (Unix socket connections don't have a TCP port)
     if actual_port is not None and actual_port != APPROVED_TEST_TARGET["port"]:
