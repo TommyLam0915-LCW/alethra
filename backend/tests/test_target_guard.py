@@ -164,6 +164,33 @@ def _verify_socket_file_exists(socket_dir: str, port: int = 5432) -> bool:
         return False
 
 
+def _mask_url_credentials(db_url: str) -> str:
+    """Mask password in URL for safe logging. Returns URL with password replaced by '***'."""
+    if not isinstance(db_url, str):
+        return "<unparseable URL>"
+    
+    try:
+        parsed = urlparse(db_url)
+        if parsed.password:
+            # Reconstruct netloc with masked password
+            # netloc format: [user[:password]@]host[:port]
+            userinfo = parsed.username or ""
+            hostinfo = parsed.hostname or ""
+            if parsed.port:
+                hostinfo = f"{hostinfo}:{parsed.port}"
+            
+            if userinfo:
+                new_netloc = f"{userinfo}:***@{hostinfo}"
+            else:
+                new_netloc = hostinfo
+            
+            masked = parsed._replace(netloc=new_netloc)
+            return masked.geturl()
+        return db_url
+    except Exception:
+        return "<unparseable URL>"
+
+
 def verify_test_target(session, db_url: str = None) -> dict:
     """Verify database session matches approved test target.
 
@@ -256,7 +283,7 @@ def verify_test_target(session, db_url: str = None) -> dict:
                 if socket_dir is None:
                     errors.append(
                         f"Unix socket mode but no host= query parameter in URL. "
-                        f"Ambiguous socket target rejected. URL: {db_url!r}"
+                        f"Ambiguous socket target rejected. URL: {_mask_url_credentials(db_url)!r}"
                     )
                 elif socket_dir == "":
                     errors.append(
@@ -634,6 +661,46 @@ def test_socket_validation_no_host_param_rejected():
     socket_dir = _extract_socket_dir_from_url(url)
     assert socket_dir is None
     # None means no explicit socket dir — rejected by validation
+
+
+# === Gap 4: Credential masking tests ===
+
+def test_mask_url_credentials_with_password():
+    """URL with password is masked."""
+    url = "postgresql://user:secretpassword@localhost:5432/db"
+    masked = _mask_url_credentials(url)
+    assert "secretpassword" not in masked
+    assert "***" in masked
+    assert "user" in masked
+    assert "localhost" in masked
+
+
+def test_mask_url_credentials_without_password():
+    """URL without password is unchanged."""
+    url = "postgresql://user@localhost:5432/db"
+    masked = _mask_url_credentials(url)
+    assert masked == url
+
+
+def test_mask_url_credentials_unparseable():
+    """Non-string input returns safe placeholder."""
+    # None would cause an exception in urlparse
+    masked = _mask_url_credentials(None)
+    assert masked == "<unparseable URL>"
+    
+    # Invalid type would cause an exception
+    masked = _mask_url_credentials(123)
+    assert masked == "<unparseable URL>"
+
+
+def test_error_message_masks_credentials():
+    """Error messages don't expose passwords."""
+    # Simulate an error with a URL containing a password
+    url_with_password = "postgresql://user:secretpassword@/db"
+    masked = _mask_url_credentials(url_with_password)
+    error_msg = f"Ambiguous socket target rejected. URL: {masked!r}"
+    assert "secretpassword" not in error_msg
+    assert "***" in error_msg
 
 
 # === Tests for is_local_database_url (Gap 二) ===
