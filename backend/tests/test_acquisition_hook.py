@@ -1432,26 +1432,43 @@ def test_real_abort_during_wait_no_inject_verify_closed():
     result = session.execute(acquisition_query, {"id": 123})
     result.fetchone()
     
+    # Explicit handshake: thread_started signals when commit thread begins
+    thread_started = threading.Event()
+    thread_result = {"exception": None}
+    
     # Start commit in a thread
     def commit_thread():
+        thread_started.set()  # Signal thread has started
         try:
             session.commit()
-        except AbortError:
-            pass
+        except Exception as e:
+            thread_result["exception"] = e
     
     thread = threading.Thread(target=commit_thread)
     thread.start()
     
-    # Wait a bit for commit to reach the wait
+    # Wait for thread to start
+    assert thread_started.wait(timeout=1.0), "Thread did not start"
+    
+    # Small delay to ensure thread reaches the wait
     import time
     time.sleep(0.1)
     
     # Signal abort
     abort_event.set()
     
-    thread.join(timeout=1.0)
+    # Join with timeout
+    thread.join(timeout=2.0)
     
-    # AbortError raised, no injection
+    # Assert thread stopped
+    assert not thread.is_alive(), "Thread did not stop"
+    
+    # Assert AbortError was raised
+    assert thread_result["exception"] is not None, "No exception raised"
+    assert isinstance(thread_result["exception"], AbortError), \
+        f"Expected AbortError, got {type(thread_result['exception'])}"
+    
+    # No injection
     assert shared_results["signal_count"] == 1  # Signal happened before wait
     assert shared_results["injection_count"] == 0  # No injection
     
@@ -1524,8 +1541,10 @@ def test_success_with_row_callback_pending_close_assertions():
     mock_session = MagicMock()
     mock_factory = MagicMock(return_value=mock_session)
     
+    # Create expected row object for identity assertion
+    expected_row = (123,)
     mock_result = MagicMock()
-    mock_result.fetchone.return_value = (123,)
+    mock_result.fetchone.return_value = expected_row
     mock_session.execute.return_value = mock_result
     mock_session.commit.side_effect = None
     
@@ -1565,10 +1584,9 @@ def test_success_with_row_callback_pending_close_assertions():
     """)
     result = session.execute(acquisition_query, {"id": 123})
     
-    # Row identity assertion
+    # Row identity assertion - call fetchone only once
     row = result.fetchone()
-    assert row == (123,)
-    assert row[0] is 123 or row[0] == 123  # Identity or equality
+    assert row is expected_row, f"Row identity failed: expected {id(expected_row)}, got {id(row)}"
     
     # Pending set
     assert session._acquisition_state.acquisition_pending is True
@@ -1586,6 +1604,93 @@ def test_success_with_row_callback_pending_close_assertions():
     
     # Verify session closed
     mock_verify_session.close.assert_called_once()
+    
+    # Verify fetchone called only once on underlying result
+    assert mock_result.fetchone.call_count == 1
 
 
-# Total: 30 + 10 = 40 tests
+def test_concurrent_b_updates_while_a_in_callback_wait():
+    """A is in callback/wait, B can still update counts concurrently."""
+    # This test verifies that the narrow lock scope allows B to access
+    # shared_results without deadlock while A is in callback/wait.
+    
+    mock_session = MagicMock()
+    mock_factory = MagicMock(return_value=mock_session)
+    
+    mock_result = MagicMock()
+    mock_result.fetchone.return_value = (123,)
+    mock_session.execute.return_value = mock_result
+    mock_session.commit.side_effect = None
+    
+    mock_verify_session = MagicMock()
+    mock_verify_result = MagicMock()
+    mock_verify_result.fetchone.return_value = ("running",)
+    mock_verify_session.execute.return_value = mock_verify_result
+    
+    call_count = [0]
+    def factory_side_effect():
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return mock_session
+        else:
+            return mock_verify_session
+    
+    mock_factory.side_effect = factory_side_effect
+    
+    # Track callback entry
+    callback_entered = threading.Event()
+    callback_can_exit = threading.Event()
+    
+    def on_acquisition_committed():
+        callback_entered.set()
+        # Wait in callback to simulate long-running operation
+        callback_can_exit.wait(timeout=2.0)
+    
+    shared_results = {"signal_count": 0, "injection_count": 0}
+    
+    hooked_factory = create_hooked_session_factory(
+        base_factory=mock_factory,
+        target_run_id=123,
+        on_acquisition_committed=on_acquisition_committed,
+        shared_results=shared_results,
+    )
+    
+    # Session A: acquisition and commit (will enter callback and wait)
+    session_a = hooked_factory()
+    acquisition_query = text("""
+        UPDATE paper_trading_runs
+        SET status = 'running'
+        WHERE id = :id AND status IN ('queued')
+          AND cancel_requested = FALSE
+        RETURNING id
+    """)
+    result_a = session_a.execute(acquisition_query, {"id": 123})
+    result_a.fetchone()
+    
+    # Start A's commit in a thread
+    a_thread = threading.Thread(target=session_a.commit)
+    a_thread.start()
+    
+    # Wait for A to enter callback
+    assert callback_entered.wait(timeout=1.0), "A did not enter callback"
+    
+    # While A is in callback, B can still access shared_results
+    # (This would deadlock if lock scope was too broad)
+    session_b = hooked_factory()
+    session_b.commit()  # No pending, just accesses shared_results
+    
+    # B completed without deadlock - this is the key assertion
+    # signal_count is already 1 because A incremented it before callback
+    assert shared_results["signal_count"] == 1
+    
+    # Allow A's callback to exit
+    callback_can_exit.set()
+    
+    a_thread.join(timeout=2.0)
+    assert not a_thread.is_alive(), "A thread did not complete"
+    
+    # A's signal was counted
+    assert shared_results["signal_count"] == 1
+
+
+# Total: 30 + 10 + 1 = 41 tests

@@ -191,29 +191,32 @@ def create_hooked_session_factory(
                     
                     verification_succeeded = True
                     
-                    # Fix 3: Increment shared totals with lock protection
+                    # Fix 3: Increment signal_count with lock protection (narrow scope)
                     with shared_lock:
                         if shared_results is not None:
                             shared_results["signal_count"] = shared_results.get("signal_count", 0) + 1
-                        
-                        if on_acquisition_committed:
-                            on_acquisition_committed()
-                        
-                        # Wait for cancel with abort support
-                        if cancel_committed_event:
-                            abort_aware_wait_or_raise(
-                                cancel_committed_event,
-                                abort_event=abort_event,
-                                timeout=30.0,
-                                error_context="waiting for cancel commit"
-                            )
-                        
-                        # Inject exception to test post-acquisition error handler
-                        # Fix 4: injected_exception is pre-built once by caller
-                        if inject_exception_after_cancel and injected_exception is not None:
+                    
+                    # Callback outside lock
+                    if on_acquisition_committed:
+                        on_acquisition_committed()
+                    
+                    # Wait for cancel with abort support (outside lock)
+                    if cancel_committed_event:
+                        abort_aware_wait_or_raise(
+                            cancel_committed_event,
+                            abort_event=abort_event,
+                            timeout=30.0,
+                            error_context="waiting for cancel commit"
+                        )
+                    
+                    # Inject exception to test post-acquisition error handler
+                    # Fix 4: injected_exception is pre-built once by caller
+                    if inject_exception_after_cancel and injected_exception is not None:
+                        # Increment injection_count with lock protection (narrow scope)
+                        with shared_lock:
                             if shared_results is not None:
                                 shared_results["injection_count"] = shared_results.get("injection_count", 0) + 1
-                            raise injected_exception
+                        raise injected_exception
                 finally:
                     # Fix 1: Always consume pending after commit (success or failure)
                     session_state.acquisition_pending = False
