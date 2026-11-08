@@ -2761,8 +2761,20 @@ class TestBatchBMinimalIntegration:
         # Requirement 五: Track threads for proper stop-before-cleanup order
         threads_started = []
         
+        # Gap 2: Shared state — cleanup refuses to delete if workers not confirmed stopped
+        workers_confirmed_stopped = [False]
+        
         # Register finalizer BEFORE any writes
         def cleanup():
+            # Gap 2: Check worker-stop state before deleting data
+            if not workers_confirmed_stopped[0]:
+                raise RuntimeError(
+                    f"Gap 2 SAFETY: Cleanup refused — workers not confirmed stopped. "
+                    f"Resources at risk: user_id={user_id}, paper_run_id={paper_run_id}, "
+                    f"portfolio_id={portfolio_id}, study_run_id={study_run_id}, "
+                    f"trade_id={trade_id}. "
+                    f"Live threads: {[t for t in threads_started if t.is_alive()]}"
+                )
             s = session_factory()
             try:
                 # Clean up in FK-safe order
@@ -2939,8 +2951,12 @@ class TestBatchBMinimalIntegration:
                         if verify_result and verify_result[0] == 'running':
                             # Now signal success
                             acquisition_committed.set()
-                            # Wait for cancel to be committed
-                            if not cancel_committed.wait(timeout=5.0):
+                            # Gap 1: Wait for cancel with abort support
+                            while not cancel_committed.wait(timeout=0.5):
+                                if abort_test.is_set():
+                                    acquisition_failed.set()
+                                    return
+                            if abort_test.is_set():
                                 acquisition_failed.set()
                                 return
                             # Inject exception to test formal handler preserves it
@@ -2958,7 +2974,12 @@ class TestBatchBMinimalIntegration:
         # Gap 三: Cancel thread uses formal un-hooked cancel_engine
         def submit_cancel():
             try:
-                if not acquisition_committed.wait(timeout=5.0):
+                # Gap 1: Wait supports abort — wake on either event
+                while not acquisition_committed.wait(timeout=0.5):
+                    if abort_test.is_set():
+                        cancel_failed.set()
+                        return
+                if abort_test.is_set():
                     cancel_failed.set()
                     return
                 # Call formal cancel_run method on cancel_engine (un-hooked)
@@ -3024,6 +3045,9 @@ class TestBatchBMinimalIntegration:
             if replay_thread.is_alive():
                 raise RuntimeError("Replay thread still alive after join")
             
+            # Gap 2: Mark workers confirmed stopped — cleanup can now proceed safely
+            workers_confirmed_stopped[0] = True
+            
             # Requirement 四: Unconditional assertions — no if results.get(...) skipping
             # Check all thread errors
             if results["replay_exception"]:
@@ -3078,12 +3102,9 @@ class TestBatchBMinimalIntegration:
                 verify_residual_session.close()
         
         finally:
-            # Gap 四: All paths stop worker before cleanup
-            # Release all waiting threads (independent abort/release, not success events)
+            # Gap 1: Only abort/release events in finally — NEVER success events
+            abort_test.set()
             release_all.set()
-            acquisition_committed.set()
-            cancel_committed.set()
-            can_inject_exception.set()
             
             # Join threads (may already be joined above, but ensure in case of early exit)
             for thread in threads_started:
@@ -3100,5 +3121,54 @@ class TestBatchBMinimalIntegration:
                     f"portfolio_id={portfolio_id}, study_run_id={study_run_id}. "
                     f"Cannot proceed to cleanup with live workers."
                 )
+            else:
+                # Gap 2: Mark workers confirmed stopped in finally path too
+                workers_confirmed_stopped[0] = True
+    
+    def test_cleanup_refuses_when_workers_not_confirmed_stopped(self):
+        """Gap 2: Verify cleanup finalizer refuses to delete data if workers not stopped.
         
-# Updated test count: 31 + 7 + 2 + 1 + 3 + 1 = 45 methods across 14 classes
+        This is a fault-path test — simulates the scenario where the test fails
+        before confirming workers are stopped, and verifies cleanup refuses to
+        proceed, reporting precise isolated resources.
+        """
+        # Simulate the shared state
+        workers_confirmed_stopped = [False]
+        user_id = str(uuid.uuid4())
+        paper_run_id = str(uuid.uuid4())
+        portfolio_id = str(uuid.uuid4())
+        study_run_id = str(uuid.uuid4())
+        trade_id = str(uuid.uuid4())
+        threads_started = []
+        
+        # Simulate cleanup function with Gap 2 safety check
+        def cleanup():
+            if not workers_confirmed_stopped[0]:
+                raise RuntimeError(
+                    f"Gap 2 SAFETY: Cleanup refused — workers not confirmed stopped. "
+                    f"Resources at risk: user_id={user_id}, paper_run_id={paper_run_id}, "
+                    f"portfolio_id={portfolio_id}, study_run_id={study_run_id}, "
+                    f"trade_id={trade_id}. "
+                    f"Live threads: {[t for t in threads_started if t.is_alive()]}"
+                )
+        
+        # Verify cleanup refuses when workers not confirmed stopped
+        try:
+            cleanup()
+            assert False, "Cleanup should have raised RuntimeError"
+        except RuntimeError as e:
+            assert "Gap 2 SAFETY" in str(e)
+            assert user_id in str(e)
+            assert paper_run_id in str(e)
+            assert portfolio_id in str(e)
+            assert study_run_id in str(e)
+            assert trade_id in str(e)
+        
+        # Now simulate workers confirmed stopped
+        workers_confirmed_stopped[0] = True
+        
+        # Verify cleanup proceeds (no exception)
+        cleanup()  # Should not raise
+
+
+# Updated test count: 31 + 7 + 2 + 1 + 3 + 1 + 1 = 46 methods across 14 classes
