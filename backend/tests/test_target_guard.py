@@ -51,17 +51,27 @@ def _extract_socket_dir_from_url(db_url: str):
 
     Returns None if no socket host parameter found.
     Returns empty string if host= is explicitly empty (will be rejected).
-    Raises TargetGuardError if multiple conflicting host values found.
+    Raises TargetGuardError if:
+    - Multiple conflicting host values found
+    - Both authority hostname AND query host= present (ambiguous)
     """
     parsed = urlparse(db_url)
-
-    # If hostname is present, this is TCP mode, not Unix socket
-    if parsed.hostname:
-        return None
 
     # Parse query parameters for host=
     query_params = parse_qs(parsed.query, keep_blank_values=True)
     host_values = query_params.get("host", [])
+
+    # SECURITY: Reject if both authority hostname and query host= are present
+    # This is ambiguous — is it TCP to hostname or socket at host=?
+    if parsed.hostname and host_values:
+        raise TargetGuardError(
+            f"URL has both authority hostname ({parsed.hostname!r}) and "
+            f"query host= ({host_values!r}). Ambiguous connection target rejected."
+        )
+
+    # If hostname is present (without query host), this is TCP mode, not Unix socket
+    if parsed.hostname:
+        return None
 
     if not host_values:
         return None
@@ -73,6 +83,34 @@ def _extract_socket_dir_from_url(db_url: str):
         )
 
     return host_values[0]
+
+
+def _extract_port_from_url(db_url: str) -> int:
+    """Extract port from PostgreSQL connection URL.
+
+    Returns the port from:
+    - URL authority: postgresql://user@host:PORT/db
+    - Query param: postgresql://user@/db?host=/tmp&port=5433
+    - Config default if neither specified
+
+    Returns None if no port specified (caller should use config default).
+    """
+    parsed = urlparse(db_url)
+
+    # Check query param first (explicit port= overrides authority port for socket)
+    query_params = parse_qs(parsed.query)
+    port_values = query_params.get("port", [])
+    if port_values:
+        try:
+            return int(port_values[0])
+        except (ValueError, IndexError):
+            pass
+
+    # Fallback to authority port
+    if parsed.port:
+        return parsed.port
+
+    return None
 
 
 def _verify_socket_file_exists(socket_dir: str, port: int = 5432) -> bool:
@@ -194,11 +232,21 @@ def verify_test_target(session, db_url: str = None) -> dict:
                         f"Unix socket directory not approved: {socket_dir!r}. "
                         f"Approved: {approved_dirs}"
                     )
-                elif not _verify_socket_file_exists(socket_dir, socket_port):
-                    errors.append(
-                        f"PostgreSQL socket file not found or not a socket at "
-                        f"{socket_dir}/.s.PGSQL.{socket_port}"
-                    )
+                else:
+                    # Check URL port vs socket file port consistency
+                    url_port = _extract_port_from_url(db_url)
+                    if url_port is not None and url_port != socket_port:
+                        errors.append(
+                            f"Socket URL port mismatch: URL specifies port {url_port} "
+                            f"but approved socket port is {socket_port}. "
+                            f"Socket file would be at {socket_dir}/.s.PGSQL.{socket_port}, "
+                            f"not {socket_dir}/.s.PGSQL.{url_port}."
+                        )
+                    elif not _verify_socket_file_exists(socket_dir, socket_port):
+                        errors.append(
+                            f"PostgreSQL socket file not found or not a socket at "
+                            f"{socket_dir}/.s.PGSQL.{socket_port}"
+                        )
     else:
         tcp_policy = APPROVED_TEST_TARGET["tcp"]
         if actual_server_addr != tcp_policy["server_ip"]:
@@ -229,6 +277,10 @@ def create_verified_session_factory(db_url: str):
     The first session created will verify the target. If verification fails,
     no sessions are returned and RuntimeError is raised.
     
+    All failure paths guarantee:
+    - verify_session is closed
+    - engine is disposed (no leaked connections)
+    
     Args:
         db_url: Database URL
         
@@ -237,6 +289,7 @@ def create_verified_session_factory(db_url: str):
         
     Raises:
         TargetGuardError: If initial verification fails
+        Exception: If session creation or verification fails for any reason
     """
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
@@ -245,16 +298,19 @@ def create_verified_session_factory(db_url: str):
     factory = sessionmaker(bind=engine)
     
     # Verify target on first session
-    verify_session = factory()
+    # All failure paths must close session and dispose engine
+    verify_session = None
     try:
+        verify_session = factory()
         actual_target = verify_test_target(verify_session, db_url=db_url)
-    except TargetGuardError:
-        # P1 C8: On rejection, verify session is closed and engine is disposed
+    except Exception:
+        # ANY failure: dispose engine (closes all pooled connections)
         engine.dispose()
         raise
     finally:
-        # P1 Commit 1.1: Use standard finally close, not is_closed check
-        verify_session.close()
+        # Always close the verification session
+        if verify_session is not None:
+            verify_session.close()
     
     # P1 C9: Return factory that can create sessions
     def guarded_factory():
@@ -322,19 +378,74 @@ def test_extract_socket_dir_multiple_hosts_rejected():
         assert "Multiple host parameters" in str(e)
 
 
-def test_verify_socket_file_exists_approved_dir():
-    """Socket file exists in approved directory."""
-    assert _verify_socket_file_exists("/tmp", 5432) is True
+def test_extract_socket_dir_authority_and_query_host_conflict():
+    """URL with both authority hostname AND query host= is rejected (ambiguous)."""
+    url = "postgresql://user@localhost/db?host=/tmp"
+    try:
+        _extract_socket_dir_from_url(url)
+        assert False, "Should have raised TargetGuardError"
+    except TargetGuardError as e:
+        assert "both authority hostname" in str(e) and "query host=" in str(e)
 
 
-def test_verify_socket_file_exists_wrong_dir():
-    """Socket file doesn't exist in unapproved directory."""
-    assert _verify_socket_file_exists("/evil", 5432) is False
+def test_extract_port_from_url_query_param():
+    """Port extracted from query param takes precedence."""
+    url = "postgresql://user@/db?host=/tmp&port=5433"
+    assert _extract_port_from_url(url) == 5433
 
 
-def test_verify_socket_file_exists_wrong_port():
-    """Socket file doesn't exist for wrong port."""
-    assert _verify_socket_file_exists("/tmp", 9999) is False
+def test_extract_port_from_url_authority():
+    """Port extracted from authority when no query param."""
+    url = "postgresql://user@localhost:5433/db"
+    assert _extract_port_from_url(url) == 5433
+
+
+def test_extract_port_from_url_none():
+    """No port returns None."""
+    url = "postgresql://user@/db?host=/tmp"
+    assert _extract_port_from_url(url) is None
+
+
+def test_verify_socket_file_exists_mocked_socket():
+    """Socket file exists — mocked to not depend on real PostgreSQL."""
+    from unittest.mock import patch, MagicMock
+    import stat as stat_module
+    
+    mock_stat_result = MagicMock()
+    mock_stat_result.st_mode = stat_module.S_IFSOCK | 0o755
+    
+    with patch("os.path.exists", return_value=True), \
+         patch("os.stat", return_value=mock_stat_result):
+        assert _verify_socket_file_exists("/tmp", 5432) is True
+
+
+def test_verify_socket_file_exists_mocked_not_socket():
+    """File exists but is not a socket type — mocked."""
+    from unittest.mock import patch, MagicMock
+    import stat as stat_module
+    
+    mock_stat_result = MagicMock()
+    mock_stat_result.st_mode = stat_module.S_IFREG | 0o644  # Regular file
+    
+    with patch("os.path.exists", return_value=True), \
+         patch("os.stat", return_value=mock_stat_result):
+        assert _verify_socket_file_exists("/tmp", 5432) is False
+
+
+def test_verify_socket_file_exists_mocked_not_found():
+    """Socket file doesn't exist — mocked."""
+    from unittest.mock import patch
+    
+    with patch("os.path.exists", return_value=False):
+        assert _verify_socket_file_exists("/evil", 5432) is False
+
+
+def test_verify_socket_file_exists_mocked_wrong_port():
+    """Socket file doesn't exist for wrong port — mocked."""
+    from unittest.mock import patch
+    
+    with patch("os.path.exists", return_value=False):
+        assert _verify_socket_file_exists("/tmp", 9999) is False
 
 
 # === Tests for is_local_database_url (Gap 二) ===
