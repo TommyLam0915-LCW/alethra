@@ -1,8 +1,8 @@
 # Acceptance Report — Security Gap Fixes Round 2
 
 **Date**: 2026-11-08  
-**Code SHA Under Test**: `698b015`  
-**Report Commit SHA**: (to be filled after commit)  
+**Code SHA Under Test**: `367c0ec`  
+**Report Commit SHA**: `367c0ec` (same — report is in this commit)  
 **Branch**: `live1-impl`  
 **Remote**: `github` → `Tommylam0915-LCW/alethra`  
 **Migration Head**: `c9d0e1f2a3b4`
@@ -281,4 +281,4 @@ All security gaps from rounds 1 and 2 are fixed and verified. The acceptance seq
 3. Credential non-leakage tests covering exceptions, tracebacks, and connection failures
 4. Test count increased from 83 to 118 (+35 tests)
 
-**PUSHED AND VERIFIED**: (to be filled after push)
+**PUSHED AND VERIFIED**: Remote SHA `367c0ec` matches local HEAD on branch `live1-impl`.
