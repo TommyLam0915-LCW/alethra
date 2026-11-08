@@ -393,7 +393,7 @@ class TestCleanupThrowsError:
     """Test 6: Cleanup throws error - cleanup error observable, main error preserved."""
     
     def test_cleanup_error_observable_with_main_error(self):
-        """Cleanup throws error - both errors preserved through real finalizer path."""
+        """Cleanup throws error - both errors preserved through exception chain."""
         lifecycle = WorkerLifecycle()
         
         worker_started = threading.Event()
@@ -404,6 +404,8 @@ class TestCleanupThrowsError:
             abort_event.wait(timeout=5.0)
             worker_can_exit.wait(timeout=1.0)
         
+        # Pre-build two distinct exception instances
+        main_error = ValueError("Main flow failed")
         cleanup_error = RuntimeError("Cleanup failed")
         
         def cleanup_callback():
@@ -417,12 +419,7 @@ class TestCleanupThrowsError:
             name="test_worker"
         )
         
-        # Pre-build two distinct exception instances
-        main_error = ValueError("Main flow failed")
-        cleanup_error = RuntimeError("Cleanup failed")
-        
-        caught_main = []
-        caught_cleanup = []
+        caught_exception = []
         
         # Simulate real finalizer path: try/finally with main error
         try:
@@ -441,16 +438,12 @@ class TestCleanupThrowsError:
                 lifecycle.verify_all_stopped()
                 
                 # Cleanup should throw pre-built cleanup_error
+                # This will mask main_error, but Python preserves it in __context__
                 lifecycle.run_cleanup()
                     
-        except ValueError as e:
-            # Should get main_error (pre-built instance)
-            assert e is main_error, f"Expected main_error instance, got {e}"
-            caught_main.append(e)
-        except RuntimeError as e:
+        except Exception as e:
             # Should get cleanup_error (pre-built instance)
-            assert e is cleanup_error, f"Expected cleanup_error instance, got {e}"
-            caught_cleanup.append(e)
+            caught_exception.append(e)
         finally:
             # Ensure cleanup
             worker_can_exit.set()
@@ -458,19 +451,26 @@ class TestCleanupThrowsError:
             if thread.is_alive():
                 thread.join(timeout=1.0)
         
-        # Verify we caught exactly one of the pre-built exceptions
-        # (cleanup_error should be caught, masking main_error)
-        assert len(caught_cleanup) == 1, "Should catch cleanup_error"
-        assert caught_cleanup[0] is cleanup_error, "Caught exception should be pre-built cleanup_error instance"
+        # Verify we caught cleanup_error
+        assert len(caught_exception) == 1, "Should catch one exception"
+        caught = caught_exception[0]
+        assert caught is cleanup_error, f"Caught exception should be cleanup_error instance, got {caught}"
         
-        # Verify both pre-built exception instances are identifiable in lifecycle errors
+        # Verify exception chain: cleanup_error.__context__ should be main_error
+        assert caught.__context__ is main_error, (
+            f"cleanup_error.__context__ should be main_error instance. "
+            f"Got: {caught.__context__}"
+        )
+        
+        # Verify cleanup_error is in lifecycle errors
         all_errors = lifecycle.get_all_errors()
         assert cleanup_error in all_errors, "cleanup_error should be in lifecycle errors"
         
         # Verify we can distinguish the two pre-built instances by identity
         error_ids = [id(e) for e in all_errors]
         assert id(cleanup_error) in error_ids, "cleanup_error instance should be preserved"
-        assert id(main_error) not in error_ids, "main_error should not be in lifecycle errors (it was caught)"
+        # main_error is NOT in lifecycle.errors (it's in __context__, not added by helper)
+        assert id(main_error) not in error_ids, "main_error should not be in lifecycle errors (only in __context__)"
 
 
 class TestRealThreadIntegration:
@@ -687,16 +687,29 @@ class TestFirstIsAliveThrows:
             
             # Monkey-patch thread1.is_alive to throw
             original_is_alive1 = thread1.is_alive
+            original_is_alive2 = thread2.is_alive
             is_alive_error = RuntimeError("is_alive check failed")
             
-            def failing_is_alive():
+            is_alive2_called = []
+            
+            def failing_is_alive1():
                 raise is_alive_error
             
-            thread1.is_alive = failing_is_alive
+            def tracking_is_alive2():
+                # Record that second is_alive was called
+                is_alive2_called.append(True)
+                # Call original is_alive
+                return original_is_alive2()
+            
+            thread1.is_alive = failing_is_alive1
+            thread2.is_alive = tracking_is_alive2
             
             # Verify all stopped - should collect error from first, still check second
             with pytest.raises(WorkerNotStoppedError) as exc_info:
                 lifecycle.verify_all_stopped()
+            
+            # Verify second is_alive was actually called (not skipped due to first error)
+            assert len(is_alive2_called) == 1, "Second is_alive should have been called despite first is_alive error"
             
             # Verify error message mentions the is_alive error
             assert "is_alive" in str(exc_info.value).lower() or "verification errors" in str(exc_info.value).lower()
@@ -714,8 +727,9 @@ class TestFirstIsAliveThrows:
             assert lifecycle.cleanup_called_count == 0
             
         finally:
-            # Restore original is_alive
+            # Restore original is_alives
             thread1.is_alive = original_is_alive1
+            thread2.is_alive = original_is_alive2
             # Ensure cleanup
             worker1_can_exit.set()
             worker2_can_exit.set()
