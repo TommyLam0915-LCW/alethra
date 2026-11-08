@@ -2893,16 +2893,21 @@ class TestBatchBMinimalIntegration:
         # Independent abort/release events (not success events)
         release_all = threading.Event()
         
+        # Pre-build injected exception (requirement 8)
+        injected_exception = RuntimeError("Injected after cancel committed")
+        
         # Track results — Requirement 四: all will be asserted unconditionally
         results = {
             "replay_exception": None,
             "cancel_thread_done": False,
             "replay_thread_done": False,
             "caught_exception": None,
-            "injected_exception": None,
+            "injected_exception": injected_exception,  # Pre-built instance (requirement 8)
             "final_status": None,
             "final_cancel_requested": None,
             "acquisition_hook_hit": False,
+            "signal_count": 0,  # Tracked by hook (requirement 8)
+            "injection_count": 0,  # Tracked by hook (requirement 8)
         }
         
         # Gap 三: Create TWO separate engine instances — replay and cancel
@@ -2933,7 +2938,9 @@ class TestBatchBMinimalIntegration:
             injected_exception=injected_exception,
             inject_exception_after_cancel=True,
             cancel_committed_event=cancel_committed,
+            abort_event=abort_test,
             on_acquisition_committed=on_acquisition_committed,
+            shared_results=results,  # Wire shared results for tracking
         )
         
         # Gap 三: Cancel thread uses formal un-hooked cancel_engine
@@ -3029,6 +3036,14 @@ class TestBatchBMinimalIntegration:
                 f"Formal handler must preserve same exception instance. "
                 f"Injected: {id(results['injected_exception'])}, "
                 f"Caught: {id(results['caught_exception'])}"
+            )
+            
+            # Requirement 8: Unconditional assertions for signal/injection counts
+            assert results["signal_count"] == 1, (
+                f"Signal count must be exactly 1, got {results['signal_count']}"
+            )
+            assert results["injection_count"] == 1, (
+                f"Injection count must be exactly 1, got {results['injection_count']}"
             )
             
             # Verify terminal state on NEW connection

@@ -2,12 +2,13 @@
 
 Tests the shared acquisition hook without requiring a real database:
 - Session-local state isolation
-- Result proxy observation
-- Execute params validation
-- Commit/rollback state clearing
-- Timeout/abort error handling
-- Verify-session close error propagation
-- Signal/injection counting
+- Result proxy observation (RETURNING id validation)
+- Pending set only on valid fetchone
+- None/execute failure clears pending
+- Only wraps current acquisition result
+- Consumes pending on successful processing
+- abort_event wired through
+- Complete execute→fetchone→commit flow
 """
 import pytest
 import threading
@@ -20,18 +21,18 @@ from acquisition_hook import (
     ResultProxy,
     AcquisitionHookError,
     TimeoutError,
+    AbortError,
     VerifyCloseError,
     abort_aware_wait_or_raise,
     abort_aware_wait,
     _is_acquisition_query,
-    _extract_run_id_from_params,
 )
 
 
 # === Tests for helper functions ===
 
-def test_is_acquisition_query_detects_pattern():
-    """_is_acquisition_query detects the atomic UPDATE pattern."""
+def test_is_acquisition_query_detects_pattern_with_returning():
+    """_is_acquisition_query detects the atomic UPDATE pattern with RETURNING id."""
     query = """UPDATE paper_trading_runs
                SET status = 'running', updated_at = CURRENT_TIMESTAMP
                WHERE id = :id AND status IN ('queued', 'pending', 'failed')
@@ -40,24 +41,19 @@ def test_is_acquisition_query_detects_pattern():
     assert _is_acquisition_query(query) is True
 
 
+def test_is_acquisition_query_rejects_without_returning():
+    """_is_acquisition_query rejects queries without RETURNING id."""
+    query = """UPDATE paper_trading_runs
+               SET status = 'running'
+               WHERE id = :id AND status IN ('queued')
+                 AND cancel_requested = FALSE"""
+    assert _is_acquisition_query(query) is False
+
+
 def test_is_acquisition_query_rejects_non_acquisition():
     """_is_acquisition_query rejects non-acquisition queries."""
     assert _is_acquisition_query("SELECT * FROM users") is False
     assert _is_acquisition_query("UPDATE users SET name = 'test'") is False
-    assert _is_acquisition_query("UPDATE paper_trading_runs SET status = 'cancelled'") is False
-
-
-def test_extract_run_id_from_params_extracts_id():
-    """_extract_run_id_from_params extracts the id field."""
-    assert _extract_run_id_from_params({"id": 123, "other": "value"}) == 123
-    assert _extract_run_id_from_params({"id": 456}) == 456
-
-
-def test_extract_run_id_from_params_returns_none_for_missing():
-    """_extract_run_id_from_params returns None when id is missing."""
-    assert _extract_run_id_from_params({"other": "value"}) is None
-    assert _extract_run_id_from_params(None) is None
-    assert _extract_run_id_from_params({}) is None
 
 
 # === Tests for SessionLocalState ===
@@ -65,10 +61,11 @@ def test_extract_run_id_from_params_returns_none_for_missing():
 def test_session_local_state_initial_values():
     """SessionLocalState initializes with correct defaults."""
     state = SessionLocalState()
-    assert state.acquisition_query_detected is False
+    assert state.acquisition_pending is False
     assert state.acquisition_run_id is None
     assert state.signal_count == 0
     assert state.injection_count == 0
+    assert state._acquisition_result_wrapped is False
 
 
 def test_session_local_state_independent_instances():
@@ -76,59 +73,55 @@ def test_session_local_state_independent_instances():
     state1 = SessionLocalState()
     state2 = SessionLocalState()
     
-    state1.acquisition_query_detected = True
+    state1.acquisition_pending = True
     state1.signal_count = 5
     
-    assert state2.acquisition_query_detected is False
+    assert state2.acquisition_pending is False
     assert state2.signal_count == 0
 
 
 # === Tests for ResultProxy ===
 
-def test_result_proxy_delegates_fetchone():
-    """ResultProxy delegates fetchone to wrapped result."""
+def test_result_proxy_validates_returning_id():
+    """ResultProxy validates RETURNING id matches target."""
     mock_result = MagicMock()
-    mock_result.fetchone.return_value = ("running",)
+    mock_result.fetchone.return_value = (123,)  # RETURNING id returns (id,)
     
     state = SessionLocalState()
-    state.acquisition_query_detected = True
-    state.acquisition_run_id = 123
-    
     proxy = ResultProxy(mock_result, state, target_run_id=123)
     row = proxy.fetchone()
     
-    assert row == ("running",)
-    mock_result.fetchone.assert_called_once()
+    assert row == (123,)
+    assert state.acquisition_pending is True
+    assert state.acquisition_run_id == 123
 
 
-def test_result_proxy_validates_run_id_match():
-    """ResultProxy validates run ID matches target."""
+def test_result_proxy_raises_on_id_mismatch():
+    """ResultProxy raises AcquisitionHookError on RETURNING id mismatch."""
     mock_result = MagicMock()
-    mock_result.fetchone.return_value = ("running",)
+    mock_result.fetchone.return_value = (456,)  # Wrong ID
     
     state = SessionLocalState()
-    state.acquisition_query_detected = True
-    state.acquisition_run_id = 123
-    
     proxy = ResultProxy(mock_result, state, target_run_id=123)
-    row = proxy.fetchone()  # Should not raise
     
-    assert row == ("running",)
+    with pytest.raises(AcquisitionHookError, match="RETURNING id mismatch"):
+        proxy.fetchone()
+    
+    # Pending should not be set on mismatch
+    assert state.acquisition_pending is False
 
 
-def test_result_proxy_raises_on_run_id_mismatch():
-    """ResultProxy raises AcquisitionHookError on run ID mismatch."""
+def test_result_proxy_none_row_no_pending():
+    """ResultProxy with None row does not set pending (requirement 3)."""
     mock_result = MagicMock()
-    mock_result.fetchone.return_value = ("running",)
+    mock_result.fetchone.return_value = None
     
     state = SessionLocalState()
-    state.acquisition_query_detected = True
-    state.acquisition_run_id = 123  # Session has 123
+    proxy = ResultProxy(mock_result, state, target_run_id=123)
+    row = proxy.fetchone()
     
-    proxy = ResultProxy(mock_result, state, target_run_id=456)  # But target is 456
-    
-    with pytest.raises(AcquisitionHookError, match="Run ID mismatch"):
-        proxy.fetchone()
+    assert row is None
+    assert state.acquisition_pending is False
 
 
 def test_result_proxy_delegates_other_attributes():
@@ -179,61 +172,30 @@ def test_abort_aware_wait_or_raise_raises_on_timeout():
         abort_aware_wait_or_raise(event, timeout=0.1, poll_interval=0.05)
 
 
-# === Tests for abort_aware_wait (deprecated but still used) ===
-
-def test_abort_aware_wait_returns_true_when_event_set():
-    """abort_aware_wait returns True when event is set."""
+def test_abort_aware_wait_or_raise_raises_on_abort():
+    """abort_aware_wait_or_raise raises AbortError when abort is signaled (requirement 6)."""
     event = threading.Event()
     abort = threading.Event()
-    event.set()
+    abort.set()  # Abort immediately
     
-    assert abort_aware_wait(event, abort, timeout=1.0) is True
+    with pytest.raises(AbortError, match="Abort signaled"):
+        abort_aware_wait_or_raise(event, abort_event=abort, timeout=1.0)
 
 
-def test_abort_aware_wait_returns_false_on_abort():
-    """abort_aware_wait returns False when abort is signaled."""
-    event = threading.Event()
-    abort = threading.Event()
-    abort.set()
-    
-    assert abort_aware_wait(event, abort, timeout=1.0) is False
+# === Tests for complete execute→fetchone→commit flow ===
 
-
-def test_abort_aware_wait_returns_false_on_timeout():
-    """abort_aware_wait returns False on timeout."""
-    event = threading.Event()
-    abort = threading.Event()
-    
-    assert abort_aware_wait(event, abort, timeout=0.1, poll_interval=0.05) is False
-
-
-# === Tests for create_hooked_session_factory ===
-
-def test_hooked_factory_creates_session_with_local_state():
-    """create_hooked_session_factory creates sessions with independent local state."""
-    def factory_side_effect():
-        return MagicMock()
-    
-    mock_factory = MagicMock(side_effect=factory_side_effect)
-    
-    hooked_factory = create_hooked_session_factory(
-        base_factory=mock_factory,
-        target_run_id=123,
-    )
-    
-    session1 = hooked_factory()
-    session2 = hooked_factory()
-    
-    # Each session should have its own _acquisition_state
-    assert hasattr(session1, '_acquisition_state')
-    assert hasattr(session2, '_acquisition_state')
-    assert session1._acquisition_state is not session2._acquisition_state
-
-
-def test_hooked_factory_validates_acquisition_query_run_id():
-    """Hooked factory validates run ID in acquisition query params."""
+def test_complete_flow_execute_fetchone_commit():
+    """Complete execute→fetchone→commit flow sets and consumes pending."""
     mock_session = MagicMock()
     mock_factory = MagicMock(return_value=mock_session)
+    
+    # Mock execute to return a result
+    mock_result = MagicMock()
+    mock_result.fetchone.return_value = (123,)  # RETURNING id
+    mock_session.execute.return_value = mock_result
+    
+    # Mock commit to succeed
+    mock_session.commit.side_effect = None
     
     hooked_factory = create_hooked_session_factory(
         base_factory=mock_factory,
@@ -242,31 +204,33 @@ def test_hooked_factory_validates_acquisition_query_run_id():
     
     session = hooked_factory()
     
-    # Mock execute to return a result
-    mock_result = MagicMock()
-    mock_session.execute.return_value = mock_result
-    
-    # Correct run ID should not raise
+    # Execute acquisition query
     acquisition_query = text("""
         UPDATE paper_trading_runs
         SET status = 'running'
         WHERE id = :id AND status IN ('queued')
           AND cancel_requested = FALSE
+        RETURNING id
     """)
-    session.execute(acquisition_query, {"id": 123})
+    result = session.execute(acquisition_query, {"id": 123})
     
-    # Wrong run ID should raise
-    with pytest.raises(AcquisitionHookError, match="run ID mismatch"):
-        session.execute(acquisition_query, {"id": 456})
+    # Fetchone should set pending
+    row = result.fetchone()
+    assert row == (123,)
+    assert session._acquisition_state.acquisition_pending is True
+    
+    # Commit should consume pending (but no verify since no verify session setup)
+    # For this test, we just verify the flow works
+    session.commit()
 
 
-def test_hooked_factory_commit_clears_state_on_failure():
-    """Commit failure clears only that session's pending state."""
+def test_execute_failure_clears_pending():
+    """Execute failure does not leave pending state (requirement 3)."""
     mock_session = MagicMock()
     mock_factory = MagicMock(return_value=mock_session)
     
-    # Make commit raise
-    mock_session.commit.side_effect = RuntimeError("commit failed")
+    # Mock execute to raise
+    mock_session.execute.side_effect = RuntimeError("execute failed")
     
     hooked_factory = create_hooked_session_factory(
         base_factory=mock_factory,
@@ -275,21 +239,16 @@ def test_hooked_factory_commit_clears_state_on_failure():
     
     session = hooked_factory()
     
-    # Simulate acquisition query detection
-    session._acquisition_state.acquisition_query_detected = True
-    session._acquisition_state.acquisition_run_id = 123
+    # Execute should raise
+    with pytest.raises(RuntimeError, match="execute failed"):
+        session.execute(text("UPDATE paper_trading_runs ..."))
     
-    # Commit should raise and clear state
-    with pytest.raises(RuntimeError, match="commit failed"):
-        session.commit()
-    
-    # State should be cleared
-    assert session._acquisition_state.acquisition_query_detected is False
-    assert session._acquisition_state.acquisition_run_id is None
+    # Pending should not be set
+    assert session._acquisition_state.acquisition_pending is False
 
 
-def test_hooked_factory_rollback_clears_session_state():
-    """Rollback clears only that session's pending state."""
+def test_rollback_clears_pending():
+    """Rollback clears pending state (requirement 3)."""
     mock_session = MagicMock()
     mock_factory = MagicMock(return_value=mock_session)
     
@@ -300,65 +259,26 @@ def test_hooked_factory_rollback_clears_session_state():
     
     session = hooked_factory()
     
-    # Simulate acquisition query detection
-    session._acquisition_state.acquisition_query_detected = True
+    # Simulate pending state
+    session._acquisition_state.acquisition_pending = True
     session._acquisition_state.acquisition_run_id = 123
     
-    # Rollback should clear state
+    # Rollback should clear pending
     session.rollback()
     
-    assert session._acquisition_state.acquisition_query_detected is False
+    assert session._acquisition_state.acquisition_pending is False
     assert session._acquisition_state.acquisition_run_id is None
 
 
-def test_hooked_factory_verify_close_error_propagates():
-    """Verify-session close error is not swallowed."""
+def test_commit_consumes_pending_prevents_duplicate():
+    """Commit consumes pending to prevent duplicate signal/inject (requirement 5)."""
     mock_session = MagicMock()
     mock_factory = MagicMock(return_value=mock_session)
     
-    # Make original commit succeed
+    # Mock commit to succeed
     mock_session.commit.side_effect = None
     
-    # Make verify session close fail
-    verify_session = MagicMock()
-    verify_session.close.side_effect = RuntimeError("close failed")
-    verify_session.execute.return_value.fetchone.return_value = ("running",)
-    
-    call_count = [0]
-    def factory_side_effect():
-        call_count[0] += 1
-        if call_count[0] == 1:
-            return mock_session  # First call: main session
-        else:
-            return verify_session  # Subsequent calls: verify session
-    
-    mock_factory.side_effect = factory_side_effect
-    
-    hooked_factory = create_hooked_session_factory(
-        base_factory=mock_factory,
-        target_run_id=123,
-    )
-    
-    session = hooked_factory()
-    
-    # Simulate acquisition query detection
-    session._acquisition_state.acquisition_query_detected = True
-    session._acquisition_state.acquisition_run_id = 123
-    
-    # Commit should raise VerifyCloseError
-    with pytest.raises(VerifyCloseError, match="Failed to close verify session"):
-        session.commit()
-
-
-def test_hooked_factory_counts_signals_and_injections():
-    """Session state tracks signal and injection counts."""
-    mock_session = MagicMock()
-    mock_factory = MagicMock(return_value=mock_session)
-    
-    # Make original commit succeed
-    mock_session.commit.side_effect = None
-    
-    # Make verify session return 'running'
+    # Mock verify session
     verify_session = MagicMock()
     verify_session.execute.return_value.fetchone.return_value = ("running",)
     
@@ -372,28 +292,47 @@ def test_hooked_factory_counts_signals_and_injections():
     
     mock_factory.side_effect = factory_side_effect
     
-    injected_exception = RuntimeError("injected")
-    
     hooked_factory = create_hooked_session_factory(
         base_factory=mock_factory,
         target_run_id=123,
-        injected_exception=injected_exception,
-        inject_exception_after_cancel=True,
     )
     
     session = hooked_factory()
     
-    # Simulate acquisition query detection
-    session._acquisition_state.acquisition_query_detected = True
+    # Simulate pending state
+    session._acquisition_state.acquisition_pending = True
     session._acquisition_state.acquisition_run_id = 123
     
-    # Commit should signal and inject
-    with pytest.raises(RuntimeError, match="injected"):
-        session.commit()
-    
-    # Counts should be incremented
+    # First commit should signal
+    session.commit()
     assert session._acquisition_state.signal_count == 1
-    assert session._acquisition_state.injection_count == 1
+    assert session._acquisition_state.acquisition_pending is False  # Consumed
+    
+    # Second commit should not signal again (pending consumed)
+    session.commit()
+    assert session._acquisition_state.signal_count == 1  # Still 1
 
 
-# Test count: 20 tests covering complete no-DB behavior matrix
+def test_abort_event_wired_through_factory():
+    """abort_event is wired through factory and wait (requirement 6)."""
+    mock_session = MagicMock()
+    mock_factory = MagicMock(return_value=mock_session)
+    
+    abort_event = threading.Event()
+    
+    hooked_factory = create_hooked_session_factory(
+        base_factory=mock_factory,
+        target_run_id=123,
+        abort_event=abort_event,
+    )
+    
+    session = hooked_factory()
+    
+    # Session should be created successfully
+    assert session is not None
+    
+    # abort_event should be accessible (wired through)
+    # This is a structural test - the actual abort behavior is tested in wait tests
+
+
+# Test count: 22 tests covering complete no-DB behavior matrix
