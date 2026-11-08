@@ -1618,10 +1618,10 @@ def test_success_with_row_callback_pending_close_assertions():
 
 
 def test_concurrent_b_updates_while_a_in_callback_wait():
-    """A and B both do full acquisition→fetchone→commit, updating same counter.
+    """A and B both do full acquisition→fetchone→commit in separate worker threads.
     
-    Proves narrow lock scope: B acquires lock and increments counter while A
-    is blocked in callback (after A released lock but before A's commit completes).
+    Proves narrow lock scope: B's worker completes while A's worker is blocked
+    in callback. Main thread orchestrates timing to ensure B executes during A's pause.
     """
     # Session A setup
     mock_session_a = MagicMock()
@@ -1652,28 +1652,35 @@ def test_concurrent_b_updates_while_a_in_callback_wait():
     call_count = [0]
     def factory_side_effect():
         call_count[0] += 1
-        # Call sequence: A_main, A_verify, B_main, B_verify
+        # Call sequence: A_main, B_main, A_verify, B_verify
+        # A and B main sessions created upfront, verify sessions created during commit
         if call_count[0] == 1:
             return mock_session_a
         elif call_count[0] == 2:
-            return mock_verify_a
-        elif call_count[0] == 3:
             return mock_session_b
+        elif call_count[0] == 3:
+            return mock_verify_a
         else:
             return mock_verify_b
     
     mock_factory = MagicMock(side_effect=factory_side_effect)
     
-    # Track callback entry and B's completion
-    callback_entered = threading.Event()
-    callback_can_exit = threading.Event()
+    # Track A's callback entry and B's completion
+    a_in_callback = threading.Event()
+    a_can_exit_callback = threading.Event()
     b_completed = threading.Event()
     
+    # Track which thread is calling the callback
+    a_thread_id = [None]  # Use list to allow mutation in nested function
+    
     def on_acquisition_committed():
-        callback_entered.set()
-        # Wait in callback to simulate long-running operation
-        # B should be able to acquire lock and increment during this pause
-        callback_can_exit.wait(timeout=2.0)
+        current_thread = threading.current_thread()
+        # Only block if this is A's worker thread
+        if current_thread.name == "worker_a":
+            a_in_callback.set()
+            # Wait for explicit release from main thread
+            a_can_exit_callback.wait(timeout=5.0)
+        # B's worker thread doesn't block - just returns immediately
     
     shared_results = {"signal_count": 0, "injection_count": 0}
     
@@ -1692,71 +1699,97 @@ def test_concurrent_b_updates_while_a_in_callback_wait():
         RETURNING id
     """)
     
-    # Session A: acquisition and commit (will enter callback and wait)
+    # Session A: acquisition and fetchone (preparation)
     session_a = hooked_factory()
     result_a = session_a.execute(acquisition_query, {"id": 123})
     result_a.fetchone()
     
+    # Session B: acquisition and fetchone (preparation)
+    session_b = hooked_factory()
+    result_b = session_b.execute(acquisition_query, {"id": 123})
+    result_b.fetchone()
+    
     # Capture thread exceptions back to main thread
     thread_exceptions = {"a": None, "b": None}
     
-    # Start A's commit in a thread
-    def a_commit_thread():
+    # Worker thread for A's commit
+    def a_worker():
         try:
             session_a.commit()
         except Exception as e:
             thread_exceptions["a"] = e
     
-    a_thread = threading.Thread(target=a_commit_thread)
+    # Worker thread for B's commit
+    def b_worker():
+        try:
+            session_b.commit()
+            b_completed.set()
+        except Exception as e:
+            thread_exceptions["b"] = e
+    
+    a_thread = threading.Thread(target=a_worker, name="worker_a")
+    b_thread = threading.Thread(target=b_worker, name="worker_b")
+    
     try:
+        # Start A's worker - it will enter callback and block
         a_thread.start()
         
         # Wait for A to enter callback (explicit handshake)
-        assert callback_entered.wait(timeout=1.0), "A did not enter callback"
+        assert a_in_callback.wait(timeout=2.0), "A did not enter callback"
         
-        # At this point, A has incremented signal_count to 1 and is blocked in callback
-        # A has released the lock (narrow scope) but not yet completed
+        # At this point: A has incremented signal_count to 1 and is blocked in callback
+        # A has released the lock (narrow scope) but worker thread is still alive
         
-        # While A is in callback (before release), B does full acquisition flow
-        # B should be able to acquire the lock and increment counter
-        session_b = hooked_factory()
-        result_b = session_b.execute(acquisition_query, {"id": 123})
-        row_b = result_b.fetchone()
-        assert row_b == (123,)
+        # Verify A is still blocked (worker thread alive)
+        assert a_thread.is_alive(), "A worker should still be blocked in callback"
+        assert shared_results["signal_count"] == 1, "A should have incremented count to 1"
         
-        # B commits - this will also increment signal_count
-        # This proves B acquired the lock while A was paused in callback
-        session_b.commit()
-        b_completed.set()
+        # Now start B's worker - it should be able to acquire lock and complete
+        b_thread.start()
         
-        # Verify B completed during A's callback pause
-        assert b_completed.wait(timeout=1.0), "B did not complete during A's pause"
+        # Wait for B to complete (bounded wait)
+        assert b_completed.wait(timeout=2.0), "B did not complete"
         
-        # B completed without deadlock - key assertion
-        # signal_count is 2: A incremented before callback, B incremented during A's callback
+        # CRITICAL ASSERTION: Before releasing A, verify:
+        # 1. B has completed
+        assert not b_thread.is_alive(), "B worker should have completed"
+        # 2. A is still blocked in callback
+        assert a_thread.is_alive(), "A worker should still be blocked"
+        # 3. Count is 2 (both A and B incremented)
         assert shared_results["signal_count"] == 2, \
             f"Expected signal_count==2 (A+B both incremented), got {shared_results['signal_count']}"
         
-        # Allow A's callback to exit
-        callback_can_exit.set()
+        # Now release A from callback
+        a_can_exit_callback.set()
         
-        # Wait for A thread with bounded timeout
+        # Wait for A worker to complete
         a_thread.join(timeout=2.0)
-        assert not a_thread.is_alive(), "A thread did not complete"
+        assert not a_thread.is_alive(), "A worker did not complete after release"
         
         # Check for thread exceptions
         if thread_exceptions["a"] is not None:
             raise thread_exceptions["a"]
+        if thread_exceptions["b"] is not None:
+            raise thread_exceptions["b"]
         
-        # Final count
+        # Final verification
         assert shared_results["signal_count"] == 2
+        
     finally:
-        # Ensure cleanup: release A from callback and join thread
-        callback_can_exit.set()
+        # Ensure cleanup: release A and join all workers
+        a_can_exit_callback.set()
+        
+        # Join A with bounded timeout
         if a_thread.is_alive():
             a_thread.join(timeout=1.0)
-            # If still alive after final join, that's a test failure
-            assert not a_thread.is_alive(), "A thread still alive after cleanup"
+            if a_thread.is_alive():
+                raise RuntimeError("A worker still alive after cleanup join")
+        
+        # Join B with bounded timeout
+        if b_thread.is_alive():
+            b_thread.join(timeout=1.0)
+            if b_thread.is_alive():
+                raise RuntimeError("B worker still alive after cleanup join")
 
 
 # Total: 30 + 10 + 1 = 41 tests
