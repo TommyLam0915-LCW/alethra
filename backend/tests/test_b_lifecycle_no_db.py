@@ -144,24 +144,29 @@ class TestFirstWorkerJoinThrows:
         
         lifecycle.set_cleanup_callback(cleanup_callback)
         
-        # Start two workers
+        # Start first worker
         thread1, abort1 = lifecycle.start_worker(
             target=worker1_target,
             name="worker1"
         )
-        thread2, abort2 = lifecycle.start_worker(
-            target=worker2_target,
-            name="worker2"
-        )
         
-        # Initialize original methods IMMEDIATELY after worker start
-        # (before any assertions that might fail)
+        # After first worker starts successfully, enter protected scope
+        # Initialize original methods IMMEDIATELY (before any assertions)
         original_join1 = thread1.join
-        original_join2 = thread2.join
+        original_join2 = None  # Will be set after second worker starts
         
         try:
-            # Wait for both workers to start
+            # Wait for first worker to start
             assert worker1_started.wait(timeout=2.0), "Worker 1 did not start"
+            
+            # Start second worker (may fail, but first worker is protected)
+            thread2, abort2 = lifecycle.start_worker(
+                target=worker2_target,
+                name="worker2"
+            )
+            original_join2 = thread2.join
+            
+            # Wait for second worker to start
             assert worker2_started.wait(timeout=2.0), "Worker 2 did not start"
             
             # Abort all
@@ -221,17 +226,19 @@ class TestFirstWorkerJoinThrows:
             worker1_can_exit.set()
             worker2_can_exit.set()
             lifecycle.abort_all()
-            # Restore original joins
+            # Restore original joins (thread2 may not exist if second start failed)
             thread1.join = original_join1
-            thread2.join = original_join2
+            if original_join2 is not None:
+                thread2.join = original_join2
             # Independently try to reclaim each worker
             if thread1.is_alive():
                 thread1.join(timeout=1.0)
-            if thread2.is_alive():
+            if original_join2 is not None and thread2.is_alive():
                 thread2.join(timeout=1.0)
             # Verify no alive test workers
             assert not thread1.is_alive(), "Test worker 1 still alive after cleanup"
-            assert not thread2.is_alive(), "Test worker 2 still alive after cleanup"
+            if original_join2 is not None:
+                assert not thread2.is_alive(), "Test worker 2 still alive after cleanup"
 
 
 class TestWorkerStillAlive:
@@ -856,6 +863,10 @@ class TestFinalizeDirectCall:
             name="test_worker"
         )
         
+        # Save original is_alive IMMEDIATELY after worker start
+        # (before any assertions that might fail)
+        original_is_alive = thread.is_alive
+        
         try:
             # Wait for worker to start
             assert worker_started.wait(timeout=2.0), "Worker did not start"
@@ -867,7 +878,6 @@ class TestFinalizeDirectCall:
             
             # Monkey-patch is_alive to throw
             is_alive_error = RuntimeError("is_alive check failed failed")
-            original_is_alive = thread.is_alive
             
             def failing_is_alive():
                 raise is_alive_error
@@ -890,7 +900,7 @@ class TestFinalizeDirectCall:
             assert is_alive_error in all_errors
             
         finally:
-            # Restore original is_alive
+            # Restore original is_alive (guaranteed to exist)
             thread.is_alive = original_is_alive
             # Ensure cleanup
             worker_can_exit.set()
@@ -945,7 +955,7 @@ class TestFinalizeDirectCall:
                 thread.join(timeout=1.0)
     
     def test_finalize_callback_fails(self):
-        """finalize() propagates cleanup callback errors."""
+        """finalize() propagates cleanup callback errors and does not mark success."""
         lifecycle = WorkerLifecycle()
         
         worker_started = threading.Event()
@@ -957,10 +967,10 @@ class TestFinalizeDirectCall:
             worker_can_exit.wait(timeout=1.0)
         
         cleanup_error = RuntimeError("Cleanup callback failed")
-        def cleanup_callback():
+        def failing_callback():
             raise cleanup_error
         
-        lifecycle.set_cleanup_callback(cleanup_callback)
+        lifecycle.set_cleanup_callback(failing_callback)
         
         # Start worker
         thread, abort_event = lifecycle.start_worker(
@@ -983,12 +993,38 @@ class TestFinalizeDirectCall:
             all_errors = lifecycle.get_all_errors()
             assert cleanup_error in all_errors
             
+            # Verify cleanup NOT marked as executed (public behavior)
+            assert lifecycle.cleanup_called_count == 0
+            assert not lifecycle._cleanup_executed
+            
+            # Now swap to a success callback
+            success_called = []
+            def success_callback():
+                success_called.append(True)
+            
+            lifecycle.set_cleanup_callback(success_callback)
+            
+            # Call finalize() again - should succeed this time
+            result = lifecycle.finalize(timeout=2.0, release_callback=worker_can_exit.set)
+            assert result is True
+            assert len(success_called) == 1
+            assert lifecycle.cleanup_called_count == 1
+            assert lifecycle._cleanup_executed
+            
+            # Call finalize() a third time - should not repeat cleanup
+            result2 = lifecycle.finalize(timeout=2.0, release_callback=worker_can_exit.set)
+            assert result2 is False
+            assert len(success_called) == 1  # Still 1, not 2
+            assert lifecycle.cleanup_called_count == 1  # Still 1
+            
         finally:
             # Ensure cleanup
             worker_can_exit.set()
             lifecycle.abort_all()
             if thread.is_alive():
                 thread.join(timeout=1.0)
+            # Assert thread stopped
+            assert not thread.is_alive(), "Worker thread still alive after cleanup"
     
     def test_finalize_main_error_chain(self):
         """finalize() preserves main error in exception chain."""
@@ -1018,6 +1054,7 @@ class TestFinalizeDirectCall:
         
         caught_exception = []
         
+        # Real outer try/finally ensures cleanup even if assertions fail
         try:
             # Wait for worker to start
             assert worker_started.wait(timeout=2.0), "Worker did not start"
@@ -1030,6 +1067,14 @@ class TestFinalizeDirectCall:
                 
         except Exception as e:
             caught_exception.append(e)
+        finally:
+            # Ensure worker exits and thread is reclaimed
+            worker_can_exit.set()
+            lifecycle.abort_all()
+            if thread.is_alive():
+                thread.join(timeout=1.0)
+            # Assert thread stopped
+            assert not thread.is_alive(), "Worker thread still alive after cleanup"
         
         # Verify we caught cleanup_error
         assert len(caught_exception) == 1
@@ -1042,12 +1087,6 @@ class TestFinalizeDirectCall:
         # Verify cleanup_error preserved in lifecycle errors
         all_errors = lifecycle.get_all_errors()
         assert cleanup_error in all_errors
-        
-        # Finally: ensure cleanup
-        worker_can_exit.set()
-        lifecycle.abort_all()
-        if thread.is_alive():
-            thread.join(timeout=1.0)
     
     def test_finalize_independent_release_event(self):
         """finalize() with independent release Event (like B's release_all)."""
