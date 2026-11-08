@@ -3004,10 +3004,8 @@ class TestBatchBMinimalIntegration:
                 replay_completed.set()
         
         # Start threads and register with lifecycle helper
-        # Use try/finally to ensure first worker gets abort/release/join even if second start fails
-        cancel_thread = None
-        replay_thread = None
-        
+        # Single outer try/finally wraps startup + main flow
+        # All exit paths: abort/release → join → verify
         try:
             # Start cancel thread
             cancel_thread, cancel_abort = lifecycle.start_worker(
@@ -3027,21 +3025,6 @@ class TestBatchBMinimalIntegration:
             replay_worker = next(w for w in lifecycle.workers if w['name'] == 'replay_thread')
             replay_worker['abort_event'] = abort_test
             
-        except Exception as start_error:
-            # If second worker start fails, first worker still needs cleanup
-            # lifecycle.abort_all() and lifecycle.join_all() will handle this
-            # in the finally block below
-            raise RuntimeError(f"Failed to start worker threads: {start_error}") from start_error
-        finally:
-            # This finally block only covers startup failures
-            # The main test logic has its own try/finally below
-            if start_error if 'start_error' in locals() else None:
-                # Startup failed - ensure any started workers are cleaned up
-                lifecycle.abort_all()
-                release_all.set()
-                lifecycle.join_all(timeout=2.0)
-        
-        try:
             # Wait for completion with timeout
             if not replay_completed.wait(timeout=10.0):
                 # Timeout - abort test using lifecycle helper
