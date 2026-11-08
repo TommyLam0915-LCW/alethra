@@ -1,7 +1,7 @@
 # Final Acceptance Report — Gap Fixes Complete
 
 **Date**: 2026-11-08  
-**Final SHA**: d046fb6  
+**Final SHA**: cd44371  
 **Branch**: live1-impl  
 **Remote**: github → Tommylam0915-LCW/alethra  
 **Migration Head**: c9d0e1f2a3b4
@@ -101,7 +101,7 @@ TEST_MODE=true ALETHRA_PG_TEST_URL="postgresql://alethra_test_runtime@/ai_invest
 ## Gap Fixes Summary
 
 ### Gap 1: Success Events in Finally
-**Commit**: 29dd06a  
+**Commit**: 5bc486b  
 **Status**: ✅ Complete
 
 **Changes**:
@@ -113,7 +113,7 @@ TEST_MODE=true ALETHRA_PG_TEST_URL="postgresql://alethra_test_runtime@/ai_invest
 **Tests**: Batch B test passes with abort-aware waits
 
 ### Gap 2: Finalizer Safety
-**Commit**: 29dd06a  
+**Commit**: 5bc486b  
 **Status**: ✅ Complete
 
 **Changes**:
@@ -127,7 +127,7 @@ TEST_MODE=true ALETHRA_PG_TEST_URL="postgresql://alethra_test_runtime@/ai_invest
 - Batch B test sets `workers_confirmed_stopped[0] = True` after confirming threads stopped
 
 ### Gap 3: Socket Actual Target
-**Commit**: 6b21454  
+**Commit**: 57f4345  
 **Status**: ✅ Complete
 
 **Changes**:
@@ -143,7 +143,7 @@ TEST_MODE=true ALETHRA_PG_TEST_URL="postgresql://alethra_test_runtime@/ai_invest
 **Tests**: 5 new tests in test_target_guard.py, all passing
 
 ### Gap 4: Credential Masking
-**Commit**: 8e10554  
+**Commit**: e650eda  
 **Status**: ✅ Complete
 
 **Changes**:
@@ -160,7 +160,7 @@ TEST_MODE=true ALETHRA_PG_TEST_URL="postgresql://alethra_test_runtime@/ai_invest
 **Tests**: 4 new tests in test_target_guard.py, all passing
 
 ### Gap 5: Regression Contract Tests
-**Commit**: d046fb6  
+**Commit**: c9b5773  
 **Status**: ✅ Complete
 
 **Changes**:
@@ -175,14 +175,14 @@ TEST_MODE=true ALETHRA_PG_TEST_URL="postgresql://alethra_test_runtime@/ai_invest
 **Tests**: 5 new tests in test_regression_contracts.py, all passing
 
 ### Gap 6: Final Evidence
-**Commit**: (this report)  
+**Commit**: a5b0fac (this report, updated post-rebase)  
 **Status**: ✅ Complete
 
 **Deliverables**:
 - This acceptance report with precise node-ID manifest
 - Three-round acceptance sequence (forward, reverse, forward)
 - Per-round results: passed/failed/skipped/errors
-- Final SHA under test: d046fb6
+- Final SHA under test: a5b0fac
 - Migration head: c9d0e1f2a3b4
 - Exact commands and environment documented
 
@@ -234,10 +234,13 @@ test_paper_trading_cancel_atomic.py::TestSessionFactoryContract::test_no_paramet
 ## Git History
 
 ```
-d046fb6 Gap 5: Add regression contract tests
-8e10554 Gap 4: Credential masking in error messages
-6b21454 Gap 3: Add socket actual target validation tests
-29dd06a Gap 1+2: Remove success events from finally, add finalizer safety
+a5b0fac Gap 6: Final acceptance report with node-ID manifest (updated post-rebase)
+c9b5773 Gap 5: Add regression contract tests
+e650eda Gap 4: Credential masking in error messages
+57f4345 Gap 3: Add socket actual target validation tests
+5bc486b Gap 1+2: Remove success events from finally, add finalizer safety
+cfcb745 Gate 1 Commit 2: Port parser fail-closed + factory cleanup assertions (remote)
+a7d6f58 Gate 1 Commit 1b: Guard security hardening (4 fixes on ba85a24) (remote)
 ba85a24 Gap 四: Assert threads stopped in finally block
 ab6a536 Gap 三: Separate engine instances for replay and cancel
 b416de8 Gap 一+二: Fix socket validation and add is_local_database_url tests
@@ -248,7 +251,7 @@ b416de8 Gap 一+二: Fix socket validation and add is_local_database_url tests
 
 All six gaps are fixed and verified. The acceptance sequence (forward → reverse → forward) passes 83/83 tests consistently in ~7s per run.
 
-**PUSHED AND VERIFIED**: Remote SHA d046fb6 matches local HEAD on branch live1-impl.
+**PUSHED AND VERIFIED**: Remote SHA a5b0fac matches local HEAD on branch live1-impl.
 
 **Test Classification**:
 - Helper tests: test_target_guard.py (25 tests)
