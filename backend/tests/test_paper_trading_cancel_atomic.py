@@ -2883,16 +2883,14 @@ class TestBatchBMinimalIntegration:
             setup_session.close()
         
         # Requirement 三: Synchronization events — separate success from abort/release
-        acquisition_committed = threading.Event()
+        # Note: acquisition_committed and can_inject_exception are managed by the hook
         acquisition_failed = threading.Event()
         cancel_committed = threading.Event()
         cancel_failed = threading.Event()
-        can_inject_exception = threading.Event()
         replay_completed = threading.Event()
         replay_failed = threading.Event()
         
         # Independent abort/release events (not success events)
-        abort_test = threading.Event()
         release_all = threading.Event()
         
         # Track results — Requirement 四: all will be asserted unconditionally
@@ -2914,72 +2912,30 @@ class TestBatchBMinimalIntegration:
         
         # Gap 三: Hook session factory to detect acquisition and inject exception
         # Only replay sessions get the narrow hook; cancel uses un-hooked factory
-        original_session_factory = session_factory
-        acquisition_query_detected = [False]
+        from acquisition_hook import AcquisitionHook, create_hooked_session_factory, abort_aware_wait
         
-        def hooked_session_factory():
-            """Narrow hook for replay sessions only — tracks acquisition query."""
-            session = original_session_factory()
-            original_execute = session.execute
-            original_commit = session.commit
-            
-            def hooked_execute(query, params=None):
-                # Detect the atomic acquisition UPDATE
-                query_str = str(query) if hasattr(query, '__str__') else ''
-                if (not acquisition_query_detected[0] and 
-                    'UPDATE paper_trading_runs' in query_str and
-                    'SET status = \'running\'' in query_str and
-                    'WHERE id = :id AND status IN' in query_str and
-                    'cancel_requested = FALSE' in query_str):
-                    acquisition_query_detected[0] = True
-                    results["acquisition_hook_hit"] = True
-                
-                result = original_execute(query, params)
-                return result
-            
-            def hooked_commit():
-                original_commit()
-                # Requirement 三: After REAL commit, verify on NEW connection before signaling
-                if acquisition_query_detected[0] and not acquisition_committed.is_set():
-                    # Verify on NEW connection that status is 'running'
-                    verify_session = session_factory()
-                    try:
-                        verify_result = verify_session.execute(
-                            text("SELECT status FROM paper_trading_runs WHERE id = :id"),
-                            {"id": paper_run_id}
-                        ).fetchone()
-                        if verify_result and verify_result[0] == 'running':
-                            # Now signal success
-                            acquisition_committed.set()
-                            # Gap 1: Wait for cancel with abort support
-                            while not cancel_committed.wait(timeout=0.5):
-                                if abort_test.is_set():
-                                    acquisition_failed.set()
-                                    return
-                            if abort_test.is_set():
-                                acquisition_failed.set()
-                                return
-                            # Inject exception to test formal handler preserves it
-                            can_inject_exception.set()
-                            injected_error = RuntimeError("Injected after cancel committed")
-                            results["injected_exception"] = injected_error
-                            raise injected_error
-                    finally:
-                        verify_session.close()
-            
-            session.execute = hooked_execute
-            session.commit = hooked_commit
-            return session
+        hook = AcquisitionHook()
+        hook.results = results  # Share results dict with hook
+        
+        # Sync abort_test with hook.abort for backward compatibility
+        abort_test = hook.abort
+        
+        hooked_session_factory = create_hooked_session_factory(
+            base_factory=session_factory,
+            hook=hook,
+            paper_run_id=paper_run_id,
+            inject_exception_after_cancel=True,
+            cancel_committed_event=cancel_committed,
+        )
         
         # Gap 三: Cancel thread uses formal un-hooked cancel_engine
         def submit_cancel():
             try:
-                # Gap 1: Wait supports abort — wake on either event
-                while not acquisition_committed.wait(timeout=0.5):
-                    if abort_test.is_set():
-                        cancel_failed.set()
-                        return
-                if abort_test.is_set():
+                # Gap 1: Wait supports abort — use abort_aware_wait
+                if not abort_aware_wait(hook.acquisition_committed, hook.abort):
+                    cancel_failed.set()
+                    return
+                if hook.abort.is_set():
                     cancel_failed.set()
                     return
                 # Call formal cancel_run method on cancel_engine (un-hooked)
