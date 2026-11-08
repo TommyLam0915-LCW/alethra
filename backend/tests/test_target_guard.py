@@ -555,6 +555,22 @@ def test_extract_port_from_url_authority_and_query_conflict():
         _extract_port_from_url(url)
 
 
+def test_extract_port_from_url_authority_non_numeric_rejected():
+    """Authority port with non-numeric value is rejected."""
+    # urlparse raises ValueError for non-numeric authority port
+    url = "postgresql://user@localhost:abc/db"
+    with pytest.raises((TargetGuardError, ValueError)):
+        _extract_port_from_url(url)
+
+
+def test_extract_port_from_url_authority_out_of_range_rejected():
+    """Authority port > 65535 is rejected."""
+    # urlparse may accept > 65535 but our validation rejects it
+    url = "postgresql://user@localhost:70000/db"
+    with pytest.raises((TargetGuardError, ValueError)):
+        _extract_port_from_url(url)
+
+
 def test_verify_test_target_illegal_port_not_fallback():
     """Integration: illegal port in URL raises, doesn't silently use approved 5432."""
     from unittest.mock import Mock
@@ -878,3 +894,54 @@ def test_factory_verify_failure_close_error_chained():
         # Close error raised, with verify error chained via __context__
         assert exc_info.value.__context__ is verify_error
         mock_engine.dispose.assert_called_once()
+
+
+def test_guarded_factory_session_creation_failure():
+    """Returned guarded_factory() propagates session creation errors."""
+    from unittest.mock import MagicMock, patch
+    import sys
+    
+    mock_engine = MagicMock()
+    mock_session = MagicMock()
+    mock_factory_fn = MagicMock(return_value=mock_session)
+    
+    mod = sys.modules[__name__]
+    
+    with patch("sqlalchemy.create_engine", return_value=mock_engine), \
+         patch("sqlalchemy.orm.sessionmaker", return_value=mock_factory_fn), \
+         patch.object(mod, "verify_test_target", return_value={"ok": True}):
+        guarded_factory, engine = create_verified_session_factory("postgresql:///test")
+        
+        # Now make the underlying factory raise on next call
+        mock_factory_fn.side_effect = RuntimeError("session creation failed")
+        
+        with pytest.raises(RuntimeError, match="session creation failed"):
+            guarded_factory()
+
+
+def test_triple_failure_chain_verify_close_dispose():
+    """When verify, close, AND dispose all fail, all errors observable."""
+    from unittest.mock import MagicMock, patch
+    import sys
+    
+    mock_engine = MagicMock()
+    mock_engine.dispose.side_effect = RuntimeError("dispose failed")
+    mock_session = MagicMock()
+    mock_session.close.side_effect = RuntimeError("close failed")
+    mock_factory_fn = MagicMock(return_value=mock_session)
+    verify_error = TargetGuardError("verify failed")
+    
+    mod = sys.modules[__name__]
+    
+    with patch("sqlalchemy.create_engine", return_value=mock_engine), \
+         patch("sqlalchemy.orm.sessionmaker", return_value=mock_factory_fn), \
+         patch.object(mod, "verify_test_target", side_effect=verify_error):
+        with pytest.raises(RuntimeError, match="dispose failed") as exc_info:
+            create_verified_session_factory("postgresql:///test")
+        
+        # Dispose error raised (outermost)
+        # Close error chained to dispose error
+        assert exc_info.value.__context__ is not None
+        assert "close failed" in str(exc_info.value.__context__)
+        # Verify error chained to close error
+        assert exc_info.value.__context__.__context__ is verify_error
