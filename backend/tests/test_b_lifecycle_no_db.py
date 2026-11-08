@@ -80,17 +80,14 @@ class TestOneWorkerMainFlowFails:
             main_error = RuntimeError("Main flow failed")
             
             # Finally block: abort, join, verify, cleanup
-            lifecycle.record_operation('main_flow_failed')
+            # (Operations are automatically recorded by helper methods)
             lifecycle.abort_all()
-            lifecycle.record_operation('abort')
             
             worker_can_exit.set()  # Allow worker to exit
             
             lifecycle.join_all(timeout=2.0)
-            lifecycle.record_operation('join')
             
             lifecycle.verify_all_stopped()
-            lifecycle.record_operation('verify')
             
             lifecycle.run_cleanup()
             
@@ -98,12 +95,11 @@ class TestOneWorkerMainFlowFails:
             assert len(cleanup_called) == 1
             assert lifecycle.cleanup_called_count == 1
             
-            # Verify call order
+            # Verify call order (from automatic recording by helper methods)
             call_order = lifecycle.get_call_order()
-            assert 'main_flow_failed' in call_order
-            assert 'abort' in call_order
-            assert 'join' in call_order
-            assert 'verify' in call_order
+            assert 'abort_all' in call_order
+            assert 'join_all' in call_order
+            assert 'verify_all_stopped' in call_order
             assert 'cleanup' in call_order
             
             # Main error should be preserved (re-raise after cleanup)
@@ -158,6 +154,11 @@ class TestFirstWorkerJoinThrows:
             name="worker2"
         )
         
+        # Initialize original methods IMMEDIATELY after worker start
+        # (before any assertions that might fail)
+        original_join1 = thread1.join
+        original_join2 = thread2.join
+        
         try:
             # Wait for both workers to start
             assert worker1_started.wait(timeout=2.0), "Worker 1 did not start"
@@ -169,8 +170,6 @@ class TestFirstWorkerJoinThrows:
             worker2_can_exit.set()
             
             # Monkey-patch thread1.join to throw an error
-            original_join1 = thread1.join
-            original_join2 = thread2.join
             join_error = RuntimeError("Thread 1 join failed")
             
             join2_called = []
@@ -338,26 +337,18 @@ class TestAllWorkersStopped:
             assert worker1_started.wait(timeout=2.0), "Worker 1 did not start"
             assert worker2_started.wait(timeout=2.0), "Worker 2 did not start"
             
-            # Record operations in order
-            lifecycle.record_operation('start_workers')
-            
-            # Abort all
+            # Abort all (automatically recorded by helper)
             lifecycle.abort_all()
-            lifecycle.record_operation('abort_all')
             
             # Allow workers to exit
             worker1_can_exit.set()
             worker2_can_exit.set()
             
-            # Join all
+            # Join all (automatically recorded by helper)
             lifecycle.join_all(timeout=2.0)
-            lifecycle.record_operation('join_all')
             
-            # Verify all stopped
-            lifecycle.verify_all_stopped()
-            lifecycle.record_operation('verify_all_stopped')
-            
-            # Run cleanup (this automatically records 'cleanup' in call order)
+            # Run cleanup (internally calls verify_all_stopped, then cleanup callback)
+            # Both operations are automatically recorded by helper methods
             lifecycle.run_cleanup()
             
             # Verify cleanup executed exactly once
@@ -365,12 +356,13 @@ class TestAllWorkersStopped:
             assert lifecycle.cleanup_called_count == 1
             
             # Verify call order proves stop before cleanup
+            # (Operations are automatically recorded by helper methods)
+            # run_cleanup() internally calls verify_all_stopped() before cleanup
             call_order = lifecycle.get_call_order()
             assert call_order == [
-                'start_workers',
                 'abort_all',
                 'join_all',
-                'verify_all_stopped',
+                'verify_all_stopped',  # Called by run_cleanup()
                 'cleanup'
             ]
             
@@ -518,24 +510,20 @@ class TestRealThreadIntegration:
             # Let worker do some work
             time.sleep(0.05)
             
-            # Abort worker
+            # Abort worker (automatically recorded by helper)
             lifecycle.abort_all()
-            lifecycle.record_operation('abort')
             
             # Allow worker to exit
             worker_can_exit.set()
             
-            # Join worker
+            # Join worker (automatically recorded by helper)
             lifecycle.join_all(timeout=2.0)
-            lifecycle.record_operation('join')
             
-            # Verify worker stopped
+            # Verify worker stopped (automatically recorded by helper)
             lifecycle.verify_all_stopped()
-            lifecycle.record_operation('verify')
             
-            # Run cleanup
+            # Run cleanup (automatically recorded by helper)
             lifecycle.run_cleanup()
-            lifecycle.record_operation('cleanup')
             
             # Verify cleanup executed
             assert cleanup_executed.wait(timeout=1.0), "Cleanup did not execute"
@@ -544,11 +532,11 @@ class TestRealThreadIntegration:
             # Verify thread actually completed
             assert worker_completed.is_set(), "Worker did not complete"
             
-            # Verify call order
+            # Verify call order (from automatic recording by helper methods)
             call_order = lifecycle.get_call_order()
-            assert 'abort' in call_order
-            assert 'join' in call_order
-            assert 'verify' in call_order
+            assert 'abort_all' in call_order
+            assert 'join_all' in call_order
+            assert 'verify_all_stopped' in call_order
             assert 'cleanup' in call_order
             
         finally:
@@ -672,6 +660,11 @@ class TestFirstIsAliveThrows:
             name="worker2"
         )
         
+        # Initialize original methods IMMEDIATELY after worker start
+        # (before any assertions that might fail)
+        original_is_alive1 = thread1.is_alive
+        original_is_alive2 = thread2.is_alive
+        
         try:
             # Wait for both workers to start
             assert worker1_started.wait(timeout=2.0), "Worker 1 did not start"
@@ -686,8 +679,6 @@ class TestFirstIsAliveThrows:
             lifecycle.join_all(timeout=2.0)
             
             # Monkey-patch thread1.is_alive to throw
-            original_is_alive1 = thread1.is_alive
-            original_is_alive2 = thread2.is_alive
             is_alive_error = RuntimeError("is_alive check failed")
             
             is_alive2_called = []

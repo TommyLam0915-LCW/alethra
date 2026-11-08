@@ -138,6 +138,9 @@ class WorkerLifecycle:
     
     def abort_all(self):
         """Signal abort/release to all STARTED workers."""
+        # Record operation automatically
+        self.cleanup_call_order.append('abort_all')
+        
         for worker in self.workers:
             if worker.get('state') != 'started':
                 continue
@@ -159,6 +162,9 @@ class WorkerLifecycle:
         Returns:
             List of exceptions from join failures
         """
+        # Record operation automatically
+        self.cleanup_call_order.append('join_all')
+        
         join_errors = []
         
         for worker in self.workers:
@@ -184,6 +190,9 @@ class WorkerLifecycle:
         Raises:
             WorkerNotStoppedError: If any worker still alive (after checking all)
         """
+        # Record operation automatically
+        self.cleanup_call_order.append('verify_all_stopped')
+        
         alive_workers = []
         check_errors = []
         
@@ -267,6 +276,40 @@ class WorkerLifecycle:
         except Exception as e:
             self.errors.append(e)
             raise
+    
+    def finalize(self, timeout: float = 5.0, resource_ids: Optional[Dict[str, str]] = None) -> bool:
+        """Execute complete finalization sequence: abort → join → verify → cleanup.
+        
+        This is the shared finalization callable that both integration tests (B)
+        and no-DB tests use. The sequence is:
+        1. abort_all() - signal all workers to stop
+        2. join_all(timeout) - wait for all workers to exit
+        3. verify_all_stopped() - confirm all workers are not alive
+        4. run_cleanup(resource_ids) - execute cleanup callback if all stopped
+        
+        Args:
+            timeout: Timeout for join_all() in seconds
+            resource_ids: Optional dict of resource identifiers for error messages
+        
+        Returns:
+            True if cleanup executed successfully
+        
+        Raises:
+            WorkerNotStoppedError: If any worker still alive after join
+            CleanupRefusedError: If workers not stopped (from run_cleanup)
+            Exception: If cleanup callback raises
+        """
+        # Step 1: Abort all workers
+        self.abort_all()
+        
+        # Step 2: Join all workers with timeout
+        self.join_all(timeout=timeout)
+        
+        # Step 3: Verify all workers stopped
+        self.verify_all_stopped()
+        
+        # Step 4: Run cleanup (only if verify succeeded)
+        return self.run_cleanup(resource_ids=resource_ids)
     
     def record_operation(self, operation: str):
         """Record an operation in the call order log.

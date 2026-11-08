@@ -3105,24 +3105,25 @@ class TestBatchBMinimalIntegration:
         
         finally:
             # Gap 1: Only abort/release events in finally — NEVER success events
-            # Use lifecycle helper for proper cleanup
-            lifecycle.abort_all()
-            release_all.set()  # Also set the shared release event
-            
-            # Join threads using lifecycle helper (may already be joined above, but ensure in case of early exit)
-            lifecycle.join_all(timeout=5.0)
-            
-            # Gap 四: Verify all workers stopped — never proceed with live workers
+            # Use shared finalization callable from lifecycle helper
             try:
-                lifecycle.verify_all_stopped()
-            except Exception as e:
+                lifecycle.finalize(timeout=5.0)
+            except WorkerNotStoppedError as e:
+                # Gap 四: Verify all workers stopped — never proceed with live workers
                 # Report error with precise isolated resources
                 raise RuntimeError(
                     f"Gap 四 VIOLATION: {str(e)}. "
                     f"Resources: user_id={user_id}, paper_run_id={paper_run_id}, "
                     f"portfolio_id={portfolio_id}, study_run_id={study_run_id}. "
                     f"Cannot proceed to cleanup with live workers."
-                )
+                ) from e
+            except CleanupRefusedError as e:
+                # Cleanup refused — workers not confirmed stopped
+                raise RuntimeError(
+                    f"Cleanup refused: {str(e)}. "
+                    f"Resources: user_id={user_id}, paper_run_id={paper_run_id}, "
+                    f"portfolio_id={portfolio_id}, study_run_id={study_run_id}."
+                ) from e
     
     def test_cleanup_refuses_when_workers_not_confirmed_stopped(self):
         """Gap 2: Verify cleanup finalizer refuses to delete data if workers not stopped.
