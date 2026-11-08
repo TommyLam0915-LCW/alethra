@@ -45,6 +45,7 @@ from app.services.paper_trading_exceptions import (
     ResourceNotFoundError,
     InvalidStateError,
 )
+from tests.lifecycle_helper import WorkerLifecycle
 
 
 @pytest.fixture
@@ -2758,23 +2759,29 @@ class TestBatchBMinimalIntegration:
         study_run_id = str(uuid.uuid4())
         trade_id = str(uuid.uuid4())
         
-        # Requirement 五: Track threads for proper stop-before-cleanup order
-        threads_started = []
+        # Requirement 五: Use lifecycle helper for proper stop-before-cleanup order
+        lifecycle = WorkerLifecycle()
         
         # Gap 2: Shared state — cleanup refuses to delete if workers not confirmed stopped
-        workers_confirmed_stopped = [False]
+        # Now managed by lifecycle helper
         
         # Register finalizer BEFORE any writes
         def cleanup():
-            # Gap 2: Check worker-stop state before deleting data
-            if not workers_confirmed_stopped[0]:
-                raise RuntimeError(
-                    f"Gap 2 SAFETY: Cleanup refused — workers not confirmed stopped. "
-                    f"Resources at risk: user_id={user_id}, paper_run_id={paper_run_id}, "
-                    f"portfolio_id={portfolio_id}, study_run_id={study_run_id}, "
-                    f"trade_id={trade_id}. "
-                    f"Live threads: {[t for t in threads_started if t.is_alive()]}"
-                )
+            # Gap 2: Use lifecycle helper to verify workers stopped before cleanup
+            resource_ids = {
+                "user_id": user_id,
+                "paper_run_id": paper_run_id,
+                "portfolio_id": portfolio_id,
+                "study_run_id": study_run_id,
+                "trade_id": trade_id,
+            }
+            try:
+                lifecycle.run_cleanup(resource_ids=resource_ids)
+            except Exception as e:
+                # Lifecycle helper raises CleanupRefusedError if workers not stopped
+                raise RuntimeError(f"Cleanup refused: {e}") from e
+            
+            # If lifecycle cleanup succeeded, perform DB cleanup
             s = session_factory()
             try:
                 # Clean up in FK-safe order
@@ -2987,11 +2994,21 @@ class TestBatchBMinimalIntegration:
                 replay_failed.set()
                 replay_completed.set()
         
-        # Start threads
-        cancel_thread = threading.Thread(target=submit_cancel)
-        replay_thread = threading.Thread(target=execute_replay)
+        # Start threads and register with lifecycle helper
+        cancel_thread = threading.Thread(target=submit_cancel, name="cancel_thread")
+        replay_thread = threading.Thread(target=execute_replay, name="replay_thread")
         
-        threads_started.extend([cancel_thread, replay_thread])
+        # Register with lifecycle helper for proper stop-before-cleanup
+        lifecycle.workers.append({
+            'thread': cancel_thread,
+            'abort_event': abort_test,
+            'name': 'cancel_thread'
+        })
+        lifecycle.workers.append({
+            'thread': replay_thread,
+            'abort_event': abort_test,
+            'name': 'replay_thread'
+        })
         
         cancel_thread.start()
         replay_thread.start()
@@ -2999,24 +3016,20 @@ class TestBatchBMinimalIntegration:
         try:
             # Wait for completion with timeout
             if not replay_completed.wait(timeout=10.0):
-                # Timeout - abort test
-                abort_test.set()
-                release_all.set()
+                # Timeout - abort test using lifecycle helper
+                lifecycle.abort_all()
+                release_all.set()  # Also set the shared release event
                 raise TimeoutError("Replay completion timeout")
             
-            # Requirement 五: Stop worker before cleanup — join threads first
-            release_all.set()
-            cancel_thread.join(timeout=5.0)
-            replay_thread.join(timeout=5.0)
+            # Requirement 五: Stop worker before cleanup — use lifecycle helper
+            release_all.set()  # Signal workers to release
+            lifecycle.join_all(timeout=5.0)
             
-            # Assert threads stopped
-            if cancel_thread.is_alive():
-                raise RuntimeError("Cancel thread still alive after join")
-            if replay_thread.is_alive():
-                raise RuntimeError("Replay thread still alive after join")
+            # Verify all workers stopped using lifecycle helper
+            lifecycle.verify_all_stopped()
             
-            # Gap 2: Mark workers confirmed stopped — cleanup can now proceed safely
-            workers_confirmed_stopped[0] = True
+            # Gap 2: Workers confirmed stopped — cleanup can now proceed safely
+            # (Lifecycle helper tracks this state internally)
             
             # Requirement 四: Unconditional assertions — no if results.get(...) skipping
             # Check all thread errors
@@ -3081,27 +3094,24 @@ class TestBatchBMinimalIntegration:
         
         finally:
             # Gap 1: Only abort/release events in finally — NEVER success events
-            abort_test.set()
-            release_all.set()
+            # Use lifecycle helper for proper cleanup
+            lifecycle.abort_all()
+            release_all.set()  # Also set the shared release event
             
-            # Join threads (may already be joined above, but ensure in case of early exit)
-            for thread in threads_started:
-                thread.join(timeout=5.0)
+            # Join threads using lifecycle helper (may already be joined above, but ensure in case of early exit)
+            lifecycle.join_all(timeout=5.0)
             
-            # Gap 四: Assert threads stopped — never proceed with live workers
-            live_threads = [t for t in threads_started if t.is_alive()]
-            if live_threads:
+            # Gap 四: Verify all workers stopped — never proceed with live workers
+            try:
+                lifecycle.verify_all_stopped()
+            except Exception as e:
                 # Report error with precise isolated resources
-                thread_names = [t.name for t in live_threads]
                 raise RuntimeError(
-                    f"Gap 四 VIOLATION: Threads still alive after join timeout: {thread_names}. "
+                    f"Gap 四 VIOLATION: {str(e)}. "
                     f"Resources: user_id={user_id}, paper_run_id={paper_run_id}, "
                     f"portfolio_id={portfolio_id}, study_run_id={study_run_id}. "
                     f"Cannot proceed to cleanup with live workers."
                 )
-            else:
-                # Gap 2: Mark workers confirmed stopped in finally path too
-                workers_confirmed_stopped[0] = True
     
     def test_cleanup_refuses_when_workers_not_confirmed_stopped(self):
         """Gap 2: Verify cleanup finalizer refuses to delete data if workers not stopped.
@@ -3110,43 +3120,50 @@ class TestBatchBMinimalIntegration:
         before confirming workers are stopped, and verifies cleanup refuses to
         proceed, reporting precise isolated resources.
         """
-        # Simulate the shared state
-        workers_confirmed_stopped = [False]
+        # Use lifecycle helper instead of manual state
+        lifecycle = WorkerLifecycle()
         user_id = str(uuid.uuid4())
         paper_run_id = str(uuid.uuid4())
         portfolio_id = str(uuid.uuid4())
         study_run_id = str(uuid.uuid4())
         trade_id = str(uuid.uuid4())
-        threads_started = []
         
-        # Simulate cleanup function with Gap 2 safety check
-        def cleanup():
-            if not workers_confirmed_stopped[0]:
-                raise RuntimeError(
-                    f"Gap 2 SAFETY: Cleanup refused — workers not confirmed stopped. "
-                    f"Resources at risk: user_id={user_id}, paper_run_id={paper_run_id}, "
-                    f"portfolio_id={portfolio_id}, study_run_id={study_run_id}, "
-                    f"trade_id={trade_id}. "
-                    f"Live threads: {[t for t in threads_started if t.is_alive()]}"
-                )
+        # Simulate a worker that is still running
+        import threading
+        def fake_worker(abort_event):
+            # Worker that blocks until abort
+            abort_event.wait(timeout=10.0)
         
-        # Verify cleanup refuses when workers not confirmed stopped
+        thread, abort_event = lifecycle.start_worker(
+            target=fake_worker,
+            name="fake_worker"
+        )
+        
+        # Verify cleanup refuses when worker not stopped
+        resource_ids = {
+            "user_id": user_id,
+            "paper_run_id": paper_run_id,
+            "portfolio_id": portfolio_id,
+            "study_run_id": study_run_id,
+            "trade_id": trade_id,
+        }
+        
+        from tests.lifecycle_helper import CleanupRefusedError
         try:
-            cleanup()
-            assert False, "Cleanup should have raised RuntimeError"
-        except RuntimeError as e:
-            assert "Gap 2 SAFETY" in str(e)
-            assert user_id in str(e)
-            assert paper_run_id in str(e)
-            assert portfolio_id in str(e)
-            assert study_run_id in str(e)
-            assert trade_id in str(e)
+            lifecycle.run_cleanup(resource_ids=resource_ids)
+            assert False, "Cleanup should have raised CleanupRefusedError"
+        except CleanupRefusedError as e:
+            assert "Cleanup refused" in str(e)
+            assert "fake_worker" in str(e)
         
-        # Now simulate workers confirmed stopped
-        workers_confirmed_stopped[0] = True
+        # Now stop the worker
+        lifecycle.abort_all()
+        lifecycle.join_all(timeout=2.0)
         
         # Verify cleanup proceeds (no exception)
-        cleanup()  # Should not raise
+        lifecycle.cleanup_callback = lambda: None  # Set a no-op callback
+        result = lifecycle.run_cleanup(resource_ids=resource_ids)
+        assert result is True, "Cleanup should succeed after workers stopped"
 
 
 # Updated test count: 31 + 7 + 2 + 1 + 3 + 1 + 1 = 46 methods across 14 classes
