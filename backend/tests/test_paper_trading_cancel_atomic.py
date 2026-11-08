@@ -2919,8 +2919,7 @@ class TestBatchBMinimalIntegration:
         # Only replay sessions get the narrow hook; cancel uses un-hooked factory
         from acquisition_hook import create_hooked_session_factory, abort_aware_wait
         
-        # Pre-build injected exception (requirement 8)
-        injected_exception = RuntimeError("Injected after cancel committed")
+        # Use the pre-built injected_exception from line 2897 (don't create a new one)
         
         # Create abort event for backward compatibility
         abort_test = threading.Event()

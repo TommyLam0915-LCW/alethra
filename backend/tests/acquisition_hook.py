@@ -190,7 +190,18 @@ def create_hooked_session_factory(
                         )
                     
                     verification_succeeded = True
-                    
+
+                    # Minimal lifecycle fix: close verify_session BEFORE signaling success
+                    # This ensures verify connection is cleaned up before acquisition signal
+                    if verify_session:
+                        try:
+                            verify_session.close()
+                        except Exception as close_err:
+                            raise VerifyCloseError(
+                                f"Failed to close verify session: {close_err}"
+                            ) from close_err
+                        verify_session = None  # Mark as closed
+
                     # Fix 3: Increment signal_count with lock protection (narrow scope)
                     with shared_lock:
                         if shared_results is not None:
@@ -224,8 +235,9 @@ def create_hooked_session_factory(
                     # Fix 2: Increment generation to invalidate old results
                     session_state._transaction_generation += 1
                     
+                    # verify_session already closed above if verification succeeded
+                    # Only close if it wasn't closed (e.g., verification failed before close)
                     if verify_session:
-                        # Verify-session close error must not be swallowed
                         try:
                             verify_session.close()
                         except Exception as close_err:
