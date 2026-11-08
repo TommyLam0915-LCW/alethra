@@ -2912,30 +2912,38 @@ class TestBatchBMinimalIntegration:
         
         # Gap 三: Hook session factory to detect acquisition and inject exception
         # Only replay sessions get the narrow hook; cancel uses un-hooked factory
-        from acquisition_hook import AcquisitionHook, create_hooked_session_factory, abort_aware_wait
+        from acquisition_hook import create_hooked_session_factory, abort_aware_wait
         
-        hook = AcquisitionHook()
-        hook.results = results  # Share results dict with hook
+        # Pre-build injected exception (requirement 8)
+        injected_exception = RuntimeError("Injected after cancel committed")
         
-        # Sync abort_test with hook.abort for backward compatibility
-        abort_test = hook.abort
+        # Create abort event for backward compatibility
+        abort_test = threading.Event()
+        
+        # Shared event for cancel thread coordination
+        acquisition_committed = threading.Event()
+        
+        def on_acquisition_committed():
+            """Callback when acquisition is verified durable."""
+            acquisition_committed.set()
         
         hooked_session_factory = create_hooked_session_factory(
             base_factory=session_factory,
-            hook=hook,
-            paper_run_id=paper_run_id,
+            target_run_id=paper_run_id,
+            injected_exception=injected_exception,
             inject_exception_after_cancel=True,
             cancel_committed_event=cancel_committed,
+            on_acquisition_committed=on_acquisition_committed,
         )
         
         # Gap 三: Cancel thread uses formal un-hooked cancel_engine
         def submit_cancel():
             try:
                 # Gap 1: Wait supports abort — use abort_aware_wait
-                if not abort_aware_wait(hook.acquisition_committed, hook.abort):
+                if not abort_aware_wait(acquisition_committed, abort_test):
                     cancel_failed.set()
                     return
-                if hook.abort.is_set():
+                if abort_test.is_set():
                     cancel_failed.set()
                     return
                 # Call formal cancel_run method on cancel_engine (un-hooked)
