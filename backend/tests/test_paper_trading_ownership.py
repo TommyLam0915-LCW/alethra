@@ -173,19 +173,29 @@ class TestStopOwnership:
         response = client.post(f"/api/v1/paper-trading/stop/{RUN_A}")
         assert response.status_code == 401
 
-    @patch("app.api.paper_trading._verify_run_ownership")
-    def test_owner_can_stop_own_run(self, mock_ownership, client):
-        """When ownership check passes, stop proceeds to DB write."""
+    @patch("app.api.paper_trading.get_engine")
+    def test_owner_can_stop_own_run(self, mock_engine_cls, client):
+        """When ownership check passes (inside cancel_run), stop proceeds."""
         headers, user_id = _make_user_headers(client, "stop-owner-ok@alethra.io")
-
-        mock_ownership.return_value = None
-
+        
+        # Mock the engine.cancel_run which does ownership check internally
+        mock_engine = MagicMock()
+        mock_engine.cancel_run.return_value = {
+            "run_id": RUN_A,
+            "status": "running",
+            "cancel_requested": True,
+            "message": "Cancel request accepted",
+        }
+        mock_engine_cls.return_value = mock_engine
+        
         response = client.post(f"/api/v1/paper-trading/stop/{RUN_A}", headers=headers)
-        mock_ownership.assert_called_once()
-        call_args = mock_ownership.call_args
-        assert call_args[0][1] == RUN_A
-        assert call_args[0][2] == user_id
-        assert response.status_code in (200, 500)
+        
+        # Verify cancel_run was called with correct parameters
+        mock_engine.cancel_run.assert_called_once()
+        call_args = mock_engine.cancel_run.call_args
+        assert call_args[0][0] == RUN_A  # run_id
+        assert call_args[0][1] == user_id  # user_id
+        assert response.status_code == 200
 
 
 class TestLiveDaemonRequiresAdmin:

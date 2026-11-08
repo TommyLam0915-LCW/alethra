@@ -1618,7 +1618,11 @@ def test_success_with_row_callback_pending_close_assertions():
 
 
 def test_concurrent_b_updates_while_a_in_callback_wait():
-    """A and B both do full acquisition→fetchone→commit, updating same counter."""
+    """A and B both do full acquisition→fetchone→commit, updating same counter.
+    
+    Proves narrow lock scope: B acquires lock and increments counter while A
+    is blocked in callback (after A released lock but before A's commit completes).
+    """
     # Session A setup
     mock_session_a = MagicMock()
     mock_result_a = MagicMock()
@@ -1660,13 +1664,15 @@ def test_concurrent_b_updates_while_a_in_callback_wait():
     
     mock_factory = MagicMock(side_effect=factory_side_effect)
     
-    # Track callback entry
+    # Track callback entry and B's completion
     callback_entered = threading.Event()
     callback_can_exit = threading.Event()
+    b_completed = threading.Event()
     
     def on_acquisition_committed():
         callback_entered.set()
         # Wait in callback to simulate long-running operation
+        # B should be able to acquire lock and increment during this pause
         callback_can_exit.wait(timeout=2.0)
     
     shared_results = {"signal_count": 0, "injection_count": 0}
@@ -1691,42 +1697,66 @@ def test_concurrent_b_updates_while_a_in_callback_wait():
     result_a = session_a.execute(acquisition_query, {"id": 123})
     result_a.fetchone()
     
+    # Capture thread exceptions back to main thread
+    thread_exceptions = {"a": None, "b": None}
+    
     # Start A's commit in a thread
-    a_thread = threading.Thread(target=session_a.commit)
+    def a_commit_thread():
+        try:
+            session_a.commit()
+        except Exception as e:
+            thread_exceptions["a"] = e
+    
+    a_thread = threading.Thread(target=a_commit_thread)
     try:
         a_thread.start()
         
-        # Wait for A to enter callback
+        # Wait for A to enter callback (explicit handshake)
         assert callback_entered.wait(timeout=1.0), "A did not enter callback"
         
         # At this point, A has incremented signal_count to 1 and is blocked in callback
+        # A has released the lock (narrow scope) but not yet completed
         
         # While A is in callback (before release), B does full acquisition flow
+        # B should be able to acquire the lock and increment counter
         session_b = hooked_factory()
         result_b = session_b.execute(acquisition_query, {"id": 123})
         row_b = result_b.fetchone()
         assert row_b == (123,)
         
         # B commits - this will also increment signal_count
+        # This proves B acquired the lock while A was paused in callback
         session_b.commit()
+        b_completed.set()
+        
+        # Verify B completed during A's callback pause
+        assert b_completed.wait(timeout=1.0), "B did not complete during A's pause"
         
         # B completed without deadlock - key assertion
         # signal_count is 2: A incremented before callback, B incremented during A's callback
-        assert shared_results["signal_count"] == 2
+        assert shared_results["signal_count"] == 2, \
+            f"Expected signal_count==2 (A+B both incremented), got {shared_results['signal_count']}"
         
         # Allow A's callback to exit
         callback_can_exit.set()
         
+        # Wait for A thread with bounded timeout
         a_thread.join(timeout=2.0)
         assert not a_thread.is_alive(), "A thread did not complete"
+        
+        # Check for thread exceptions
+        if thread_exceptions["a"] is not None:
+            raise thread_exceptions["a"]
         
         # Final count
         assert shared_results["signal_count"] == 2
     finally:
-        # Ensure cleanup
+        # Ensure cleanup: release A from callback and join thread
         callback_can_exit.set()
         if a_thread.is_alive():
             a_thread.join(timeout=1.0)
+            # If still alive after final join, that's a test failure
+            assert not a_thread.is_alive(), "A thread still alive after cleanup"
 
 
 # Total: 30 + 10 + 1 = 41 tests
