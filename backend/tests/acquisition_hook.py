@@ -45,7 +45,7 @@ class SessionLocalState:
     def __init__(self):
         self.acquisition_pending = False
         self.acquisition_run_id: Optional[int] = None
-        self._result_expired = False  # Prevent old result from re-setting pending
+        self._transaction_generation = 0  # Increments on commit/rollback
 
 
 class ResultProxy:
@@ -56,11 +56,13 @@ class ResultProxy:
         self._session_state = session_state
         self._target_run_id = target_run_id
         self._shared_results = shared_results
+        # Capture generation at result creation time
+        self._creation_generation = session_state._transaction_generation
     
     def fetchone(self):
         """Intercept fetchone to observe acquisition RETURNING id result."""
-        # Fix 2: Old result cannot re-set pending after rollback/commit
-        if self._session_state._result_expired:
+        # Fix 2: Check if generation has changed (commit/rollback occurred)
+        if self._creation_generation != self._session_state._transaction_generation:
             return self._result.fetchone()
         
         row = self._result.fetchone()
@@ -126,6 +128,9 @@ def create_hooked_session_factory(
     Returns:
         A factory function that returns hooked sessions with session-local state
     """
+    # Lock for protecting shared_results increments
+    shared_lock = threading.Lock()
+    
     def hooked_session_factory() -> Session:
         """Returns a session with acquisition detection hooks."""
         session = base_factory()
@@ -154,10 +159,10 @@ def create_hooked_session_factory(
             try:
                 original_commit()
             except Exception as commit_err:
-                # Commit failure: clear pending and mark result expired
+                # Commit failure: clear pending and increment generation
                 session_state.acquisition_pending = False
                 session_state.acquisition_run_id = None
-                session_state._result_expired = True
+                session_state._transaction_generation += 1
                 raise
             
             # After successful commit, verify acquisition on independent connection
@@ -172,10 +177,21 @@ def create_hooked_session_factory(
                         {"id": target_run_id}
                     ).fetchone()
                     
-                    if verify_result and verify_result[0] == 'running':
-                        verification_succeeded = True
-                        
-                        # Fix 3: Increment shared totals (not overwrite with session-local)
+                    # Fix 6: Verification non-running/zero-row raises error
+                    if not verify_result:
+                        raise AcquisitionHookError(
+                            f"Verification returned zero rows for run_id={target_run_id}"
+                        )
+                    
+                    if verify_result[0] != 'running':
+                        raise AcquisitionHookError(
+                            f"Verification returned status={verify_result[0]!r}, expected 'running'"
+                        )
+                    
+                    verification_succeeded = True
+                    
+                    # Fix 3: Increment shared totals with lock protection
+                    with shared_lock:
                         if shared_results is not None:
                             shared_results["signal_count"] = shared_results.get("signal_count", 0) + 1
                         
@@ -201,8 +217,8 @@ def create_hooked_session_factory(
                     # Fix 1: Always consume pending after commit (success or failure)
                     session_state.acquisition_pending = False
                     session_state.acquisition_run_id = None
-                    # Fix 2: Mark result expired to prevent re-setting pending
-                    session_state._result_expired = True
+                    # Fix 2: Increment generation to invalidate old results
+                    session_state._transaction_generation += 1
                     
                     if verify_session:
                         # Verify-session close error must not be swallowed
@@ -213,14 +229,14 @@ def create_hooked_session_factory(
                                 f"Failed to close verify session: {close_err}"
                             ) from close_err
             else:
-                # No pending: mark result expired anyway
-                session_state._result_expired = True
+                # No pending: increment generation anyway
+                session_state._transaction_generation += 1
         
         def hooked_rollback():
-            """Intercept rollback: clear pending and mark result expired."""
+            """Intercept rollback: clear pending and increment generation."""
             session_state.acquisition_pending = False
             session_state.acquisition_run_id = None
-            session_state._result_expired = True
+            session_state._transaction_generation += 1
             return original_rollback()
         
         # Replace methods on session instance
