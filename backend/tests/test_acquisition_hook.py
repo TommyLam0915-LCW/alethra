@@ -1750,8 +1750,11 @@ def test_concurrent_b_updates_while_a_in_callback_wait():
         # Wait for B to complete (bounded wait)
         assert b_completed.wait(timeout=2.0), "B did not complete"
         
+        # Bounded join B before asserting (issue #1 fix)
+        b_thread.join(timeout=1.0)
+        
         # CRITICAL ASSERTION: Before releasing A, verify:
-        # 1. B has completed
+        # 1. B has completed and joined
         assert not b_thread.is_alive(), "B worker should have completed"
         # 2. A is still blocked in callback
         assert a_thread.is_alive(), "A worker should still be blocked"
@@ -1776,20 +1779,27 @@ def test_concurrent_b_updates_while_a_in_callback_wait():
         assert shared_results["signal_count"] == 2
         
     finally:
-        # Ensure cleanup: release A and join all workers
+        # Ensure cleanup: release A and join all workers (issue #2 fix)
+        # Try to join ALL workers, collect errors, report once
         a_can_exit_callback.set()
+        
+        cleanup_errors = []
         
         # Join A with bounded timeout
         if a_thread.is_alive():
             a_thread.join(timeout=1.0)
             if a_thread.is_alive():
-                raise RuntimeError("A worker still alive after cleanup join")
+                cleanup_errors.append("A worker still alive after cleanup join")
         
-        # Join B with bounded timeout
+        # Join B with bounded timeout (even if A failed)
         if b_thread.is_alive():
             b_thread.join(timeout=1.0)
             if b_thread.is_alive():
-                raise RuntimeError("B worker still alive after cleanup join")
+                cleanup_errors.append("B worker still alive after cleanup join")
+        
+        # Report all cleanup errors at once
+        if cleanup_errors:
+            raise RuntimeError("; ".join(cleanup_errors))
 
 
 # Total: 30 + 10 + 1 = 41 tests
