@@ -2765,23 +2765,10 @@ class TestBatchBMinimalIntegration:
         # Gap 2: Shared state — cleanup refuses to delete if workers not confirmed stopped
         # Now managed by lifecycle helper
         
-        # Register finalizer BEFORE any writes
-        def cleanup():
-            # Gap 2: Use lifecycle helper to verify workers stopped before cleanup
-            resource_ids = {
-                "user_id": user_id,
-                "paper_run_id": paper_run_id,
-                "portfolio_id": portfolio_id,
-                "study_run_id": study_run_id,
-                "trade_id": trade_id,
-            }
-            try:
-                lifecycle.run_cleanup(resource_ids=resource_ids)
-            except Exception as e:
-                # Lifecycle helper raises CleanupRefusedError if workers not stopped
-                raise RuntimeError(f"Cleanup refused: {e}") from e
-            
-            # If lifecycle cleanup succeeded, perform DB cleanup
+        # Set DB cleanup callback BEFORE registering finalizer
+        # This ensures DB cleanup only happens after workers confirmed stopped
+        def db_cleanup_callback():
+            """Actual DB cleanup - called by lifecycle.run_cleanup() after workers stopped."""
             s = session_factory()
             try:
                 # Clean up in FK-safe order
@@ -2801,6 +2788,28 @@ class TestBatchBMinimalIntegration:
                 raise RuntimeError(f"Cleanup failed: {e}") from e
             finally:
                 s.close()
+        
+        lifecycle.set_cleanup_callback(db_cleanup_callback)
+        
+        # Register finalizer BEFORE any writes
+        def cleanup():
+            # Gap 2: Use lifecycle helper to verify workers stopped before cleanup
+            resource_ids = {
+                "user_id": user_id,
+                "paper_run_id": paper_run_id,
+                "portfolio_id": portfolio_id,
+                "study_run_id": study_run_id,
+                "trade_id": trade_id,
+            }
+            try:
+                # This will:
+                # 1. Verify all workers stopped (raises CleanupRefusedError if not)
+                # 2. Execute db_cleanup_callback (only if workers stopped)
+                # 3. Mark cleanup as executed (prevents duplicate)
+                lifecycle.run_cleanup(resource_ids=resource_ids)
+            except Exception as e:
+                # Lifecycle helper raises CleanupRefusedError if workers not stopped
+                raise RuntimeError(f"Cleanup refused: {e}") from e
         
         request.addfinalizer(cleanup)
         
@@ -2995,23 +3004,42 @@ class TestBatchBMinimalIntegration:
                 replay_completed.set()
         
         # Start threads and register with lifecycle helper
-        cancel_thread = threading.Thread(target=submit_cancel, name="cancel_thread")
-        replay_thread = threading.Thread(target=execute_replay, name="replay_thread")
+        # Use try/finally to ensure first worker gets abort/release/join even if second start fails
+        cancel_thread = None
+        replay_thread = None
         
-        # Register with lifecycle helper for proper stop-before-cleanup
-        lifecycle.workers.append({
-            'thread': cancel_thread,
-            'abort_event': abort_test,
-            'name': 'cancel_thread'
-        })
-        lifecycle.workers.append({
-            'thread': replay_thread,
-            'abort_event': abort_test,
-            'name': 'replay_thread'
-        })
-        
-        cancel_thread.start()
-        replay_thread.start()
+        try:
+            # Start cancel thread
+            cancel_thread, cancel_abort = lifecycle.start_worker(
+                target=submit_cancel,
+                name="cancel_thread"
+            )
+            # Override abort event to use shared test event
+            cancel_worker = next(w for w in lifecycle.workers if w['name'] == 'cancel_thread')
+            cancel_worker['abort_event'] = abort_test
+            
+            # Start replay thread
+            replay_thread, replay_abort = lifecycle.start_worker(
+                target=execute_replay,
+                name="replay_thread"
+            )
+            # Override abort event to use shared test event
+            replay_worker = next(w for w in lifecycle.workers if w['name'] == 'replay_thread')
+            replay_worker['abort_event'] = abort_test
+            
+        except Exception as start_error:
+            # If second worker start fails, first worker still needs cleanup
+            # lifecycle.abort_all() and lifecycle.join_all() will handle this
+            # in the finally block below
+            raise RuntimeError(f"Failed to start worker threads: {start_error}") from start_error
+        finally:
+            # This finally block only covers startup failures
+            # The main test logic has its own try/finally below
+            if start_error if 'start_error' in locals() else None:
+                # Startup failed - ensure any started workers are cleaned up
+                lifecycle.abort_all()
+                release_all.set()
+                lifecycle.join_all(timeout=2.0)
         
         try:
             # Wait for completion with timeout

@@ -95,6 +95,12 @@ class WorkerLifecycle:
         Note:
             If worker needs abort_event, it must be in kwargs.
             This method creates the abort_event and adds it to kwargs.
+            
+        State tracking:
+            - Worker is marked as 'created' before thread start
+            - Worker is marked as 'started' after successful thread.start()
+            - Worker is marked as 'failed' if thread.start() raises
+            - Only 'started' workers are joined/verified in abort_all/join_all/verify_all_stopped
         """
         if kwargs is None:
             kwargs = {}
@@ -106,33 +112,46 @@ class WorkerLifecycle:
         # (target should accept abort_event parameter)
         kwargs['abort_event'] = abort_event
         
-        # Create and start thread
+        # Create thread
         thread = threading.Thread(target=target, name=name, args=args, kwargs=kwargs)
-        thread.start()
         
-        # Track worker
-        self.workers.append({
+        # Track worker as created
+        worker_entry = {
             'thread': thread,
             'abort_event': abort_event,
-            'name': name
-        })
+            'name': name,
+            'state': 'created'
+        }
+        self.workers.append(worker_entry)
+        
+        # Start thread with error handling
+        try:
+            thread.start()
+            worker_entry['state'] = 'started'
+        except Exception as e:
+            worker_entry['state'] = 'failed'
+            worker_entry['start_error'] = e
+            self.errors.append(e)
+            raise
         
         return thread, abort_event
     
     def abort_all(self):
-        """Signal abort/release to all tracked workers."""
+        """Signal abort/release to all STARTED workers."""
         for worker in self.workers:
+            if worker.get('state') != 'started':
+                continue
             try:
                 worker['abort_event'].set()
             except Exception as e:
                 self.errors.append(e)
     
     def release_all(self):
-        """Alias for abort_all - signal release to all tracked workers."""
+        """Alias for abort_all - signal release to all STARTED workers."""
         self.abort_all()
     
     def join_all(self, timeout: float = 2.0) -> List[Exception]:
-        """Bounded join all workers.
+        """Bounded join all STARTED workers.
         
         Args:
             timeout: Maximum seconds to wait per worker
@@ -143,6 +162,8 @@ class WorkerLifecycle:
         join_errors = []
         
         for worker in self.workers:
+            if worker.get('state') != 'started':
+                continue
             try:
                 worker['thread'].join(timeout=timeout)
             except Exception as e:
@@ -152,23 +173,42 @@ class WorkerLifecycle:
         return join_errors
     
     def verify_all_stopped(self) -> List[str]:
-        """Verify all workers are stopped (not alive).
+        """Verify all STARTED workers are stopped (not alive).
+        
+        Checks ALL started workers even if first one fails.
+        Collects all errors before raising.
         
         Returns:
             List of worker names that are still alive
         
         Raises:
-            WorkerNotStoppedError: If any worker still alive
+            WorkerNotStoppedError: If any worker still alive (after checking all)
         """
         alive_workers = []
+        check_errors = []
         
         for worker in self.workers:
-            if worker['thread'].is_alive():
-                alive_workers.append(worker['name'])
+            if worker.get('state') != 'started':
+                continue
+            try:
+                if worker['thread'].is_alive():
+                    alive_workers.append(worker['name'])
+            except Exception as e:
+                check_errors.append((worker['name'], e))
+                self.errors.append(e)
         
+        # Report all alive workers at once
         if alive_workers:
             raise WorkerNotStoppedError(
                 f"Workers still alive: {alive_workers}. "
+                f"Cannot proceed to cleanup."
+            )
+        
+        # If check errors occurred but no alive workers, still report
+        if check_errors:
+            error_info = "; ".join(f"{name}: {str(e)}" for name, e in check_errors)
+            raise WorkerNotStoppedError(
+                f"Worker stop verification errors: {error_info}. "
                 f"Cannot proceed to cleanup."
             )
         
