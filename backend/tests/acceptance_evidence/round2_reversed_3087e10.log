@@ -1,0 +1,206 @@
+/Users/tommylam0915/Documents/Qoder/2026-11-03/5062987d/alethra-dev/backend/.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:208: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the fixture caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to function scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
+........................................................................ [ 60%]
+...............................................                          [100%]
+=============================== warnings summary ===============================
+backend/.venv/lib/python3.12/site-packages/starlette/formparsers.py:12
+  /Users/tommylam0915/Documents/Qoder/2026-11-03/5062987d/alethra-dev/backend/.venv/lib/python3.12/site-packages/starlette/formparsers.py:12: PendingDeprecationWarning: Please use `import python_multipart` instead.
+    import multipart
+
+backend/.venv/lib/python3.12/site-packages/starlette/testclient.py:40
+  /Users/tommylam0915/Documents/Qoder/2026-11-03/5062987d/alethra-dev/backend/.venv/lib/python3.12/site-packages/starlette/testclient.py:40: DeprecationWarning: The anyio.abc.BlockingPortal alias is deprecated, use anyio.from_thread.BlockingPortal instead.
+    _PortalFactoryType = typing.Callable[[], typing.ContextManager[anyio.abc.BlockingPortal]]
+
+backend/app/database.py:21
+  /Users/tommylam0915/Documents/Qoder/2026-11-03/5062987d/alethra-dev/backend/app/database.py:21: MovedIn20Warning: The ``declarative_base()`` function is now available as sqlalchemy.orm.declarative_base(). (deprecated since: 2.0) (Background on SQLAlchemy 2.0 at: https://sqlalche.me/e/b8d9)
+    Base = declarative_base()
+
+backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:132
+  /Users/tommylam0915/Documents/Qoder/2026-11-03/5062987d/alethra-dev/backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:132: UserWarning: Field "model_or_strategy_version_id" in PaperOrderResponse has conflict with protected namespace "model_".
+  
+  You may be able to resolve this warning by setting `model_config['protected_namespaces'] = ()`.
+    warnings.warn(
+
+backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:132
+  /Users/tommylam0915/Documents/Qoder/2026-11-03/5062987d/alethra-dev/backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:132: UserWarning: Field "model_type" in ModelVersionCreate has conflict with protected namespace "model_".
+  
+  You may be able to resolve this warning by setting `model_config['protected_namespaces'] = ()`.
+    warnings.warn(
+
+backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:132
+  /Users/tommylam0915/Documents/Qoder/2026-11-03/5062987d/alethra-dev/backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:132: UserWarning: Field "model_specification_json" in ModelVersionCreate has conflict with protected namespace "model_".
+  
+  You may be able to resolve this warning by setting `model_config['protected_namespaces'] = ()`.
+    warnings.warn(
+
+backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:132
+  /Users/tommylam0915/Documents/Qoder/2026-11-03/5062987d/alethra-dev/backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:132: UserWarning: Field "model_type" in ModelVersionFromStrategy has conflict with protected namespace "model_".
+  
+  You may be able to resolve this warning by setting `model_config['protected_namespaces'] = ()`.
+    warnings.warn(
+
+backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:132
+  /Users/tommylam0915/Documents/Qoder/2026-11-03/5062987d/alethra-dev/backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:132: UserWarning: Field "model_research_record_id" in ModelVersionResponse has conflict with protected namespace "model_".
+  
+  You may be able to resolve this warning by setting `model_config['protected_namespaces'] = ()`.
+    warnings.warn(
+
+backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:132
+  /Users/tommylam0915/Documents/Qoder/2026-11-03/5062987d/alethra-dev/backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:132: UserWarning: Field "model_type" in ModelVersionResponse has conflict with protected namespace "model_".
+  
+  You may be able to resolve this warning by setting `model_config['protected_namespaces'] = ()`.
+    warnings.warn(
+
+backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:132
+  /Users/tommylam0915/Documents/Qoder/2026-11-03/5062987d/alethra-dev/backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:132: UserWarning: Field "model_specification_json" in ModelVersionResponse has conflict with protected namespace "model_".
+  
+  You may be able to resolve this warning by setting `model_config['protected_namespaces'] = ()`.
+    warnings.warn(
+
+backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:132
+  /Users/tommylam0915/Documents/Qoder/2026-11-03/5062987d/alethra-dev/backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:132: UserWarning: Field "model_card_id" in ModelVersionResponse has conflict with protected namespace "model_".
+  
+  You may be able to resolve this warning by setting `model_config['protected_namespaces'] = ()`.
+    warnings.warn(
+
+backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:132
+  /Users/tommylam0915/Documents/Qoder/2026-11-03/5062987d/alethra-dev/backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:132: UserWarning: Field "model_version_id" in ModelEvaluationCreate has conflict with protected namespace "model_".
+  
+  You may be able to resolve this warning by setting `model_config['protected_namespaces'] = ()`.
+    warnings.warn(
+
+backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:132
+  /Users/tommylam0915/Documents/Qoder/2026-11-03/5062987d/alethra-dev/backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:132: UserWarning: Field "model_version_id" in ModelEvaluationResponse has conflict with protected namespace "model_".
+  
+  You may be able to resolve this warning by setting `model_config['protected_namespaces'] = ()`.
+    warnings.warn(
+
+backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:132
+  /Users/tommylam0915/Documents/Qoder/2026-11-03/5062987d/alethra-dev/backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:132: UserWarning: Field "model_research_record_id" in ModelEvaluationResponse has conflict with protected namespace "model_".
+  
+  You may be able to resolve this warning by setting `model_config['protected_namespaces'] = ()`.
+    warnings.warn(
+
+backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:132
+  /Users/tommylam0915/Documents/Qoder/2026-11-03/5062987d/alethra-dev/backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:132: UserWarning: Field "model_version_id" in ModelCardCreate has conflict with protected namespace "model_".
+  
+  You may be able to resolve this warning by setting `model_config['protected_namespaces'] = ()`.
+    warnings.warn(
+
+backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:132
+  /Users/tommylam0915/Documents/Qoder/2026-11-03/5062987d/alethra-dev/backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:132: UserWarning: Field "model_version_id" in ModelCardResponse has conflict with protected namespace "model_".
+  
+  You may be able to resolve this warning by setting `model_config['protected_namespaces'] = ()`.
+    warnings.warn(
+
+backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:132
+  /Users/tommylam0915/Documents/Qoder/2026-11-03/5062987d/alethra-dev/backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:132: UserWarning: Field "model_version_id" in ModelResearchExportCreate has conflict with protected namespace "model_".
+  
+  You may be able to resolve this warning by setting `model_config['protected_namespaces'] = ()`.
+    warnings.warn(
+
+backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:132
+  /Users/tommylam0915/Documents/Qoder/2026-11-03/5062987d/alethra-dev/backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:132: UserWarning: Field "model_research_record_id" in ModelResearchExportResponse has conflict with protected namespace "model_".
+  
+  You may be able to resolve this warning by setting `model_config['protected_namespaces'] = ()`.
+    warnings.warn(
+
+backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:132
+  /Users/tommylam0915/Documents/Qoder/2026-11-03/5062987d/alethra-dev/backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:132: UserWarning: Field "model_version_id" in ModelResearchExportResponse has conflict with protected namespace "model_".
+  
+  You may be able to resolve this warning by setting `model_config['protected_namespaces'] = ()`.
+    warnings.warn(
+
+backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:132
+  /Users/tommylam0915/Documents/Qoder/2026-11-03/5062987d/alethra-dev/backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:132: UserWarning: Field "model_research_record_id" in PackageManifest has conflict with protected namespace "model_".
+  
+  You may be able to resolve this warning by setting `model_config['protected_namespaces'] = ()`.
+    warnings.warn(
+
+backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:132
+  /Users/tommylam0915/Documents/Qoder/2026-11-03/5062987d/alethra-dev/backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:132: UserWarning: Field "model_version_id" in PackageManifest has conflict with protected namespace "model_".
+  
+  You may be able to resolve this warning by setting `model_config['protected_namespaces'] = ()`.
+    warnings.warn(
+
+backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:132
+  /Users/tommylam0915/Documents/Qoder/2026-11-03/5062987d/alethra-dev/backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:132: UserWarning: Field "model_status" in PackageManifest has conflict with protected namespace "model_".
+  
+  You may be able to resolve this warning by setting `model_config['protected_namespaces'] = ()`.
+    warnings.warn(
+
+backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:132
+  /Users/tommylam0915/Documents/Qoder/2026-11-03/5062987d/alethra-dev/backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:132: UserWarning: Field "model_version_id" in InferenceRunCreate has conflict with protected namespace "model_".
+  
+  You may be able to resolve this warning by setting `model_config['protected_namespaces'] = ()`.
+    warnings.warn(
+
+backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:132
+  /Users/tommylam0915/Documents/Qoder/2026-11-03/5062987d/alethra-dev/backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:132: UserWarning: Field "model_version_id" in InferenceRunResponse has conflict with protected namespace "model_".
+  
+  You may be able to resolve this warning by setting `model_config['protected_namespaces'] = ()`.
+    warnings.warn(
+
+backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_config.py:291
+backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_config.py:291
+  /Users/tommylam0915/Documents/Qoder/2026-11-03/5062987d/alethra-dev/backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_config.py:291: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.9/migration/
+    warnings.warn(DEPRECATION_MESSAGE, DeprecationWarning)
+
+backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:132
+  /Users/tommylam0915/Documents/Qoder/2026-11-03/5062987d/alethra-dev/backend/.venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:132: UserWarning: Field "model_type" in TrainingJobRequest has conflict with protected namespace "model_".
+  
+  You may be able to resolve this warning by setting `model_config['protected_namespaces'] = ()`.
+    warnings.warn(
+
+backend/app/main.py:50
+  /Users/tommylam0915/Documents/Qoder/2026-11-03/5062987d/alethra-dev/backend/app/main.py:50: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    @app.on_event("startup")
+
+backend/.venv/lib/python3.12/site-packages/fastapi/applications.py:4495
+backend/.venv/lib/python3.12/site-packages/fastapi/applications.py:4495
+backend/.venv/lib/python3.12/site-packages/fastapi/applications.py:4495
+backend/.venv/lib/python3.12/site-packages/fastapi/applications.py:4495
+  /Users/tommylam0915/Documents/Qoder/2026-11-03/5062987d/alethra-dev/backend/.venv/lib/python3.12/site-packages/fastapi/applications.py:4495: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    return self.router.on_event(event_type)
+
+backend/app/main.py:62
+  /Users/tommylam0915/Documents/Qoder/2026-11-03/5062987d/alethra-dev/backend/app/main.py:62: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    @app.on_event("startup")
+
+backend/app/main.py:79
+  /Users/tommylam0915/Documents/Qoder/2026-11-03/5062987d/alethra-dev/backend/app/main.py:79: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    @app.on_event("shutdown")
+
+backend/app/main.py:87
+  /Users/tommylam0915/Documents/Qoder/2026-11-03/5062987d/alethra-dev/backend/app/main.py:87: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    @app.on_event("shutdown")
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+119 passed, 35 warnings in 9.55s
