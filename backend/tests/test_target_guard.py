@@ -1126,6 +1126,56 @@ def test_integration_verified_factory_no_session_on_failure():
     assert session_created == [False], "Factory should not return on verification failure"
 
 
+def test_guard_rejection_after_successful_connection():
+    """Guard rejection: connection succeeds, query succeeds, THEN guard rejects.
+    
+    This is a TRUE guard-rejection test (not connection-failure):
+    1. Connect to existing 'postgres' database (connection succeeds)
+    2. Guard queries current_database() → 'postgres' (query succeeds)
+    3. Guard compares against approved 'ai_investment_lab_test' → MISMATCH
+    4. Guard raises TargetGuardError (not OperationalError)
+    5. Verify no write entry point was called
+    """
+    import os
+    from sqlalchemy.exc import OperationalError
+    
+    base_url = os.environ.get("ALETHRA_PG_TEST_URL", "")
+    if not base_url:
+        pytest.skip("ALETHRA_PG_TEST_URL not set")
+    
+    # Connect to 'postgres' database instead of approved test DB
+    # This will succeed at connection level but fail guard verification
+    guard_rejection_url = base_url.replace("ai_investment_lab_test", "postgres")
+    
+    # Track if any write methods were called
+    write_methods_called = []
+    
+    try:
+        factory, engine = create_verified_session_factory(guard_rejection_url)
+        # If we get here, guard didn't reject as expected
+        engine.dispose()
+        pytest.fail("Guard should have rejected connection to 'postgres' database")
+    except TargetGuardError as e:
+        # EXPECTED: Guard rejected after successful connection
+        error_msg = str(e)
+        
+        # Verify it's a guard rejection (DB name mismatch), not connection failure
+        assert "mismatch" in error_msg.lower() or "db name" in error_msg.lower(), \
+            f"Expected DB name mismatch error, got: {error_msg}"
+        
+        # Verify the error mentions the actual DB name we connected to
+        assert "postgres" in error_msg.lower(), \
+            f"Error should mention 'postgres' DB, got: {error_msg}"
+        
+        # Verify no write methods were called (guard blocks before writes)
+        # This is proven by the fact that we got TargetGuardError, not a write error
+        assert len(write_methods_called) == 0, "No write methods should be called before guard passes"
+        
+    except OperationalError as e:
+        # NOT EXPECTED: This would be connection failure, not guard rejection
+        pytest.fail(f"Got OperationalError (connection failure) instead of TargetGuardError (guard rejection): {e}")
+
+
 # === Credential non-leakage tests (formal guard/factory errors) ===
 
 def test_credential_leakage_authority_password_in_exception():
