@@ -732,3 +732,364 @@ class TestFirstIsAliveThrows:
             # Verify no alive test workers
             assert not thread1.is_alive(), "Test worker 1 still alive after cleanup"
             assert not thread2.is_alive(), "Test worker 2 still alive after cleanup"
+
+
+class TestFinalizeDirectCall:
+    """Tests that call finalize() directly to verify the shared finalization callable."""
+    
+    def test_finalize_normal_flow(self):
+        """finalize() with normal flow: abort → release → join → cleanup."""
+        lifecycle = WorkerLifecycle()
+        
+        worker_started = threading.Event()
+        worker_can_exit = threading.Event()
+        release_called = []
+        
+        def worker_target(abort_event):
+            worker_started.set()
+            abort_event.wait(timeout=5.0)
+            worker_can_exit.wait(timeout=1.0)
+        
+        def release_callback():
+            release_called.append(True)
+            worker_can_exit.set()
+        
+        cleanup_called = []
+        def cleanup_callback():
+            cleanup_called.append(True)
+        
+        lifecycle.set_cleanup_callback(cleanup_callback)
+        
+        # Start worker
+        thread, abort_event = lifecycle.start_worker(
+            target=worker_target,
+            name="test_worker"
+        )
+        
+        try:
+            # Wait for worker to start
+            assert worker_started.wait(timeout=2.0), "Worker did not start"
+            
+            # Call finalize() directly with release callback
+            result = lifecycle.finalize(timeout=2.0, release_callback=release_callback)
+            
+            # Verify cleanup executed
+            assert result is True
+            assert len(cleanup_called) == 1
+            assert lifecycle.cleanup_called_count == 1
+            
+            # Verify release callback was called
+            assert len(release_called) == 1
+            
+            # Verify call order (from automatic recording)
+            call_order = lifecycle.get_call_order()
+            assert call_order == ['abort_all', 'join_all', 'verify_all_stopped', 'cleanup']
+            
+        finally:
+            # Ensure cleanup
+            worker_can_exit.set()
+            lifecycle.abort_all()
+            if thread.is_alive():
+                thread.join(timeout=1.0)
+    
+    def test_finalize_workers_not_stopped(self):
+        """finalize() refuses cleanup when workers not stopped."""
+        lifecycle = WorkerLifecycle()
+        
+        worker_started = threading.Event()
+        worker_can_exit = threading.Event()
+        
+        def worker_target(abort_event):
+            worker_started.set()
+            abort_event.wait(timeout=5.0)
+            # Wait for explicit exit signal - worker will stay alive until this is set
+            worker_can_exit.wait(timeout=10.0)
+        
+        cleanup_called = []
+        def cleanup_callback():
+            cleanup_called.append(True)
+        
+        lifecycle.set_cleanup_callback(cleanup_callback)
+        
+        # Start worker
+        thread, abort_event = lifecycle.start_worker(
+            target=worker_target,
+            name="test_worker"
+        )
+        
+        try:
+            # Wait for worker to start
+            assert worker_started.wait(timeout=2.0), "Worker did not start"
+            
+            # Call finalize() with short timeout - should refuse because worker not stopped
+            # (worker is waiting on worker_can_exit which is not set yet)
+            # run_cleanup converts WorkerNotStoppedError to CleanupRefusedError
+            with pytest.raises(CleanupRefusedError):
+                lifecycle.finalize(timeout=0.5)
+            
+            # Verify cleanup NOT executed
+            assert len(cleanup_called) == 0
+            assert lifecycle.cleanup_called_count == 0
+            
+        finally:
+            # Ensure cleanup
+            worker_can_exit.set()
+            lifecycle.abort_all()
+            if thread.is_alive():
+                thread.join(timeout=1.0)
+    
+    def test_finalize_verification_throws(self):
+        """finalize() propagates verification errors."""
+        lifecycle = WorkerLifecycle()
+        
+        worker_started = threading.Event()
+        worker_can_exit = threading.Event()
+        
+        def worker_target(abort_event):
+            worker_started.set()
+            abort_event.wait(timeout=5.0)
+            worker_can_exit.wait(timeout=1.0)
+        
+        # Start worker
+        thread, abort_event = lifecycle.start_worker(
+            target=worker_target,
+            name="test_worker"
+        )
+        
+        try:
+            # Wait for worker to start
+            assert worker_started.wait(timeout=2.0), "Worker did not start"
+            
+            # Abort and join
+            lifecycle.abort_all()
+            worker_can_exit.set()
+            lifecycle.join_all(timeout=2.0)
+            
+            # Monkey-patch is_alive to throw
+            is_alive_error = RuntimeError("is_alive check failed failed")
+            original_is_alive = thread.is_alive
+            
+            def failing_is_alive():
+                raise is_alive_error
+            
+            thread.is_alive = failing_is_alive
+            
+            # Call finalize() - should propagate verification error as CleanupRefusedError
+            # (run_cleanup converts WorkerNotStoppedError to CleanupRefusedError)
+            with pytest.raises(CleanupRefusedError) as exc_info:
+                lifecycle.finalize(timeout=2.0)
+            
+            # Verify error message mentions is_alive
+            assert "is_alive" in str(exc_info.value).lower() or "verification errors" in str(exc_info.value).lower()
+            
+            # Verify the cause is WorkerNotStoppedError
+            assert isinstance(exc_info.value.__cause__, WorkerNotStoppedError)
+            
+            # Verify error preserved
+            all_errors = lifecycle.get_all_errors()
+            assert is_alive_error in all_errors
+            
+        finally:
+            # Restore original is_alive
+            thread.is_alive = original_is_alive
+            # Ensure cleanup
+            worker_can_exit.set()
+            lifecycle.abort_all()
+            if thread.is_alive():
+                thread.join(timeout=1.0)
+    
+    def test_finalize_duplicate_cleanup(self):
+        """finalize() does not repeat cleanup on duplicate call."""
+        lifecycle = WorkerLifecycle()
+        
+        worker_started = threading.Event()
+        worker_can_exit = threading.Event()
+        
+        def worker_target(abort_event):
+            worker_started.set()
+            abort_event.wait(timeout=5.0)
+            worker_can_exit.wait(timeout=1.0)
+        
+        cleanup_called = []
+        def cleanup_callback():
+            cleanup_called.append(True)
+        
+        lifecycle.set_cleanup_callback(cleanup_callback)
+        
+        # Start worker
+        thread, abort_event = lifecycle.start_worker(
+            target=worker_target,
+            name="test_worker"
+        )
+        
+        try:
+            # Wait for worker to start
+            assert worker_started.wait(timeout=2.0), "Worker did not start"
+            
+            # Call finalize() first time
+            result1 = lifecycle.finalize(timeout=2.0, release_callback=worker_can_exit.set)
+            assert result1 is True
+            assert len(cleanup_called) == 1
+            
+            # Call finalize() second time - should not repeat cleanup
+            result2 = lifecycle.finalize(timeout=2.0, release_callback=worker_can_exit.set)
+            assert result2 is False  # Returns False on duplicate
+            assert len(cleanup_called) == 1  # Still 1, not 2
+            assert lifecycle.cleanup_called_count == 1
+            
+        finally:
+            # Ensure cleanup
+            worker_can_exit.set()
+            lifecycle.abort_all()
+            if thread.is_alive():
+                thread.join(timeout=1.0)
+    
+    def test_finalize_callback_fails(self):
+        """finalize() propagates cleanup callback errors."""
+        lifecycle = WorkerLifecycle()
+        
+        worker_started = threading.Event()
+        worker_can_exit = threading.Event()
+        
+        def worker_target(abort_event):
+            worker_started.set()
+            abort_event.wait(timeout=5.0)
+            worker_can_exit.wait(timeout=1.0)
+        
+        cleanup_error = RuntimeError("Cleanup callback failed")
+        def cleanup_callback():
+            raise cleanup_error
+        
+        lifecycle.set_cleanup_callback(cleanup_callback)
+        
+        # Start worker
+        thread, abort_event = lifecycle.start_worker(
+            target=worker_target,
+            name="test_worker"
+        )
+        
+        try:
+            # Wait for worker to start
+            assert worker_started.wait(timeout=2.0), "Worker did not start"
+            
+            # Call finalize() - should propagate cleanup error
+            with pytest.raises(RuntimeError) as exc_info:
+                lifecycle.finalize(timeout=2.0, release_callback=worker_can_exit.set)
+            
+            # Verify error is the cleanup error
+            assert exc_info.value is cleanup_error
+            
+            # Verify error preserved in lifecycle errors
+            all_errors = lifecycle.get_all_errors()
+            assert cleanup_error in all_errors
+            
+        finally:
+            # Ensure cleanup
+            worker_can_exit.set()
+            lifecycle.abort_all()
+            if thread.is_alive():
+                thread.join(timeout=1.0)
+    
+    def test_finalize_main_error_chain(self):
+        """finalize() preserves main error in exception chain."""
+        lifecycle = WorkerLifecycle()
+        
+        worker_started = threading.Event()
+        worker_can_exit = threading.Event()
+        
+        def worker_target(abort_event):
+            worker_started.set()
+            abort_event.wait(timeout=5.0)
+            worker_can_exit.wait(timeout=1.0)
+        
+        main_error = ValueError("Main flow failed")
+        cleanup_error = RuntimeError("Cleanup callback failed")
+        
+        def cleanup_callback():
+            raise cleanup_error
+        
+        lifecycle.set_cleanup_callback(cleanup_callback)
+        
+        # Start worker
+        thread, abort_event = lifecycle.start_worker(
+            target=worker_target,
+            name="test_worker"
+        )
+        
+        caught_exception = []
+        
+        try:
+            # Wait for worker to start
+            assert worker_started.wait(timeout=2.0), "Worker did not start"
+            
+            # Simulate main flow failure with finalize in finally
+            try:
+                raise main_error
+            finally:
+                lifecycle.finalize(timeout=2.0, release_callback=worker_can_exit.set)
+                
+        except Exception as e:
+            caught_exception.append(e)
+        
+        # Verify we caught cleanup_error
+        assert len(caught_exception) == 1
+        caught = caught_exception[0]
+        assert caught is cleanup_error
+        
+        # Verify exception chain: cleanup_error.__context__ is main_error
+        assert caught.__context__ is main_error
+        
+        # Verify cleanup_error preserved in lifecycle errors
+        all_errors = lifecycle.get_all_errors()
+        assert cleanup_error in all_errors
+        
+        # Finally: ensure cleanup
+        worker_can_exit.set()
+        lifecycle.abort_all()
+        if thread.is_alive():
+            thread.join(timeout=1.0)
+    
+    def test_finalize_independent_release_event(self):
+        """finalize() with independent release Event (like B's release_all)."""
+        lifecycle = WorkerLifecycle()
+        
+        worker_started = threading.Event()
+        release_all = threading.Event()  # Independent release Event
+        
+        def worker_target(abort_event):
+            worker_started.set()
+            abort_event.wait(timeout=5.0)
+            release_all.wait(timeout=5.0)  # Wait for release Event
+        
+        cleanup_called = []
+        def cleanup_callback():
+            cleanup_called.append(True)
+        
+        lifecycle.set_cleanup_callback(cleanup_callback)
+        
+        # Start worker
+        thread, abort_event = lifecycle.start_worker(
+            target=worker_target,
+            name="test_worker"
+        )
+        
+        try:
+            # Wait for worker to start
+            assert worker_started.wait(timeout=2.0), "Worker did not start"
+            
+            # Call finalize() with release_all.set as release callback
+            result = lifecycle.finalize(timeout=2.0, release_callback=release_all.set)
+            
+            # Verify cleanup executed
+            assert result is True
+            assert len(cleanup_called) == 1
+            
+            # Verify release Event was set
+            assert release_all.is_set()
+            
+        finally:
+            # Ensure cleanup
+            release_all.set()
+            lifecycle.abort_all()
+            if thread.is_alive():
+                thread.join(timeout=1.0)

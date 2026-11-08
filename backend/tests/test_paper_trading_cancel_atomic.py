@@ -45,7 +45,7 @@ from app.services.paper_trading_exceptions import (
     ResourceNotFoundError,
     InvalidStateError,
 )
-from tests.lifecycle_helper import WorkerLifecycle
+from tests.lifecycle_helper import WorkerLifecycle, WorkerNotStoppedError, CleanupRefusedError
 
 
 @pytest.fixture
@@ -3106,8 +3106,9 @@ class TestBatchBMinimalIntegration:
         finally:
             # Gap 1: Only abort/release events in finally — NEVER success events
             # Use shared finalization callable from lifecycle helper
+            # Pass release_all.set as release_callback to ensure workers are released before join
             try:
-                lifecycle.finalize(timeout=5.0)
+                lifecycle.finalize(timeout=5.0, release_callback=release_all.set)
             except WorkerNotStoppedError as e:
                 # Gap 四: Verify all workers stopped — never proceed with live workers
                 # Report error with precise isolated resources
