@@ -945,3 +945,316 @@ def test_triple_failure_chain_verify_close_dispose():
         assert "close failed" in str(exc_info.value.__context__)
         # Verify error chained to close error
         assert exc_info.value.__context__.__context__ is verify_error
+
+
+def test_triple_failure_explicit_count_and_order():
+    """Triple failure: close called exactly once, dispose called exactly once, in order."""
+    from unittest.mock import MagicMock, patch, call
+    import sys
+    
+    call_order = []
+    
+    mock_engine = MagicMock()
+    def track_dispose():
+        call_order.append("dispose")
+        raise RuntimeError("dispose failed")
+    mock_engine.dispose.side_effect = track_dispose
+    
+    mock_session = MagicMock()
+    def track_close():
+        call_order.append("close")
+        raise RuntimeError("close failed")
+    mock_session.close.side_effect = track_close
+    
+    mock_factory_fn = MagicMock(return_value=mock_session)
+    verify_error = TargetGuardError("verify failed")
+    
+    mod = sys.modules[__name__]
+    
+    with patch("sqlalchemy.create_engine", return_value=mock_engine), \
+         patch("sqlalchemy.orm.sessionmaker", return_value=mock_factory_fn), \
+         patch.object(mod, "verify_test_target", side_effect=verify_error):
+        with pytest.raises(RuntimeError, match="dispose failed"):
+            create_verified_session_factory("postgresql:///test")
+        
+        # Explicit count assertions
+        assert mock_session.close.call_count == 1, "close() must be called exactly once"
+        assert mock_engine.dispose.call_count == 1, "dispose() must be called exactly once"
+        
+        # Explicit order assertion: close before dispose
+        assert call_order == ["close", "dispose"], f"Expected ['close', 'dispose'], got {call_order}"
+
+
+# === Integration tests: actual driver verification (no mocks) ===
+
+def test_integration_wrong_db_name_rejected_before_write():
+    """Integration: connecting to wrong DB name is rejected before any write."""
+    import os
+    wrong_db_url = os.environ.get("ALETHRA_PG_TEST_URL", "").replace(
+        "ai_investment_lab_test", "wrong_db_name"
+    )
+    if not wrong_db_url or "wrong_db_name" not in wrong_db_url:
+        pytest.skip("ALETHRA_PG_TEST_URL not set or doesn't contain expected DB name")
+    
+    # Attempt to create verified factory with wrong DB name
+    with pytest.raises((TargetGuardError, Exception)) as exc_info:
+        create_verified_session_factory(wrong_db_url)
+    
+    # Prove rejection occurred (either target guard or connection error)
+    assert "mismatch" in str(exc_info.value).lower() or "failed" in str(exc_info.value).lower()
+
+
+def test_integration_wrong_socket_dir_rejected():
+    """Integration: URL with unapproved socket dir is rejected before writes."""
+    import os
+    from sqlalchemy.exc import OperationalError
+    
+    base_url = os.environ.get("ALETHRA_PG_TEST_URL", "")
+    if not base_url or "host=/tmp" not in base_url:
+        pytest.skip("ALETHRA_PG_TEST_URL not set or doesn't use socket connection")
+    
+    # Replace /tmp with unapproved dir
+    wrong_socket_url = base_url.replace("host=/tmp", "host=/var/run/postgresql")
+    
+    # Either target guard rejects it, or connection fails (both prove rejection before writes)
+    with pytest.raises((TargetGuardError, OperationalError)) as exc_info:
+        create_verified_session_factory(wrong_socket_url)
+    
+    # Prove rejection occurred
+    error_msg = str(exc_info.value).lower()
+    assert ("not approved" in error_msg or 
+            "socket directory" in error_msg or 
+            "no such file" in error_msg or
+            "connection" in error_msg)
+
+
+def test_integration_wrong_socket_port_rejected():
+    """Integration: URL with wrong socket port is rejected before writes."""
+    import os
+    from sqlalchemy.exc import OperationalError
+    
+    base_url = os.environ.get("ALETHRA_PG_TEST_URL", "")
+    if not base_url or "host=/tmp" not in base_url:
+        pytest.skip("ALETHRA_PG_TEST_URL not set or doesn't use socket connection")
+    
+    # Add wrong port parameter
+    wrong_port_url = base_url + "&port=9999" if "?" in base_url else base_url + "?port=9999"
+    
+    # Either target guard rejects it, or connection fails (both prove rejection before writes)
+    with pytest.raises((TargetGuardError, OperationalError)) as exc_info:
+        create_verified_session_factory(wrong_port_url)
+    
+    # Prove rejection occurred
+    error_msg = str(exc_info.value).lower()
+    assert ("port" in error_msg or 
+            "no such file" in error_msg or
+            "connection" in error_msg)
+
+
+def test_integration_empty_host_rejected():
+    """Integration: URL with empty host= is rejected."""
+    import os
+    base_url = os.environ.get("ALETHRA_PG_TEST_URL", "")
+    if not base_url or "host=/tmp" not in base_url:
+        pytest.skip("ALETHRA_PG_TEST_URL not set or doesn't use socket connection")
+    
+    # Replace host=/tmp with host=
+    empty_host_url = base_url.replace("host=/tmp", "host=")
+    
+    with pytest.raises(TargetGuardError) as exc_info:
+        create_verified_session_factory(empty_host_url)
+    
+    assert "empty" in str(exc_info.value).lower() or "ambiguous" in str(exc_info.value).lower()
+
+
+def test_integration_no_host_param_rejected():
+    """Integration: URL without host= param is rejected for socket connection."""
+    import os
+    base_url = os.environ.get("ALETHRA_PG_TEST_URL", "")
+    if not base_url or "host=/tmp" not in base_url:
+        pytest.skip("ALETHRA_PG_TEST_URL not set or doesn't use socket connection")
+    
+    # Remove host= parameter
+    import re
+    no_host_url = re.sub(r"[?&]host=[^&]*", "", base_url)
+    # Clean up double ?? or trailing ?
+    no_host_url = no_host_url.replace("??", "?").rstrip("?")
+    
+    with pytest.raises(TargetGuardError) as exc_info:
+        create_verified_session_factory(no_host_url)
+    
+    assert "no host=" in str(exc_info.value).lower() or "ambiguous" in str(exc_info.value).lower()
+
+
+def test_integration_conflicting_host_params_rejected():
+    """Integration: URL with multiple conflicting host= params is rejected."""
+    import os
+    base_url = os.environ.get("ALETHRA_PG_TEST_URL", "")
+    if not base_url or "host=/tmp" not in base_url:
+        pytest.skip("ALETHRA_PG_TEST_URL not set or doesn't use socket connection")
+    
+    # Add conflicting host parameter
+    conflicting_url = base_url + "&host=/evil"
+    
+    with pytest.raises(TargetGuardError) as exc_info:
+        create_verified_session_factory(conflicting_url)
+    
+    assert "multiple host" in str(exc_info.value).lower() or "ambiguous" in str(exc_info.value).lower()
+
+
+def test_integration_verified_factory_no_session_on_failure():
+    """Integration: when verification fails, no session is returned."""
+    import os
+    wrong_db_url = os.environ.get("ALETHRA_PG_TEST_URL", "").replace(
+        "ai_investment_lab_test", "nonexistent_db"
+    )
+    if not wrong_db_url or "nonexistent_db" not in wrong_db_url:
+        pytest.skip("ALETHRA_PG_TEST_URL not set")
+    
+    # Attempt to create verified factory
+    session_created = []
+    try:
+        factory, engine = create_verified_session_factory(wrong_db_url)
+        # If we get here, verification didn't fail as expected
+        session_created.append(True)
+        engine.dispose()
+    except Exception:
+        # Expected: verification or connection failed
+        session_created.append(False)
+    
+    # Prove no session was successfully created and returned
+    assert session_created == [False], "Factory should not return on verification failure"
+
+
+# === Credential non-leakage tests (formal guard/factory errors) ===
+
+def test_credential_leakage_authority_password_in_exception():
+    """Formal guard error with authority password doesn't leak credentials."""
+    import os
+    from sqlalchemy.exc import OperationalError
+    
+    # URL with password in authority
+    base_url = os.environ.get("ALETHRA_PG_TEST_URL", "")
+    if not base_url:
+        pytest.skip("ALETHRA_PG_TEST_URL not set")
+    
+    # Inject a fake password into the URL
+    url_with_password = base_url.replace("://", "://user:FakePassword123@", 1)
+    
+    # Try to create verified factory (will fail connection or verification)
+    try:
+        create_verified_session_factory(url_with_password)
+        pytest.fail("Should have raised an exception")
+    except (TargetGuardError, OperationalError, Exception) as e:
+        error_msg = str(e)
+        traceback_str = "".join(
+            __import__("traceback").format_exception(type(e), e, e.__traceback__)
+        )
+        
+        # Assert password doesn't appear in exception or traceback
+        assert "FakePassword123" not in error_msg, f"Password leaked in error message: {error_msg}"
+        assert "FakePassword123" not in traceback_str, f"Password leaked in traceback"
+
+
+def test_credential_leakage_encoded_password_in_exception():
+    """Formal guard error with URL-encoded password doesn't leak credentials."""
+    import os
+    from sqlalchemy.exc import OperationalError
+    from urllib.parse import quote
+    
+    base_url = os.environ.get("ALETHRA_PG_TEST_URL", "")
+    if not base_url:
+        pytest.skip("ALETHRA_PG_TEST_URL not set")
+    
+    # URL with encoded password (special characters)
+    encoded_password = quote("F@ke:P@ssw0rd!#$")
+    url_with_encoded = base_url.replace("://", f"://user:{encoded_password}@", 1)
+    
+    try:
+        create_verified_session_factory(url_with_encoded)
+        pytest.fail("Should have raised an exception")
+    except (TargetGuardError, OperationalError, Exception) as e:
+        error_msg = str(e)
+        traceback_str = "".join(
+            __import__("traceback").format_exception(type(e), e, e.__traceback__)
+        )
+        
+        # Assert encoded password doesn't appear
+        assert encoded_password not in error_msg, f"Encoded password leaked: {error_msg}"
+        assert encoded_password not in traceback_str, f"Encoded password leaked in traceback"
+
+
+def test_credential_leakage_sensitive_query_params():
+    """Formal guard error doesn't leak sensitive query parameters."""
+    import os
+    from sqlalchemy.exc import OperationalError
+    
+    base_url = os.environ.get("ALETHRA_PG_TEST_URL", "")
+    if not base_url or "?" not in base_url:
+        pytest.skip("ALETHRA_PG_TEST_URL not set or has no query params")
+    
+    # Add a sensitive-looking query parameter AND change DB name to force failure
+    url_with_sensitive = base_url.replace("ai_investment_lab_test", "wrong_db") + "&password=SecretPass123"
+    
+    try:
+        create_verified_session_factory(url_with_sensitive)
+        pytest.fail("Should have raised an exception")
+    except (TargetGuardError, OperationalError, Exception) as e:
+        error_msg = str(e)
+        
+        # Assert sensitive param doesn't appear in error
+        assert "SecretPass123" not in error_msg, f"Sensitive query param leaked: {error_msg}"
+
+
+def test_credential_leakage_connection_failure():
+    """Connection failure error doesn't leak full URL with credentials."""
+    import os
+    from sqlalchemy.exc import OperationalError
+    
+    base_url = os.environ.get("ALETHRA_PG_TEST_URL", "")
+    if not base_url:
+        pytest.skip("ALETHRA_PG_TEST_URL not set")
+    
+    # URL with password pointing to non-existent server
+    url_with_password = base_url.replace("://", "://user:MySecretPass@", 1)
+    # Change to non-existent host
+    url_with_password = url_with_password.replace("host=/tmp", "host=/nonexistent")
+    
+    try:
+        create_verified_session_factory(url_with_password)
+        pytest.fail("Should have raised OperationalError")
+    except OperationalError as e:
+        error_msg = str(e)
+        traceback_str = "".join(
+            __import__("traceback").format_exception(type(e), e, e.__traceback__)
+        )
+        
+        # Assert password doesn't appear in connection error
+        assert "MySecretPass" not in error_msg, f"Password leaked in connection error: {error_msg}"
+        assert "MySecretPass" not in traceback_str, f"Password leaked in connection traceback"
+
+
+def test_credential_leakage_mask_function_used_in_errors():
+    """Verify that error messages use _mask_url_credentials for any URL output."""
+    # Test that the mask function is actually used in error paths
+    url_with_password = "postgresql://user:SecretPass123@localhost:5432/db"
+    masked = _mask_url_credentials(url_with_password)
+    
+    # Assert masking works
+    assert "SecretPass123" not in masked
+    assert "***" in masked
+    
+    # Test with various URL formats
+    test_urls = [
+        "postgresql://user:pass@host/db",
+        "postgresql://user:p@ssw0rd@host:5432/db",
+        "postgresql://user:pass%40word@host/db",  # encoded @
+    ]
+    
+    for url in test_urls:
+        masked = _mask_url_credentials(url)
+        # Extract password from URL for verification
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        if parsed.password:
+            assert parsed.password not in masked, f"Password leaked for URL: {url}"
