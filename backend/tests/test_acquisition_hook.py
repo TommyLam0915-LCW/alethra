@@ -1411,12 +1411,20 @@ def test_real_abort_during_wait_no_inject_verify_closed():
     
     shared_results = {"signal_count": 0, "injection_count": 0}
     
+    # Track when thread reaches the wait point
+    wait_reached = threading.Event()
+    
+    def on_acquisition_committed():
+        # Signal that we've reached the wait point
+        wait_reached.set()
+    
     hooked_factory = create_hooked_session_factory(
         base_factory=mock_factory,
         target_run_id=123,
         cancel_committed_event=cancel_committed,
         abort_event=abort_event,
         injected_exception=injected_exception,
+        on_acquisition_committed=on_acquisition_committed,
         shared_results=shared_results,
     )
     
@@ -1432,48 +1440,48 @@ def test_real_abort_during_wait_no_inject_verify_closed():
     result = session.execute(acquisition_query, {"id": 123})
     result.fetchone()
     
-    # Explicit handshake: thread_started signals when commit thread begins
-    thread_started = threading.Event()
+    # Explicit handshake: wait_reached signals when thread enters the wait
     thread_result = {"exception": None}
     
     # Start commit in a thread
     def commit_thread():
-        thread_started.set()  # Signal thread has started
         try:
             session.commit()
         except Exception as e:
             thread_result["exception"] = e
     
     thread = threading.Thread(target=commit_thread)
-    thread.start()
-    
-    # Wait for thread to start
-    assert thread_started.wait(timeout=1.0), "Thread did not start"
-    
-    # Small delay to ensure thread reaches the wait
-    import time
-    time.sleep(0.1)
-    
-    # Signal abort
-    abort_event.set()
-    
-    # Join with timeout
-    thread.join(timeout=2.0)
-    
-    # Assert thread stopped
-    assert not thread.is_alive(), "Thread did not stop"
-    
-    # Assert AbortError was raised
-    assert thread_result["exception"] is not None, "No exception raised"
-    assert isinstance(thread_result["exception"], AbortError), \
-        f"Expected AbortError, got {type(thread_result['exception'])}"
-    
-    # No injection
-    assert shared_results["signal_count"] == 1  # Signal happened before wait
-    assert shared_results["injection_count"] == 0  # No injection
-    
-    # Verify session closed
-    mock_verify_session.close.assert_called_once()
+    try:
+        thread.start()
+        
+        # Wait for thread to reach the wait point (inside cancel_committed_event.wait)
+        assert wait_reached.wait(timeout=1.0), "Thread did not reach wait point"
+        
+        # Now signal abort (thread is definitely in the wait)
+        abort_event.set()
+        
+        # Join with timeout
+        thread.join(timeout=2.0)
+        
+        # Assert thread stopped
+        assert not thread.is_alive(), "Thread did not stop"
+        
+        # Assert AbortError was raised
+        assert thread_result["exception"] is not None, "No exception raised"
+        assert isinstance(thread_result["exception"], AbortError), \
+            f"Expected AbortError, got {type(thread_result['exception'])}"
+        
+        # No injection
+        assert shared_results["signal_count"] == 1  # Signal happened before wait
+        assert shared_results["injection_count"] == 0  # No injection
+        
+        # Verify session closed
+        mock_verify_session.close.assert_called_once()
+    finally:
+        # Ensure cleanup
+        abort_event.set()
+        if thread.is_alive():
+            thread.join(timeout=1.0)
 
 
 def test_second_commit_after_injection_still_one():
@@ -1610,10 +1618,7 @@ def test_success_with_row_callback_pending_close_assertions():
 
 
 def test_concurrent_b_updates_while_a_in_callback_wait():
-    """A is in callback/wait, B can still update counts concurrently."""
-    # This test verifies that the narrow lock scope allows B to access
-    # shared_results without deadlock while A is in callback/wait.
-    
+    """A is in callback/wait, B can still commit and access shared counter."""
     mock_session = MagicMock()
     mock_factory = MagicMock(return_value=mock_session)
     
@@ -1655,8 +1660,6 @@ def test_concurrent_b_updates_while_a_in_callback_wait():
         shared_results=shared_results,
     )
     
-    # Session A: acquisition and commit (will enter callback and wait)
-    session_a = hooked_factory()
     acquisition_query = text("""
         UPDATE paper_trading_runs
         SET status = 'running'
@@ -1664,33 +1667,42 @@ def test_concurrent_b_updates_while_a_in_callback_wait():
           AND cancel_requested = FALSE
         RETURNING id
     """)
+    
+    # Session A: acquisition and commit (will enter callback and wait)
+    session_a = hooked_factory()
     result_a = session_a.execute(acquisition_query, {"id": 123})
     result_a.fetchone()
     
     # Start A's commit in a thread
     a_thread = threading.Thread(target=session_a.commit)
-    a_thread.start()
-    
-    # Wait for A to enter callback
-    assert callback_entered.wait(timeout=1.0), "A did not enter callback"
-    
-    # While A is in callback, B can still access shared_results
-    # (This would deadlock if lock scope was too broad)
-    session_b = hooked_factory()
-    session_b.commit()  # No pending, just accesses shared_results
-    
-    # B completed without deadlock - this is the key assertion
-    # signal_count is already 1 because A incremented it before callback
-    assert shared_results["signal_count"] == 1
-    
-    # Allow A's callback to exit
-    callback_can_exit.set()
-    
-    a_thread.join(timeout=2.0)
-    assert not a_thread.is_alive(), "A thread did not complete"
-    
-    # A's signal was counted
-    assert shared_results["signal_count"] == 1
+    try:
+        a_thread.start()
+        
+        # Wait for A to enter callback
+        assert callback_entered.wait(timeout=1.0), "A did not enter callback"
+        
+        # While A is in callback (before release), B can still commit
+        # This demonstrates narrow lock scope - B is not blocked
+        session_b = hooked_factory()
+        session_b.commit()  # No pending, just completes
+        
+        # B completed without deadlock - key assertion
+        # signal_count is 1 from A (incremented before callback)
+        assert shared_results["signal_count"] == 1
+        
+        # Allow A's callback to exit
+        callback_can_exit.set()
+        
+        a_thread.join(timeout=2.0)
+        assert not a_thread.is_alive(), "A thread did not complete"
+        
+        # Final count
+        assert shared_results["signal_count"] == 1
+    finally:
+        # Ensure cleanup
+        callback_can_exit.set()
+        if a_thread.is_alive():
+            a_thread.join(timeout=1.0)
 
 
 # Total: 30 + 10 + 1 = 41 tests
