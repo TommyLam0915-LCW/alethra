@@ -1618,29 +1618,47 @@ def test_success_with_row_callback_pending_close_assertions():
 
 
 def test_concurrent_b_updates_while_a_in_callback_wait():
-    """A is in callback/wait, B can still commit and access shared counter."""
-    mock_session = MagicMock()
-    mock_factory = MagicMock(return_value=mock_session)
+    """A and B both do full acquisition→fetchone→commit, updating same counter."""
+    # Session A setup
+    mock_session_a = MagicMock()
+    mock_result_a = MagicMock()
+    mock_result_a.fetchone.return_value = (123,)
+    mock_session_a.execute.return_value = mock_result_a
+    mock_session_a.commit.side_effect = None
     
-    mock_result = MagicMock()
-    mock_result.fetchone.return_value = (123,)
-    mock_session.execute.return_value = mock_result
-    mock_session.commit.side_effect = None
+    # Verify session for A
+    mock_verify_a = MagicMock()
+    mock_verify_result_a = MagicMock()
+    mock_verify_result_a.fetchone.return_value = ("running",)
+    mock_verify_a.execute.return_value = mock_verify_result_a
     
-    mock_verify_session = MagicMock()
-    mock_verify_result = MagicMock()
-    mock_verify_result.fetchone.return_value = ("running",)
-    mock_verify_session.execute.return_value = mock_verify_result
+    # Session B setup
+    mock_session_b = MagicMock()
+    mock_result_b = MagicMock()
+    mock_result_b.fetchone.return_value = (123,)
+    mock_session_b.execute.return_value = mock_result_b
+    mock_session_b.commit.side_effect = None
+    
+    # Verify session for B
+    mock_verify_b = MagicMock()
+    mock_verify_result_b = MagicMock()
+    mock_verify_result_b.fetchone.return_value = ("running",)
+    mock_verify_b.execute.return_value = mock_verify_result_b
     
     call_count = [0]
     def factory_side_effect():
         call_count[0] += 1
+        # Call sequence: A_main, A_verify, B_main, B_verify
         if call_count[0] == 1:
-            return mock_session
+            return mock_session_a
+        elif call_count[0] == 2:
+            return mock_verify_a
+        elif call_count[0] == 3:
+            return mock_session_b
         else:
-            return mock_verify_session
+            return mock_verify_b
     
-    mock_factory.side_effect = factory_side_effect
+    mock_factory = MagicMock(side_effect=factory_side_effect)
     
     # Track callback entry
     callback_entered = threading.Event()
@@ -1681,14 +1699,20 @@ def test_concurrent_b_updates_while_a_in_callback_wait():
         # Wait for A to enter callback
         assert callback_entered.wait(timeout=1.0), "A did not enter callback"
         
-        # While A is in callback (before release), B can still commit
-        # This demonstrates narrow lock scope - B is not blocked
+        # At this point, A has incremented signal_count to 1 and is blocked in callback
+        
+        # While A is in callback (before release), B does full acquisition flow
         session_b = hooked_factory()
-        session_b.commit()  # No pending, just completes
+        result_b = session_b.execute(acquisition_query, {"id": 123})
+        row_b = result_b.fetchone()
+        assert row_b == (123,)
+        
+        # B commits - this will also increment signal_count
+        session_b.commit()
         
         # B completed without deadlock - key assertion
-        # signal_count is 1 from A (incremented before callback)
-        assert shared_results["signal_count"] == 1
+        # signal_count is 2: A incremented before callback, B incremented during A's callback
+        assert shared_results["signal_count"] == 2
         
         # Allow A's callback to exit
         callback_can_exit.set()
@@ -1697,7 +1721,7 @@ def test_concurrent_b_updates_while_a_in_callback_wait():
         assert not a_thread.is_alive(), "A thread did not complete"
         
         # Final count
-        assert shared_results["signal_count"] == 1
+        assert shared_results["signal_count"] == 2
     finally:
         # Ensure cleanup
         callback_can_exit.set()
