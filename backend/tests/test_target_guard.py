@@ -1287,16 +1287,27 @@ def test_credential_leakage_connection_failure():
     """Connection failure error doesn't leak full URL with credentials."""
     import os
     from sqlalchemy.exc import OperationalError
-    
+
     base_url = os.environ.get("ALETHRA_PG_TEST_URL", "")
     if not base_url:
         pytest.skip("ALETHRA_PG_TEST_URL not set")
-    
-    # URL with password pointing to non-existent server
-    url_with_password = base_url.replace("://", "://user:MySecretPass@", 1)
-    # Change to non-existent host
+
+    # Strip existing credentials if present, then add test credentials
+    # Base URL might be: postgresql://user:pass@host:port/db or postgresql://host:port/db
+    if "://" in base_url:
+        scheme, rest = base_url.split("://", 1)
+        # Remove any existing credentials (everything before @ if present)
+        if "@" in rest:
+            rest = rest.split("@", 1)[1]
+        # Construct URL with test credentials
+        url_with_password = f"{scheme}://user:MySecretPass@{rest}"
+    else:
+        url_with_password = base_url
+
+    # Change to non-existent host for connection failure
     url_with_password = url_with_password.replace("host=/tmp", "host=/nonexistent")
-    
+    url_with_password = url_with_password.replace("localhost", "nonexistent.invalid")
+
     try:
         create_verified_session_factory(url_with_password)
         pytest.fail("Should have raised OperationalError")
@@ -1305,7 +1316,7 @@ def test_credential_leakage_connection_failure():
         traceback_str = "".join(
             __import__("traceback").format_exception(type(e), e, e.__traceback__)
         )
-        
+
         # Assert password doesn't appear in connection error
         assert "MySecretPass" not in error_msg, f"Password leaked in connection error: {error_msg}"
         assert "MySecretPass" not in traceback_str, f"Password leaked in connection traceback"
