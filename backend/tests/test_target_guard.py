@@ -10,6 +10,7 @@ Safety guarantees:
 """
 import os
 import stat
+import pytest
 from urllib.parse import urlparse, parse_qs
 from sqlalchemy import text
 
@@ -145,8 +146,16 @@ def _extract_port_from_url(db_url: str):
             )
         return port
 
-    # Authority port (already validated by urlparse)
-    return parsed.port
+    # Authority port — validate range
+    port = parsed.port
+    if port is not None:
+        if not (1 <= port <= 65535):
+            raise TargetGuardError(
+                f"Port out of valid range (1-65535): {port}"
+            )
+        return port
+    
+    return None
 
 
 def _verify_socket_file_exists(socket_dir: str, port: int = 5432) -> bool:
@@ -338,16 +347,18 @@ def verify_test_target(session, db_url: str = None) -> dict:
 def create_verified_session_factory(db_url: str):
     """Create session factory with target guard verification.
     
-    P1 C5: Extracted shared verified-factory creation flow.
-    Both fixtures and tests use this same entry point.
-    
-    The first session created will verify the target. If verification fails,
-    no sessions are returned and RuntimeError is raised.
-    
     All failure paths guarantee:
     - verify_session is closed (if created)
     - engine is disposed (no leaked connections)
-    - If cleanup itself fails, original exception preserved with cleanup error chained
+    - Both primary and cleanup errors are observable (never silently swallowed)
+    
+    Error handling:
+    - If sessionmaker() fails: dispose engine, raise original
+    - If factory() fails: close session (if created), dispose engine, raise original
+    - If verify_test_target() fails: close session, dispose engine, raise original
+    - If session.close() fails after primary error: chain via __context__
+    - If session.close() fails without primary error: dispose engine, raise close error
+    - If engine.dispose() fails: chain via __context__ with whatever error triggered it
     
     Args:
         db_url: Database URL
@@ -357,47 +368,56 @@ def create_verified_session_factory(db_url: str):
         
     Raises:
         TargetGuardError: If initial verification fails
-        Exception: If session creation or verification fails for any reason
-            If cleanup also fails, cleanup error is chained via __context__
+        Exception: If any step fails; cleanup errors chained via __context__
     """
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
     
     engine = create_engine(db_url)
-    factory = sessionmaker(bind=engine)
-    
-    # Verify target on first session
-    # All failure paths must close session and dispose engine
     verify_session = None
     primary_error = None
+    
     try:
+        # sessionmaker construction is part of engine failure protection
+        factory = sessionmaker(bind=engine)
         verify_session = factory()
-        actual_target = verify_test_target(verify_session, db_url=db_url)
+        verify_test_target(verify_session, db_url=db_url)
     except Exception as e:
         primary_error = e
-        # Attempt cleanup — if cleanup also fails, chain it
-        try:
-            engine.dispose()
-        except Exception as cleanup_err:
-            cleanup_err.__context__ = e  # chain: cleanup happened because of primary
-            raise cleanup_err
-        raise
-    finally:
-        # Always close the verification session (if created)
+        # Attempt session close first (if session was created)
         if verify_session is not None:
             try:
                 verify_session.close()
-            except Exception:
-                # Session close failure is secondary — don't mask primary error
-                if primary_error is None:
-                    raise
+            except Exception as close_err:
+                # Chain: close happened because of primary
+                close_err.__context__ = e
+                primary_error = close_err
+        # Now dispose engine
+        try:
+            engine.dispose()
+        except Exception as dispose_err:
+            # Chain: dispose happened because of primary
+            dispose_err.__context__ = primary_error
+            raise dispose_err
+        raise primary_error
     
-    # P1 C9: Return factory that can create sessions
+    # Success path: close verification session
+    # If close fails, must still dispose engine
+    try:
+        verify_session.close()
+    except Exception as close_err:
+        try:
+            engine.dispose()
+        except Exception as dispose_err:
+            # Chain both errors for observability
+            dispose_err.__context__ = close_err
+            raise dispose_err
+        raise close_err
+    
+    # Return factory for ongoing use
     def guarded_factory():
-        session = factory()
-        return session
+        return factory()
     
-    # P1 C9: Return both factory and engine for explicit teardown
     return guarded_factory, engine
 
 
@@ -489,61 +509,50 @@ def test_extract_port_from_url_none():
 def test_extract_port_from_url_empty_value_rejected():
     """Empty port= value is rejected (fail-closed)."""
     url = "postgresql://user@/db?host=/tmp&port="
-    try:
+    with pytest.raises(TargetGuardError, match="empty string"):
         _extract_port_from_url(url)
-        assert False, "Should have raised TargetGuardError"
-    except TargetGuardError as e:
-        assert "empty string" in str(e)
 
 
 def test_extract_port_from_url_non_numeric_rejected():
     """Non-numeric port value is rejected."""
     url = "postgresql://user@/db?host=/tmp&port=abc"
-    try:
+    with pytest.raises(TargetGuardError, match="not a valid integer"):
         _extract_port_from_url(url)
-        assert False, "Should have raised TargetGuardError"
-    except TargetGuardError as e:
-        assert "not a valid integer" in str(e)
 
 
 def test_extract_port_from_url_multiple_values_rejected():
     """Multiple port= values are rejected."""
     url = "postgresql://user@/db?host=/tmp&port=5432&port=5433"
-    try:
+    with pytest.raises(TargetGuardError, match="Multiple port parameters"):
         _extract_port_from_url(url)
-        assert False, "Should have raised TargetGuardError"
-    except TargetGuardError as e:
-        assert "Multiple port parameters" in str(e)
 
 
 def test_extract_port_from_url_out_of_range_rejected():
-    """Port outside 1-65535 is rejected."""
+    """Port outside 1-65535 is rejected (query param)."""
     url = "postgresql://user@/db?host=/tmp&port=70000"
-    try:
+    with pytest.raises(TargetGuardError, match="out of valid range"):
         _extract_port_from_url(url)
-        assert False, "Should have raised TargetGuardError"
-    except TargetGuardError as e:
-        assert "out of valid range" in str(e)
 
 
 def test_extract_port_from_url_zero_rejected():
-    """Port 0 is rejected."""
+    """Port 0 is rejected (query param)."""
     url = "postgresql://user@/db?host=/tmp&port=0"
-    try:
+    with pytest.raises(TargetGuardError, match="out of valid range"):
         _extract_port_from_url(url)
-        assert False, "Should have raised TargetGuardError"
-    except TargetGuardError as e:
-        assert "out of valid range" in str(e)
+
+
+def test_extract_port_from_url_authority_zero_rejected():
+    """Authority port 0 is rejected."""
+    url = "postgresql://user@localhost:0/db"
+    with pytest.raises(TargetGuardError, match="out of valid range"):
+        _extract_port_from_url(url)
 
 
 def test_extract_port_from_url_authority_and_query_conflict():
     """Both authority port AND query port= is rejected (ambiguous)."""
     url = "postgresql://user@localhost:5432/db?port=5433"
-    try:
+    with pytest.raises(TargetGuardError, match="both authority port.*query port="):
         _extract_port_from_url(url)
-        assert False, "Should have raised TargetGuardError"
-    except TargetGuardError as e:
-        assert "both authority port" in str(e) and "query port=" in str(e)
 
 
 def test_verify_test_target_illegal_port_not_fallback():
@@ -762,45 +771,110 @@ def test_is_local_database_url_empty_string():
     assert is_local_database_url(None) is False
 
 
-# === Tests for create_verified_session_factory close/dispose (Item 4) ===
+# === Tests for create_verified_session_factory close/dispose ===
 
-def test_factory_dispose_called_on_verify_failure():
-    """engine.dispose() is called when verify_test_target raises."""
-    # Use SQLite in-memory DB — will fail verification (PostgreSQL functions not supported)
-    # This tests that cleanup happens even on verification failure
-    try:
-        create_verified_session_factory("sqlite:///:memory:")
-        assert False, "Should have raised"
-    except (TargetGuardError, Exception) as e:
-        # Verification failed as expected (SQLite doesn't support inet_server_addr)
-        pass
-    # If we get here without hanging or leaking, cleanup worked
-
-
-def test_factory_dispose_called_on_connection_failure():
-    """engine.dispose() is called when connection fails."""
-    # Use invalid URL — will fail at connection/engine creation
-    try:
-        create_verified_session_factory("postgresql://invalid:invalid@nonexistent:9999/test")
-        assert False, "Should have raised"
-    except Exception:
-        # Connection failed as expected
-        pass
-    # If engine was created, it should be disposed (no hanging connections)
+def test_factory_verify_failure_disposes_engine():
+    """engine.dispose() called when verify_test_target raises."""
+    from unittest.mock import MagicMock, patch
+    import sys
+    
+    mock_engine = MagicMock()
+    mock_session = MagicMock()
+    mock_factory_fn = MagicMock(return_value=mock_session)
+    
+    # Get module reference for patching
+    mod = sys.modules[__name__]
+    
+    with patch("sqlalchemy.create_engine", return_value=mock_engine), \
+         patch("sqlalchemy.orm.sessionmaker", return_value=mock_factory_fn), \
+         patch.object(mod, "verify_test_target",
+                      side_effect=TargetGuardError("verify failed")):
+        with pytest.raises(TargetGuardError, match="verify failed"):
+            create_verified_session_factory("postgresql:///test")
+        
+        mock_engine.dispose.assert_called_once()
+        mock_session.close.assert_called_once()
 
 
-def test_factory_cleanup_on_session_close_failure():
-    """Session close failure doesn't mask primary error."""
-    # The implementation ensures session.close() is in finally block
-    # and exceptions from close are caught if there's a primary error
-    try:
-        create_verified_session_factory("sqlite:///:memory:")
-    except Exception:
-        pass  # Expected — SQLite doesn't support PostgreSQL functions
+def test_factory_sessionmaker_failure_disposes_engine():
+    """engine.dispose() called when sessionmaker() raises."""
+    from unittest.mock import MagicMock, patch
+    
+    mock_engine = MagicMock()
+    
+    with patch("sqlalchemy.create_engine", return_value=mock_engine), \
+         patch("sqlalchemy.orm.sessionmaker",
+               side_effect=RuntimeError("sessionmaker failed")):
+        with pytest.raises(RuntimeError, match="sessionmaker failed"):
+            create_verified_session_factory("postgresql:///test")
+        
+        mock_engine.dispose.assert_called_once()
 
 
-def test_factory_exception_chaining_documented():
-    """Verify exception chaining behavior is documented in docstring."""
-    doc = create_verified_session_factory.__doc__
-    assert "cleanup" in doc.lower()
-    assert "chained" in doc.lower() or "context" in doc.lower()
+def test_factory_session_close_failure_disposes_engine():
+    """engine.dispose() called when session.close() fails after success."""
+    from unittest.mock import MagicMock, patch
+    import sys
+    
+    mock_engine = MagicMock()
+    mock_session = MagicMock()
+    mock_session.close.side_effect = RuntimeError("close failed")
+    mock_factory_fn = MagicMock(return_value=mock_session)
+    
+    mod = sys.modules[__name__]
+    
+    with patch("sqlalchemy.create_engine", return_value=mock_engine), \
+         patch("sqlalchemy.orm.sessionmaker", return_value=mock_factory_fn), \
+         patch.object(mod, "verify_test_target", return_value={"ok": True}):
+        with pytest.raises(RuntimeError, match="close failed"):
+            create_verified_session_factory("postgresql:///test")
+        
+        mock_engine.dispose.assert_called_once()
+
+
+def test_factory_close_error_chained_with_dispose_error():
+    """Both close and dispose errors observable when both fail."""
+    from unittest.mock import MagicMock, patch
+    import sys
+    
+    mock_engine = MagicMock()
+    mock_engine.dispose.side_effect = RuntimeError("dispose failed")
+    mock_session = MagicMock()
+    mock_session.close.side_effect = RuntimeError("close failed")
+    mock_factory_fn = MagicMock(return_value=mock_session)
+    
+    mod = sys.modules[__name__]
+    
+    with patch("sqlalchemy.create_engine", return_value=mock_engine), \
+         patch("sqlalchemy.orm.sessionmaker", return_value=mock_factory_fn), \
+         patch.object(mod, "verify_test_target", return_value={"ok": True}):
+        with pytest.raises(RuntimeError, match="dispose failed") as exc_info:
+            create_verified_session_factory("postgresql:///test")
+        
+        # Dispose error raised, with close error chained via __context__
+        assert exc_info.value.__context__ is not None
+        assert "close failed" in str(exc_info.value.__context__)
+
+
+def test_factory_verify_failure_close_error_chained():
+    """When verify fails AND close fails, close error chains to verify error."""
+    from unittest.mock import MagicMock, patch
+    import sys
+    
+    mock_engine = MagicMock()
+    mock_session = MagicMock()
+    mock_session.close.side_effect = RuntimeError("close failed")
+    mock_factory_fn = MagicMock(return_value=mock_session)
+    verify_error = TargetGuardError("verify failed")
+    
+    mod = sys.modules[__name__]
+    
+    with patch("sqlalchemy.create_engine", return_value=mock_engine), \
+         patch("sqlalchemy.orm.sessionmaker", return_value=mock_factory_fn), \
+         patch.object(mod, "verify_test_target", side_effect=verify_error):
+        with pytest.raises(RuntimeError, match="close failed") as exc_info:
+            create_verified_session_factory("postgresql:///test")
+        
+        # Close error raised, with verify error chained via __context__
+        assert exc_info.value.__context__ is verify_error
+        mock_engine.dispose.assert_called_once()
