@@ -5,12 +5,11 @@ Implements transparent session proxy with:
 - Result proxy observing fetchone for acquisition verification
 - RETURNING id validation: row[0] == target_run_id
 - Pending set only when caller fetchone reads valid row
-- None/execute failure clears pending (no leftover state)
-- Only wraps current acquisition result (not all results)
-- Consumes pending on successful processing (prevents duplicate signal/inject)
+- Pending consumed after commit (success or failure), not left for next commit
+- Old result cannot re-set pending after rollback/commit
+- Shared totals (not session-local overwrites) for signal/injection counts
+- Injected exception pre-built once by caller
 - abort_event wired through factory, wait, and B
-- Injected exception pre-built by caller with signal/injection counts
-- Shared results dict for external tracking
 """
 import threading
 import time
@@ -44,11 +43,9 @@ class SessionLocalState:
     """Per-session pending acquisition state."""
     
     def __init__(self):
-        self.acquisition_pending = False  # Set only when fetchone returns valid row
+        self.acquisition_pending = False
         self.acquisition_run_id: Optional[int] = None
-        self.signal_count = 0
-        self.injection_count = 0
-        self._acquisition_result_wrapped = False  # Track if current result is wrapped
+        self._result_expired = False  # Prevent old result from re-setting pending
 
 
 class ResultProxy:
@@ -62,6 +59,10 @@ class ResultProxy:
     
     def fetchone(self):
         """Intercept fetchone to observe acquisition RETURNING id result."""
+        # Fix 2: Old result cannot re-set pending after rollback/commit
+        if self._session_state._result_expired:
+            return self._result.fetchone()
+        
         row = self._result.fetchone()
         
         # Acquisition query returns (id,) from RETURNING id
@@ -79,7 +80,6 @@ class ResultProxy:
                     f"RETURNING id mismatch: got {returned_id}, expected {self._target_run_id}"
                 )
         
-        # None or invalid row: don't set pending (requirement 3)
         return row
     
     def __getattr__(self, name: str):
@@ -116,7 +116,7 @@ def create_hooked_session_factory(
     Args:
         base_factory: The original session factory to wrap
         target_run_id: The run ID to verify after acquisition
-        injected_exception: Pre-built exception to raise after cancel commits
+        injected_exception: Pre-built exception to raise after cancel commits (Fix 4: once)
         cancel_committed_event: Event signaled when cancel thread commits
         abort_event: Event to signal abort (wired through factory, wait, and B)
         on_acquisition_committed: Callback after acquisition is verified durable
@@ -143,10 +143,8 @@ def create_hooked_session_factory(
             
             result = original_execute(query, params, **kwargs)
             
-            # Only wrap if this is the acquisition query (requirement 4)
+            # Only wrap if this is the acquisition query
             if _is_acquisition_query(query_str, params):
-                # Mark that we're wrapping an acquisition result
-                session_state._acquisition_result_wrapped = True
                 return ResultProxy(result, session_state, target_run_id, shared_results)
             
             return result
@@ -156,15 +154,17 @@ def create_hooked_session_factory(
             try:
                 original_commit()
             except Exception as commit_err:
-                # Commit failure: clear pending (requirement 3)
+                # Commit failure: clear pending and mark result expired
                 session_state.acquisition_pending = False
                 session_state.acquisition_run_id = None
+                session_state._result_expired = True
                 raise
             
             # After successful commit, verify acquisition on independent connection
-            # Only if pending is set (requirement 2)
+            # Only if pending is set
             if session_state.acquisition_pending:
                 verify_session = None
+                verification_succeeded = False
                 try:
                     verify_session = base_factory()
                     verify_result = verify_session.execute(
@@ -173,16 +173,16 @@ def create_hooked_session_factory(
                     ).fetchone()
                     
                     if verify_result and verify_result[0] == 'running':
-                        # Acquisition verified durable - consume pending (requirement 5)
-                        session_state.acquisition_pending = False
-                        session_state.signal_count += 1
+                        verification_succeeded = True
+                        
+                        # Fix 3: Increment shared totals (not overwrite with session-local)
                         if shared_results is not None:
-                            shared_results["signal_count"] = session_state.signal_count
+                            shared_results["signal_count"] = shared_results.get("signal_count", 0) + 1
                         
                         if on_acquisition_committed:
                             on_acquisition_committed()
                         
-                        # Wait for cancel with abort support (requirement 6)
+                        # Wait for cancel with abort support
                         if cancel_committed_event:
                             abort_aware_wait_or_raise(
                                 cancel_committed_event,
@@ -192,14 +192,18 @@ def create_hooked_session_factory(
                             )
                         
                         # Inject exception to test post-acquisition error handler
-                        # Only if not already injected (requirement 5)
+                        # Fix 4: injected_exception is pre-built once by caller
                         if inject_exception_after_cancel and injected_exception is not None:
-                            if session_state.injection_count == 0:
-                                session_state.injection_count += 1
-                                if shared_results is not None:
-                                    shared_results["injection_count"] = session_state.injection_count
-                                raise injected_exception
+                            if shared_results is not None:
+                                shared_results["injection_count"] = shared_results.get("injection_count", 0) + 1
+                            raise injected_exception
                 finally:
+                    # Fix 1: Always consume pending after commit (success or failure)
+                    session_state.acquisition_pending = False
+                    session_state.acquisition_run_id = None
+                    # Fix 2: Mark result expired to prevent re-setting pending
+                    session_state._result_expired = True
+                    
                     if verify_session:
                         # Verify-session close error must not be swallowed
                         try:
@@ -208,11 +212,15 @@ def create_hooked_session_factory(
                             raise VerifyCloseError(
                                 f"Failed to close verify session: {close_err}"
                             ) from close_err
+            else:
+                # No pending: mark result expired anyway
+                session_state._result_expired = True
         
         def hooked_rollback():
-            """Intercept rollback: clear pending (requirement 3)."""
+            """Intercept rollback: clear pending and mark result expired."""
             session_state.acquisition_pending = False
             session_state.acquisition_run_id = None
+            session_state._result_expired = True
             return original_rollback()
         
         # Replace methods on session instance
@@ -239,7 +247,7 @@ def abort_aware_wait_or_raise(
     
     Args:
         event: The event to wait for
-        abort_event: Optional abort event (requirement 6)
+        abort_event: Optional abort event
         timeout: Maximum total wait time (None = no timeout)
         poll_interval: How often to check for completion
         error_context: Context message for errors
@@ -251,7 +259,7 @@ def abort_aware_wait_or_raise(
     start_time = time.time()
     
     while not event.is_set():
-        # Check abort (requirement 6)
+        # Check abort
         if abort_event and abort_event.is_set():
             raise AbortError(f"Abort signaled {error_context}")
         
@@ -265,7 +273,6 @@ def abort_aware_wait_or_raise(
         if event.wait(timeout=poll_interval):
             return
     
-    # Event was set
     return
 
 
@@ -278,15 +285,6 @@ def abort_aware_wait(
     """Wait for an event with abort support. Returns False on abort/timeout.
     
     DEPRECATED: Use abort_aware_wait_or_raise for new code.
-    
-    Args:
-        event: The event to wait for
-        abort: The abort event that cancels the wait
-        timeout: Maximum total wait time (None = no timeout)
-        poll_interval: How often to check abort flag
-    
-    Returns:
-        True if event was set, False if aborted or timed out
     """
     start_time = time.time()
     

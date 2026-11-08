@@ -63,9 +63,7 @@ def test_session_local_state_initial_values():
     state = SessionLocalState()
     assert state.acquisition_pending is False
     assert state.acquisition_run_id is None
-    assert state.signal_count == 0
-    assert state.injection_count == 0
-    assert state._acquisition_result_wrapped is False
+    assert state._result_expired is False
 
 
 def test_session_local_state_independent_instances():
@@ -74,10 +72,10 @@ def test_session_local_state_independent_instances():
     state2 = SessionLocalState()
     
     state1.acquisition_pending = True
-    state1.signal_count = 5
+    state1._result_expired = True
     
     assert state2.acquisition_pending is False
-    assert state2.signal_count == 0
+    assert state2._result_expired is False
 
 
 # === Tests for ResultProxy ===
@@ -271,9 +269,14 @@ def test_rollback_clears_pending():
 
 
 def test_commit_consumes_pending_prevents_duplicate():
-    """Commit consumes pending to prevent duplicate signal/inject (requirement 5)."""
+    """Commit consumes pending to prevent duplicate signal/inject."""
     mock_session = MagicMock()
     mock_factory = MagicMock(return_value=mock_session)
+    
+    # Mock execute to return acquisition result
+    mock_result = MagicMock()
+    mock_result.fetchone.return_value = (123,)
+    mock_session.execute.return_value = mock_result
     
     # Mock commit to succeed
     mock_session.commit.side_effect = None
@@ -292,25 +295,35 @@ def test_commit_consumes_pending_prevents_duplicate():
     
     mock_factory.side_effect = factory_side_effect
     
+    shared_results = {"signal_count": 0}
+    
     hooked_factory = create_hooked_session_factory(
         base_factory=mock_factory,
         target_run_id=123,
+        shared_results=shared_results,
     )
     
     session = hooked_factory()
     
-    # Simulate pending state
-    session._acquisition_state.acquisition_pending = True
-    session._acquisition_state.acquisition_run_id = 123
+    # Execute acquisition query (sets pending via fetchone)
+    acquisition_query = text("""
+        UPDATE paper_trading_runs
+        SET status = 'running'
+        WHERE id = :id AND status IN ('queued')
+          AND cancel_requested = FALSE
+        RETURNING id
+    """)
+    result = session.execute(acquisition_query, {"id": 123})
+    result.fetchone()
     
     # First commit should signal
     session.commit()
-    assert session._acquisition_state.signal_count == 1
+    assert shared_results["signal_count"] == 1
     assert session._acquisition_state.acquisition_pending is False  # Consumed
     
     # Second commit should not signal again (pending consumed)
     session.commit()
-    assert session._acquisition_state.signal_count == 1  # Still 1
+    assert shared_results["signal_count"] == 1  # Still 1
 
 
 def test_abort_event_wired_through_factory():
@@ -336,3 +349,586 @@ def test_abort_event_wired_through_factory():
 
 
 # Test count: 22 tests covering complete no-DB behavior matrix
+
+
+# === Real helper path tests (12 tests) ===
+
+def test_different_replay_verify_sessions_full_success():
+    """Different replay/verify sessions complete full success flow."""
+    mock_replay_session = MagicMock()
+    mock_verify_session = MagicMock()
+    
+    # Replay session executes acquisition query
+    mock_result = MagicMock()
+    mock_result.fetchone.return_value = (123,)
+    mock_replay_session.execute.return_value = mock_result
+    mock_replay_session.commit.side_effect = None
+    
+    # Verify session returns 'running'
+    mock_verify_result = MagicMock()
+    mock_verify_result.fetchone.return_value = ("running",)
+    mock_verify_session.execute.return_value = mock_verify_result
+    
+    call_count = [0]
+    def factory_side_effect():
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return mock_replay_session
+        else:
+            return mock_verify_session
+    
+    mock_factory = MagicMock(side_effect=factory_side_effect)
+    
+    hooked_factory = create_hooked_session_factory(
+        base_factory=mock_factory,
+        target_run_id=123,
+    )
+    
+    # Replay session
+    replay_session = hooked_factory()
+    acquisition_query = text("""
+        UPDATE paper_trading_runs
+        SET status = 'running'
+        WHERE id = :id AND status IN ('queued')
+          AND cancel_requested = FALSE
+        RETURNING id
+    """)
+    result = replay_session.execute(acquisition_query, {"id": 123})
+    row = result.fetchone()
+    assert row == (123,)
+    
+    # Commit triggers verify on different session
+    replay_session.commit()
+    
+    # Verify session was used
+    assert call_count[0] == 2
+
+
+def test_no_fetchone_before_commit_no_signal():
+    """Commit without fetchone does not signal."""
+    mock_session = MagicMock()
+    mock_factory = MagicMock(return_value=mock_session)
+    
+    mock_session.commit.side_effect = None
+    
+    shared_results = {"signal_count": 0}
+    
+    hooked_factory = create_hooked_session_factory(
+        base_factory=mock_factory,
+        target_run_id=123,
+        shared_results=shared_results,
+    )
+    
+    session = hooked_factory()
+    
+    # Execute but don't fetchone
+    acquisition_query = text("""
+        UPDATE paper_trading_runs
+        SET status = 'running'
+        WHERE id = :id AND status IN ('queued')
+          AND cancel_requested = FALSE
+        RETURNING id
+    """)
+    session.execute(acquisition_query, {"id": 123})
+    
+    # Commit without fetchone
+    session.commit()
+    
+    # No signal
+    assert shared_results["signal_count"] == 0
+
+
+def test_zero_row_fetchone_no_signal():
+    """Fetchone returning zero rows does not signal."""
+    mock_session = MagicMock()
+    mock_factory = MagicMock(return_value=mock_session)
+    
+    # Return zero rows
+    mock_result = MagicMock()
+    mock_result.fetchone.return_value = None
+    mock_session.execute.return_value = mock_result
+    mock_session.commit.side_effect = None
+    
+    shared_results = {"signal_count": 0}
+    
+    hooked_factory = create_hooked_session_factory(
+        base_factory=mock_factory,
+        target_run_id=123,
+        shared_results=shared_results,
+    )
+    
+    session = hooked_factory()
+    
+    acquisition_query = text("""
+        UPDATE paper_trading_runs
+        SET status = 'running'
+        WHERE id = :id AND status IN ('queued')
+          AND cancel_requested = FALSE
+        RETURNING id
+    """)
+    result = session.execute(acquisition_query, {"id": 123})
+    row = result.fetchone()
+    
+    assert row is None
+    
+    session.commit()
+    
+    # No signal
+    assert shared_results["signal_count"] == 0
+
+
+def test_session_a_acquisition_session_b_commit_no_signal():
+    """Session A acquisition, session B commit does not signal."""
+    mock_session_a = MagicMock()
+    mock_session_b = MagicMock()
+    
+    # Session A executes acquisition
+    mock_result_a = MagicMock()
+    mock_result_a.fetchone.return_value = (123,)
+    mock_session_a.execute.return_value = mock_result_a
+    
+    # Session B commits (no acquisition)
+    mock_session_b.commit.side_effect = None
+    
+    def factory_side_effect():
+        return mock_session_a if factory_side_effect.call_count == 0 else mock_session_b
+    factory_side_effect.call_count = 0
+    
+    mock_factory = MagicMock(side_effect=factory_side_effect)
+    
+    shared_results = {"signal_count": 0}
+    
+    hooked_factory = create_hooked_session_factory(
+        base_factory=mock_factory,
+        target_run_id=123,
+        shared_results=shared_results,
+    )
+    
+    # Session A: acquisition
+    session_a = hooked_factory()
+    acquisition_query = text("""
+        UPDATE paper_trading_runs
+        SET status = 'running'
+        WHERE id = :id AND status IN ('queued')
+          AND cancel_requested = FALSE
+        RETURNING id
+    """)
+    result = session_a.execute(acquisition_query, {"id": 123})
+    result.fetchone()
+    
+    # Session B: commit (different session)
+    session_b = hooked_factory()
+    session_b.commit()
+    
+    # No signal (session B has no pending)
+    assert shared_results["signal_count"] == 0
+
+
+def test_session_b_rollback_does_not_clear_session_a_pending():
+    """Session B rollback does not clear session A pending."""
+    mock_session_a = MagicMock()
+    mock_session_b = MagicMock()
+    
+    # Session A executes acquisition
+    mock_result_a = MagicMock()
+    mock_result_a.fetchone.return_value = (123,)
+    mock_session_a.execute.return_value = mock_result_a
+    
+    call_count = [0]
+    def factory_side_effect():
+        call_count[0] += 1
+        return mock_session_a if call_count[0] == 1 else mock_session_b
+    
+    mock_factory = MagicMock(side_effect=factory_side_effect)
+    
+    hooked_factory = create_hooked_session_factory(
+        base_factory=mock_factory,
+        target_run_id=123,
+    )
+    
+    # Session A: acquisition
+    session_a = hooked_factory()
+    acquisition_query = text("""
+        UPDATE paper_trading_runs
+        SET status = 'running'
+        WHERE id = :id AND status IN ('queued')
+          AND cancel_requested = FALSE
+        RETURNING id
+    """)
+    result = session_a.execute(acquisition_query, {"id": 123})
+    result.fetchone()
+    
+    assert session_a._acquisition_state.acquisition_pending is True
+    
+    # Session B: rollback
+    session_b = hooked_factory()
+    session_b.rollback()
+    
+    # Session A pending still set
+    assert session_a._acquisition_state.acquisition_pending is True
+
+
+def test_same_session_commit_failure_clears_pending():
+    """Same session commit failure clears pending."""
+    mock_session = MagicMock()
+    mock_factory = MagicMock(return_value=mock_session)
+    
+    # Execute acquisition
+    mock_result = MagicMock()
+    mock_result.fetchone.return_value = (123,)
+    mock_session.execute.return_value = mock_result
+    
+    # Commit fails
+    mock_session.commit.side_effect = RuntimeError("commit failed")
+    
+    hooked_factory = create_hooked_session_factory(
+        base_factory=mock_factory,
+        target_run_id=123,
+    )
+    
+    session = hooked_factory()
+    
+    acquisition_query = text("""
+        UPDATE paper_trading_runs
+        SET status = 'running'
+        WHERE id = :id AND status IN ('queued')
+          AND cancel_requested = FALSE
+        RETURNING id
+    """)
+    result = session.execute(acquisition_query, {"id": 123})
+    result.fetchone()
+    
+    assert session._acquisition_state.acquisition_pending is True
+    
+    # Commit fails
+    with pytest.raises(RuntimeError, match="commit failed"):
+        session.commit()
+    
+    # Pending cleared
+    assert session._acquisition_state.acquisition_pending is False
+
+
+def test_second_commit_after_success_no_duplicate_signal():
+    """Second commit after success does not duplicate signal/inject."""
+    mock_session = MagicMock()
+    mock_factory = MagicMock(return_value=mock_session)
+    
+    # Execute acquisition
+    mock_result = MagicMock()
+    mock_result.fetchone.return_value = (123,)
+    mock_session.execute.return_value = mock_result
+    
+    # Commit succeeds
+    mock_session.commit.side_effect = None
+    
+    # Verify session
+    mock_verify_session = MagicMock()
+    mock_verify_session.execute.return_value.fetchone.return_value = ("running",)
+    
+    call_count = [0]
+    def factory_side_effect():
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return mock_session
+        else:
+            return mock_verify_session
+    
+    mock_factory.side_effect = factory_side_effect
+    
+    shared_results = {"signal_count": 0, "injection_count": 0}
+    
+    hooked_factory = create_hooked_session_factory(
+        base_factory=mock_factory,
+        target_run_id=123,
+        shared_results=shared_results,
+    )
+    
+    session = hooked_factory()
+    
+    acquisition_query = text("""
+        UPDATE paper_trading_runs
+        SET status = 'running'
+        WHERE id = :id AND status IN ('queued')
+          AND cancel_requested = FALSE
+        RETURNING id
+    """)
+    result = session.execute(acquisition_query, {"id": 123})
+    result.fetchone()
+    
+    # First commit
+    session.commit()
+    assert shared_results["signal_count"] == 1
+    
+    # Second commit (pending already consumed)
+    session.commit()
+    assert shared_results["signal_count"] == 1  # Still 1
+
+
+def test_abort_during_wait_raises_no_inject():
+    """Abort during wait raises AbortError, no injection."""
+    mock_session = MagicMock()
+    mock_factory = MagicMock(return_value=mock_session)
+    
+    # Execute acquisition
+    mock_result = MagicMock()
+    mock_result.fetchone.return_value = (123,)
+    mock_session.execute.return_value = mock_result
+    
+    # Commit succeeds
+    mock_session.commit.side_effect = None
+    
+    # Verify session
+    mock_verify_session = MagicMock()
+    mock_verify_session.execute.return_value.fetchone.return_value = ("running",)
+    
+    call_count = [0]
+    def factory_side_effect():
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return mock_session
+        else:
+            return mock_verify_session
+    
+    mock_factory.side_effect = factory_side_effect
+    
+    abort_event = threading.Event()
+    cancel_committed = threading.Event()
+    
+    shared_results = {"signal_count": 0, "injection_count": 0}
+    
+    hooked_factory = create_hooked_session_factory(
+        base_factory=mock_factory,
+        target_run_id=123,
+        cancel_committed_event=cancel_committed,
+        abort_event=abort_event,
+        shared_results=shared_results,
+    )
+    
+    session = hooked_factory()
+    
+    acquisition_query = text("""
+        UPDATE paper_trading_runs
+        SET status = 'running'
+        WHERE id = :id AND status IN ('queued')
+          AND cancel_requested = FALSE
+        RETURNING id
+    """)
+    result = session.execute(acquisition_query, {"id": 123})
+    result.fetchone()
+    
+    # Abort before commit
+    abort_event.set()
+    
+    # Commit should raise AbortError
+    with pytest.raises(AbortError, match="Abort signaled"):
+        session.commit()
+    
+    # No injection
+    assert shared_results["injection_count"] == 0
+
+
+def test_verify_not_running_pending_expired():
+    """Verify returns non-running: pending already expired."""
+    mock_session = MagicMock()
+    mock_factory = MagicMock(return_value=mock_session)
+    
+    # Execute acquisition
+    mock_result = MagicMock()
+    mock_result.fetchone.return_value = (123,)
+    mock_session.execute.return_value = mock_result
+    
+    # Commit succeeds
+    mock_session.commit.side_effect = None
+    
+    # Verify session returns 'failed' (not 'running')
+    mock_verify_session = MagicMock()
+    mock_verify_session.execute.return_value.fetchone.return_value = ("failed",)
+    
+    call_count = [0]
+    def factory_side_effect():
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return mock_session
+        else:
+            return mock_verify_session
+    
+    mock_factory.side_effect = factory_side_effect
+    
+    shared_results = {"signal_count": 0}
+    
+    hooked_factory = create_hooked_session_factory(
+        base_factory=mock_factory,
+        target_run_id=123,
+        shared_results=shared_results,
+    )
+    
+    session = hooked_factory()
+    
+    acquisition_query = text("""
+        UPDATE paper_trading_runs
+        SET status = 'running'
+        WHERE id = :id AND status IN ('queued')
+          AND cancel_requested = FALSE
+        RETURNING id
+    """)
+    result = session.execute(acquisition_query, {"id": 123})
+    result.fetchone()
+    
+    # Commit
+    session.commit()
+    
+    # No signal (verify failed)
+    assert shared_results["signal_count"] == 0
+    
+    # Pending expired
+    assert session._acquisition_state.acquisition_pending is False
+
+
+def test_verify_close_error_observable():
+    """Verify close error is observable via VerifyCloseError."""
+    mock_session = MagicMock()
+    mock_factory = MagicMock(return_value=mock_session)
+    
+    # Execute acquisition
+    mock_result = MagicMock()
+    mock_result.fetchone.return_value = (123,)
+    mock_session.execute.return_value = mock_result
+    
+    # Commit succeeds
+    mock_session.commit.side_effect = None
+    
+    # Verify session close fails
+    mock_verify_session = MagicMock()
+    mock_verify_session.execute.return_value.fetchone.return_value = ("running",)
+    mock_verify_session.close.side_effect = RuntimeError("close failed")
+    
+    call_count = [0]
+    def factory_side_effect():
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return mock_session
+        else:
+            return mock_verify_session
+    
+    mock_factory.side_effect = factory_side_effect
+    
+    hooked_factory = create_hooked_session_factory(
+        base_factory=mock_factory,
+        target_run_id=123,
+    )
+    
+    session = hooked_factory()
+    
+    acquisition_query = text("""
+        UPDATE paper_trading_runs
+        SET status = 'running'
+        WHERE id = :id AND status IN ('queued')
+          AND cancel_requested = FALSE
+        RETURNING id
+    """)
+    result = session.execute(acquisition_query, {"id": 123})
+    result.fetchone()
+    
+    # Commit should raise VerifyCloseError
+    with pytest.raises(VerifyCloseError, match="Failed to close verify session"):
+        session.commit()
+
+
+def test_rollback_then_read_old_result_no_restart_pending():
+    """Rollback then read old result does not restart pending."""
+    mock_session = MagicMock()
+    mock_factory = MagicMock(return_value=mock_session)
+    
+    # Execute acquisition
+    mock_result = MagicMock()
+    mock_result.fetchone.return_value = (123,)
+    mock_session.execute.return_value = mock_result
+    
+    hooked_factory = create_hooked_session_factory(
+        base_factory=mock_factory,
+        target_run_id=123,
+    )
+    
+    session = hooked_factory()
+    
+    acquisition_query = text("""
+        UPDATE paper_trading_runs
+        SET status = 'running'
+        WHERE id = :id AND status IN ('queued')
+          AND cancel_requested = FALSE
+        RETURNING id
+    """)
+    result = session.execute(acquisition_query, {"id": 123})
+    result.fetchone()
+    
+    assert session._acquisition_state.acquisition_pending is True
+    
+    # Rollback
+    session.rollback()
+    
+    assert session._acquisition_state.acquisition_pending is False
+    
+    # Read old result again
+    result.fetchone()
+    
+    # Pending not restarted (result expired)
+    assert session._acquisition_state.acquisition_pending is False
+
+
+def test_injected_exception_identity_is_assertion():
+    """Injected exception identity uses 'is' assertion."""
+    mock_session = MagicMock()
+    mock_factory = MagicMock(return_value=mock_session)
+    
+    # Execute acquisition
+    mock_result = MagicMock()
+    mock_result.fetchone.return_value = (123,)
+    mock_session.execute.return_value = mock_result
+    
+    # Commit succeeds
+    mock_session.commit.side_effect = None
+    
+    # Verify session
+    mock_verify_session = MagicMock()
+    mock_verify_session.execute.return_value.fetchone.return_value = ("running",)
+    
+    call_count = [0]
+    def factory_side_effect():
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return mock_session
+        else:
+            return mock_verify_session
+    
+    mock_factory.side_effect = factory_side_effect
+    
+    # Pre-build exception once
+    injected_exception = RuntimeError("Injected")
+    
+    hooked_factory = create_hooked_session_factory(
+        base_factory=mock_factory,
+        target_run_id=123,
+        injected_exception=injected_exception,
+    )
+    
+    session = hooked_factory()
+    
+    acquisition_query = text("""
+        UPDATE paper_trading_runs
+        SET status = 'running'
+        WHERE id = :id AND status IN ('queued')
+          AND cancel_requested = FALSE
+        RETURNING id
+    """)
+    result = session.execute(acquisition_query, {"id": 123})
+    result.fetchone()
+    
+    # Commit should raise the same instance
+    with pytest.raises(RuntimeError) as exc_info:
+        session.commit()
+    
+    # Identity assertion
+    assert exc_info.value is injected_exception
+
+
+# Total: 18 + 12 = 30 tests
