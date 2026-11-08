@@ -71,7 +71,8 @@ class ResultProxy:
         # Only set pending when we read a valid row with matching run ID
         if row is not None and len(row) >= 1:
             returned_id = row[0]
-            if returned_id == self._target_run_id:
+            # Convert both to string for comparison (UUID object vs string)
+            if str(returned_id) == str(self._target_run_id):
                 # Valid acquisition confirmed - set pending
                 self._session_state.acquisition_pending = True
                 self._session_state.acquisition_run_id = returned_id

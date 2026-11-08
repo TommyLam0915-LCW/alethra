@@ -1128,52 +1128,79 @@ def test_integration_verified_factory_no_session_on_failure():
 
 def test_guard_rejection_after_successful_connection():
     """Guard rejection: connection succeeds, query succeeds, THEN guard rejects.
-    
+
     This is a TRUE guard-rejection test (not connection-failure):
     1. Connect to existing 'postgres' database (connection succeeds)
-    2. Guard queries current_database() → 'postgres' (query succeeds)
-    3. Guard compares against approved 'ai_investment_lab_test' → MISMATCH
+    2. Guard queries current_database() via SQL listener-captured SELECT
+    3. Guard compares against approved 'ai_investment_lab_test' -> MISMATCH
     4. Guard raises TargetGuardError (not OperationalError)
-    5. Verify no write entry point was called
+    5. SQL listener proves only read-only SELECT executed, no write statements
     """
     import os
+    import re
+    from sqlalchemy import event
+    from sqlalchemy.engine.url import make_url
     from sqlalchemy.exc import OperationalError
-    
-    base_url = os.environ.get("ALETHRA_PG_TEST_URL", "")
-    if not base_url:
+
+    base_url_str = os.environ.get("ALETHRA_PG_TEST_URL", "")
+    if not base_url_str:
         pytest.skip("ALETHRA_PG_TEST_URL not set")
-    
-    # Connect to 'postgres' database instead of approved test DB
-    # This will succeed at connection level but fail guard verification
-    guard_rejection_url = base_url.replace("ai_investment_lab_test", "postgres")
-    
-    # Track if any write methods were called
-    write_methods_called = []
-    
+
+    base_url = make_url(base_url_str)
+    guard_rejection_url = str(base_url.set(database="postgres"))
+
+    executed_statements = []
+
+    def _track_sql(conn, cursor, statement, parameters, context, executemany):
+        executed_statements.append(statement)
+
+    engine_for_listener = None
     try:
-        factory, engine = create_verified_session_factory(guard_rejection_url)
-        # If we get here, guard didn't reject as expected
-        engine.dispose()
-        pytest.fail("Guard should have rejected connection to 'postgres' database")
-    except TargetGuardError as e:
-        # EXPECTED: Guard rejected after successful connection
-        error_msg = str(e)
-        
-        # Verify it's a guard rejection (DB name mismatch), not connection failure
-        assert "mismatch" in error_msg.lower() or "db name" in error_msg.lower(), \
-            f"Expected DB name mismatch error, got: {error_msg}"
-        
-        # Verify the error mentions the actual DB name we connected to
-        assert "postgres" in error_msg.lower(), \
-            f"Error should mention 'postgres' DB, got: {error_msg}"
-        
-        # Verify no write methods were called (guard blocks before writes)
-        # This is proven by the fact that we got TargetGuardError, not a write error
-        assert len(write_methods_called) == 0, "No write methods should be called before guard passes"
-        
+        from sqlalchemy import create_engine
+        engine_for_listener = create_engine(guard_rejection_url)
+        event.listen(engine_for_listener, "before_cursor_execute", _track_sql)
+
+        from sqlalchemy.orm import sessionmaker
+        factory = sessionmaker(bind=engine_for_listener)
+        verify_session = factory()
+        try:
+            verify_test_target(verify_session, db_url=guard_rejection_url)
+            pytest.fail("Guard should have rejected connection to 'postgres' database")
+        except TargetGuardError as e:
+            error_msg = str(e)
+
+            assert "mismatch" in error_msg.lower() or "db name" in error_msg.lower(), \
+                f"Expected DB name mismatch error, got: {error_msg}"
+            assert "postgres" in error_msg.lower(), \
+                f"Error should mention 'postgres' DB, got: {error_msg}"
+
+            assert len(executed_statements) >= 1, \
+                "Guard must have executed at least one query before rejection"
+
+            write_pattern = re.compile(
+                r"^\s*(INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|TRUNCATE|GRANT|REVOKE)\b",
+                re.IGNORECASE,
+            )
+            write_statements = [s for s in executed_statements if write_pattern.match(s)]
+            assert len(write_statements) == 0, \
+                f"Guard rejection must not execute writes. Found: {write_statements}"
+
+            for stmt in executed_statements:
+                assert "current_database()" in stmt.lower() or "inet_server" in stmt.lower() \
+                    or "current_user" in stmt.lower() or "select" in stmt.lower(), \
+                    f"Unexpected non-read statement: {stmt}"
+
+        finally:
+            verify_session.close()
+
     except OperationalError as e:
-        # NOT EXPECTED: This would be connection failure, not guard rejection
-        pytest.fail(f"Got OperationalError (connection failure) instead of TargetGuardError (guard rejection): {e}")
+        pytest.fail(
+            f"Got OperationalError (connection failure) instead of "
+            f"TargetGuardError (guard rejection): {e}"
+        )
+    finally:
+        if engine_for_listener is not None:
+            engine_for_listener.dispose()
 
 
 # === Credential non-leakage tests (formal guard/factory errors) ===
