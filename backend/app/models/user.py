@@ -26,3 +26,4 @@ class User(Base):
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
     is_active = Column(Boolean, default=True, nullable=False)
     is_admin = Column(Boolean, default=False, nullable=False)
+    stripe_customer_id = Column(String(255), nullable=True, index=True)

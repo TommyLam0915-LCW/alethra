@@ -33,6 +33,10 @@ class ResearchDraft(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
     experiment_id = Column(UUID(as_uuid=True), ForeignKey("experiments.id"), nullable=True, index=True)
+    # Traceability: set when this draft was proposed by the personal AI.
+    source_conversation_id = Column(
+        UUID(as_uuid=True), ForeignKey("ai_conversations.id"), nullable=True, index=True
+    )
 
     title = Column(String(500), nullable=False)
     hypothesis = Column(Text, nullable=True)

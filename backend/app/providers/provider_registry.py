@@ -16,7 +16,6 @@ _LSEG_INITIALIZED = False
 
 
 def _try_init_lseg() -> Optional[DataProvider]:
-    import os
     api_key = os.environ.get("LSEG_API_KEY")
     client_id = os.environ.get("LSEG_CLIENT_ID")
     client_secret = os.environ.get("LSEG_CLIENT_SECRET")

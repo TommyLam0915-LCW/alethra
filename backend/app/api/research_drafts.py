@@ -358,6 +358,18 @@ def approve_research_draft(
 
         draft.status = DraftStatus.ACCEPTED
         event_type = "research_draft_accepted"
+        if draft.source_conversation_id is not None:
+            from app.models.pilot import UsageEvent, UsageEventType
+            db.add(
+                UsageEvent(
+                    user_id=current_user.id,
+                    event_type=UsageEventType.ai_draft_approved,
+                    metadata_json={
+                        "draft_id": str(draft.id),
+                        "conversation_id": str(draft.source_conversation_id),
+                    },
+                )
+            )
     else:
         draft.status = DraftStatus.REJECTED
         event_type = "research_draft_rejected"

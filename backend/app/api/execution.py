@@ -63,6 +63,7 @@ class OrderIntentResponse(BaseModel):
     updated_at: datetime
     rejection_reason: Optional[str]
     broker_ref: Optional[str]
+    cancel_requested: bool = False
     idempotency_key: Optional[str]
     fill_source: Optional[str]
     broker_confirmed_at: Optional[datetime]

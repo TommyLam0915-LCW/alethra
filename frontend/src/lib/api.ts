@@ -328,6 +328,7 @@ export const api = {
     },
     listModels: () => apiFetch('/api/v1/ml/models'),
     getModel: (modelId: string) => apiFetch(`/api/v1/ml/models/${modelId}`),
+    deleteModel: (modelId: string) => apiFetch(`/api/v1/ml/models/${modelId}`, { method: 'DELETE' }),
     predict: (modelId: string, params?: { instrument_id?: string; start_date?: string; end_date?: string }) => {
       const qs = new URLSearchParams();
       if (params?.instrument_id) qs.set('instrument_id', params.instrument_id);

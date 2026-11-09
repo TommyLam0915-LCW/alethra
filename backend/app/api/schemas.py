@@ -1079,6 +1079,7 @@ class ResearchDraftResponse(ResearchDraftBase):
     id: UUID
     user_id: UUID
     experiment_id: Optional[UUID] = None
+    source_conversation_id: Optional[UUID] = None
     status: str
     assistant_questions: Optional[List[Dict[str, Any]]] = None
     assistant_responses: Optional[Dict[str, Any]] = None

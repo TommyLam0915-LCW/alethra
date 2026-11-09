@@ -12,6 +12,7 @@ from .broker_transport import (
     BrokerOrderResult,
     BrokerFill,
     BrokerOrderStatus,
+    BrokerOrderState,
 )
 
 
@@ -66,3 +67,6 @@ class IBKRClient:
 
     def get_fills(self, broker_order_id: str) -> List[BrokerFill]:
         return self._transport.get_fills(broker_order_id)
+
+    def get_recent_orders(self, since: datetime) -> List[BrokerOrderState]:
+        return self._transport.get_recent_orders(since)

@@ -14,7 +14,7 @@ from app.auth.jwt import get_current_user
 from app.api.schemas import ResearchRunResponse, VersionDiffResponse, VersionDiffEntry
 from app.engine.backtest import run_backtest, ENGINE_VERSION
 from app.providers import get_data_provider
-from app.auth.entitlements import require_entitlement, consume_quota
+from app.auth.entitlements import require_entitlement, reserve_quota, settle_reservation, release_reservation
 from app.auth.api_keys import check_api_key_scope
 from app.services import emit_event
 
@@ -24,6 +24,7 @@ router = APIRouter(tags=["runs"])
 @router.post("/versions/{version_id}/runs", response_model=ResearchRunResponse, status_code=status.HTTP_201_CREATED)
 def create_run(
     version_id: UUID,
+    data_source: str = Query("auto", pattern="^(auto|stored|provider)$"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_entitlement(quota_type="research_run")),
     _scope_check=Depends(check_api_key_scope("write")),
@@ -63,13 +64,20 @@ def create_run(
         rules_locked=is_locked,
         data_cutoff_at=data_cutoff)
 
+    reservation = reserve_quota(db, current_user.id, "research_run")
+
     try:
         run.status = RunStatus.running
         run.started_at = datetime.now(timezone.utc).replace(tzinfo=None)
         db.flush()
 
         data_provider = get_data_provider()
-        result = run_backtest(version.strategy_spec, data_provider=data_provider)
+        result = run_backtest(
+            version.strategy_spec,
+            data_provider=data_provider,
+            db_session=db,
+            data_source=data_source,
+        )
 
         run.status = RunStatus.completed
         run.metrics = result["metrics"]
@@ -78,7 +86,7 @@ def create_run(
         run.methodology_json = result.get("methodology_summary")
         run.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
-        consume_quota(db, current_user.id, "research_run")
+        settle_reservation(db, reservation.id)
 
         emit_event(db,
             entity_type="run", entity_id=run.id,
@@ -104,6 +112,8 @@ def create_run(
         return run
 
     except Exception as e:
+        release_reservation(db, reservation.id)
+
         run.status = RunStatus.failed
         run.error_details = str(e)
         run.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)

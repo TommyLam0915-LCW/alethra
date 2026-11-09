@@ -91,14 +91,18 @@ class StripePaymentAdapter(PaymentAdapter):
             created_at=datetime.fromtimestamp(intent.created).isoformat(),
         )
 
-    def verify_webhook_signature(self, payload: str, signature: str) -> bool:
+    def verify_webhook_signature(self, payload: str, signature: str):
+        """Verify webhook signature and return the verified Event object.
+
+        Returns the Stripe Event on success, None on failure.
+        """
         try:
-            self._stripe.Webhook.construct_event(
+            event = self._stripe.Webhook.construct_event(
                 payload, signature, self._webhook_secret
             )
-            return True
+            return event
         except (self._stripe.error.SignatureVerificationError, ValueError):
-            return False
+            return None
 
     def parse_webhook_event(self, payload: str) -> WebhookEvent:
         data = json.loads(payload)
@@ -120,6 +124,8 @@ class StripePaymentAdapter(PaymentAdapter):
         price_id: str,
         success_url: str,
         cancel_url: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        client_reference_id: Optional[str] = None,
     ) -> str:
         session = self._stripe.checkout.Session.create(
             customer=customer_id,
@@ -128,5 +134,7 @@ class StripePaymentAdapter(PaymentAdapter):
             mode="subscription",
             success_url=success_url,
             cancel_url=cancel_url,
+            metadata=metadata or None,
+            client_reference_id=client_reference_id,
         )
         return session.url

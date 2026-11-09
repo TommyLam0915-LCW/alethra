@@ -177,3 +177,44 @@ class TestUserPlusKeyAggregateEnforcement:
             db.query(User).filter(User.id == user_id).delete()
             db.commit()
             db.close()
+
+
+class TestKillSwitchEnumPersistence:
+    """The ORM must persist enum VALUES ('global'), not member NAMES ('global_').
+
+    The alembic-created Postgres enum type killswitchscope contains 'global';
+    a name-based Enum() column writes 'global_' and fails with
+    InvalidTextRepresentation on PostgreSQL — invisible under SQLite tests,
+    where create_all derives the CHECK constraint from the same names.
+    """
+
+    def test_persists_enum_value_not_member_name(self):
+        from sqlalchemy import text
+        from app.models.kill_switch import KillSwitch
+
+        db = TestSession()
+        try:
+            db.add(KillSwitch(scope=KillSwitchScope.global_, is_active=True, activated_by="test"))
+            db.commit()
+
+            raw = db.execute(text("SELECT scope FROM kill_switches")).scalars().all()
+            assert raw == ["global"], (
+                f"kill_switches.scope must persist enum value 'global', got {raw!r} "
+                "(member name 'global_' breaks the alembic-created PostgreSQL enum)"
+            )
+        finally:
+            db.query(KillSwitch).delete()
+            db.commit()
+            db.close()
+
+    def test_activate_and_read_global_scope_round_trip(self):
+        from app.services.kill_switch import is_kill_switch_active
+
+        db = TestSession()
+        try:
+            activate_kill_switch(db, KillSwitchScope.global_, "test", "round trip")
+            assert is_kill_switch_active(db, KillSwitchScope.training) is True
+            assert is_kill_switch_active(db, KillSwitchScope.global_) is True
+        finally:
+            deactivate_kill_switch(db, KillSwitchScope.global_)
+            db.close()

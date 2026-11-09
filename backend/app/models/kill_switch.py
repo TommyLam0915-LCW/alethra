@@ -27,7 +27,10 @@ class KillSwitch(Base):
     __tablename__ = "kill_switches"
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=lambda: __import__("uuid").uuid4())
-    scope = Column(Enum(KillSwitchScope), nullable=False, unique=True, index=True)
+    scope = Column(
+        Enum(KillSwitchScope, values_callable=lambda e: [m.value for m in e]),
+        nullable=False, unique=True, index=True,
+    )
     is_active = Column(Boolean, nullable=False, default=False, index=True)
     activated_at = Column(DateTime, nullable=True)
     activated_by = Column(String(255), nullable=True)  # User ID or "system"
