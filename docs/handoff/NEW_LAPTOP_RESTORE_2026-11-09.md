@@ -14,9 +14,13 @@
 ```
 分支: live1-impl
 HEAD: dd948f4154438257822782df10c6a35aef6872c0
-遠端同步: ✅ 已驗證 (github/live1-impl)
+遠端同步: ✅ 已驗證 (origin/live1-impl)
 工作目錄: 乾淨（無未提交變更）
 ```
+
+**Remote 說明**:
+- 新筆電使用 `origin` 指向 https://github.com/TommyLam0915-LCW/alethra.git
+- 舊筆電曾使用 `github` 作為 remote 名稱（僅歷史資訊）
 
 ### Stash 狀態
 ```
@@ -26,7 +30,13 @@ HEAD: dd948f4154438257822782df10c6a35aef6872c0
   - stash@{1}: WIP: stock data changes (未推送至遠端)
 ```
 
-**結論**: 舊筆電的兩個 stash 未同步至 GitHub，無法在新筆電恢復。
+**結論**: 舊筆電的兩個 stash 未同步至 GitHub，無法在新筆電直接恢復。
+
+**處理原則**:
+- 舊筆電應先記錄固定 stash object SHA（`git rev-parse stash@{0}` 及 `stash@{1}`）
+- 審查後逐份保存至獨立分支（`git stash branch <branch-name> <stash-ref>`）
+- 尚未取回不代表永久遺失，仍可從 object SHA 恢復
+- 本文件不記錄可直接執行的 stash 操作指令，避免誤用
 
 ---
 
@@ -99,38 +109,24 @@ package-lock.json 變更: 無
 ```
 命令: (cd frontend && npm audit --json)
 退出碼: 1 (發現漏洞)
-漏洞總數: 2
-  - Critical: 1
-  - High: 1
-  - Moderate: 0
-  - Low: 0
+執行時間: 2026-11-09 (本機輸出)
 ```
 
-#### 漏洞詳情
-
-**1. Next.js (critical)**
-- 套件: `next`
-- 版本: 14.2.18
-- 影響範圍: 0.9.9 - 16.3.0-preview.10
-- 修復版本: 16.4.5 (semver major)
-- 漏洞數量: 35 個 CVE
-- 嚴重漏洞:
-  - GHSA-p293-qw3h-jr36: Unauthenticated Remote Code Execution on Windows (CVSS 9.0)
-  - GHSA-f82v-jwr5-mffw: Authorization Bypass in Middleware (CVSS 9.1)
-  - GHSA-2464-fhr4-w9xw: Unauthenticated RCE in Image Optimization (SVG)
-
-**2. PostCSS (high)**
-- 套件: `postcss` (next 的依賴)
-- 版本: ≤8.5.22
-- 漏洞數量: 4 個 CVE
-- 嚴重漏洞:
-  - GHSA-6g55-p6wh-862q: Arbitrary file read via sourceMappingURL (CVSS 7.5)
-  - GHSA-r28c-9q8g-f849: Path Traversal in Source Map Auto-Loading (CVSS 7.5)
+**漏洞分類** (npm audit 報告，非獨立核實 CVE):
+- npm audit 分類顯示: 2 個 vulnerability (1 critical severity, 1 high severity)
+- 涉及套件: next, postcss
+- 詳細 advisory 數量及 CVE 編號需個別查證，本文件不將 audit 分類直接等同於已核實 CVE 數
 
 **處理原則**:
-- ⚠️ 本輪不自動修復 (`npm audit fix` 或 `npm audit fix --force` 均未執行)
-- ⚠️ 退出碼 1 不代表安裝失敗，僅表示存在已知漏洞
-- ⚠️ 這些漏洞在生產環境部署前必須處理
+- ⚠️ 本輪不自動修復 (未執行 `npm audit fix` 或 `npm audit fix --force`)
+- ⚠️ 退出碼 1 不代表安裝失敗，僅表示 npm audit 發現已知漏洞
+- ⚠️ 生產環境部署前應獨立查證各 advisory 及評估修復方案
+- ⚠️ 安全修復列為獨立待辦，不與本恢復紀錄合併處理
+
+**待辦**:
+- 查證 next 及 postcss 各 advisory 的實際影響範圍
+- 評估修復方案（minor/patch upgrade vs major version bump）
+- 如需 major upgrade (例如 next 14 → 16)，應獨立批准並測試
 
 ---
 
@@ -163,8 +159,14 @@ uvicorn app.main:app --reload --port 8000
 - 文件: http://localhost:8000/docs
 
 **資料庫遷移**:
-```bash
-alembic upgrade head
+```
+狀態: ⚠️ 未執行
+說明: 本輪不干預資料庫配置
+前置作業:
+  1. 確認隔離 DB 實例已就緒
+  2. 確認 DB 角色及權限
+  3. 確認 migration target revision
+  4. 另行批准後執行 `alembic upgrade head`
 ```
 
 **PostgreSQL 狀態**:
@@ -221,14 +223,14 @@ npm run dev
 跳過原因: PostgreSQL ENV_BLOCKED (ALETHRA_PG_TEST_URL 未設定)
 ```
 
-#### 3. B 整合測試
+#### 3. B cleanup refusal 測試
 ```
-命令: (cd backend && .venv/bin/python -m pytest \
-  tests/test_paper_trading_cancel_atomic.py::TestBatchBMinimalIntegration -v)
+命令: (cd backend && .venv/bin/python -m pytest tests/test_paper_trading_cancel_atomic.py::TestBatchBMinimalIntegration::test_cleanup_refuses_when_workers_not_confirmed_stopped -v)
 
 結果: ✅ 1 passed
 退出碼: 0
-說明: 使用 SQLite 的 B 整合測試
+說明: 測試 B finalizer 在 worker 未確認停止時拒絕清理
+注意: 此為 SQLite 離線測試，非完整 B class 或 PG integration
 ```
 
 ### 與舊筆電測試結果比較
@@ -237,9 +239,14 @@ npm run dev
 |---------|-------------------|-------------------|------|
 | No-DB 基準 | 16 passed | 16 passed | ✅ 一致 |
 | 完整回歸 | 135 passed, 12 skipped | 135 passed, 12 skipped | ✅ 一致 |
-| B 整合 | 1 passed | 1 passed | ✅ 一致 |
+| B cleanup refusal | 1 passed | 1 passed | ✅ 一致 |
 
 **結論**: 後端測試結果與舊筆電完全一致，環境恢復成功。
+
+**SHA 追蹤**:
+- 歷史基準 SHA: `dd948f4154438257822782df10c6a35aef6872c0` (舊筆電最後同步)
+- 文件保存提交 SHA: `3eaee13f0b768a33b969eb0a4b0f38f5728e5dc5` (本恢復紀錄入版控)
+- 後續程式修復: 見各 commit message，結果可能與上述基準不同
 
 ---
 
@@ -325,61 +332,44 @@ npm run dev
 ### 📋 後續行動建議
 
 **優先級 1: 修復前端建置錯誤**
-```bash
-cd frontend
-# 修復 CrossRunComparison.tsx:119 的 null 檢查
-# 然後重新執行 npm run build
-```
+- 項目: CrossRunComparison.tsx:119 的 null 檢查
+- 狀態: 待修復（見本輪切片 B）
+- 驗證: 修復後重新執行 `npm run build`，確認 exit code 0
 
 **優先級 2: 設定 ESLint**
-```bash
-cd frontend
-npm run lint
-# 選擇 Strict (recommended) 或 Base
-```
+- 項目: 前端 ESLint 配置
+- 狀態: 需要互動式設定
+- 說明: 執行 `npm run lint` 並選擇 Strict 或 Base 配置
+- 注意: 此為一次性設定，完成後可非互動執行
 
-**優先級 3: 升級安全性漏洞**
-```bash
-cd frontend
-npm audit fix
-# 或手動升級 next 至 16.4.5+
-```
+**優先級 3: 安全性漏洞評估**
+- 項目: next 及 postcss 套件漏洞
+- 狀態: 待獨立評估
+- 步驟:
+  1. 查證各 advisory 的實際影響範圍
+  2. 評估修復方案（minor/patch upgrade vs major version bump）
+  3. 如需 major upgrade，獨立批准並測試
+- 注意: 本輪不執行 `npm audit fix` 或自動升級
 
-**優先級 4: 配置 PostgreSQL (可選)**
-```bash
-# 安裝 PostgreSQL
-brew install postgresql
-
-# 啟動服務
-brew services start postgresql
-
-# 建立測試資料庫
-createdb ai_investment_lab_test
-
-# 設定環境變數
-export ALETHRA_PG_TEST_URL=postgresql://localhost:5432/ai_investment_lab_test
-
-# 執行遷移
-cd backend
-alembic upgrade head
-
-# 執行完整測試
-.venv/bin/python -m pytest tests/test_target_guard.py -v
-```
+**優先級 4: PostgreSQL 配置 (可選)**
+- 項目: 本機 PostgreSQL 測試環境
+- 狀態: ENV_BLOCKED
+- 前置作業:
+  1. 安裝 PostgreSQL
+  2. 建立隔離測試資料庫
+  3. 設定 ALETHRA_PG_TEST_URL 環境變數
+  4. 確認 migration target revision
+  5. 另行批准後執行遷移
+- 驗證: 執行 test_target_guard.py，確認 12 個跳過的測試可以執行
 
 **優先級 5: 恢復舊筆電 Stash (如有需要)**
-```bash
-# 在舊筆電執行
-git stash branch wip/cancel-implementation stash@{0}
-git stash branch wip/stock-data-changes stash@{1}
-git push github wip/cancel-implementation
-git push github wip/stock-data-changes
-
-# 在新筆電執行
-git fetch github
-git checkout wip/cancel-implementation
-# 審查並合併或 cherry-pick
-```
+- 原因: 兩個 stash 未同步到 GitHub
+- 步驟:
+  1. 在舊筆電建立分支: `git stash branch <branch-name> stash@{N}`
+  2. 推送到 GitHub: `git push origin <branch-name>`
+  3. 在新筆電 fetch 並審查: `git fetch origin && git checkout <branch-name>`
+  4. 根據內容決定合併或 cherry-pick
+- 注意: 需要先確認舊筆電可連線且 stash 仍然存在
 
 ---
 
