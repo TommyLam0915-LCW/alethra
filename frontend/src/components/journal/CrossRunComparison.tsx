@@ -116,11 +116,11 @@ export default function CrossRunComparison() {
     setComparison(null);
   };
 
-  const getMetricStyle = (runId: string, metric: keyof typeof comparison.highlights, value: number, invert: boolean = false) => {
+  const getMetricStyle = (runId: string, metric: keyof ComparisonResult['highlights'], value: number, invert: boolean = false) => {
     if (!comparison?.highlights) return {};
     
     const isBest = comparison.highlights[metric] === runId;
-    const isWorst = comparison.highlights[`worst_${metric.split('_')[1]}` as keyof typeof comparison.highlights] === runId;
+    const isWorst = comparison.highlights[`worst_${metric.split('_')[1]}` as keyof ComparisonResult['highlights']] === runId;
     
     if (invert) {
       // For metrics where lower is better (e.g., max_drawdown)

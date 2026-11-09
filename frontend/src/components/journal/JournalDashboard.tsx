@@ -134,6 +134,10 @@ const TAB_DESCRIPTIONS: Record<TabKey, { title: string; description: string }> =
     title: 'Auto Data Collection',
     description: 'Manage automatic data collection scheduler. Start/stop the scheduler, trigger manual collections, and view recent collection runs. Keeps your research data up-to-date automatically.',
   },
+  'paper-trading': {
+    title: 'Paper Trading',
+    description: 'Track simulated trades without risking real money. Test your strategies in a risk-free environment. Monitor positions, orders, and performance metrics.',
+  },
 };
 
 function refusalFrom(err: unknown): string {
