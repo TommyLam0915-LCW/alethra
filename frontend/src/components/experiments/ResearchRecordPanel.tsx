@@ -602,7 +602,7 @@ export default function ResearchRecordPanel({ experimentId, refreshToken = 0 }: 
             {coverage.excluded
               .map((key) => EXCLUDED_LABEL[key] ?? key)
               .join(', ')}
-            . Open a single run's detail page when you need them.
+            . Open a single run&apos;s detail page when you need them.
           </>
         )}
         <div style={{ marginTop: '4px', color: 'var(--text-muted)' }}>

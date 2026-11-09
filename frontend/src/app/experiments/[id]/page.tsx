@@ -496,7 +496,7 @@ export default function ExperimentDetailPage() {
             {currentVersion ? `Lock version ${currentVersion.version_number}` : 'No version to lock yet'}
           </h3>
           <p style={{ color: 'var(--text-secondary)', fontSize: '14px', marginTop: 0, marginBottom: '16px' }}>
-            Locking freezes this version's strategy parameters and data cutoff. Changing parameters requires a new
+            Locking freezes this version&apos;s strategy parameters and data cutoff. Changing parameters requires a new
             version. Forward simulation, the replay cursor and paper fills all follow this version.
           </p>
           {isLocked && !currentVersionLocked && currentVersion && (
@@ -917,7 +917,7 @@ export default function ExperimentDetailPage() {
             </div>
 
             <div style={{ padding: '10px 12px', backgroundColor: 'rgba(245,158,11,0.10)', borderRadius: '6px', fontSize: '12px', color: 'var(--warning)', marginBottom: '12px', lineHeight: '1.6' }}>
-              <strong>Data source note:</strong> RC-001 and RC-002 check the experiment's current text (hypothesis,
+              <strong>Data source note:</strong> RC-001 and RC-002 check the experiment&apos;s current text (hypothesis,
               original idea, falsification conditions). Those fields stay editable, so the reviewed text may differ
               from what it was when the backtest ran. This is not a snapshot of the historical text.
             </div>
@@ -925,7 +925,7 @@ export default function ExperimentDetailPage() {
             {methodReview.completed_at_available === false && (
               <div style={{ padding: '10px 12px', backgroundColor: 'rgba(245,158,11,0.14)', borderRadius: '6px', fontSize: '12px', color: 'var(--warning)', marginBottom: '12px', lineHeight: '1.6' }}>
                 <strong>Timestamp warning:</strong> The selected run has no completion timestamp. Runs are ordered
-                by ID rather than by time, so "latest" does not mean most recent.
+                by ID rather than by time, so &ldquo;latest&rdquo; does not mean most recent.
               </div>
             )}
 

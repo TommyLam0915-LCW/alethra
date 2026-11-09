@@ -231,7 +231,7 @@ export default function AutoCollectionStatus() {
         
         {history.length === 0 ? (
           <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--text-secondary)', fontSize: 14 }}>
-            No collection runs yet. Click "Trigger Manual Collection" to start.
+            No collection runs yet. Click &ldquo;Trigger Manual Collection&rdquo; to start.
           </div>
         ) : (
           <div style={{ overflowX: 'auto' }}>

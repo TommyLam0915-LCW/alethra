@@ -534,7 +534,7 @@ export default function RunDetailPage() {
           )}
           <div style={{ marginTop: '10px', fontSize: '12px', color: 'var(--text-muted)' }}>
             Stop, target and planned risk are fields the strategy declares. When a template declares no stop, the
-            table shows "—" rather than treating the trade as zero risk. "Source" records which layer produced the
+            table shows &ldquo;&mdash;&rdquo; rather than treating the trade as zero risk. &ldquo;Source&rdquo; records which layer produced the
             fill: engine fills are the strategy engine, while human and API client entries come from paper orders.
           </div>
         </div>
