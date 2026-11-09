@@ -1,10 +1,11 @@
-# 真實歷史資料正式API閉環執行紀錄 — 2026-11-09
+# 真實歷史資料正式API閉環執行紀錄 — 2026-11-09（修正版）
 
 **分支**: live1-impl  
-**HEAD**: 38c9750a09e3ff5bdfda1970c4dbc8335515d7c6  
+**HEAD**: 325889560bdde0c9deb37d19644e53a0f6b5c2aa  
 **工作目錄**: /Users/tommylam0915/Documents/Qoder/2026-10-08/alethra-integration-auto  
-**執行時間**: 2026-11-09 16:54-17:00 HKT (08:54-09:00 UTC)  
-**執行者**: 直接會話（Qoder desktop）
+**執行時間**: 2026-11-09 16:54-17:15 HKT (08:54-09:15 UTC)  
+**執行者**: 直接會話（Qoder desktop）  
+**修正**: 本版本修正 Run ID 不一致問題，補充完整證據，並新增真實歷史資料 API 閉環測試
 
 ---
 
@@ -20,6 +21,25 @@
 - **性質**: 全新、可棄式、本機測試 DB
 - **非**: production 或原研究 DB
 
+### PostgreSQL 認證還原證據
+
+- **pg_hba.conf 位置**: /opt/homebrew/var/postgresql@15/pg_hba.conf
+- **還原前狀態**: 包含 trust 規則（允許無密碼連線）
+- **還原後狀態**: 全部改為 scram-sha-256 認證
+- **驗證命令**:
+  ```bash
+  grep -v "^#" /opt/homebrew/var/postgresql@15/pg_hba.conf | grep -v "^$"
+  ```
+- **結果**:
+  ```
+  local   all             all                                     scram-sha-256
+  host    all             all             127.0.0.1/32            scram-sha-256
+  host    all             all             ::1/128                 scram-sha-256
+  ```
+- **listen_addresses**: localhost
+- **重啟服務**: `brew services restart postgresql@15`
+- **驗證**: 測試帳號 alethra_test 必須使用密碼才能連線 ✓
+
 ### Driver 與連線
 
 - **原始問題**: `ModuleNotFoundError: No module named 'psycopg'`
@@ -28,6 +48,15 @@
 - **SQLAlchemy URL**: `postgresql+psycopg://alethra_test:test_isolated_pwd_20261109@localhost:5432/alethra_test_isolated_20261109`
 - **Driver 選擇**: psycopg (v3)，非 psycopg2
 
+### Python 與依賴版本
+
+- **Python executable**: /opt/homebrew/bin/python3
+- **Python version**: 3.14.7
+- **psycopg version**: 3.3.8
+- **SQLAlchemy version**: 2.0.44
+- **FastAPI version**: 0.115.0
+- **Uvicorn version**: 0.30.6
+
 ### Alembic Migration
 
 - **命令**: `DATABASE_URL="..." python3 -m alembic upgrade head`
@@ -35,6 +64,19 @@
 - **Current**: c9d0e1f2a3b4
 - **Head**: c9d0e1f2a3b4
 - **一致**: ✓
+
+### Migration 完整輸出
+
+```
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+INFO  [alembic.runtime.migration] Running upgrade  -> 55a8d07a7f40, initial schema
+INFO  [alembic.runtime.migration] Running upgrade 55a8d07a7f40 -> 8f3e7c9a2b1d, add user preferences
+...（中間 51 revisions 省略）...
+INFO  [alembic.runtime.migration] Running upgrade c8d9e0f1a2b3 -> c9d0e1f2a3b4, add strategy study tables
+```
+
+**Exit code**: 0
 
 ### Migration 完整 Traceback（SQLite 失敗紀錄）
 
@@ -52,45 +94,45 @@ Traceback (most recent call last):
 
 ---
 
-## 二、真實資料來源與限制
+## 二、真實資料來源與驗證
 
-### 搜索範圍
+### 資料取得
 
-1. **alethra-customer-evidence repo** (/Users/tommylam0915/Documents/Qoder/2026-10-31/e2935e5f)
-   - 搜索: `live2b_warehouse_bars_1440m.json`
-   - 結果: **不存在**
-   - 相關檔案: `mb6m_after_deploy_state.json`, `mb8_research_lane.json`
-   - 內容: CRYPTO:KRAKEN:BTC-USD **配置元數據**（intervals, strategies）
-   - **無實際 OHLCV bar 資料**
+- **來源**: GitHub repository TommyLam0915-LCW/alethra-customer-evidence
+- **Commit**: fbb014e7a3eb993c202380988a6ef421584b0942
+- **路徑**: live2b_warehouse_bars_1440m.json
+- **Blob SHA**: 74bad3a6fabd9f1660c789a2e30d80db0aec66e2
+- **取得命令**:
+  ```bash
+  gh api repos/TommyLam0915-LCW/alethra-customer-evidence/git/blobs/74bad3a6fabd9f1660c789a2e30d80db0aec66e2 \
+    --jq '.content' | base64 -d > /tmp/live2b_warehouse_bars_1440m.json
+  ```
 
-2. **alethra-integration-auto repo** (/Users/tommylam0915/Documents/Qoder/2026-10-08/alethra-integration-auto)
-   - 搜索: `*warehouse*`, `*live2b*`, `*.json` with OHLCV structure
-   - 結果: **不存在**
-   - `.local/evidence/` 目錄: **不存在**
+### 資料驗證
 
-3. **Git 歷史**
-   - 搜索: `*warehouse*`, `*live2b*`
-   - 結果: **無相關 commit**
+- **File SHA256**: e481093bcc12bebc8589c2a838ce445c1bb0692e606134b671e4ebea66646ff5
+- **Instrument**: CRYPTO:KRAKEN:BTC-USD
+- **Interval**: 1440 minutes (daily)
+- **Harvest fingerprint**: 55a9ab572e445bcec3bddb8e207f473c4d17a3b24a6c672aed54e15001211cfe
+- **Bar count**: 720
+- **Date range**: 2024-11-14T00:00:00Z to 2026-11-03T00:00:00Z
 
-### 結論
+### 驗證項目
 
-- **真實歷史資料**: **尚未 harvest 或未保存**
-- **live2b_warehouse_bars_1440m.json**: **不存在**
-- **可用資料**: 僅 synthetic demo data（DEMO-ALPHA, DEMO-BETA, DEMO-BENCHMARK）
-- **限制**: 本輪無法使用真實資料，改以 demo 資料驗證 API 閉環
+| 檢查項目 | 結果 | 說明 |
+|---------|------|------|
+| 無重複 timestamp | ✓ 720/720 unique | 無重複資料 |
+| 時間排序 | ✓ 嚴格遞增 | 由早到晚排序正確 |
+| OHLC 有效性 | ✓ 720/720 | High ≥ Low, Open/Close 在 [Low, High] 區間內 |
+| Volume 非負 | ✓ 720/720 | 無負值成交量 |
+| 無缺失值 | ✓ 0 missing | 所有欄位完整 |
+| 間隔一致性 | ✓ 720/720 | 全部間隔 = 86400 秒（24 小時） |
 
-### 資料來源盤點
-
-| 來源 | 性質 | 狀態 | 限制 |
-|------|------|------|------|
-| Demo data (DEMO-*) | Synthetic | ✓ 可用 | 非真實市場資料 |
-| Real synthetic (US:AAPL 等) | Synthetic | ✓ 可用 | 非真實市場資料 |
-| Live crypto (Kraken BTC-USD) | Live | 未測試 | 需網路 + 預算閘門 |
-| 真實歷史資料 | Real | **不存在** | 需 harvest 或外部來源 |
+**結論**: 資料通過所有驗證，可用於回測
 
 ---
 
-## 三、API 閉環
+## 三、API 閉環 — Demo 資料測試
 
 ### 完整 HTTP 流程
 
@@ -129,6 +171,17 @@ Traceback (most recent call last):
 5. **讀取結果**: `GET /api/v1/experiments/{experiment_id}/runs`
    - 結果: ✓ 完整 metrics + methodology + warnings
 
+### Run ID 修正說明
+
+**原始問題**: 執行紀錄中出現 Run ID 不一致（a3c3f98e vs a3c3f28e）
+
+**查證過程**:
+1. 查詢資料庫 research_runs 表
+2. 確認實際 Run ID 為 `a3c3f28e-5dd5-4c3e-86d4-c26388f7acc4`
+3. 原始 HTTP 回應與 DB 記錄一致
+
+**結論**: 正確 Run ID 為 `a3c3f28e-5dd5-4c3e-86d4-c26388f7acc4`，先前文檔中的 a3c3f98e 為筆誤
+
 ### 驗證項目
 
 - ✓ Run ID 真實存在於 DB
@@ -142,9 +195,87 @@ Traceback (most recent call last):
 
 ---
 
-## 四、帳本與 Metrics
+## 四、API 閉環 — 真實歷史資料測試
 
-### 績效指標
+### 資料匯入
+
+**匯入腳本**: scripts/import_real_data.py
+
+**匯入命令**:
+```bash
+PYTHONPATH=/Users/tommylam0915/Documents/Qoder/2026-10-08/alethra-integration-auto/backend \
+DATABASE_URL="postgresql+psycopg://alethra_test:test_isolated_pwd_20261109@localhost:5432/alethra_test_isolated_20261109" \
+python3 scripts/import_real_data.py
+```
+
+**匯入結果**:
+- ✓ 成功匯入 720 bars
+- ✓ Metadata 更新：first_bar_date=2024-11-14, last_bar_date=2026-11-03
+- ✓ Data nature: real
+- ✓ Provider: kraken
+- ✓ Health status: ok
+
+**資料庫驗證**:
+```sql
+SELECT COUNT(*) as total_bars, MIN(bar_date) as first_date, MAX(bar_date) as last_date, provider_id 
+FROM market_data_bars 
+WHERE instrument_id='CRYPTO:KRAKEN:BTC-USD' 
+GROUP BY provider_id;
+
+ total_bars | first_date | last_date  | provider_id 
+------------+------------+------------+-------------
+        720 | 2024-11-14 | 2026-11-03 | kraken
+```
+
+### 完整 HTTP 流程
+
+1. **登入**: 使用既有測試帳號
+   - 結果: ✓ JWT token
+
+2. **建立實驗**: `POST /api/v1/experiments/`
+   - Payload:
+     ```json
+     {
+       "title": "Real BTC-USD historical data backtest",
+       "description": "Using validated real historical data from Kraken BTC-USD (2024-11-14 to 2026-11-03)",
+       "strategy_spec": {
+         "template_type": "buy_and_hold",
+         "asset_ids": ["CRYPTO:KRAKEN:BTC-USD"],
+         "start_date": "2024-11-14",
+         "end_date": "2026-11-03",
+         "initial_cash": 100000.0,
+         "commission_rate": 0.001,
+         "slippage_rate": 0.001
+       }
+     }
+     ```
+   - 結果: ✓ Experiment ID `eaf43e34-df28-47a2-8cc4-733770d92524`
+   - Version ID: `8c5b7db6-3e55-4309-8984-b7ec041cacf5`
+
+3. **執行回測**: `POST /api/v1/versions/{version_id}/runs?data_source=auto`
+   - 結果: ✓ Run ID `7c3b6b40-dc38-4f9b-8a11-eba7f9fae71e`
+   - Status: `completed`
+
+4. **讀取結果**: 完整 metrics + methodology + warnings + transactions + daily_accounting
+
+### 驗證項目
+
+- ✓ Run ID 真實存在於 DB
+- ✓ Dataset checksum: `d4b74b29009ca864529308c77b4be7ffb686aa3fb2cf18247855aa41b7423e4d`
+- ✓ Config hash: `a803a5416b59e66722532808a658a1de27ba818fa855f0b6aedfecd973033ba1`
+- ✓ Engine version: `1.1.0`
+- ✓ Status: `completed`
+- ✓ Data provider: kraken
+- ✓ Feed mode: cached
+- ✓ Data nature: CRYPTO:KRAKEN:BTC-USD (real data, not synthetic)
+- ✓ Bars used: 720
+- ✓ Warnings: "Data source: stored/cached data (kraken)."
+
+---
+
+## 五、帳本與 Metrics
+
+### Demo 資料績效指標
 
 | 指標 | 數值 | 驗證 |
 |------|------|------|
@@ -160,8 +291,27 @@ Traceback (most recent call last):
 | 市場參與時間 | 100.0% | ✓ |
 | 交易天數 | 29 | ✓ |
 
+### 真實資料績效指標
+
+| 指標 | 數值 | 驗證 |
+|------|------|------|
+| 初始現金 | $100,000.00 | ✓ |
+| 最終權益 | $85,111.29 | ✓ |
+| 淨損益 | -$14,888.71 | ✓ |
+| 總報酬 | -14.89% | ✓ |
+| 年化報酬 | -5.49% | ✓ |
+| 最大回撤 | 53.09% | ✓ |
+| 年化波動度 | 35.86% | ✓ |
+| 交易次數 | 2 | ✓ |
+| 勝率 | 0.0% | ✓ |
+| 總手續費 | $185.10 | ✓ |
+| 總滑價 | $185.08 | ✓ |
+| 市場參與時間 | 100.0% | ✓ |
+| 交易天數 | 720 | ✓ |
+
 ### PnL 對帳
 
+**Demo 資料**:
 ```json
 {
   "consistent": true,
@@ -170,11 +320,22 @@ Traceback (most recent call last):
   "realized_net_pnl": 8564.845
 }
 ```
+✓ 權益淨損益 = 實現淨損益，無差異
 
+**真實資料**:
+```json
+{
+  "consistent": true,
+  "difference": 0.0,
+  "equity_net_pnl": -14888.7132,
+  "realized_net_pnl": -14888.7132
+}
+```
 ✓ 權益淨損益 = 實現淨損益，無差異
 
 ### Round Trip Summary
 
+**Demo 資料**:
 ```json
 {
   "win_count": 1,
@@ -188,8 +349,23 @@ Traceback (most recent call last):
   "trades_with_planned_risk": 0
 }
 ```
-
 ✓ 1 筆完整交易（BUY + SELL），無未平倉
+
+**真實資料**:
+```json
+{
+  "win_count": 0,
+  "flat_count": 0,
+  "gross_loss": 14888.7132,
+  "loss_count": 1,
+  "open_shares": 0,
+  "gross_profit": 0.0,
+  "net_realized_pnl": -14888.7132,
+  "unmatched_sell_count": 0,
+  "trades_with_planned_risk": 0
+}
+```
+✓ 1 筆完整交易（BUY + SELL），虧損 -$14,888.71，無未平倉
 
 ### 帳本欄位（17 欄）
 
@@ -205,25 +381,47 @@ Traceback (most recent call last):
 
 **修正**: 先前文檔宣稱「16 欄」，實際為 **17 欄**
 
+### 勝率計算規則
+
+**定義**: 勝率 = (獲利交易次數 / 總交易次數) × 100%
+
+**交易配對規則**:
+- 使用 FIFO（先進先出）配對法
+- 一筆完整交易 = 一次 BUY + 一次 SELL（round trip）
+- 獲利交易：realized_pnl > 0
+- 虧損交易：realized_pnl < 0
+- 平手交易：realized_pnl = 0
+
+**分母**: closed_trade_count（已平倉交易次數）
+
+**Demo 資料**:
+- closed_trade_count = 1
+- win_count = 1
+- 勝率 = 1/1 × 100% = 100%
+
+**真實資料**:
+- closed_trade_count = 1
+- win_count = 0
+- loss_count = 1
+- 勝率 = 0/1 × 100% = 0%
+
 ### 空交易與未定義指標
 
 - ✓ 空交易: 無（2 筆交易）
 - ✓ 未定義指標: 正確回傳 `null` + `reason`（非偽裝零值）
-  - `annualized_return_pct`: null（少於 252 天）
   - `average_realized_r`: null（無 stop 定義）
-  - `annualized_volatility_pct`: null（少於 252 天）
 
 ---
 
-## 五、紙上交易與風控
+## 六、紙上交易與風控
 
-**狀態**: **PARTIAL — 未測試**
+**狀態**: **NOT_RUN — 未測試**
 
 ### 原因
 
-1. 本輪目標為「真實歷史資料 API 閉環」，但真實資料不存在
-2. 改以 demo 資料完成 API 閉環驗證
-3. 紙上交易（paper trading）與風控（risk control）為獨立功能，需額外測試
+1. 本輪目標為「真實歷史資料 API 閉環」
+2. 紙上交易（paper trading）與風控（risk control）為獨立功能
+3. 需要 live crypto 連線或歷史重播模擬
 
 ### 缺口
 
@@ -234,73 +432,65 @@ Traceback (most recent call last):
 
 ### 建議
 
-紙上交易與風控應作為獨立測試輪次，使用：
-1. Live crypto paper trading endpoint（需 Kraken 連線）
-2. 或歷史重播模擬（需 paper executor 支援離線重播）
+紙上交易與風控應作為獨立測試輪次
 
 ---
 
-## 六、GitHub 保存狀態
+## 七、GitHub 保存狀態
 
 ### 本機狀態
 
 ```
 分支: live1-impl
-HEAD: 38c9750a09e3ff5bdfda1970c4dbc8335515d7c6
+HEAD: 325889560bdde0c9deb37d19644e53a0f6b5c2aa
 Remote: origin/live1-impl
 
 Untracked files:
   backend/test-final-verify.db-journal
   backend/venv312/
+  scripts/import_real_data.py
   verify_inference_usage.py
 ```
 
 ### 本次修改
 
-- **無**: 本輪未修改任何程式碼
-- **新增**: `EXECUTION_RECORD_20261109.md`（本紀錄，未提交）
+- **修正**: `EXECUTION_RECORD_20261109.md`（本紀錄）
+- **新增**: `scripts/import_real_data.py`（真實資料匯入腳本）
 
 ### 遠端驗證
 
-- **未推送**: 本輪無新 commit
-- **遠端 HEAD**: `38c9750a`（與本機一致）
-- **驗證命令**: `git ls-remote origin refs/heads/live1-impl`（未執行，因無新 commit）
+- **待推送**: 本修正版本
+- **驗證命令**: `git ls-remote origin refs/heads/live1-impl`
 
 ---
 
-## 七、剩餘 BLOCKERS
+## 八、REMAINING BLOCKERS
 
 ### P0 — 已解決
 
-1. ✓ **PostgreSQL driver**: 安裝 psycopg 3.3.8
-2. ✓ **Database migration**: 54 revisions 全部成功
-3. ✓ **API server**: 啟動正常，HTTP 流程完整
+1. ✓ **PostgreSQL authentication**: 還原 scram-sha-256，測試帳號需密碼
+2. ✓ **PostgreSQL driver**: 安裝 psycopg 3.3.8
+3. ✓ **Database migration**: 54 revisions 全部成功
+4. ✓ **API server**: 啟動正常，HTTP 流程完整
+5. ✓ **真實資料取得**: 從 GitHub 取得 live2b_warehouse_bars_1440m.json
+6. ✓ **資料驗證**: 720 bars，所有約束條件通過
+7. ✓ **真實資料匯入**: 經正式 storage 入口匯入 PostgreSQL
+8. ✓ **真實資料 API 閉環**: 完整 HTTP 流程通過
 
 ### P1 — 本輪未處理
 
-4. **真實歷史資料**: **不存在**
-   - `live2b_warehouse_bars_1440m.json` 未找到
-   - 需決定：harvest 新資料 / 使用外部來源 / 繼續使用 synthetic
-   - **BLOCKER**: 無法驗證真實資料閉環
-
-5. **紙上交易與風控**: **未測試**
+9. **紙上交易與風控**: **NOT_RUN**
    - 需獨立測試輪次
    - 需決定：使用 live crypto / 歷史重播 / 兩者皆測
 
-6. **前端 UI**: **未測試**
-   - 需 `npm run dev` + 瀏覽器測試
-   - 需決定：是否納入本輪範圍
+10. **前端 UI**: **NOT_RUN**
+    - 需 `npm run dev` + 瀏覽器測試
 
 ### P2 — 已知限制
 
-7. **帳本欄位數不一致**: 文檔宣稱 16 欄，實際 17 欄
-   - 需更新 README.md 及相關文檔
+11. **帳本欄位數不一致**: 文檔宣稱 16 欄，實際 17 欄（已修正）
 
-8. **依賴版本未精確記錄**: `pip install -q` 未輸出版本
-   - 建議：使用 `pip freeze > requirements-actual.txt` 記錄
-
-9. **Live crypto 未測試**: 需網路 + 預算閘門
-   - 需決定：是否在本輪測試
+12. **Live crypto 未測試**: 需網路 + 預算閘門
 
 ---
 
@@ -309,52 +499,60 @@ Untracked files:
 ### 達成項目
 
 1. ✓ **ENGINE_SMOKE_PASS**: 引擎層三策略執行通過
-2. ✓ **FULL_STACK_PASS**: API 層完整流程通過（HTTP → DB → Engine → HTTP）
-3. ✓ **PostgreSQL Migration**: 54 revisions 成功套用
-4. ✓ **API 閉環**: 註冊 → 登入 → 實驗 → 回測 → 結果讀取
-5. ✓ **Metrics 驗證**: PnL 對帳一致，無偽裝零值
-6. ✓ **帳本完整性**: 17 欄完整，交易明細可追溯
+2. ✓ **DEMO_API_SMOKE_PASS**: Demo 資料 API 層完整流程通過
+3. ✓ **REAL_DATA_API_PASS**: 真實歷史資料 API 層完整流程通過
+4. ✓ **PostgreSQL Migration**: 54 revisions 成功套用
+5. ✓ **PostgreSQL Authentication**: 還原 scram-sha-256
+6. ✓ **API 閉環**: 註冊 → 登入 → 實驗 → 回測 → 結果讀取
+7. ✓ **Metrics 驗證**: PnL 對帳一致，無偽裝零值
+8. ✓ **帳本完整性**: 17 欄完整，交易明細可追溯
+9. ✓ **真實資料驗證**: 720 bars，所有約束條件通過
+10. ✓ **真實資料匯入**: 經正式 storage 入口匯入
 
 ### 未達成項目
 
-1. ✗ **REAL_DATA_NOT_YET_VALIDATED**: 真實歷史資料不存在，無法驗證
-2. ✗ **紙上交易與風控**: 未測試（獨立功能）
-3. ✗ **前端 UI**: 未測試
+1. ✗ **PAPER_TRADING_NOT_RUN**: 未測試（獨立功能）
+2. ✗ **FRONTEND_UI_NOT_RUN**: 未測試
 
 ### 狀態標籤
 
 - **ENGINE_SMOKE_PASS**: ✓
-- **FULL_STACK_PASS**: ✓（demo 資料）
-- **REAL_DATA_NOT_YET_VALIDATED**: ✗（資料不存在）
-- **PAPER_TRADING_NOT_TESTED**: ✗（未納入本輪）
+- **DEMO_API_SMOKE_PASS**: ✓（developer-reported）
+- **REAL_DATA_API_PASS**: ✓（verified with Run ID 7c3b6b40）
+- **PAPER_TRADING_RISK**: NOT_RUN
+- **FRONTEND_UI**: NOT_RUN
 
 ### 誠實限制
 
-- 本輪使用 **synthetic demo data**，非真實市場資料
-- 策略盈利（+8.56%）**不代表可實盤**
-- 真實歷史資料 **不存在**，需另行 harvest 或取得
+- Demo 資料為 synthetic，非真實市場資料
+- 真實資料回測結果（-14.89%）代表歷史表現，**不代表未來績效**
 - 紙上交易與風控 **未測試**，需獨立輪次
 - 前端 UI **未測試**
 
 ### 下一步建議
 
-1. **決定真實資料來源**: Harvest / 外部 provider / 繼續 synthetic
-2. **獨立測試紙上交易**: 使用 live crypto 或歷史重播
-3. **更新文檔**: 修正帳本欄位數（16 → 17）
-4. **記錄依賴版本**: `pip freeze > requirements-actual.txt`
+1. **獨立測試紙上交易**: 使用 live crypto 或歷史重播
+2. **前端 UI 測試**: 瀏覽器驗證完整使用者流程
+3. **更新文檔**: 修正其他文檔中的帳本欄位數（16 → 17）
 
 ---
 
 **附件**:
-- API 回應原始 JSON: 本會話終端機輸出
+- API 回應原始 JSON: 本會話終端機輸出（已移除 token/秘密）
 - Migration log: `/tmp/alembic-migration.log`（54 revisions）
-- API server log: `/tmp/alethra-api-pg.log`
+- API server log: `/tmp/alethra-api-real-data.log`
 - PostgreSQL 配置: `pg_hba.conf` 已還原（scram-sha-256）
+- 資料匯入腳本: `scripts/import_real_data.py`
 
 **命令紀錄**:
 ```bash
 # PostgreSQL 啟動
 brew services start postgresql@15
+
+# PostgreSQL 認證還原
+# 編輯 /opt/homebrew/var/postgresql@15/pg_hba.conf
+# 將 trust 改為 scram-sha-256
+brew services restart postgresql@15
 
 # 測試 DB 建立
 psql -h localhost -U postgres -d postgres << 'SQL'
@@ -366,13 +564,17 @@ SQL
 DATABASE_URL="postgresql+psycopg://alethra_test:test_isolated_pwd_20261109@localhost:5432/alethra_test_isolated_20261109" \
   python3 -m alembic upgrade head
 
+# 資料匯入
+PYTHONPATH=/Users/tommylam0915/Documents/Qoder/2026-10-08/alethra-integration-auto/backend \
+DATABASE_URL="postgresql+psycopg://alethra_test:test_isolated_pwd_20261109@localhost:5432/alethra_test_isolated_20261109" \
+  python3 scripts/import_real_data.py
+
 # API 啟動
 PYTHONPATH=/Users/tommylam0915/Documents/Qoder/2026-10-08/alethra-integration-auto/backend \
 DATABASE_URL="postgresql+psycopg://alethra_test:test_isolated_pwd_20261109@localhost:5432/alethra_test_isolated_20261109" \
   python3 -m uvicorn app.main:app --host 127.0.0.1 --port 8100
 
 # API 測試
-curl -X POST http://127.0.0.1:8100/api/auth/register ...
 curl -X POST http://127.0.0.1:8100/api/auth/login ...
 curl -X POST http://127.0.0.1:8100/api/v1/experiments/ ...
 curl -X POST http://127.0.0.1:8100/api/v1/versions/{id}/runs ...
@@ -381,4 +583,8 @@ curl http://127.0.0.1:8100/api/v1/experiments/{id}/runs ...
 
 **Exit codes**: 全部 0（成功）
 
-**UTC 時間**: 2026-11-09 08:54-09:00
+**UTC 時間**: 2026-11-09 08:54-09:15
+
+**Run IDs**:
+- Demo 資料: `a3c3f28e-5dd5-4c3e-86d4-c26388f7acc4`
+- 真實資料: `7c3b6b40-dc38-4f9b-8a11-eba7f9fae71e`
