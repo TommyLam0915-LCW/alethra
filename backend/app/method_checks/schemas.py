@@ -3,6 +3,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 from pydantic import BaseModel, Field
+from app.lib.timeutil import utcnow
 
 
 class CheckResult(BaseModel):
@@ -35,5 +36,5 @@ class MethodReviewResponse(BaseModel):
                     "Null if no run selected. False means ordering fell back to ID, "
                     "not proof of chronological recency."
     )
-    generated_at: datetime = Field(default_factory=datetime.utcnow, description="Generation timestamp")
+    generated_at: datetime = Field(default_factory=utcnow, description="Generation timestamp")
     checks: List[CheckResult] = Field(default_factory=list, description="Ordered list of check results")

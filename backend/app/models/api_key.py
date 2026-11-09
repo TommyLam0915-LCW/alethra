@@ -3,6 +3,7 @@ from datetime import datetime
 from sqlalchemy import Column, String, Boolean, DateTime, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from app.database import Base
+from app.lib.timeutil import utcnow
 
 
 class ApiKey(Base):
@@ -16,5 +17,5 @@ class ApiKey(Base):
     scopes = Column(JSONB, default=list)
     is_active = Column(Boolean, default=True, nullable=False)
     last_used_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
     expires_at = Column(DateTime, nullable=True)

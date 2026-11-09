@@ -428,6 +428,16 @@ test.describe('Subscription Page — Recovery State', () => {
     await page.route('**/api/v1/pilot/entitlements/me', (route: any) => {
       route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ detail: 'Not found' }) });
     });
+    // The dashboard visited mid-test fetches the experiments list; unmocked it
+    // would 401 against the real backend and trigger the global logout
+    // redirect, racing the navigation back to /subscription.
+    await page.route('**/api/v1/experiments/', (route: any) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify([]),
+      });
+    });
 
     await page.goto(`${FRONTEND_URL}/subscription`);
     await page.waitForLoadState('networkidle');

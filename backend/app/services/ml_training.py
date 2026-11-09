@@ -4,32 +4,162 @@ Provides an alternative to parameter sweep: actual model training using
 scikit-learn classifiers on OHLCV data with temporal splits.
 """
 
+import logging
 import uuid
-from datetime import datetime
-from typing import Any, Dict, List, Optional
+from datetime import date, timedelta
+from types import SimpleNamespace
+from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
 from app.models.training import TrainingJob, TrainingJobStatus
 from app.providers import get_data_provider
+from app.services.market_data_storage import MarketDataStorage
 from app.ml.trainer import train_model, load_model, list_models
+from app.lib.timeutil import utcnow
+
+logger = logging.getLogger(__name__)
+
+
+def _latest_available_end_date(
+    db: Session,
+    provider: Any,
+    instrument_id: str,
+) -> date:
+    """Return the most recent date for which bars are available.
+
+    Prefers stored data (last_bar_date from storage metadata), then falls
+    back to the provider's advertised date range. Never hardcodes a year.
+    """
+    metadata = MarketDataStorage(db).get_metadata(instrument_id)
+    if metadata is not None and metadata.last_bar_date is not None:
+        return metadata.last_bar_date
+
+    date_range = provider.get_date_range()
+    real_range = date_range.get("real_instruments_range", {}) or {}
+    max_str = real_range.get("max")
+    if max_str:
+        return date.fromisoformat(max_str)
+
+    raise ValueError(
+        f"No known date range for {instrument_id}: nothing stored and "
+        f"provider reports no range."
+    )
+
+
+def _get_bars_with_storage(
+    db: Session,
+    provider: Any,
+    instrument_id: str,
+    start_date: str,
+    end_date: str,
+) -> Tuple[List[Any], str, str]:
+    """Fetch bars with storage integration.
+
+    Returns (bars, data_source_used, data_nature) where data_source_used is
+    'stored' or 'provider' and data_nature is the resolved provenance of the
+    bars actually used ("synthetic"/"live"/"delayed"/"mixed"/"unknown") —
+    synthetic-sourced bars must never be presented as real market data.
+    If stored data is available and sufficient, uses it. Otherwise fetches
+    from provider and stores for future use.
+    """
+    storage = MarketDataStorage(db)
+    start_date_obj = date.fromisoformat(start_date)
+    end_date_obj = date.fromisoformat(end_date)
+
+    stored_bars = storage.get_bars(
+        instrument_id=instrument_id,
+        start_date=start_date_obj,
+        end_date=end_date_obj,
+    )
+
+    if len(stored_bars) >= 60:
+        provider_ids = {
+            getattr(b, "provider_id", None) for b in stored_bars
+        } - {None}
+        nature = MarketDataStorage.resolve_nature(
+            storage.get_nature_map([instrument_id]),
+            instrument_id,
+            provider_ids,
+        )
+        bar_list = [
+            SimpleNamespace(
+                date=b.bar_date.isoformat(),
+                open=b.open,
+                high=b.high,
+                low=b.low,
+                close=b.close,
+                volume=b.volume,
+            )
+            for b in stored_bars
+        ]
+        return bar_list, "stored", nature
+
+    bars = provider.get_bars(instrument_id, start_date, end_date)
+
+    quality = provider.get_data_quality(instrument_id)
+    nature = quality.get("data_nature", "unknown") if isinstance(quality, dict) else "unknown"
+
+    if bars:
+        try:
+            storage.store_bars(
+                instrument_id=instrument_id,
+                provider_id=provider.provider_id,
+                bars=bars,
+                data_nature=nature,
+                adjustment_status=quality.get("adjustment") if isinstance(quality, dict) else None,
+                provider_note=quality.get("note") if isinstance(quality, dict) else None,
+                provider_note_zh=quality.get("note_zh") if isinstance(quality, dict) else None,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to store bars for {instrument_id}: {e}")
+
+    return bars, "provider", nature
+
+
+def get_recent_bars_for_prediction(
+    db: Session,
+    instrument_id: str,
+    min_bars: int = 30,
+    lookback_days: int = 380,
+) -> Tuple[List[Any], str, str]:
+    """Fetch the most recent bars available for prediction.
+
+    Window ends at the latest stored bar (or the provider's latest date when
+    nothing is stored) — never at a hardcoded calendar date. Returns
+    (bars, data_source, data_nature) using the same stored-first logic as
+    training.
+    """
+    provider = get_data_provider()
+    end = _latest_available_end_date(db, provider, instrument_id)
+    start = end - timedelta(days=lookback_days)
+    return _get_bars_with_storage(
+        db, provider, instrument_id, start.isoformat(), end.isoformat()
+    )
 
 
 def create_ml_training_job(
     db: Session,
     user_id: uuid.UUID,
-    experiment_id: uuid.UUID,
+    experiment_id: Optional[uuid.UUID],
     instrument_id: str,
     model_type: str = "logistic_regression",
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
+    quota_reservation_id: Optional[uuid.UUID] = None,
 ) -> TrainingJob:
     """Create an ML training job.
 
     Unlike parameter sweep, this trains an actual ML model (classifier)
     to predict next-day return direction.
 
+    experiment_id is optional: ML jobs started from the training page are
+    not tied to an experiment. The column is nullable — never fabricate a
+    random experiment UUID, it violates the FK on PostgreSQL.
+
     The training_type is stored in strategy_spec_snapshot as a marker.
+    quota_reservation_id links the job to its two-phase quota reservation
+    so the worker can settle (success) or release (failure) it.
     """
     provider = get_data_provider()
 
@@ -37,33 +167,36 @@ def create_ml_training_job(
         date_range = provider.get_date_range()
         real_range = date_range.get("real_instruments_range", {})
         start_date = start_date or real_range.get("min", "2024-01-02")
-        end_date = end_date or "2024-12-31"
+        end_date = end_date or _latest_available_end_date(
+            db, provider, instrument_id
+        ).isoformat()
 
-    bars = provider.get_bars(instrument_id, start_date, end_date)
+    bars, data_source, data_nature = _get_bars_with_storage(db, provider, instrument_id, start_date, end_date)
     if len(bars) < 60:
         raise ValueError(
             f"Insufficient data for {instrument_id}: got {len(bars)} bars, "
             f"need at least 60 for ML training."
         )
 
-    bar_dicts = [
-        {"date": b.date, "open": b.open, "high": b.high, "low": b.low, "close": b.close, "volume": b.volume}
-        for b in bars
-    ]
+    spec: Dict[str, Any] = {
+        "training_type": "ml_model",
+        "instrument_id": instrument_id,
+        "model_type": model_type,
+        "start_date": start_date,
+        "end_date": end_date,
+        "n_bars": len(bars),
+        "data_source": data_source,
+        "data_nature": data_nature,
+    }
+    if quota_reservation_id is not None:
+        spec["quota_reservation_id"] = str(quota_reservation_id)
 
     job = TrainingJob(
         user_id=user_id,
         experiment_id=experiment_id,
         status=TrainingJobStatus.pending,
         parameter_grid={"model_type": [model_type]},
-        strategy_spec_snapshot={
-            "training_type": "ml_model",
-            "instrument_id": instrument_id,
-            "model_type": model_type,
-            "start_date": start_date,
-            "end_date": end_date,
-            "n_bars": len(bars),
-        },
+        strategy_spec_snapshot=spec,
     )
     db.add(job)
     db.flush()
@@ -97,7 +230,7 @@ def execute_ml_training(
         end_date = spec["end_date"]
 
         provider = get_data_provider()
-        bars = provider.get_bars(instrument_id, start_date, end_date)
+        bars, data_source, data_nature = _get_bars_with_storage(db, provider, instrument_id, start_date, end_date)
         bar_dicts = [
             {"date": b.date, "open": b.open, "high": b.high, "low": b.low,
              "close": b.close, "volume": b.volume}
@@ -108,16 +241,22 @@ def execute_ml_training(
             bars=bar_dicts,
             instrument_id=instrument_id,
             model_type=model_type,
+            user_id=str(job.user_id),
         )
 
         job.results = result
-        job.best_params = {"model_id": result["model_id"], "model_type": model_type}
+        job.best_params = {
+            "model_id": result["model_id"],
+            "model_type": model_type,
+            "data_source": data_source,
+            "data_nature": data_nature,
+        }
         job.status = TrainingJobStatus.completed
 
     except Exception as e:
         job.status = TrainingJobStatus.failed
         job.error_details = str(e)
 
-    job.completed_at = datetime.utcnow()
+    job.completed_at = utcnow()
     db.flush()
     return job

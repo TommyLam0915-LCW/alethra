@@ -3,11 +3,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import get_settings
 from app.database import engine, Base
 from app.api import api_router
+from app.api.health import router as health_router
 from app.models import *
 
 settings = get_settings()
 
-Base.metadata.create_all(bind=engine)
+Base.metadata.create_all(bind=engine, checkfirst=True)
 
 app = FastAPI(
     title="Alethra",
@@ -23,6 +24,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(health_router)
 app.include_router(api_router, prefix="/api")
 
 
@@ -35,8 +37,3 @@ def root():
         "status": "running",
         "disclaimer": "Research tool, not investment advice."
     }
-
-
-@app.get("/health")
-def health():
-    return {"status": "healthy"}

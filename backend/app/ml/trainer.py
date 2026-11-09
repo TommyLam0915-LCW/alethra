@@ -18,9 +18,24 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.dummy import DummyClassifier
 
 from app.ml.features import build_feature_matrix, build_target_direction
+from app.lib.timeutil import utcnow
 
 
 ARTIFACTS_DIR = os.path.join(os.path.dirname(__file__), "artifacts")
+
+
+def _safe_model_dir(model_id: str) -> str:
+    """Resolve model_id to a directory path within ARTIFACTS_DIR.
+
+    Raises ValueError if model_id attempts path traversal.
+    """
+    if os.sep in model_id or "/" in model_id or ".." in model_id:
+        raise ValueError(f"Invalid model ID: {model_id}")
+    model_dir = os.path.realpath(os.path.join(ARTIFACTS_DIR, model_id))
+    artifacts_real = os.path.realpath(ARTIFACTS_DIR)
+    if not model_dir.startswith(artifacts_real + os.sep) and model_dir != artifacts_real:
+        raise ValueError(f"Invalid model ID: {model_id}")
+    return model_dir
 
 
 def temporal_split(
@@ -45,6 +60,7 @@ def train_model(
     model_type: str = "logistic_regression",
     train_ratio: float = 0.7,
     val_ratio: float = 0.15,
+    user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Train a model on OHLCV bar data.
 
@@ -130,7 +146,8 @@ def train_model(
         metadata={
             "instrument_id": instrument_id,
             "model_type": model_type,
-            "trained_at": datetime.utcnow().isoformat(),
+            "user_id": user_id,
+            "trained_at": utcnow().isoformat(),
             "n_train": len(train_idx),
             "n_val": len(val_idx),
             "n_test": len(test_idx),
@@ -201,7 +218,7 @@ def _save_artifact(
     import joblib
 
     os.makedirs(ARTIFACTS_DIR, exist_ok=True)
-    model_dir = os.path.join(ARTIFACTS_DIR, model_id)
+    model_dir = _safe_model_dir(model_id)
     os.makedirs(model_dir, exist_ok=True)
 
     joblib.dump(model, os.path.join(model_dir, "model.joblib"))
@@ -216,22 +233,26 @@ def _save_artifact(
     return model_dir
 
 
-def load_model(model_id: str) -> Tuple[Any, Any, Dict[str, Any], List[str]]:
+def load_model(model_id: str, user_id: Optional[str] = None) -> Tuple[Any, Any, Dict[str, Any], List[str]]:
     """Load a saved model artifact.
 
     Returns: (model, scaler, metadata, feature_names)
+    Raises: PermissionError if user_id is provided and doesn't match model owner
     """
     import joblib
 
-    model_dir = os.path.join(ARTIFACTS_DIR, model_id)
+    model_dir = _safe_model_dir(model_id)
     if not os.path.isdir(model_dir):
         raise FileNotFoundError(f"Model artifact not found: {model_id}")
 
-    model = joblib.load(os.path.join(model_dir, "model.joblib"))
-    scaler = joblib.load(os.path.join(model_dir, "scaler.joblib"))
-
     with open(os.path.join(model_dir, "metadata.json")) as f:
         metadata = json.load(f)
+
+    if user_id is not None and metadata.get("user_id") != user_id:
+        raise PermissionError(f"Model {model_id} is not owned by user {user_id}")
+
+    model = joblib.load(os.path.join(model_dir, "model.joblib"))
+    scaler = joblib.load(os.path.join(model_dir, "scaler.joblib"))
 
     with open(os.path.join(model_dir, "feature_names.json")) as f:
         feature_names = json.load(f)
@@ -239,20 +260,51 @@ def load_model(model_id: str) -> Tuple[Any, Any, Dict[str, Any], List[str]]:
     return model, scaler, metadata, feature_names
 
 
-def list_models() -> List[Dict[str, Any]]:
-    """List all saved model artifacts."""
+def list_models(user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """List all saved model artifacts, optionally filtered by user_id."""
     if not os.path.isdir(ARTIFACTS_DIR):
         return []
 
     models = []
     for model_id in os.listdir(ARTIFACTS_DIR):
-        model_dir = os.path.join(ARTIFACTS_DIR, model_id)
+        try:
+            model_dir = _safe_model_dir(model_id)
+        except ValueError:
+            continue
         meta_path = os.path.join(model_dir, "metadata.json")
         if os.path.isfile(meta_path):
             with open(meta_path) as f:
                 metadata = json.load(f)
             metadata["model_id"] = model_id
-            models.append(metadata)
+            if user_id is None or metadata.get("user_id") == user_id:
+                models.append(metadata)
 
     models.sort(key=lambda m: m.get("trained_at", ""), reverse=True)
     return models
+
+
+def delete_model(model_id: str, user_id: Optional[str] = None) -> None:
+    """Delete a model artifact directory after verifying ownership.
+
+    Raises FileNotFoundError / PermissionError with the same semantics as
+    load_model. Callers must validate that model_id is a UUID — this function
+    removes directories, so the path must never resolve outside ARTIFACTS_DIR.
+    Refuses to delete an artifact whose metadata.json is missing (ownership
+    cannot be proven).
+    """
+    model_dir = os.path.join(ARTIFACTS_DIR, model_id)
+    if not os.path.isdir(model_dir):
+        raise FileNotFoundError(f"Model artifact not found: {model_id}")
+
+    meta_path = os.path.join(model_dir, "metadata.json")
+    if not os.path.isfile(meta_path):
+        raise FileNotFoundError(f"Model artifact has no metadata: {model_id}")
+
+    with open(meta_path) as f:
+        metadata = json.load(f)
+    if user_id is not None and metadata.get("user_id") != user_id:
+        raise PermissionError(f"Model {model_id} is not owned by user {user_id}")
+
+    import shutil
+
+    shutil.rmtree(model_dir)

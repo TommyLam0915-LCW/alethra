@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.models.inference import InferenceRun, InferenceRunStatus
 from app.models.model_research import ModelVersion, ModelType
 from app.providers import get_data_provider
+from app.lib.timeutil import utcnow
 
 
 def _compute_sma(closes: List[float], window: int) -> List[Optional[float]]:
@@ -215,6 +216,6 @@ def run_inference(
         run.status = InferenceRunStatus.failed
         run.error_details = str(e)
 
-    run.completed_at = datetime.utcnow()
+    run.completed_at = utcnow()
     db.flush()
     return run

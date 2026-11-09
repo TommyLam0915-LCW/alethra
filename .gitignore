@@ -4,6 +4,7 @@ __pycache__/
 *.egg-info/
 venv/
 .venv/
+venv312/
 
 # Node
 node_modules/
@@ -43,3 +44,6 @@ exports_output/
 # ML model artifacts (binary files, not for version control)
 backend/app/ml/artifacts/
 *.joblib
+
+# Deployment backups
+backups/

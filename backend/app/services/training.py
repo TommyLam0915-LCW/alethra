@@ -11,6 +11,7 @@ from app.models.training import TrainingJob, TrainingJobStatus
 from app.models.experiment import Experiment
 from app.models.experiment_version import ExperimentVersion
 from app.engine.backtest import run_backtest
+from app.lib.timeutil import utcnow
 
 
 # Maximum number of grid combinations allowed per training job.
@@ -122,8 +123,8 @@ def run_parameter_sweep(
             # ── Check cancellation flag between iterations ──────────
             if _cancellation_flags.get(job_id):
                 job.status = TrainingJobStatus.cancelled
-                job.cancelled_at = datetime.utcnow()
-                job.completed_at = datetime.utcnow()
+                job.cancelled_at = utcnow()
+                job.completed_at = utcnow()
                 job.error_details = "Job cancelled by user"
                 _cancellation_flags.pop(job_id, None)
                 db.flush()
@@ -138,7 +139,7 @@ def run_parameter_sweep(
             strategy_spec["signal_parameters"] = signal_params
 
             # Run the backtest
-            backtest_result = run_backtest(strategy_spec)
+            backtest_result = run_backtest(strategy_spec, db_session=db)
 
             metrics = backtest_result.get("metrics", {})
             errors = backtest_result.get("errors", [])
@@ -163,7 +164,7 @@ def run_parameter_sweep(
                 "failed or produced errors"
             )
             job.results = results  # keep raw results for diagnostics
-            job.completed_at = datetime.utcnow()
+            job.completed_at = utcnow()
             db.flush()
             return job
 
@@ -190,7 +191,7 @@ def run_parameter_sweep(
         job.status = TrainingJobStatus.failed
         job.error_details = str(e)
 
-    job.completed_at = datetime.utcnow()
+    job.completed_at = utcnow()
     db.flush()
     return job
 

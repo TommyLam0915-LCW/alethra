@@ -1224,3 +1224,214 @@ class TestSecureFieldTransfer:
 
         other_resp = client.get(f"/api/v1/research-drafts/{draft_id}", headers=user2_headers)
         assert other_resp.status_code == 403
+
+
+def _make_accepted_draft(client, headers):
+    """Helper: create and accept a complete draft, return its JSON body."""
+    create_resp = client.post(
+        "/api/v1/research-drafts/",
+        json={
+            "title": "Complete Draft",
+            "hypothesis": "Test hypothesis",
+            "falsification_criteria": "Drawdown > 25%",
+            "strategy_template": "buy_and_hold",
+            "asset_symbol": "DEMO-ALPHA",
+        },
+        headers=headers,
+    )
+    assert create_resp.status_code == 201
+    draft_id = create_resp.json()["id"]
+
+    approve_resp = client.post(
+        f"/api/v1/research-drafts/{draft_id}/approve",
+        json={"action": "accept"},
+        headers=headers,
+    )
+    assert approve_resp.status_code == 200
+    return approve_resp.json()
+
+
+class TestAcceptedDraftExperimentLinking:
+    """Safeguards for experiment_id linking on finalized drafts."""
+
+    def test_accepted_draft_link_owned_experiment(self, client, auth_headers):
+        draft = _make_accepted_draft(client, auth_headers)
+        exp = _make_experiment(client, auth_headers, "My Exp")
+
+        resp = client.patch(
+            f"/api/v1/research-drafts/{draft['id']}",
+            json={"experiment_id": exp["id"]},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["experiment_id"] == exp["id"]
+
+    def test_accepted_draft_link_foreign_experiment_rejected(self, client):
+        owner_h = _register_and_login(client, "linkowner@test.com", name="Owner")
+        other_h = _register_and_login(client, "linkother@test.com", name="Other")
+
+        draft = _make_accepted_draft(client, other_h)
+        exp = _make_experiment(client, owner_h, "Owner Exp")
+
+        resp = client.patch(
+            f"/api/v1/research-drafts/{draft['id']}",
+            json={"experiment_id": exp["id"]},
+            headers=other_h,
+        )
+        assert resp.status_code == 403
+
+    def test_accepted_draft_link_unknown_experiment_rejected(self, client, auth_headers):
+        draft = _make_accepted_draft(client, auth_headers)
+        fake_id = str(uuid4())
+
+        resp = client.patch(
+            f"/api/v1/research-drafts/{draft['id']}",
+            json={"experiment_id": fake_id},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 404
+
+    def test_foreign_draft_link_rejected(self, client):
+        owner_h = _register_and_login(client, "fdraft_owner@test.com", name="Owner")
+        other_h = _register_and_login(client, "fdraft_other@test.com", name="Other")
+
+        draft = _make_accepted_draft(client, owner_h)
+        exp = _make_experiment(client, other_h, "Other Exp")
+
+        resp = client.patch(
+            f"/api/v1/research-drafts/{draft['id']}",
+            json={"experiment_id": exp["id"]},
+            headers=other_h,
+        )
+        assert resp.status_code == 403
+
+    def test_content_edit_on_accepted_draft_rejected(self, client, auth_headers):
+        draft = _make_accepted_draft(client, auth_headers)
+
+        resp = client.patch(
+            f"/api/v1/research-drafts/{draft['id']}",
+            json={"title": "Modified Title"},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 400
+
+    def test_mixed_content_and_reference_rejected_atomically(self, client, auth_headers):
+        draft = _make_accepted_draft(client, auth_headers)
+        exp = _make_experiment(client, auth_headers, "Target Exp")
+
+        resp = client.patch(
+            f"/api/v1/research-drafts/{draft['id']}",
+            json={"experiment_id": exp["id"], "title": "Sneaky Content Change"},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 400
+
+        readback = client.get(
+            f"/api/v1/research-drafts/{draft['id']}",
+            headers=auth_headers,
+        )
+        assert readback.json()["title"] == draft["title"]
+        assert readback.json()["experiment_id"] is None
+
+    def test_rejected_draft_link_rejected(self, client, auth_headers):
+        create_resp = client.post(
+            "/api/v1/research-drafts/",
+            json={
+                "title": "Reject Me",
+                "hypothesis": "Test",
+                "falsification_criteria": "Test",
+                "strategy_template": "buy_and_hold",
+                "asset_symbol": "DEMO-ALPHA",
+            },
+            headers=auth_headers,
+        )
+        draft_id = create_resp.json()["id"]
+        client.post(
+            f"/api/v1/research-drafts/{draft_id}/approve",
+            json={"action": "reject"},
+            headers=auth_headers,
+        )
+        exp = _make_experiment(client, auth_headers, "Exp")
+
+        resp = client.patch(
+            f"/api/v1/research-drafts/{draft_id}",
+            json={"experiment_id": exp["id"]},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 400
+
+    def test_unlink_and_relink(self, client, auth_headers):
+        draft = _make_accepted_draft(client, auth_headers)
+        exp1 = _make_experiment(client, auth_headers, "Exp 1")
+        exp2 = _make_experiment(client, auth_headers, "Exp 2")
+
+        link_resp = client.patch(
+            f"/api/v1/research-drafts/{draft['id']}",
+            json={"experiment_id": exp1["id"]},
+            headers=auth_headers,
+        )
+        assert link_resp.status_code == 200
+        assert link_resp.json()["experiment_id"] == exp1["id"]
+
+        unlink_resp = client.patch(
+            f"/api/v1/research-drafts/{draft['id']}",
+            json={"experiment_id": None},
+            headers=auth_headers,
+        )
+        assert unlink_resp.status_code == 200
+        assert unlink_resp.json()["experiment_id"] is None
+
+        relink_resp = client.patch(
+            f"/api/v1/research-drafts/{draft['id']}",
+            json={"experiment_id": exp2["id"]},
+            headers=auth_headers,
+        )
+        assert relink_resp.status_code == 200
+        assert relink_resp.json()["experiment_id"] == exp2["id"]
+
+    def test_idempotent_link_is_safe(self, client, auth_headers):
+        draft = _make_accepted_draft(client, auth_headers)
+        exp = _make_experiment(client, auth_headers, "Same Exp")
+
+        resp1 = client.patch(
+            f"/api/v1/research-drafts/{draft['id']}",
+            json={"experiment_id": exp["id"]},
+            headers=auth_headers,
+        )
+        assert resp1.status_code == 200
+
+        resp2 = client.patch(
+            f"/api/v1/research-drafts/{draft['id']}",
+            json={"experiment_id": exp["id"]},
+            headers=auth_headers,
+        )
+        assert resp2.status_code == 200
+        assert resp2.json()["experiment_id"] == exp["id"]
+
+    def test_link_audit_event_and_persisted(self, client, auth_headers):
+        draft = _make_accepted_draft(client, auth_headers)
+        exp = _make_experiment(client, auth_headers, "Audited Exp")
+
+        link_resp = client.patch(
+            f"/api/v1/research-drafts/{draft['id']}",
+            json={"experiment_id": exp["id"]},
+            headers=auth_headers,
+        )
+        assert link_resp.status_code == 200
+
+        audit_resp = client.get(
+            f"/api/v1/research-drafts/{draft['id']}/audit-events",
+            headers=auth_headers,
+        )
+        assert audit_resp.status_code == 200
+        events = audit_resp.json()
+        link_events = [e for e in events if e["event_type"] == "research_draft_updated"]
+        assert len(link_events) >= 1
+        assert "experiment_id" in link_events[-1]["event_data"]["updated_fields"]
+
+        readback = client.get(
+            f"/api/v1/research-drafts/{draft['id']}",
+            headers=auth_headers,
+        )
+        assert readback.json()["experiment_id"] == exp["id"]
+        assert readback.json()["title"] == draft["title"]

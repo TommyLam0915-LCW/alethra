@@ -4,6 +4,7 @@ from sqlalchemy import Column, Text, DateTime, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from app.database import Base
+from app.lib.timeutil import utcnow
 
 
 class ResearchNote(Base):
@@ -14,7 +15,7 @@ class ResearchNote(Base):
     version_id = Column(UUID(as_uuid=True), ForeignKey("experiment_versions.id"), nullable=True)
     author_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     content = Column(Text, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
 
     experiment = relationship("Experiment")
     version = relationship("ExperimentVersion")

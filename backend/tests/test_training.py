@@ -406,7 +406,7 @@ class TestFailedBacktestFiltering:
         """Failed backtests must not appear in ranked results."""
         call_count = [0]
 
-        def side_effect(strategy_spec):
+        def side_effect(strategy_spec, **kwargs):
             call_count[0] += 1
             if call_count[0] <= 2:
                 # First two backtests fail

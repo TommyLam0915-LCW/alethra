@@ -5,6 +5,7 @@ from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
 from app.database import Base
 import enum
+from app.lib.timeutil import utcnow
 
 
 class ResearchType(str, enum.Enum):
@@ -41,8 +42,8 @@ class Experiment(Base):
     status = Column(SAEnum(ExperimentStatus), default=ExperimentStatus.draft)
     visibility = Column(SAEnum(Visibility), default=Visibility.private)
     current_version_id = Column(UUID(as_uuid=True), ForeignKey("experiment_versions.id"), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
     workspace = relationship("Workspace", back_populates="experiments")
     versions = relationship("ExperimentVersion", back_populates="experiment", foreign_keys="ExperimentVersion.experiment_id")

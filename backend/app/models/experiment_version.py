@@ -5,6 +5,7 @@ from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
 from app.database import Base
 import enum
+from app.lib.timeutil import utcnow
 
 
 class VersionStatus(str, enum.Enum):
@@ -22,7 +23,7 @@ class ExperimentVersion(Base):
     assumptions = Column(JSONB, nullable=True)
     change_reason = Column(Text, nullable=True)
     created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
     user_approved_at = Column(DateTime, nullable=True)
     config_hash = Column(String(64), nullable=True)
     locked_at = Column(DateTime, nullable=True)

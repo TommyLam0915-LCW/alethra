@@ -3,6 +3,7 @@ from datetime import datetime
 from typing import Optional
 from sqlalchemy.orm import Session
 from app.models.kill_switch import KillSwitch, KillSwitchScope
+from app.lib.timeutil import utcnow
 
 
 def is_kill_switch_active(db: Session, scope: KillSwitchScope) -> bool:
@@ -54,10 +55,10 @@ def activate_kill_switch(
         db.add(switch)
     
     switch.is_active = True
-    switch.activated_at = datetime.utcnow()
+    switch.activated_at = utcnow()
     switch.activated_by = activated_by
     switch.reason = reason
-    switch.updated_at = datetime.utcnow()
+    switch.updated_at = utcnow()
     
     db.commit()
     db.refresh(switch)
@@ -75,7 +76,7 @@ def deactivate_kill_switch(db: Session, scope: KillSwitchScope) -> Optional[Kill
         return None
     
     switch.is_active = False
-    switch.updated_at = datetime.utcnow()
+    switch.updated_at = utcnow()
     
     db.commit()
     db.refresh(switch)

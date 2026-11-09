@@ -7,6 +7,8 @@ without a live IBKR connection.
 - ``FakeBrokerTransport`` — deterministic in-memory transport for tests
 - ``IBKRBrokerTransport`` — real IBKR transport (requires ib_insync)
 """
+import json
+import logging
 import random
 import uuid
 from abc import ABC, abstractmethod
@@ -14,6 +16,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Dict, List, Optional
+from app.lib.timeutil import utcnow
+
+logger = logging.getLogger(__name__)
 
 
 class BrokerOrderStatus(str, Enum):
@@ -39,7 +44,7 @@ class BrokerFill:
     quantity: int
     price: float
     fill_time: datetime
-    commission: float = 0.0
+    commission: Optional[float] = None
 
 
 @dataclass
@@ -53,7 +58,7 @@ class BrokerOrderState:
     status: BrokerOrderStatus
     filled_quantity: int = 0
     fills: List[BrokerFill] = field(default_factory=list)
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=utcnow)
 
 
 class BrokerTransport(ABC):
@@ -94,15 +99,26 @@ class BrokerTransport(ABC):
     def get_fills(self, broker_order_id: str) -> List[BrokerFill]:
         ...
 
+    @abstractmethod
+    def get_recent_orders(self, since: datetime) -> List[BrokerOrderState]:
+        """Return all orders (any status) created at or after `since`.
+
+        Used for lost-acknowledgement recovery: after a crash between order
+        submission and platform reporting, the agent matches recent broker
+        orders against authorized intents instead of resubmitting.
+        """
+        ...
+
 
 class FakeBrokerTransport(BrokerTransport):
     """Deterministic in-memory broker transport for testing.
 
     Configurable behaviors:
-    - fill_mode: "immediate" | "delayed" | "partial" | "reject"
+    - fill_mode: "immediate" | "delayed" | "partial" | "reject" | "pending"
     - fill_price_offset: deviation from a reference price (default 0)
     - partial_fill_pct: fraction filled per poll in "partial" mode
     - reject_after_submit: if True, order is submitted then rejected on next status check
+    - state_path: optional path to persist broker state across restarts
     """
 
     def __init__(
@@ -112,6 +128,8 @@ class FakeBrokerTransport(BrokerTransport):
         partial_fill_pct: float = 0.5,
         reject_message: str = "Order rejected by exchange",
         seed: Optional[int] = None,
+        submission_log_path: Optional[str] = None,
+        state_path: Optional[str] = None,
     ):
         self.fill_mode = fill_mode
         self.fill_price = fill_price
@@ -121,6 +139,106 @@ class FakeBrokerTransport(BrokerTransport):
         self._orders: Dict[str, BrokerOrderState] = {}
         self._order_counter = 0
         self._rng = random.Random(seed)
+        self.submission_log_path = submission_log_path
+        self.state_path = state_path
+        # Load existing submission count if log exists
+        self._submission_count = self._load_submission_count()
+        # Load existing broker state if state file exists
+        self._load_state()
+
+    def _load_state(self):
+        """Load broker state from persistent file."""
+        if not self.state_path:
+            return
+        try:
+            with open(self.state_path, 'r') as f:
+                data = json.load(f)
+                self._order_counter = data.get('order_counter', 0)
+                # Reconstruct orders from saved state
+                for order_data in data.get('orders', []):
+                    order = BrokerOrderState(
+                        order_id=order_data['order_id'],
+                        instrument_id=order_data['instrument_id'],
+                        side=order_data['side'],
+                        quantity=order_data['quantity'],
+                        order_type=order_data['order_type'],
+                        limit_price=order_data.get('limit_price'),
+                        status=BrokerOrderStatus(order_data['status']),
+                        filled_quantity=order_data.get('filled_quantity', 0),
+                    )
+                    # Reconstruct fills
+                    for fill_data in order_data.get('fills', []):
+                        fill = BrokerFill(
+                            broker_order_id=fill_data['broker_order_id'],
+                            quantity=fill_data['quantity'],
+                            price=fill_data['price'],
+                            fill_time=datetime.fromisoformat(fill_data['fill_time']),
+                            commission=fill_data.get('commission'),
+                        )
+                        order.fills.append(fill)
+                    self._orders[order.order_id] = order
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            logger.warning(f"Failed to load broker state: {e}")
+
+    def _save_state(self):
+        """Save broker state to persistent file."""
+        if not self.state_path:
+            return
+        try:
+            data = {
+                'order_counter': self._order_counter,
+                'orders': [],
+            }
+            for order in self._orders.values():
+                order_data = {
+                    'order_id': order.order_id,
+                    'instrument_id': order.instrument_id,
+                    'side': order.side,
+                    'quantity': order.quantity,
+                    'order_type': order.order_type,
+                    'limit_price': order.limit_price,
+                    'status': order.status.value,
+                    'filled_quantity': order.filled_quantity,
+                    'fills': [],
+                }
+                for fill in order.fills:
+                    fill_data = {
+                        'broker_order_id': fill.broker_order_id,
+                        'quantity': fill.quantity,
+                        'price': fill.price,
+                        'fill_time': fill.fill_time.isoformat(),
+                        'commission': fill.commission,
+                    }
+                    order_data['fills'].append(fill_data)
+                data['orders'].append(order_data)
+            with open(self.state_path, 'w') as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            logger.warning(f"Failed to save broker state: {e}")
+
+    def _load_submission_count(self) -> int:
+        """Load submission count from durable log file."""
+        if not self.submission_log_path:
+            return 0
+        try:
+            with open(self.submission_log_path, 'r') as f:
+                lines = f.readlines()
+                return len(lines)
+        except FileNotFoundError:
+            return 0
+
+    def _log_submission(self, order_id: str, instrument_id: str, side: str, quantity: int):
+        """Log a submission to durable file."""
+        if not self.submission_log_path:
+            return
+        with open(self.submission_log_path, 'a') as f:
+            f.write(f"{utcnow().isoformat()}|{order_id}|{instrument_id}|{side}|{quantity}\n")
+
+    def get_submission_count(self) -> int:
+        """Get the total number of submissions (survives restart)."""
+        return self._submission_count
 
     def connect(self) -> None:
         self._connected = True
@@ -147,7 +265,11 @@ class FakeBrokerTransport(BrokerTransport):
 
         self._order_counter += 1
         order_id = f"FAKE-{self._order_counter:06d}"
-        now = datetime.utcnow()
+        now = utcnow()
+
+        # Log submission to durable file
+        self._log_submission(order_id, instrument_id, side, quantity)
+        self._submission_count += 1
 
         if self.fill_mode == "reject":
             order = BrokerOrderState(
@@ -177,6 +299,7 @@ class FakeBrokerTransport(BrokerTransport):
             status=BrokerOrderStatus.SUBMITTED,
         )
         self._orders[order_id] = order
+        self._save_state()
 
         if self.fill_mode == "immediate":
             fill = BrokerFill(
@@ -189,6 +312,9 @@ class FakeBrokerTransport(BrokerTransport):
             order.fills.append(fill)
             order.filled_quantity = quantity
             order.status = BrokerOrderStatus.FILLED
+        elif self.fill_mode == "pending":
+            # Order stays in SUBMITTED state, no fills
+            pass
 
         return BrokerOrderResult(
             success=True,
@@ -203,6 +329,7 @@ class FakeBrokerTransport(BrokerTransport):
         if order.status in (BrokerOrderStatus.FILLED, BrokerOrderStatus.CANCELLED, BrokerOrderStatus.REJECTED):
             return False
         order.status = BrokerOrderStatus.CANCELLED
+        self._save_state()
         return True
 
     def get_order_status(self, broker_order_id: str) -> BrokerOrderStatus:
@@ -216,7 +343,7 @@ class FakeBrokerTransport(BrokerTransport):
                     broker_order_id=broker_order_id,
                     quantity=order.quantity,
                     price=self.fill_price,
-                    fill_time=datetime.utcnow(),
+                    fill_time=utcnow(),
                     commission=self._compute_commission(order.quantity, self.fill_price),
                 )
                 order.fills.append(fill)
@@ -234,7 +361,7 @@ class FakeBrokerTransport(BrokerTransport):
                     broker_order_id=broker_order_id,
                     quantity=partial_qty,
                     price=self.fill_price,
-                    fill_time=datetime.utcnow(),
+                    fill_time=utcnow(),
                     commission=self._compute_commission(partial_qty, self.fill_price),
                 )
                 order.fills.append(fill)
@@ -252,8 +379,271 @@ class FakeBrokerTransport(BrokerTransport):
             return []
         return list(order.fills)
 
+    def get_recent_orders(self, since: datetime) -> List[BrokerOrderState]:
+        return [
+            order for order in self._orders.values()
+            if order.created_at >= since
+        ]
+
     def _compute_commission(self, quantity: int, price: float) -> float:
         return max(1.0, quantity * price * 0.0001)
 
     def get_order(self, broker_order_id: str) -> Optional[BrokerOrderState]:
         return self._orders.get(broker_order_id)
+
+
+# ib_insync OrderStatus strings → BrokerOrderStatus
+_IBKR_STATUS_MAP = {
+    "PendingSubmit": BrokerOrderStatus.PENDING,
+    "PendingCancel": BrokerOrderStatus.PENDING,
+    "PreSubmitted": BrokerOrderStatus.SUBMITTED,
+    "Submitted": BrokerOrderStatus.SUBMITTED,
+    "Filled": BrokerOrderStatus.FILLED,
+    "Cancelled": BrokerOrderStatus.CANCELLED,
+    "ApiCancelled": BrokerOrderStatus.CANCELLED,
+    "Inactive": BrokerOrderStatus.REJECTED,
+}
+
+
+def normalize_instrument_id(instrument_id: str) -> str:
+    """Reduce accepted instrument formats to the broker-side symbol.
+
+    ``US:AAPL``/``AAPL`` → ``AAPL``; ``0700.HK``/``HK:0700`` → ``700``.
+    IBKR contract symbols lose the platform prefix and HKEX leading zeros,
+    so recovered broker orders must be compared against intents through
+    this same mapping (e.g. in lost-acknowledgement matching).
+    """
+    symbol = (instrument_id or "").strip().upper()
+    if symbol.endswith(".HK"):
+        return symbol[: -len(".HK")].lstrip("0") or "0"
+    if ":" in symbol:
+        prefix, _, sym = symbol.partition(":")
+        if prefix == "HK":
+            return sym.lstrip("0") or "0"
+        return sym
+    return symbol
+
+
+class IBKRBrokerTransport(BrokerTransport):
+    """Real IBKR transport via ib_insync (IB Gateway / TWS).
+
+    Requires a reachable IB Gateway or TWS with the API enabled. ``ib_insync``
+    is imported lazily so environments without it can still import this module
+    (e.g. tests that use FakeBrokerTransport).
+
+    An already-connected ``ib`` instance can be injected for offline unit
+    testing of the adapter logic (contract building, status mapping, fill
+    extraction) — the socket-level connection to a real gateway is verified
+    externally only.
+
+    Contract mapping: ``US:<SYM>`` / bare ``SYM`` → SMART(USD);
+    ``<CODE>.HK`` → HKEX(HKD). Orders are submitted in the instrument's
+    currency as inferred here.
+    """
+
+    def __init__(
+        self,
+        host: str = "127.0.0.1",
+        port: int = 7497,
+        client_id: int = 1,
+        ib=None,
+        connect_timeout: float = 10.0,
+    ):
+        self._host = host
+        self._port = port
+        self._client_id = client_id
+        self._connect_timeout = connect_timeout
+        # Injectable ib_insync.IB instance (tests); created lazily otherwise.
+        self._ib = ib
+        self._trades: Dict[str, object] = {}
+
+    # -- connection ---------------------------------------------------------
+
+    def _get_ib(self):
+        if self._ib is None:
+            from ib_insync import IB
+            self._ib = IB()
+        return self._ib
+
+    def connect(self) -> None:
+        ib = self._get_ib()
+        ib.connect(self._host, self._port, clientId=self._client_id, timeout=self._connect_timeout)
+        if not ib.isConnected():
+            raise ConnectionError(
+                f"Could not connect to IB Gateway at {self._host}:{self._port}"
+            )
+
+    def disconnect(self) -> None:
+        if self._ib is not None:
+            self._ib.disconnect()
+
+    def is_connected(self) -> bool:
+        return self._ib is not None and self._ib.isConnected()
+
+    # -- order handling -----------------------------------------------------
+
+    def _make_contract(self, instrument_id: str):
+        from ib_insync import Stock
+
+        symbol = instrument_id.strip().upper()
+        if symbol.endswith(".HK"):
+            code = symbol[: -len(".HK")].lstrip("0") or "0"
+            return Stock(code, "HKEX", "HKD")
+        if ":" in symbol:
+            # e.g. "US:AAPL" — platform's prefixed form
+            prefix, _, sym = symbol.partition(":")
+            if prefix == "HK":
+                code = sym.lstrip("0") or "0"
+                return Stock(code, "HKEX", "HKD")
+            symbol = sym
+        return Stock(symbol, "SMART", "USD")
+
+    @staticmethod
+    def _map_status(order_status) -> BrokerOrderStatus:
+        status_str = getattr(order_status, "status", "") or ""
+        mapped = _IBKR_STATUS_MAP.get(status_str)
+        if mapped is not None:
+            if mapped is BrokerOrderStatus.SUBMITTED:
+                filled = getattr(order_status, "filled", 0) or 0
+                total = getattr(order_status, "totalQuantity", 0) or 0
+                if total and 0 < filled < total:
+                    return BrokerOrderStatus.PARTIALLY_FILLED
+            return mapped
+        return BrokerOrderStatus.SUBMITTED
+
+    def submit_order(
+        self,
+        instrument_id: str,
+        side: str,
+        quantity: int,
+        order_type: str = "MARKET",
+        limit_price: Optional[float] = None,
+    ) -> BrokerOrderResult:
+        if not self.is_connected():
+            return BrokerOrderResult(
+                success=False,
+                error_message="Not connected to IB Gateway",
+            )
+
+        try:
+            from ib_insync import MarketOrder, LimitOrder
+
+            ib = self._get_ib()
+            contract = self._make_contract(instrument_id)
+            if order_type == "LIMIT":
+                if limit_price is None:
+                    return BrokerOrderResult(
+                        success=False,
+                        error_message="LIMIT order requires limit_price",
+                    )
+            elif order_type != "MARKET":
+                return BrokerOrderResult(
+                    success=False,
+                    error_message=f"Unsupported order type: {order_type}",
+                )
+
+            ib_order = (
+                LimitOrder(side.upper(), quantity, limit_price)
+                if order_type == "LIMIT"
+                else MarketOrder(side.upper(), quantity)
+            )
+            trade = ib.placeOrder(contract, ib_order)
+            broker_order_id = str(ib_order.orderId)
+            self._trades[broker_order_id] = trade
+            return BrokerOrderResult(
+                success=True,
+                broker_order_id=broker_order_id,
+                submitted_at=utcnow(),
+            )
+        except Exception as e:
+            return BrokerOrderResult(success=False, error_message=str(e))
+
+    def _get_trade(self, broker_order_id: str):
+        trade = self._trades.get(broker_order_id)
+        if trade is not None:
+            return trade
+        ib = self._get_ib()
+        for t in ib.trades():
+            if str(t.order.orderId) == str(broker_order_id):
+                self._trades[broker_order_id] = t
+                return t
+        return None
+
+    def cancel_order(self, broker_order_id: str) -> bool:
+        trade = self._get_trade(broker_order_id)
+        if trade is None:
+            return False
+        status = self._map_status(trade.orderStatus)
+        if status in (BrokerOrderStatus.FILLED, BrokerOrderStatus.CANCELLED, BrokerOrderStatus.REJECTED):
+            return False
+        self._get_ib().cancelOrder(trade.order)
+        return True
+
+    def get_order_status(self, broker_order_id: str) -> BrokerOrderStatus:
+        trade = self._get_trade(broker_order_id)
+        if trade is None:
+            raise ValueError(f"Unknown order: {broker_order_id}")
+        return self._map_status(trade.orderStatus)
+
+    def get_fills(self, broker_order_id: str) -> List[BrokerFill]:
+        trade = self._get_trade(broker_order_id)
+        if trade is None:
+            return []
+        fills = []
+        for fill in trade.fills:
+            exec_details = getattr(fill, "execution", None)
+            if exec_details is None:
+                continue
+            commission = None
+            report = getattr(fill, "commissionReport", None)
+            if report is not None and getattr(report, "commission", None) is not None:
+                commission = float(report.commission)
+            fills.append(BrokerFill(
+                broker_order_id=broker_order_id,
+                quantity=int(exec_details.shares),
+                price=float(exec_details.avgPrice),
+                fill_time=exec_details.time,
+                commission=commission,
+            ))
+        return fills
+
+    def get_recent_orders(self, since: datetime) -> List[BrokerOrderState]:
+        ib = self._get_ib()
+        states = []
+        for trade in ib.trades():
+            created_at = None
+            log = getattr(trade, "log", None) or []
+            for entry in log:
+                entry_time = getattr(entry, "time", None)
+                if entry_time is not None:
+                    created_at = entry_time
+                    break
+            if created_at is None:
+                created_at = utcnow()
+            if created_at < since:
+                continue
+            order_status = trade.orderStatus
+            fills = []
+            for fill in trade.fills:
+                exec_details = getattr(fill, "execution", None)
+                if exec_details is None:
+                    continue
+                fills.append(BrokerFill(
+                    broker_order_id=str(trade.order.orderId),
+                    quantity=int(exec_details.shares),
+                    price=float(exec_details.avgPrice),
+                    fill_time=exec_details.time,
+                ))
+            states.append(BrokerOrderState(
+                order_id=str(trade.order.orderId),
+                instrument_id=trade.contract.symbol,
+                side=(trade.order.action or "").upper(),
+                quantity=int(order_status.totalQuantity or trade.order.totalQuantity or 0),
+                order_type=(trade.order.orderType or "MARKET").upper(),
+                limit_price=getattr(trade.order, "lmtPrice", None),
+                status=self._map_status(order_status),
+                filled_quantity=int(order_status.filled or 0),
+                fills=fills,
+                created_at=created_at,
+            ))
+        return states

@@ -23,6 +23,7 @@ from app.services.training import (
     _expand_grid,
     MAX_GRID_SIZE,
 )
+from app.lib.timeutil import utcnow
 
 router = APIRouter(prefix="/training", tags=["training"])
 
@@ -48,11 +49,11 @@ class TrainingJobCreate(BaseModel):
 class TrainingJobResponse(BaseModel):
     id: UUID
     user_id: UUID
-    experiment_id: UUID
+    experiment_id: Optional[UUID] = None
     status: str
     parameter_grid: dict
     strategy_spec_snapshot: Optional[dict]
-    results: Optional[List[dict]]
+    results: Optional[Any]
     best_params: Optional[dict]
     error_details: Optional[str]
     created_at: datetime
@@ -196,8 +197,8 @@ def cancel_training_job(
 
     if job.status == TrainingJobStatus.pending:
         job.status = TrainingJobStatus.cancelled
-        job.cancelled_at = datetime.utcnow()
-        job.completed_at = datetime.utcnow()
+        job.cancelled_at = utcnow()
+        job.completed_at = utcnow()
         db.commit()
         db.refresh(job)
         return job
@@ -206,7 +207,7 @@ def cancel_training_job(
         # Set cancellation flag — the sweep loop checks this between
         # iterations and will transition the status to cancelled.
         cancel_running_job(job.id)
-        job.cancelled_at = datetime.utcnow()
+        job.cancelled_at = utcnow()
         db.commit()
         db.refresh(job)
         return job

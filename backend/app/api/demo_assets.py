@@ -1,7 +1,19 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from app.providers import get_data_provider, get_provider_info
+from app.providers.data_provider import compute_staleness
 
 router = APIRouter(tags=["market-data"])
+
+
+def _provider_failure(symbol: str, exc: Exception) -> HTTPException:
+    provider = get_data_provider()
+    return HTTPException(
+        status_code=503,
+        detail={
+            "error": f"Data provider failed to serve data for {symbol}: {exc}",
+            "provider_status": provider.get_status(),
+        },
+    )
 
 
 @router.get("/demo-assets")
@@ -37,7 +49,14 @@ def get_bars(
     end_date: str,
 ):
     provider = get_data_provider()
-    bars = provider.get_bars(symbol, start_date, end_date)
+    try:
+        bars = provider.get_bars(symbol, start_date, end_date)
+    except Exception as exc:
+        raise _provider_failure(symbol, exc)
+
+    quality = provider.get_data_quality(symbol)
+    quality.update(compute_staleness(bars[-1].date if bars else None))
+
     return {
         "symbol": symbol,
         "provider": provider.provider_name,
@@ -45,6 +64,7 @@ def get_bars(
         "start_date": start_date,
         "end_date": end_date,
         "bar_count": len(bars),
+        "data_quality": quality,
         "bars": [
             {
                 "date": b.date,
@@ -64,7 +84,10 @@ def get_bars(
 @router.get("/market-data/latest/{symbol}")
 def get_latest_bar(symbol: str):
     provider = get_data_provider()
-    bar = provider.get_latest_bar(symbol)
+    try:
+        bar = provider.get_latest_bar(symbol)
+    except Exception as exc:
+        raise _provider_failure(symbol, exc)
     if bar is None:
         return {
             "symbol": symbol,
@@ -72,11 +95,14 @@ def get_latest_bar(symbol: str):
             "available": False,
             "bar": None,
         }
+    quality = provider.get_data_quality(symbol)
+    quality.update(compute_staleness(bar.date))
     return {
         "symbol": symbol,
         "provider": provider.provider_name,
         "feed_mode": provider.feed_mode,
         "available": True,
+        "data_quality": quality,
         "bar": {
             "date": bar.date,
             "open": bar.open,

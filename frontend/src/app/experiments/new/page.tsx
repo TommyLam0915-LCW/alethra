@@ -61,8 +61,11 @@ function NewExperimentForm() {
   const [templateType, setTemplateType] = useState('buy_and_hold');
   const [assetId, setAssetId] = useState('DEMO-ALPHA');
   const [benchmarkId, setBenchmarkId] = useState('DEMO-BENCHMARK');
-  const [startDate, setStartDate] = useState('2024-01-02');
-  const [endDate, setEndDate] = useState('2024-02-14');
+  const [startDate, setStartDate] = useState(() => {
+    const yearAgo = new Date(Date.now() - 366 * 24 * 60 * 60 * 1000);
+    return yearAgo.toISOString().slice(0, 10);
+  });
+  const [endDate, setEndDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [initialCash, setInitialCash] = useState('10000');
   const [commissionRate, setCommissionRate] = useState('0');
   const [slippageRate, setSlippageRate] = useState('0');

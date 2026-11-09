@@ -41,6 +41,7 @@ from app.services.execution import (
 )
 from app.models.kill_switch import KillSwitchScope
 from app.services.kill_switch import activate_kill_switch, deactivate_kill_switch
+from app.lib.timeutil import utcnow
 
 
 # ── Helpers ──
@@ -186,11 +187,11 @@ class TestCancelBeforeSubmit:
 
 
 # ──────────────────────────────────────────────
-# 5. Cancel after submit → rejected
+# 5. Cancel after submit → cancel_requested (agent cancels at broker)
 # ──────────────────────────────────────────────
 
 class TestCancelAfterSubmit:
-    def test_cancel_submitted_gives_rejected(self, client, auth_headers):
+    def test_cancel_submitted_requests_agent_cancel(self, client, auth_headers):
         """In offline mode submit auto-fills. We test the cancel logic by
         manually moving an intent to 'submitted' status via the service layer."""
         portfolio_id = _create_portfolio_via_api(client, auth_headers)
@@ -214,14 +215,16 @@ class TestCancelAfterSubmit:
         finally:
             db.close()
 
-        # Cancel → should be rejected
+        # Cancel → cancel_requested (agent cancels at broker and reports back);
+        # the intent must NOT be marked rejected — that would lose real fills.
         resp = client.post(
             f"/api/v1/execution/intents/{intent_id}/cancel",
             headers=auth_headers,
         )
         assert resp.status_code == 200
-        assert resp.json()["status"] == "rejected"
-        assert resp.json()["rejection_reason"] is not None
+        assert resp.json()["status"] == "submitted"
+        assert resp.json()["cancel_requested"] is True
+        assert resp.json()["rejection_reason"] is None
 
 
 # ──────────────────────────────────────────────
@@ -239,7 +242,7 @@ class TestExpiredIntent:
         db = TestSession()
         try:
             intent = db.query(OrderIntent).filter(OrderIntent.intent_id == intent_id).first()
-            intent.expires_at = datetime.utcnow() - timedelta(minutes=1)
+            intent.expires_at = utcnow() - timedelta(minutes=1)
             db.commit()
         finally:
             db.close()
@@ -269,7 +272,7 @@ class TestExpiredIntent:
         db = TestSession()
         try:
             intent = db.query(OrderIntent).filter(OrderIntent.intent_id == intent_id).first()
-            intent.expires_at = datetime.utcnow() - timedelta(minutes=1)
+            intent.expires_at = utcnow() - timedelta(minutes=1)
             db.commit()
         finally:
             db.close()
@@ -308,7 +311,7 @@ class TestDuplicateIntentId:
                 order_type="MARKET",
                 status=IntentStatus.pending,
                 authorization_token=secrets.token_urlsafe(32),
-                expires_at=datetime.utcnow() + timedelta(minutes=5),
+                expires_at=utcnow() + timedelta(minutes=5),
             )
             db.add(duplicate)
             with pytest.raises(Exception):

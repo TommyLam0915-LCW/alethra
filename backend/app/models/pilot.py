@@ -4,6 +4,7 @@ from sqlalchemy import Column, String, Boolean, DateTime, Integer, Float, Text, 
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from app.database import Base
 import enum
+from app.lib.timeutil import utcnow
 
 
 class IntendedUserType(str, enum.Enum):
@@ -82,8 +83,8 @@ class PilotApplication(Base):
     willingness_to_interview = Column(Boolean, default=False, nullable=False)
     consent_to_contact = Column(Boolean, default=False, nullable=False)
     status = Column(SAEnum(PilotApplicationStatus), default=PilotApplicationStatus.submitted, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
 
 class PilotEntitlement(Base):
@@ -99,8 +100,8 @@ class PilotEntitlement(Base):
     expiry_date = Column(DateTime, nullable=True)
     support_tier = Column(SAEnum(SupportTier), default=SupportTier.standard, nullable=False)
     granted_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
 
 class UsageEvent(Base):
@@ -110,7 +111,7 @@ class UsageEvent(Base):
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
     event_type = Column(SAEnum(UsageEventType), nullable=False, index=True)
     metadata_json = Column(JSONB, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
 
 
 class CostRecord(Base):
@@ -125,7 +126,7 @@ class CostRecord(Base):
     method_of_estimation = Column(Text, nullable=True)
     linked_entity = Column(String(255), nullable=True)
     description = Column(Text, nullable=True)
-    recorded_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    recorded_at = Column(DateTime, default=utcnow, nullable=False)
 
 
 class SupportLog(Base):
@@ -139,8 +140,8 @@ class SupportLog(Base):
     linked_entity = Column(String(255), nullable=True)
     recurring_issue_tag = Column(String(100), nullable=True, index=True)
     notes = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
 
 class ProductHypothesis(Base):
@@ -151,5 +152,5 @@ class ProductHypothesis(Base):
     status = Column(SAEnum(HypothesisStatus), default=HypothesisStatus.untested, nullable=False)
     evidence_criteria = Column(Text, nullable=True)
     evidence_notes = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)

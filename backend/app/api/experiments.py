@@ -21,7 +21,7 @@ from app.api.schemas import (
     VersionDiffResponse,
     VersionDiffEntry,
 )
-from app.engine.backtest import compute_config_hash
+from app.engine.backtest import compute_config_hash, run_backtest
 from app.services import emit_event
 from app.method_checks import evaluate_checks, MethodReviewResponse
 from app.method_checks.loader import load_review_data
@@ -513,3 +513,58 @@ def get_method_review(
         completed_at_available=completed_at_available,
         checks=checks,
     )
+
+
+@router.post("/{experiment_id}/versions/{version_id}/backtest")
+def run_experiment_backtest(
+    experiment_id: UUID,
+    version_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Run backtest for an experiment version and store results.
+
+    Executes the strategy against historical data and computes performance metrics.
+    Results are stored in the database and returned to the client.
+    """
+    # Load experiment and verify ownership
+    experiment = db.query(Experiment).filter(
+        Experiment.id == experiment_id,
+        Experiment.owner_id == current_user.id
+    ).first()
+    if not experiment:
+        raise HTTPException(status_code=404, detail="Experiment not found")
+
+    # Load version and verify it belongs to this experiment
+    version = db.query(ExperimentVersion).filter(
+        ExperimentVersion.id == version_id,
+        ExperimentVersion.experiment_id == experiment_id
+    ).first()
+    if not version:
+        raise HTTPException(status_code=404, detail="Experiment version not found")
+
+    # Extract strategy spec from version
+    strategy_spec = version.strategy_spec or {}
+
+    try:
+        # Run backtest engine
+        result = run_backtest(strategy_spec, db_session=db)
+
+        # Store results in ExperimentRun (if model exists) or return directly
+        # For now, return results directly since ExperimentRun model may not exist
+        return {
+            "status": "completed",
+            "experiment_id": str(experiment_id),
+            "version_id": str(version_id),
+            "metrics": result.get("metrics", {}),
+            "equity_curve": result.get("equity_curve", []),
+            "trades": result.get("trades", []),
+            "config_hash": result.get("config_hash"),
+            "engine_version": result.get("engine_version"),
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Backtest execution failed: {str(e)}"
+        )

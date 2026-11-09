@@ -12,6 +12,7 @@ from app.models.user import User
 from app.models.inference import InferenceRun, InferenceRunStatus
 from app.auth.jwt import get_current_user
 from app.auth.safety import safety_control
+from app.auth.entitlements import reserve_quota, release_reservation, settle_reservation
 from app.models.kill_switch import KillSwitchScope
 from app.services.inference import run_inference
 
@@ -62,12 +63,29 @@ def create_inference_run(
     Safety controls:
     - Kill switch: Blocks new inference runs if inference/global switch is active
     - Rate limit: 100 inference runs per hour per user/API key
+    
+    Quota: 1 ai_usage unit is reserved before inference and settled on success;
+    failures release the reservation (no charge).
     """
-    input_spec_dict = payload.input_spec.model_dump()
-    run = run_inference(db, payload.model_version_id, current_user.id, input_spec_dict)
-    db.commit()
-    db.refresh(run)
-    return run
+    # Reserve quota for inference
+    reservation = reserve_quota(db, current_user.id, "ai_usage")
+    
+    try:
+        input_spec_dict = payload.input_spec.model_dump()
+        run = run_inference(db, payload.model_version_id, current_user.id, input_spec_dict)
+        db.commit()
+        db.refresh(run)
+        
+        # Settle quota on success
+        settle_reservation(db, reservation.id)
+        db.commit()
+        
+        return run
+    except Exception as e:
+        # Release reservation on failure
+        release_reservation(db, reservation.id)
+        db.commit()
+        raise
 
 
 @router.get("/runs/{run_id}", response_model=InferenceRunResponse)
