@@ -18,7 +18,6 @@ import os
 import sys
 from urllib.parse import urlparse
 from typing import Optional, Dict, Any
-import psycopg2
 
 
 # Allowed test databases (whitelist) — all others are rejected
@@ -27,6 +26,7 @@ ALLOWED_TEST_DATABASES = {
     'alethra_test',
     'test_ai_investment_lab',
     'alethra_owner_test',  # Added for owner verification tests
+    'alethra_test_isolated_20261109',  # approved isolated target, 2026-11-09 round
 }
 
 # Forbidden production databases (blacklist) — always rejected
@@ -153,6 +153,57 @@ def verify_database_identity(conn, expected_db: str) -> Dict[str, Any]:
         }
 
 
+def verify_url_policy(url: str) -> Dict[str, Any]:
+    """Fail-closed checks that need no connection: TEST_MODE, URL, lists, host/port.
+
+    Returns the parsed target with the password excluded. Split out of
+    :func:`verify_test_database` so an entry point that already holds a
+    connection (SQLAlchemy, and therefore either driver) applies *this* policy
+    rather than writing a second guard beside it.
+    """
+    test_mode = os.environ.get('TEST_MODE')
+    if test_mode != 'true':
+        raise TestDatabaseGateError(
+            f"TEST_MODE must be 'true' for test operations. "
+            f"Current value: {test_mode!r}. "
+            f"This is a hard requirement, not a warning."
+        )
+
+    if not url:
+        raise TestDatabaseGateError(
+            "DATABASE_URL not set. Test scripts must explicitly set database URL. "
+            "Do not fall back to application config."
+        )
+
+    parsed = parse_database_url(url)
+    db_name = parsed['database']
+    host = parsed['host']
+    port = parsed['port']
+
+    if db_name in FORBIDDEN_DATABASES:
+        raise TestDatabaseGateError(
+            f"FORBIDDEN: Database '{db_name}' is in the production blacklist. "
+            "Test scripts must use test database only. "
+            "Rejecting to prevent production writes."
+        )
+
+    if db_name not in ALLOWED_TEST_DATABASES:
+        raise TestDatabaseGateError(
+            f"REJECTED: Database '{db_name}' is not in the test whitelist. "
+            f"Allowed test databases: {sorted(ALLOWED_TEST_DATABASES)}. "
+            "Rejecting to prevent writes to unknown databases."
+        )
+
+    if (host, port) not in ALLOWED_INSTANCES:
+        raise TestDatabaseGateError(
+            f"REJECTED: Host/port {host}:{port} not in allowed instances. "
+            f"Allowed: {sorted(ALLOWED_INSTANCES)}. "
+            "Rejecting to prevent writes to external databases."
+        )
+
+    return parsed
+
+
 def verify_test_database(database_url: Optional[str] = None) -> Dict[str, Any]:
     """
     Verify that the database connection is safe for testing.
@@ -176,74 +227,45 @@ def verify_test_database(database_url: Optional[str] = None) -> Dict[str, Any]:
         conn_info = verify_test_database()  # Raises on any failure
         # Only reaches here if ALL checks passed
     """
-    # Step 1: Verify TEST_MODE (HARD REQUIREMENT)
-    test_mode = os.environ.get('TEST_MODE')
-    if test_mode != 'true':
-        raise TestDatabaseGateError(
-            f"TEST_MODE must be 'true' for test operations. "
-            f"Current value: {test_mode!r}. "
-            f"This is a hard requirement, not a warning."
-        )
-    
-    # Step 2: Get DATABASE_URL
+    # Steps 1-6: TEST_MODE, explicit URL, blacklist, whitelist, host/port.
     url = database_url or os.environ.get('DATABASE_URL')
-    if not url:
-        raise TestDatabaseGateError(
-            "DATABASE_URL not set. Test scripts must explicitly set database URL. "
-            "Do not fall back to application config."
-        )
-    
-    # Step 3: Parse URL
-    try:
-        parsed = parse_database_url(url)
-    except Exception as e:
-        raise TestDatabaseGateError(f"Failed to parse DATABASE_URL: {e}")
-    
+    parsed = verify_url_policy(url)
     db_name = parsed['database']
-    host = parsed['host']
-    port = parsed['port']
-    
-    # Step 4: Check against blacklist (HARD FAIL)
-    if db_name in FORBIDDEN_DATABASES:
-        raise TestDatabaseGateError(
-            f"FORBIDDEN: Database '{db_name}' is in the production blacklist. "
-            f"Test scripts must use test database only. "
-            f"Rejecting to prevent production writes."
-        )
-    
-    # Step 5: Check against whitelist (HARD FAIL — not warning)
-    if db_name not in ALLOWED_TEST_DATABASES:
-        raise TestDatabaseGateError(
-            f"REJECTED: Database '{db_name}' is not in the test whitelist. "
-            f"Allowed test databases: {sorted(ALLOWED_TEST_DATABASES)}. "
-            f"Rejecting to prevent writes to unknown databases."
-        )
-    
-    # Step 6: Check host/port (HARD FAIL)
-    if (host, port) not in ALLOWED_INSTANCES:
-        raise TestDatabaseGateError(
-            f"REJECTED: Host/port {host}:{port} not in allowed instances. "
-            f"Allowed: {sorted(ALLOWED_INSTANCES)}. "
-            f"Rejecting to prevent writes to external databases."
-        )
-    
-    # Step 7: Connect and verify actual identity
+
+    # Step 7: Connect and verify actual identity. SQLAlchemy is used rather
+    # than one named driver, because this gate stands in front of the whole
+    # PostgreSQL test path (the runner preflight and tests/conftest.py) and an
+    # interpreter whose only PostgreSQL driver is psycopg (v3) would otherwise
+    # fail on an import rather than on a check.
+    from sqlalchemy import create_engine
+
+    engine = None
     try:
-        conn = psycopg2.connect(url)
+        engine = create_engine(url, connect_args={"connect_timeout": 5})
+        raw = engine.raw_connection()
         try:
-            conn_info = verify_database_identity(conn, db_name)
-            conn_info['url_parsed'] = {
-                'host': host,
-                'port': port,
-                'database': db_name,
-                'username': parsed['username'],
-                # password excluded
-            }
-            return conn_info
+            conn_info = verify_database_identity(raw, db_name)
         finally:
-            conn.close()
-    except psycopg2.Error as e:
-        raise TestDatabaseGateError(f"Failed to connect to database: {e}")
+            raw.close()
+        conn_info['url_parsed'] = {
+            'host': parsed['host'],
+            'port': parsed['port'],
+            'database': db_name,
+            'username': parsed['username'],
+            # password excluded
+        }
+        return conn_info
+    except TestDatabaseGateError:
+        raise
+    except Exception as e:
+        # Only the exception type: a driver message can carry the conninfo, and
+        # the conninfo carries the password.
+        raise TestDatabaseGateError(
+            f"Failed to connect to {db_name!r} ({type(e).__name__})"
+        )
+    finally:
+        if engine is not None:
+            engine.dispose()
 
 
 def main():
