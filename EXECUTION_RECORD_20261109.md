@@ -17,9 +17,10 @@
 - **Port**: 5432
 - **Database**: alethra_test_isolated_20261109
 - **User**: alethra_test
-- **Password**: test_isolated_pwd_20261109（測試用，非生產）
+- **Password**: 不保存於文件。實際值存放於 gitignored 的 `backend/.env.local`（0600），僅本機可讀。
 - **性質**: 全新、可棄式、本機測試 DB
 - **非**: production 或原研究 DB
+- **憑證狀態**: 2026-11-09 版文件曾把明文測試密碼提交至 public 遠端。該值已於 2026-11-10 輪換作廢，現行值指紋 `02ee558f1c64`（僅存於 gitignored `backend/.env.local`）。退休鏈：`cf26672551e1`（原始外洩值）→ `ad7e0e41795d` → `dd8f131e5988` → `02ee558f1c64`。中間值 `dd8f131e5988` 因一次驗證命令把含憑證的 conninfo 直接交給 psycopg（它無法解析 SQLAlchemy 專用的 `postgresql+psycopg://` scheme），驅動程式在錯誤訊息中回顯了整組連線字串，故再輪換一次。以舊值連線現回 `FATAL: password authentication failed`。外洩值仍留存於 git 歷史；歷史清理屬另行批准事項，本輪不 force push、不改寫歷史。
 
 ### PostgreSQL 認證還原證據
 
@@ -45,7 +46,7 @@
 - **原始問題**: `ModuleNotFoundError: No module named 'psycopg'`
 - **requirements.txt 指定**: `psycopg2-binary==2.9.10`（編譯失敗）
 - **解決方案**: 安裝 `psycopg[binary]` 3.3.8（psycopg 版本 3）
-- **SQLAlchemy URL**: `postgresql+psycopg://alethra_test:test_isolated_pwd_20261109@localhost:5432/alethra_test_isolated_20261109`
+- **SQLAlchemy URL**: `postgresql+psycopg://alethra_test:<ALETHRA_TEST_DB_PASSWORD>@localhost:5432/alethra_test_isolated_20261109`（`<ALETHRA_TEST_DB_PASSWORD>` 取自 `backend/.env.local`，不寫入文件）
 - **Driver 選擇**: psycopg (v3)，非 psycopg2
 
 ### Python 與依賴版本
@@ -203,9 +204,11 @@ Traceback (most recent call last):
 
 **匯入命令**:
 ```bash
-PYTHONPATH=/Users/tommylam0915/Documents/Qoder/2026-10-08/alethra-integration-auto/backend \
-DATABASE_URL="postgresql+psycopg://alethra_test:test_isolated_pwd_20261109@localhost:5432/alethra_test_isolated_20261109" \
-python3 scripts/import_real_data.py
+set -a && . backend/.env.local && set +a
+PYTHONPATH=backend python3 scripts/import_real_data.py \
+  --input /path/to/live2b_warehouse_bars_1440m.json \
+  --expected-sha256 e481093bcc12bebc8589c2a838ce445c1bb0692e606134b671e4ebea66646ff5 \
+  --dry-run
 ```
 
 **匯入結果**:
@@ -556,23 +559,22 @@ brew services restart postgresql@15
 
 # 測試 DB 建立
 psql -h localhost -U postgres -d postgres << 'SQL'
-CREATE USER alethra_test WITH PASSWORD 'test_isolated_pwd_20261109';
+CREATE USER alethra_test WITH PASSWORD '<ALETHRA_TEST_DB_PASSWORD>';
 CREATE DATABASE alethra_test_isolated_20261109 OWNER alethra_test;
 SQL
+# 註：此為 2026-11-09 當時的實際步驟紀錄。該明密碼已輪換作廢。
+# 後續不得再以放寬共享 PostgreSQL 認證（trust）的方式建立測試 DB。
 
 # Migration
-DATABASE_URL="postgresql+psycopg://alethra_test:test_isolated_pwd_20261109@localhost:5432/alethra_test_isolated_20261109" \
-  python3 -m alembic upgrade head
+set -a && . backend/.env.local && set +a
+python3 -m alembic upgrade head
 
 # 資料匯入
-PYTHONPATH=/Users/tommylam0915/Documents/Qoder/2026-10-08/alethra-integration-auto/backend \
-DATABASE_URL="postgresql+psycopg://alethra_test:test_isolated_pwd_20261109@localhost:5432/alethra_test_isolated_20261109" \
-  python3 scripts/import_real_data.py
+PYTHONPATH=backend python3 scripts/import_real_data.py \
+  --input "$DATA_FILE" --expected-sha256 "$EXPECTED_SHA256" --dry-run
 
 # API 啟動
-PYTHONPATH=/Users/tommylam0915/Documents/Qoder/2026-10-08/alethra-integration-auto/backend \
-DATABASE_URL="postgresql+psycopg://alethra_test:test_isolated_pwd_20261109@localhost:5432/alethra_test_isolated_20261109" \
-  python3 -m uvicorn app.main:app --host 127.0.0.1 --port 8100
+PYTHONPATH=backend python3 -m uvicorn app.main:app --host 127.0.0.1 --port 8100
 
 # API 測試
 curl -X POST http://127.0.0.1:8100/api/auth/login ...
