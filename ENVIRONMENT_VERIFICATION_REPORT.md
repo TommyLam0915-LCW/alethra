@@ -35,7 +35,7 @@ template1               ← Template (unchanged)
 
 ### .env (backend/.env)
 ```
-DATABASE_URL=postgresql://postgres:postgres@localhost:5432/ai_investment_lab
+DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@localhost:5432/ai_investment_lab
 LIVE_TRADING_ENABLED=true
 LIVE_TRADING_SYMBOLS=XBT/USD,ETH/USD,SOL/USD
 LIVE_TRADING_INTERVAL=60
@@ -160,7 +160,7 @@ run_type         character varying(50)       DEFAULT 'historical_simulation'
 1. **Always use `ai_investment_lab_test`** for verification
 2. **Update .env before testing:**
    ```
-   DATABASE_URL=postgresql://postgres:postgres@localhost:5432/ai_investment_lab_test
+   DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@localhost:5432/ai_investment_lab_test
    ```
 3. **Run migrations on test DB:**
    ```bash

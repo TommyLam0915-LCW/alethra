@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.auth.jwt import require_admin
+from app.config import get_settings
 from app.database import get_db
 from app.models.user import User
 from app.services.auto_collection import (
@@ -67,7 +68,7 @@ def collection_trigger(
     db: Session = Depends(get_db),
 ):
     """Manually trigger a collection cycle."""
-    database_url = os.environ.get('DATABASE_URL', 'postgresql://postgres:postgres@localhost:5432/ai_investment_lab')
+    database_url = get_settings().database_url
     
     try:
         result = trigger_manual_collection(database_url)
@@ -90,7 +91,7 @@ def collection_history(
     db: Session = Depends(get_db),
 ):
     """Get history of collection runs."""
-    database_url = os.environ.get('DATABASE_URL', 'postgresql://postgres:postgres@localhost:5432/ai_investment_lab')
+    database_url = get_settings().database_url
     
     return get_collection_history(database_url, limit=limit)
 
@@ -100,7 +101,7 @@ def collection_start(
     current_user: User = Depends(require_admin),
 ):
     """Start the auto-collection scheduler."""
-    database_url = os.environ.get('DATABASE_URL', 'postgresql://postgres:postgres@localhost:5432/ai_investment_lab')
+    database_url = get_settings().database_url
     enabled = os.environ.get('AUTO_COLLECTION_ENABLED', 'false').lower() == 'true'
     interval_hours = int(os.environ.get('AUTO_COLLECTION_INTERVAL_HOURS', '4'))
     

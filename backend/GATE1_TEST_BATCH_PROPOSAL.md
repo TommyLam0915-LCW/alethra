@@ -200,7 +200,7 @@ Risk: Low (test DB, no production data)
 **After migration applied:**
 ```bash
 cd backend
-export DATABASE_URL="postgresql://alethra_test_runtime:testpass@localhost:5432/ai_investment_lab_test"
+export DATABASE_URL="postgresql://alethra_test_runtime:${ALETHRA_TEST_RUNTIME_PASSWORD}@localhost:5432/ai_investment_lab_test"
 pytest tests/test_paper_trading_cancel_atomic.py -v --tb=short
 ```
 

@@ -360,8 +360,8 @@ Not provided (would require running normal-runtime environment with external ser
 - Provides concrete evidence of system operation
 
 **Steps**:
-1. Start PostgreSQL: `docker run -d --name alethra-db -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=ai_investment_lab -p 5433:5432 postgres:16-alpine`
-2. Run migrations: `cd backend && source venv/bin/activate && export DATABASE_URL=postgresql://postgres:postgres@localhost:5433/ai_investment_lab && python -m alembic upgrade head`
+1. Start PostgreSQL: `docker run -d --name alethra-db -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD="${POSTGRES_PASSWORD:?export POSTGRES_PASSWORD first}" -e POSTGRES_DB=ai_investment_lab -p 5433:5432 postgres:16-alpine`
+2. Run migrations: `cd backend && source venv/bin/activate && export DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@localhost:5433/ai_investment_lab && python -m alembic upgrade head`
 3. Start backend: `uvicorn app.main:app --host 0.0.0.0 --port 8001`
 4. Build frontend: `cd frontend && npm run build`
 5. Start frontend: `npm start -- -p 3001`

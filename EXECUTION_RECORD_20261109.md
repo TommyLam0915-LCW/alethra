@@ -17,7 +17,7 @@
 - **Port**: 5432
 - **Database**: alethra_test_isolated_20261109
 - **User**: alethra_test
-- **Password**: test_isolated_pwd_20261109（測試用，非生產）
+- **Password**: 由環境變數 `ALETHRA_TEST_ISOLATED_PASSWORD` 提供，本文件不再保存明文。原字面值曾提交於 `3258895`／`8816429` 並推送至公開 repo，故依「已外洩」處理，待批准後輪換（見文末「去敏紀錄」）
 - **性質**: 全新、可棄式、本機測試 DB
 - **非**: production 或原研究 DB
 
@@ -45,7 +45,7 @@
 - **原始問題**: `ModuleNotFoundError: No module named 'psycopg'`
 - **requirements.txt 指定**: `psycopg2-binary==2.9.10`（編譯失敗）
 - **解決方案**: 安裝 `psycopg[binary]` 3.3.8（psycopg 版本 3）
-- **SQLAlchemy URL**: `postgresql+psycopg://alethra_test:test_isolated_pwd_20261109@localhost:5432/alethra_test_isolated_20261109`
+- **SQLAlchemy URL**: `postgresql+psycopg://alethra_test:${ALETHRA_TEST_ISOLATED_PASSWORD}@localhost:5432/alethra_test_isolated_20261109`
 - **Driver 選擇**: psycopg (v3)，非 psycopg2
 
 ### Python 與依賴版本
@@ -204,7 +204,7 @@ Traceback (most recent call last):
 **匯入命令**:
 ```bash
 PYTHONPATH=/Users/tommylam0915/Documents/Qoder/2026-10-08/alethra-integration-auto/backend \
-DATABASE_URL="postgresql+psycopg://alethra_test:test_isolated_pwd_20261109@localhost:5432/alethra_test_isolated_20261109" \
+DATABASE_URL="postgresql+psycopg://alethra_test:${ALETHRA_TEST_ISOLATED_PASSWORD}@localhost:5432/alethra_test_isolated_20261109" \
 python3 scripts/import_real_data.py
 ```
 
@@ -555,23 +555,23 @@ brew services start postgresql@15
 brew services restart postgresql@15
 
 # 測試 DB 建立
-psql -h localhost -U postgres -d postgres << 'SQL'
-CREATE USER alethra_test WITH PASSWORD 'test_isolated_pwd_20261109';
+psql -h localhost -U postgres -d postgres << SQL
+CREATE USER alethra_test WITH PASSWORD '${ALETHRA_TEST_ISOLATED_PASSWORD}';
 CREATE DATABASE alethra_test_isolated_20261109 OWNER alethra_test;
 SQL
 
 # Migration
-DATABASE_URL="postgresql+psycopg://alethra_test:test_isolated_pwd_20261109@localhost:5432/alethra_test_isolated_20261109" \
+DATABASE_URL="postgresql+psycopg://alethra_test:${ALETHRA_TEST_ISOLATED_PASSWORD}@localhost:5432/alethra_test_isolated_20261109" \
   python3 -m alembic upgrade head
 
 # 資料匯入
 PYTHONPATH=/Users/tommylam0915/Documents/Qoder/2026-10-08/alethra-integration-auto/backend \
-DATABASE_URL="postgresql+psycopg://alethra_test:test_isolated_pwd_20261109@localhost:5432/alethra_test_isolated_20261109" \
+DATABASE_URL="postgresql+psycopg://alethra_test:${ALETHRA_TEST_ISOLATED_PASSWORD}@localhost:5432/alethra_test_isolated_20261109" \
   python3 scripts/import_real_data.py
 
 # API 啟動
 PYTHONPATH=/Users/tommylam0915/Documents/Qoder/2026-10-08/alethra-integration-auto/backend \
-DATABASE_URL="postgresql+psycopg://alethra_test:test_isolated_pwd_20261109@localhost:5432/alethra_test_isolated_20261109" \
+DATABASE_URL="postgresql+psycopg://alethra_test:${ALETHRA_TEST_ISOLATED_PASSWORD}@localhost:5432/alethra_test_isolated_20261109" \
   python3 -m uvicorn app.main:app --host 127.0.0.1 --port 8100
 
 # API 測試
@@ -588,3 +588,248 @@ curl http://127.0.0.1:8100/api/v1/experiments/{id}/runs ...
 **Run IDs**:
 - Demo 資料: `a3c3f28e-5dd5-4c3e-86d4-c26388f7acc4`
 - 真實資料: `7c3b6b40-dc38-4f9b-8a11-eba7f9fae71e`
+
+---
+
+## 去敏紀錄（2026-11-10，本節為追加，不改寫上方原始紀錄）
+
+本節記錄 tracked 檔案內明文憑證的移除位置與替代方式。**未改寫任何 Git history、未 force-push、未輪換任何憑證**（輪換需另行批准，見「待批准」）。
+
+### 1. 隔離測試 DB 憑證（`alethra_test` / `alethra_test_isolated_20261109`）
+
+原字面值曾在本檔與 `scripts/import_real_data.py` 的舊版本中以明文出現，並已隨 `3258895`、`8816429` 推送至公開 repo。故其字面值不復存在於 tracked 檔案，且一律依「已外洩」處理。
+
+| 檔案 | 行 | 替代方式 |
+|---|---|---|
+| `EXECUTION_RECORD_20261109.md` | 20 | 敘述改為「由環境變數提供」，不再保存明文 |
+| `EXECUTION_RECORD_20261109.md` | 48, 207, 564, 569, 574 | URL 內密碼 → `${ALETHRA_TEST_ISOLATED_PASSWORD}` |
+| `EXECUTION_RECORD_20261109.md` | 559 | `CREATE USER … WITH PASSWORD '<plaintext>'` → `'${ALETHRA_TEST_ISOLATED_PASSWORD}'`；同段 heredoc 由 `<< 'SQL'` 改為 `<< SQL`，否則該變數不會展開 |
+
+驗證：`git grep -c 'test_isolated_pwd' -- .` → 0 筆（tracked 工作區全數移除）。
+
+### 2. `postgres:postgres@…` 硬編碼連線字串（預設開發 superuser 對）
+
+| 檔案 | 行 | 替代方式 |
+|---|---|---|
+| `backend/app/api/admin.py` | 71, 94, 104 | 改讀 `get_settings().database_url`（原為含憑證預設值的 `os.environ.get`） |
+| `backend/app/api/paper_trading.py` | 122, 150, 193, 240, 289 | 同上 |
+| `backend/app/config.py` | — | `database_url` 預設值改為不具憑證的佔位字串 |
+| `backend/tests/test_ownership_integration.py` | 10 | 檔首執行範例 → `${POSTGRES_PASSWORD}` |
+| `start_acceptance_env.sh` | 10, 22 | → `${POSTGRES_PASSWORD:?…}`（未設定即失敗，fail-closed） |
+| `README.md` | 100 | → `${POSTGRES_PASSWORD}` |
+| `ENVIRONMENT_VERIFICATION_REPORT.md` | 38, 163 | → `${POSTGRES_PASSWORD}` |
+| `FINAL_HANDOFF.md` | 364 | docker `-e POSTGRES_PASSWORD` 及 migration URL → `${POSTGRES_PASSWORD:?…}` / `${POSTGRES_PASSWORD}` |
+
+### 3. 本輪 diff 的秘密掃描
+
+`git diff -U0` 的新增行經 `(password|secret|token|api[_-]?key|PRIVATE KEY|ghp_|sk-|AKIA)` 比對後僅餘三筆命中，皆為佔位樣式或環境變數引用（`${POSTGRES_PASSWORD:?…}`、`postgresql://USER:PASSWORD@localhost:5432/DB` 的使用說明），**本輪未新增任何秘密字面值**。
+
+### 4. 已盤點但「未」修改的項目（需 owner 判定）
+
+| 項目 | 位置 | 分類與理由 |
+|---|---|---|
+| `<acceptance JWT 簽金鑰字面值：len=44、sha256[:10]=6edfc67155>`（原紀錄曾直接写出該字面值，本輪入版控前改為雜湊引用；完整路徑計數見本節 §7 更正） | `start_acceptance_env.sh:23`、`execute_journey_b_worker.sh:23`、`verify_data_persistence.sh:92`、`verify_quota_persistence.sh:123`、`NORMAL_RUNTIME_EVIDENCE.md:43` | 名稱標示為 acceptance-test 專用，屬本機一次性堆疊的簽金鑰；已隨公開 repo 外洩。**是否仍有非本機實例使用同一字面值：UNKNOWN**（Docker daemon 未運行、:8100 堆疊未運行，無法核對）。未擅自改動這 5 個檔案：替換會使既有 token 全部失效，屬影響產品狀態的動作。 |
+| `postgres:postgres@db:5432/…` | `docker-compose.yml:27`、`docker-compose.acceptance.yml:29`、`docs/minimal-ci-spec.md:255` | Compose 於本機新建的暫存容器所用官方預設憑證，非既存系統的秘密；改動會使 CI／acceptance 配方無法重現。維持原樣並披露。 |
+| `postgres:postgres@127.0.0.1:5434/alethra_e2e*` | `e2e_fullstack.py:32`、`e2e_legacy_upgrade.py:22,51` | 同上：僅連往本機暫存 e2e 容器。維持原樣並披露。 |
+| `test123456`（demo 閉環註冊／登入 payload） | 本檔 140、144 行 | 本機 demo 測試用合成帳密（`test@example.com`），非真實帳號憑證，保留以維持紀錄可追跡。 |
+
+### 5. 待批准
+
+1. **輪換 `alethra_test` 角色密碼**：影響 `alethra_test_isolated_20261109`（DB B）的一切既有連線；需 `ALTER USER … PASSWORD`，本代理未執行。
+2. **決定 acceptance JWT 字面值處置**：保留（僅本機）或替換（使既有 token 失效）。
+3. **DB A（`ai_investment_lab_test` / `alethra_test_runtime`）不存在於本機 PG**，且其憑證無法通過 scram-sha-256 驗證；建立資料庫或重設密碼皆需另行批准。
+
+## Kraken 歷史資料契約核對與修正（2026-11-10，本節為追加，不改寫上方原始紀錄）
+
+本節只處理「Kraken contract gap 是否真的完成」。上方 11-09 的「29 tests passed」是以另一份工作複本＋未提交 diff 跑出的結果，**不得**代表 GitHub HEAD `88164290b4b0d29e59f58bd697966e89adb1e039`；該 HEAD 的 `kraken_provider.py` 內 `get_history_candle_series` 出現次數為 0（`git show 8816429:backend/app/providers/kraken_provider.py | grep -c get_history_candle_series` → `0`）。
+
+### 1. 官方文件原文（2026-11-10 取回）
+
+| 來源 | 原文重點 |
+|---|---|
+| `https://docs.kraken.com/api-reference/market-data/get-ohlc-data` | `since`＝「Return OHLC entries since the given timestamp (intended for incremental updates)」；`last`＝「ID to be used as since when polling」。**無**任何 `last="0"` 官方特殊語意記載。 |
+| `https://docs.kraken.com/exchange/guides/general/historical-data` | 「Maximum 720 candles per call. Daily candles (`interval=1440`): ~720 days (~2 years) per call.」；「Kraken does not provide a bulk historical data dump or websocket replay service.」 |
+
+文件只講「每次呼叫上限 720」，**未**承諾可用 `since` 往回翻出更深歷史；實際可取得範圍以下列實測為準。
+
+### 2. 對真實 venue 的唯讀實測（走產品程式路徑，非 fake transport）
+
+`/0/public/OHLC`，`pair=XBTUSD`，`interval=1440`，僅 GET、未寫入任何資料庫：
+
+| 日期 | `since` 要求 | 傳回列數 | 首列 | 末列 | `last` |
+|---|---|---|---|---|---|
+| 2026-11-09 | 2020-01-01 | 721 | 2024-11-14 | 2026-11-09 | — |
+| 2026-11-10 | 2020-01-01 | 721 | **2024-11-20** | 2026-11-10 | `1794182400`＝2026-11-09T00:00Z |
+| 2026-11-10 | 2023-01-01 | 721 | 2024-11-20 | 2026-11-10 | 同上 |
+| 2026-11-10 | 2024-11-15 | 721 | 2024-11-20 | 2026-11-10 | 同上 |
+| 2026-11-10 | 2025-06-01（中段） | 528 | 2025-06-01 | 2026-11-10 | — |
+
+三項結論：
+
+1. **擱架是滾動的**：經過 6 天，架頭由 2024-11-14 前進為 2024-11-20；較舊的 `since` 只是篩選，**不會**把擱架挖深。
+2. **整架回應是 721 列**＝720 根已收盤＋1 根仍在形成，比文件字面的「720 candles per call」多一根。
+3. **`last` 指的是最新「已收盤」區間**，不是回應裡最新的那一列。因此把 `last` 當 `since` 送回去，下一頁會合理地**重新供應比手邊最新列更舊的那根已收盤 K 線**。
+
+### 3. 由實測發現的真實缺陷（修正前）
+
+以產品路徑直連 `api.kraken.com`（`KrakenProvider()` 空建構子＝`HttpxKrakenTransport`＋`AllowAllBudgetGate`）：
+
+```text
+KrakenApiError: Kraken page for CRYPTO:KRAKEN:BTC-USD went backwards:
+2026-11-09T00:00:00+00:00 after 2026-11-10T00:00:00+00:00
+```
+
+根因：`_merge_page` 以 `seen[-1]`（手邊最新列，其實是「仍在形成」的那根）作為回退基準，於是**每一次真實的兩頁抓取都會被自己拒絕**。離線測試用的人造路由把 `last` 設成「最後一列的時間戳」，恰好掩蓋了此形狀，所以 35 項綠燈並不代表 venue 可用——正是「不得將測試 fixture 的行為當成交易所保證」。
+
+### 4. 修正內容（`backend/app/providers/kraken_provider.py`）
+
+* `_merge_page` 改為以**該頁實際回應的 `since` 游標**（`not_before`）作回退基準，並另設**頁內單調遞增**檢查；`seen[-1]` 基準移除。
+* 新增 `_cursor_instant()` 把 `since` 解析為瞬間；`since="0"`（抓取整架模式）解析為「無基準」。
+* 內容衝突拒絕只套用在**已收盤**區間：重複的已收盤列若 OHLCV 不同 → `KrakenApiError("Kraken returned conflicting content for closed bar …")`，不選邊；仍在形成的區間（`open_time > now - interval`）允許內容變動，保留第一次讀到的值，且 `build_series` 本來就不把它放進 `completed`。
+* 兩處呼叫點（`get_history_candle_series`、`get_candle_series_paginated`）都傳入 `not_before=self._cursor_instant(since_cursor)` 與 `forming_from=now - timedelta(minutes=interval_minutes)`；`get_history_candle_series` 的時鐘讀取併為一次，使合併基準與 `build_series` 基準為同一瞬間。
+* `MAX_OHLC_ROWS` 上方註解改正為實測形狀（720 根已收盤＋1 根形成＝721 列；`last` 指已收盤區間）。
+
+### 5. 驗證（同一工作目錄、同一直譯器、同一檔）
+
+執行環境：`/Users/tommylam0915/Documents/Qoder/2026-10-11/d705b961/backend`，`.venv/bin/python`＝Python 3.12.3（含 pytest），`app.providers.kraken_provider.__file__` 經 `inspect` 核對為本工作複本的 `backend/app/providers/kraken_provider.py`（非已安裝副本）。
+
+| 命令 | Raw summary | Exit |
+|---|---|---|
+| `TEST_MODE=true .venv/bin/python -m pytest -q tests/test_kraken_provider_offline.py` | `39 passed, 74 warnings in 8.97s` | 0 |
+| `… pytest -q … tests/test_kraken_provider_offline.py tests/test_crypto_api.py tests/test_crypto_instrument_catalog.py tests/test_crypto_instrument_identity.py tests/test_crypto_paper_api.py tests/test_crypto_paper_service.py tests/test_strategy_lab.py tests/test_upstream_budget.py` | `161 passed, 1 skipped, 726 warnings in 52.29s` | 0 |
+| `.venv/bin/python /tmp/live_harvest_probe.py`（唯讀直連 venue） | daily：`completed=720 forming=True first=2024-11-20T00:00:00+00:00 last_completed=2026-11-09T00:00:00+00:00 forming=2026-11-10T00:00:00+00:00 duplicates=0 gaps=0 off_grid=0 integrity_ok=True`；4h：`completed=720 … first=2026-07-13T04:00:00+00:00 integrity_ok=True` | 0 |
+
+新增的 4 項離線測試以**實測頁形狀**（`venue_route`：720 根已收盤＋1 根形成，`last` 指名已收盤區間）驗證：抓取可走完而不被拒絕、形成中區間跨頁變動不視為衝突、被重供的**已收盤**區間內容不同仍拒絕、分頁入口在同一形狀下收齊 720＋1。
+
+**突變檢查（證明守衛確實出力）**：把兩處呼叫點的 `not_before`／`forming_from` 強制改為 `None` 後重跑該 6 項 → `2 failed, 4 passed`（`test_forming_bucket_may_change_between_pages_without_being_a_conflict`、`test_walk_refuses_a_page_that_runs_backwards`），隨後還原。
+
+### 6. 本節「未」驗證（明確劃界）
+
+1. **長歷史能力：NOT VERIFIED**。測試中 2160 根（3 頁）的走查使用 `deep_shelf_route`，該路由自檔首註解即標明「This shape is NOT Kraken」；它通過只證明守衛邏輯可用，**不**證明 venue 能提供 720 根以上的歷史。
+2. **`since`/`last` 的周界與 `last="0"`**：官方文件無 `last="0"` 語意記載，實測亦未觸發；程式對 `last` 只判斷「是否向前移動」，不推測特定值意義。
+3. 本節全程唯讀：未寫入任何資料庫、未提交、未推送。Kraken 契約缺口在**本機 diff 層級已修正並經 venue 實測通過**，但在 GitHub 上驗證到含此修正的 SHA 之前，仍不得宣稱「已完成」。
+
+## 收斂補充：提交前秘密審查、失敗測試根因與 DB A 實例核對（2026-11-10，本節為追加，不改寫上方原始紀錄）
+
+### 1. 退出碼記錄紀律
+
+先前數次把 `EXIT=$?` 写在 pipe 之後，取到的是 `tail`/`grep` 的退出碼而非命令的。本節一律改為「先導向檔案、緊接取 `$?`、再顯示」：
+
+```bash
+cmd > /tmp/out.txt 2>&1; echo "CMD_EXIT=$?"; tail /tmp/out.txt
+```
+
+本節全部數值皆以該形式取得（见下表「Exit」欄皆為命令本身之退出碼）。
+
+### 2. 2 項失敗測試：節點 ID、traceback、對照實驗與根因確定度
+
+命令與原始結果：
+
+| 命令 | Raw summary | Exit |
+|---|---|---|
+| `TEST_MODE=true .venv/bin/python -m pytest -q tests/test_safety_gate_negative.py` | `2 failed, 11 passed, 49 warnings in 9.45s` | 1 |
+| `TEST_MODE=true ALETHRA_TEST_DB="postgresql://alethra_test_runtime@localhost:5432/ai_investment_lab_test?host=/tmp" PGPASSWORD="not-a-real-secret-rotated" .venv/bin/python -m pytest -q tests/test_safety_gate_negative.py -k "accepts_matching_env_vars or aliases_single_env_var"` | `Error: Failed to connect to database: connection to server on socket "/tmp/.s.PGSQL.5432" failed: FATAL: password authentication failed for user "alethra_test_runtime"`（收集階段即中止） | 4 |
+
+失敗節點 ID（完整）：
+
+1. `tests/test_safety_gate_negative.py::TestEnvVarConflict::test_conftest_accepts_matching_env_vars`（斷言於 :117）
+2. `tests/test_safety_gate_negative.py::TestEnvVarConflict::test_conftest_aliases_single_env_var`（斷言於 :146）
+
+traceback 摘要（兩者同形，失敗發生在測試派生的子直譯器 `import tests.conftest` 階段，非斷言資料錯誤）：
+
+```text
+backend/tests/conftest.py:112   verify_test_database(_TEST_DB_PATH)
+backend/test_safety_gate.py:246 TestDatabaseGateError: Failed to connect to database:
+    connection to server on socket "/tmp/.s.PGSQL.5432" failed: fe_sendauth: no password supplied
+RuntimeError: SAFETY: test database target rejected
+```
+
+根因（分兩層，附確定度）：
+
+* **直接原因（已證明）**：`backend/.env.test:7` 的密碼段寫成 `${ALETHRA_TEST_RUNTIME_PASSWORD}`（dotenv 佔位引用）。該環境變數未設定時展開為空字串，因此送出「無密碼」連線 → `fe_sendauth: no password supplied`。第二條命令補上 `PGPASSWORD` 後，同一目標改報 `password authentication failed`，證明缺的就是这一段注入，而不是測試邏輯。
+* **根本原因（已證明）**：目前監聽 5432 的 Homebrew cluster 沒有 role `alethra_test_runtime`（伺服器 log：`DETAIL: Role "alethra_test_runtime" does not exist.`）。因此**任何**密碼值都無法使這 2 項通過；此為測試目標（DB A）缺席，非本輪程式缺陷。
+* **與本輪 diff 無關（已由路徑證明）**：traceback 只經過 `tests/conftest.py` 與 `test_safety_gate.py`，未觸及本輪修改的 `backend/app/config.py`。以同一工作樹重跑其他 11 項仍通過，失敗集合在修改前後一致。
+
+`failed` 仍記為 failed、`skipped` 仍記為 skipped，未改標為 passed。
+
+### 3. 官方文義與 probe 並陳（不收窄也不擴大宣稱）
+
+* 官方原文（2026-11-10 自 `docs.kraken.com` 兩页取回，原文見上一節 §1）：`since` 為增量輪詢參數、`last` 為「ID to be used as since when polling」、以及「**Maximum 720 candles per call**」。
+* 該句的字面範圍僅約束**單次呼叫的回傳筆數**；官方**未**在其中承諾「可無限回溯至任何歷史深度」。因此本記錄不把 per-call 上限推論為長歷史能力。
+* probe 實測（上一節 §2）只證明：單次回傳 721 列（720 根已收盤＋1 根仍在形成）、`last` 指名最新**已收盤**區間、擱架為滾動（6 天內架頭 2024-11-14 → 2024-11-20）。
+* 結論：**目前已實測者僅為擱架範圍**；**長歷史深度＝NOT VERIFIED**。測試中 2160 根的走查使用 `deep_shelf_route`（檔首註解自行標明「This shape is NOT Kraken」），僅證明演算法契約，不證明 venue 能力。
+
+### 4. 提交前秘密審查（方法、結果、以及一項撤回）
+
+方法（只輸出雜湊與形態，絕不輸出值）：`git ls-files` 全數掃描工作樹，另以 `git show HEAD:<path>` 掃描已提交版本；比對 DB-URL 密碼段與 `*SECRET* / *KEY* / *TOKEN* / *PASSWORD*` 指派右側；對每個值印出 `sha256[:10]`、長度與形態標籤（ENVREF／TOKEN-CHARSET／ELIDED／SYNTHETIC-WORD／OPAQUE-CRED-SHAPE）。
+
+* HEAD 已公開發布的 credential 形態字面值：**361** 個（公開 repo 的既存狀態，非本輪造成）。
+* 本輪工作樹**未新增任何未見於 HEAD 的真實憑證字面值**；被標記的新增值經形態核對全數為佔位／引用／合成值（`${POSTGRES_PASSWORD:?…}`、`user:pass`、`not-a-real-secret`、省略號等）。
+* 扩散追蹤（同一字面值由 N 個檔案增至 N＋k 個）中，唯一需要判定的是 `sha256[:10]=4f767f043d len=32`。
+
+**撤回先前一項宣稱**：本輪曾向使用者表示「`backend/.env.test` 已被追蹤且含真實 DB 憑證字面值」。實測推翻：該檔第 7 行的密碼段為 `${ALETHRA_TEST_RUNTIME_PASSWORD}`（長度 32 的 dotenv 佔位引用），且此形態在 HEAD `88164290b4b0d29e59f58bd697966e89adb1e039` 已存在。故 `.env.test` 不含外洩密碼；此發現同時就是上第 2 節直接原因的來源。同理，本輪對 `backend/GATE1_TEST_BATCH_PROPOSAL.md:203` 的修改是把原本的 8 字元字面佔位改為同一個 `${ALETHRA_TEST_RUNTIME_PASSWORD}` 引用，屬去敏感化，而非擴散秘密。
+
+刻意不 staging 的項目（維持未追蹤）：`.qoder/`、`acceptance-results.json`、`backend/tests/test_c1_c4_safety_cases.py.bak`、`.bak2`、`package-lock.json`。兩個 `.bak` 內含既存測試合成密碼字面值（`sha256[:10]=724936cd9b len=12`，與 HEAD 已公開發布者同一值）及一組 bcrypt 雜湊（`6fadf95193 len=58`），屬本輪編輯殘留，將另行清理，不進入任何提交。
+
+### 5. DB A 存在性：實例核對（修正本檔第 640 行）
+
+第 640 行原文：「**DB A（`ai_investment_lab_test` / `alethra_test_runtime`）不存在於本機 PG**」。此陳述過度概括，現予修正（原句保留，不改寫）：
+
+> 正確表述：**不存在於目前監聽 `127.0.0.1:5432` 的 Homebrew cluster**；其原所在實例（Docker `postgres:16-alpine`，`docker-compose.yml` 以 `5432:5432` 發布）自本輪起未運行，狀態為 **UNREACHABLE（實例未運行）**，而非「已被刪除」。
+
+證據與機制：
+
+| 項目 | 證據 |
+|---|---|
+| 目前 5432 只有一個實例 | `lsof`：pid 1247 同時監聽 `127.0.0.1:5432` 與 `[::1]:5432`；`ps` 對應 Homebrew `postgres` |
+| 該 cluster 只有一個使用者 DB | `PGDATA=/opt/homebrew/var/postgresql@15`（`PG_VERSION` birth 2024-05-10）；`base/` 僅 4 個目錄＝OID 1／4／5（template1／postgres／template0）＋單一 `16419` |
+| 2026-11-07 當天該 cluster 並未運行 | 伺服器 log：`2026-11-06 17:52:46 database system is shut down` → 下一條 `ready to accept connections` 為 `2026-11-09 02:24:09`，其間無在線期間 |
+| 故 11-07 的 `\l` 出自另一實例 | `ENVIRONMENT_VERIFICATION_REPORT.md:186-200` 以 `psql -h /tmp -p 5432` 取得；`/tmp` 作為 socket 目錄在容器內同樣成立（容器內 port 亦為 5432），與 `docker-compose.yml` 的 `POSTGRES_DB: ai_investment_lab`、`5432:5432` 相符 → **「同 port、同 socket 字串」不等於同一實例**，此即先前報告與目前報告表面矛盾的真正機制 |
+| 該 cluster 對 DB A 的唯一記錄 | `2026-11-10 10:56:38 FATAL: database "ai_investment_lab_test" does not exist`（全 log 仅此 1 次） |
+
+尚未解決的異常（誠實標示，不以此推論）：同一秒 pid 5221 執行 `select version_num from alembic_version` 並回報 `ERROR: relation "alembic_version" does not exist`——通過連線驗證才會到達此階段，代表 10:56:38 存在一個能通過 scram 的連線。本代理以可見檔案內的憑證無法重現（根 `.env` 之 `postgres` 組合實測 `FATAL: password authentication failed for user "postgres"`）。故結論只到「**本代理找不到可用的管理身分**」，不到「本機不存在可用的管理身分」。
+
+角色存在性的差分證據（不依賴推測）：log 對 `test_isolated_pwd_20261109`、`nobody`、`alethra_test_runtime` 皆附 `DETAIL: Role "…" does not exist.`；對 `alethra_test` 僅有 `password authentication failed` ＋ `DETAIL: Connection matched pg_hba.conf line 91/93`，**無** role-absent detail。→ role `alethra_test` 在此 cluster **存在**，惟已公開發布的字面值不再匹配（此即輪換提案的依據）。
+
+`pg_hba.conf` 現況（非註解行全數）：`local all all scram-sha-256`、`host all all 127.0.0.1/32 scram-sha-256`、`host all all ::1/128 scram-sha-256`（另 3 條 replication 同形）；無 `trust`／`peer` 條目；檔案 mtime `2026-11-09 16:50`，與 log 中 16:50:30→16:50:48 的兩次連續重啟同時點。
+
+### 6. 提交 C 的實際行為變更（非純 docs commit）
+
+使用者要求記錄 `config`／`main`／`admin`／`paper_trading` 的實際行為變更。逐檔核對 `git diff` 後的結果：
+
+| 檔案 | 改動 | 實際行為差異 |
+|---|---|---|
+| `backend/app/config.py:36` | 欄位預設值由可連線形狀的 `postgresql://postgres:postgres@localhost:5432/ai_investment_lab` 改為佔位 `postgresql://user:pass@localhost:5432/dbname` | **有**：`DATABASE_URL` 未設定時，`Settings.database_url` 不再指向一個真實存在的本機 DB 名稱，而在建立 engine 時連線失敗（fail closed）。屬執行期配置預設值變更，非註解變更 |
+| `backend/app/main.py:69` | `os.environ.get('DATABASE_URL', '…postgres:postgres…')` → `settings.database_url` | **有**：讀取路徑由「環境變數＋內嵌 fallback」改為單一 `Settings` 來源；隨之移除同函式內已成死碼的 `import os`（`grep "^import os\|    import os\|os\.environ" app/main.py` → EXIT=1，無殘留） |
+| `backend/app/api/admin.py:71,94,104` | 3 個端點（手動觸發採集、採集歷史、啟動排程器）同上改為 `get_settings().database_url` | **有**：這 3 個 admin 端點在 `DATABASE_URL` 未設定時，傳入下游 service 的 URL 由 `postgres:postgres@…/ai_investment_lab` 改為佔位值 → 失敗點前移且不再默默指向本機 DB。同檔 `AUTO_COLLECTION_ENABLED`／`_INTERVAL_HOURS` 仍讀 `os.environ`（未變更） |
+| `backend/app/api/paper_trading.py:122,150,193,240,289` | 5 個端點（建立組合、查詢狀態、日報、歷史回放、停止運行）改為 `get_settings().database_url` | **有**：paper trading 寫路徑的 DB 目標改由 `Settings` 決定；`DATABASE_URL` 未設定時不再 fallback 至 `ai_investment_lab`。同檔 `LIVE_TRADING_SYMBOLS`／`_INTERVAL`／`_CAPITAL`（:447-449）仍讀 `os.environ`（未變更，故 `import os` 保留） |
+
+因此提交 C 的範圍是「移除硬編碼憑證」**加上**「執行期 DB URL 解析來源統一」，不得歸類為文件提交。實測（`env -u DATABASE_URL .venv/bin/python -c "from app.main import app; …"`）：`APP_IMPORT_OK routes= 320`、`DB_URL_SHAPE True`、`IMPORT_EXIT=0`——即佔位預設不會在 import 期崩潰，失敗延後到實際連線；此點對部署含義已在上表標明。
+
+另核對：移除死碼後 `app/main.py`、`app/api/admin.py`、`app/api/paper_trading.py`、`app/config.py` 通過 `ast.parse`（`AST_EXIT=0`），`tests/test_kraken_provider_offline.py` 重跑 `39 passed`（`PYTEST_EXIT=0`）。
+
+### 7. 更正（追加，不改寫第 631 行原始紀錄）
+
+本檔第 631 行將 acceptance JWT 字面值列為 **5 個檔案**。以 `git ls-files` 全庫逐一核對同一字面值後，實為 **8 個追蹤檔案／10 次出現**，原列表遺漏了容器側實際注入點與規格文件：
+
+| 檔案 | 出現次數 | 本輪是否修改 | 性质 |
+|---|---|---|---|
+| `docker-compose.acceptance.yml:30` | 1 | clean | **env 注入點**（acceptance backend 容器）——原列表的最大遺漏 |
+| `start_acceptance_env.sh:23` | 1 | MODIFIED（僅 DATABASE_URL 行） | env 注入點 |
+| `execute_journey_b_worker.sh:23` | 1 | clean | env 注入點 |
+| `verify_data_persistence.sh:92` | 1 | clean | env 注入點 |
+| `verify_quota_persistence.sh:123` | 1 | clean | env 注入點 |
+| `NORMAL_RUNTIME_EVIDENCE.md:43` | 1 | clean | 證據文件引用 |
+| `docs/minimal-ci-spec.md:256,408` | 2 | clean | 規格文件；:408 明文寫「No secrets required: JWT secret is hardcoded in compose file」 |
+| `EXECUTION_RECORD_20261109.md:631` | 1 | MODIFIED | **本紀錄自身引用了該字面值**——若此檔入版控，字面值會再次進入歷史；提交前需決定是否以佔位符取代 |
+
+全部 10 次皆為 **HS256 簽金鑰**（`JWT_SECRET_KEY`／compose `JWT_ALGORITHM: HS256`），非已簽發的 bearer token，亦非測試 fixture token。
+
+相鄰的第二類硬編碼 DB 憑證（同一輪盤點中一併發現，第 631 行未涵蓋）：`postgresql://test:test@localhost:5434/alethra_acceptance` 出現在 `backend/tests/test_quota_concurrency.py`、`execute_journey_b_worker.sh:22`、`verify_data_persistence.sh:91`、`verify_quota_persistence.sh:122`、`NORMAL_RUNTIME_EVIDENCE.md:42` 共 5 個檔案。目前 `lsof -nP -iTCP:5434 -sTCP:LISTEN` 無監聽（`LSOF_EXIT=1`、0 列），即該 acceptance DB 未運行，因此這些字面值目前無可用的連線目標；「是否仍有非本機實例使用」維持 **UNKNOWN**。
+
+### 8. 本節未驗證／未執行
+
+1. 未 commit、未 push、未輪換任何憑證、未建立或刪除任何資料庫、未修改 `pg_hba.conf`、未重啟服務。
+2. Docker 卷冊內容未核對（daemon 未運行），因此「DB A 在該卷冊中仍完整」為 **NOT VERIFIED**。
+3. OID `16419` 對應哪個 DB 名稱：NOT VERIFIED（需一次通過驗證的唯讀連線）。
+4. 證據檔案為本機暫存（`/tmp`），非 repo 產物：`sg_baseline.txt` `558f950b36999272`、`sg_withpw.txt` `f756dd2fc6548482`、`secret_delta.txt` `1b3dbf9f94742b4c`、`shape.txt` `39c9abbc8674bb29`、`pg_readonly.out` `f3e47efd3bb3a74a`、`cred_scope.txt` `4e99c9e6e56e809e`、`secinv_worktree.txt` `b42eb5029098460d`、`kraken_final.txt` `86f18603a0784b4b`、`guard_final.txt` `b5778aab8b262607`、`failed_two.txt` `5e5fbdb2cf567a6e`、`live_harvest_probe.py` `e14d2861c51bc600`（皆為 sha256 前 16 字元）。

@@ -19,7 +19,7 @@ sleep 5
 echo "2. Running database migrations..."
 cd backend
 source venv/bin/activate
-export DATABASE_URL="postgresql://postgres:postgres@localhost:5433/ai_investment_lab_acceptance"
+export DATABASE_URL="postgresql://postgres:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be exported before starting the acceptance stack}@localhost:5433/ai_investment_lab_acceptance"
 export JWT_SECRET_KEY="acceptance-test-secret-minimum-32-chars-long"
 export JWT_ALGORITHM="HS256"
 export AI_PROVIDER="mock"

@@ -7,7 +7,7 @@ Calls actual _verify_run_ownership() through the API — no SQL copies.
 Uses the disposable test database (ai_investment_lab_test), NOT production.
 
 Run with:
-    ALETHRA_TEST_DB=postgresql://postgres:postgres@localhost:5432/ai_investment_lab_test \
+    ALETHRA_TEST_DB=postgresql://postgres:${POSTGRES_PASSWORD}@localhost:5432/ai_investment_lab_test \
     pytest tests/test_ownership_integration.py -v
 """
 
