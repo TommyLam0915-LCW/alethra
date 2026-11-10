@@ -15,6 +15,7 @@ from app.engine.strategies import (
 )
 from app.engine.metrics import compute_metrics, build_benchmark_equity_curve, calc_time_in_market
 from app.engine.attribution import annotate_and_attribute
+from app.engine import annualization
 from app.engine import exit_rules
 from app.engine.fill_math import quantity_precision_for
 from app.engine.intraday import INTRADAY_TIMEFRAMES
@@ -574,6 +575,11 @@ def run_backtest(
     trading_days = len(ohlcv)
     trading_dates = [row["date"].strftime("%Y-%m-%d") for _, row in ohlcv.iterrows()]
 
+    # Keyed on the asset the run traded and the dates it traded on, so the sample
+    # length and the observation frequency come from this dataset rather than from
+    # an equity-trading-day constant that every market inherited.
+    basis = annualization.basis_for_series(asset_ids[0], trading_dates)
+
     benchmark_equity = []
     benchmark_id = strategy_spec.get("benchmark_id")
     if benchmark_id and benchmark_id in ohlcv_data:
@@ -602,7 +608,17 @@ def run_backtest(
         time_in_market_pct=time_in_market_pct,
         attribution=attribution,
         trading_dates=trading_dates,
+        basis=basis,
     )
+
+    if not basis.available:
+        warnings.append(f"Annualized metrics are unavailable for this run: {basis.reason}")
+    elif basis.elapsed_years is not None and basis.elapsed_years < annualization.MIN_YEARS_FOR_ANNUALIZATION:
+        warnings.append(
+            f"Sample spans {round(basis.elapsed_years, 4)} years, below the "
+            f"{annualization.MIN_YEARS_FOR_ANNUALIZATION}-year minimum under "
+            f"{basis.method_version}, so annualized return and volatility are not displayed."
+        )
 
     if trading_days < 30:
         warnings.append(f"Short sample period: only {trading_days} trading days.")
@@ -824,6 +840,28 @@ def _build_methodology_summary(
             "proceeds are net of its commission; slippage is already in the execution price, "
             "so costs are never counted twice."
         ),
+        "annualization": {
+            "method_version": annualization.METHOD_VERSION,
+            "rule": (
+                "Annualized return compounds the sample over the elapsed years between its first "
+                "and last observation; annualized volatility scales the per-observation standard "
+                "deviation by sqrt(observations per year). Both rates come from the market calendar "
+                "in app/providers/instruments.py plus the grain and dates of the series the run "
+                "priced against, so a US daily bar and a crypto daily bar annualize differently; "
+                "no market inherits an equity-trading-day constant, and an unresolvable frequency "
+                "or window yields an unavailable metric instead of an assumed one."
+            ),
+            "sample_gate": (
+                f"samples spanning under {annualization.MIN_YEARS_FOR_ANNUALIZATION} elapsed years "
+                "report annualized return and volatility as unavailable, because short-period "
+                "annualization can exaggerate apparent performance"
+            ),
+            "basis": (
+                "recorded per run under metrics.annualization, including market, frequency, "
+                "observations_per_year, elapsed_years, coverage and whether the window sat inside "
+                "the calendar's declared coverage"
+            ),
+        },
         "journal_field_semantics": {
             "actor": "Who produced the fill. Engine fills are recorded as 'strategy'; human and "
                       "api_key actors appear on paper orders, not in a backtest.",

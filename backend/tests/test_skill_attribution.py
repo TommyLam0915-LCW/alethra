@@ -23,10 +23,10 @@ from app.models.strategy_study import StrategyStudyRun, StrategyStudyTrade
 from app.models.user import User
 from app.services.skill_attribution import (
     _compute_group_metrics,
+    _group_basis,
     _max_drawdown_pct,
     _profit_factor,
     _sharpe_ratio,
-    _trades_per_year,
     skill_attribution,
     skill_heatmap_data,
 )
@@ -192,49 +192,99 @@ def _auth_headers(client, user_id):
 # Unit tests for metric helpers
 # ---------------------------------------------------------------------------
 
-class TestTradesPerYear:
-    def test_daily(self):
-        assert _trades_per_year(1440) == 252
+class TestGroupBasis:
+    """The frequency a group is annualized with is read off the trades, not the filter."""
 
-    def test_4h(self):
-        assert _trades_per_year(240) == 252 * 6
+    def _trade(self, instrument, interval, pnl="10"):
+        return {
+            "net_pnl": Decimal(pnl),
+            "instrument_id": instrument,
+            "interval_minutes": interval,
+        }
 
-    def test_1h(self):
-        assert _trades_per_year(60) == 252 * 24
+    def test_crypto_daily_uses_its_own_venue_cadence(self):
+        basis = _group_basis([self._trade(INSTRUMENT_BTC, 1440)])
+        assert basis.available is True
+        assert basis.market == "CRYPTO"
+        # 365.25 quoted days a year, not the 252 equity sessions this used to assume.
+        assert basis.observations_per_year == 365.25
 
-    def test_15m(self):
-        assert _trades_per_year(15) == 252 * 96
+    def test_intraday_grain_multiplies_the_same_market(self):
+        for interval, expected in ((60, 365.25 * 24), (15, 365.25 * 96), (5, 365.25 * 288)):
+            basis = _group_basis([self._trade(INSTRUMENT_BTC, interval)])
+            assert basis.observations_per_year == expected
 
-    def test_none_defaults_to_daily(self):
-        assert _trades_per_year(None) == 252
+    def test_equity_daily_is_derived_from_its_holiday_calendar(self):
+        basis = _group_basis([self._trade("US:NASDAQ:AAPL", 1440)])
+        assert basis.available is True
+        assert basis.market == "US"
+        assert 240 < basis.observations_per_year < 260
 
-    def test_zero_defaults_to_daily(self):
-        assert _trades_per_year(0) == 252
+    def test_pooled_grains_have_no_single_frequency(self):
+        metrics = _compute_group_metrics([
+            self._trade(INSTRUMENT_BTC, 1440, "10"),
+            self._trade(INSTRUMENT_BTC, 60, "20"),
+            self._trade(INSTRUMENT_BTC, 60, "-5"),
+        ])
+        record = metrics["annualization"]
+        assert record["available"] is False
+        assert "bar grains" in record["reason"]
+        assert metrics["sharpe_ratio"] is None
+
+    def test_pooled_markets_have_no_single_frequency(self):
+        metrics = _compute_group_metrics([
+            self._trade(INSTRUMENT_BTC, 1440, "10"),
+            self._trade("US:NASDAQ:AAPL", 1440, "20"),
+            self._trade("US:NASDAQ:AAPL", 1440, "-5"),
+        ])
+        record = metrics["annualization"]
+        assert record["available"] is False
+        assert "pools 2 markets" in record["reason"]
+        assert metrics["sharpe_ratio"] is None
+
+    def test_unknown_grain_refuses_instead_of_assuming_daily(self):
+        basis = _group_basis([self._trade(INSTRUMENT_BTC, None)])
+        assert basis.available is False
+        assert basis.observations_per_year is None
 
 
 class TestSharpeRatio:
+    # The rate the seeded crypto daily rows actually annualize with.
+    CRYPTO_DAILY = 365.25
+
     def test_known_values(self):
         # 4 trades: [10, 20, -5, 15] -> mean=10, stdev=sqrt(((0+100+225+25)/4))=sqrt(87.5)
         pnls = [Decimal("10"), Decimal("20"), Decimal("-5"), Decimal("15")]
         mean = Decimal("10")
         variance = (Decimal("0") + Decimal("100") + Decimal("225") + Decimal("25")) / Decimal("4")
         stdev = variance.sqrt()
-        expected = mean / stdev * Decimal(str(math.sqrt(252)))
-        result = _sharpe_ratio(pnls, 252)
+        expected = mean / stdev * Decimal(str(math.sqrt(self.CRYPTO_DAILY)))
+        result = _sharpe_ratio(pnls, self.CRYPTO_DAILY)
         assert result is not None
         assert abs(result - expected) < Decimal("0.001")
 
+    def test_scales_by_sqrt_of_the_observation_frequency(self):
+        pnls = [Decimal("10"), Decimal("20"), Decimal("-5"), Decimal("15")]
+        daily = _sharpe_ratio(pnls, self.CRYPTO_DAILY)
+        hourly = _sharpe_ratio(pnls, self.CRYPTO_DAILY * 24)
+        assert float(hourly / daily) == pytest.approx(math.sqrt(24), rel=1e-12)
+
+    def test_unknown_frequency_returns_none(self):
+        pnls = [Decimal("10"), Decimal("20"), Decimal("-5"), Decimal("15")]
+        assert _sharpe_ratio(pnls, None) is None
+        assert _sharpe_ratio(pnls, 0) is None
+
     def test_single_trade_returns_none(self):
         pnls = [Decimal("100")]
-        assert _sharpe_ratio(pnls, 252) is None
+        assert _sharpe_ratio(pnls, self.CRYPTO_DAILY) is None
 
     def test_all_identical_returns_none(self):
         pnls = [Decimal("10"), Decimal("10"), Decimal("10")]
-        assert _sharpe_ratio(pnls, 252) is None
+        assert _sharpe_ratio(pnls, self.CRYPTO_DAILY) is None
 
     def test_zero_stdev_returns_none(self):
         pnls = [Decimal("5"), Decimal("5"), Decimal("5"), Decimal("5")]
-        assert _sharpe_ratio(pnls, 252) is None
+        assert _sharpe_ratio(pnls, self.CRYPTO_DAILY) is None
 
 
 class TestMaxDrawdown:

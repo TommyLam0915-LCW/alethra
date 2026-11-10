@@ -3,6 +3,12 @@ from typing import Dict, List, Any, Optional
 import pandas as pd
 import numpy as np
 
+from app.engine.annualization import (
+    Basis,
+    annualized_return_pct,
+    annualized_volatility_pct,
+    unavailable,
+)
 from app.engine.attribution import TIME_OF_DAY_UNAVAILABLE, day_of_week_breakdown
 from app.engine.fill_math import size_position
 
@@ -26,7 +32,15 @@ def compute_metrics(
     time_in_market_pct: float = 0.0,
     attribution: Optional[Dict[str, Any]] = None,
     trading_dates: Optional[List[str]] = None,
+    basis: Optional[Basis] = None,
 ) -> Dict[str, Any]:
+    """Run metrics, with annualization driven entirely by ``basis``.
+
+    ``trading_days`` is the number of observations the run priced against; it is
+    reported, but it is no longer the annualization denominator. ``basis`` says
+    what one observation is and how many fit in a year; without it the annualized
+    figures are unavailable rather than computed on an assumed 252-day year.
+    """
     total_return_pct = _to_float(round((final_equity - initial_cash) / initial_cash * 100, 4)) if initial_cash > 0 else 0.0
 
     total_commissions = _to_float(round(sum(t["commission_amount"] for t in transactions), 4))
@@ -64,34 +78,30 @@ def compute_metrics(
         trading_dates=trading_dates,
     ))
 
-    years = trading_days / 252.0
-    if years >= 1.0 and total_return_pct > -100:
-        annualized = ((1 + total_return_pct / 100) ** (1 / years) - 1) * 100
-        metrics["annualized_return_pct"] = _to_float(round(annualized, 4))
-    else:
-        metrics["annualized_return_pct"] = {
-            "value": None,
-            "reason": "Sample has fewer than 252 trading days; annualized return is not displayed because short-period annualization can exaggerate apparent performance."
-        }
+    if basis is None:
+        basis = unavailable(
+            "the run supplied no annualization basis, so neither the sample length nor the "
+            "observation frequency is known",
+            observation_count=trading_days,
+        )
 
-    if trading_days >= 252 and len(daily_equity) >= 2:
-        returns = pd.Series(daily_equity).pct_change().dropna()
-        if len(returns) > 1 and returns.std() > 0:
-            daily_vol = float(returns.std())
-            annualized_vol = daily_vol * np.sqrt(252)
-            metrics["annualized_volatility_pct"] = _to_float(round(annualized_vol * 100, 4))
-        else:
-            metrics["annualized_volatility_pct"] = {
-                "value": None,
-                "reason": "Insufficient return variation"
-            }
-    else:
-        metrics["annualized_volatility_pct"] = {
-            "value": None,
-            "reason": "Sample has fewer than 252 trading days; annualized volatility is not displayed because short-period estimates have wide confidence intervals."
-        }
+    metrics["annualization"] = basis.as_dict()
+    metrics["annualized_return_pct"] = annualized_return_pct(total_return_pct, basis)
+    metrics["annualized_volatility_pct"] = annualized_volatility_pct(
+        _period_return_std(daily_equity), basis
+    )
 
     return metrics
+
+
+def _period_return_std(daily_equity: List[float]) -> float:
+    """Standard deviation of per-observation equity returns, 0.0 when unsignable."""
+    if len(daily_equity) < 2:
+        return 0.0
+    returns = pd.Series(daily_equity).pct_change().dropna()
+    if len(returns) < 2:
+        return 0.0
+    return float(returns.std())
 
 
 def calc_time_in_market(

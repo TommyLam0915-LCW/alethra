@@ -1,6 +1,7 @@
 import json
 import pytest
 from app.engine.backtest import run_backtest, compute_config_hash, ENGINE_VERSION
+from app.engine.annualization import METHOD_VERSION, MIN_YEARS_FOR_ANNUALIZATION
 from app.engine.strategies import generate_transaction
 from app.engine.metrics import compute_max_drawdown, compute_metrics, build_benchmark_equity_curve, calc_time_in_market
 from app.data.demo_data import get_demo_ohlcv, compute_dataset_checksum, get_available_assets
@@ -305,20 +306,30 @@ def test_price_change_signal_date_precedes_execution():
 
 # --- 25. annualized return unavailable for short sample ---
 def test_annualized_return_unavailable_short_sample():
-    result = run_backtest(_base_spec())
-    ann = result["metrics"]["annualized_return_pct"]
+    ann = run_backtest(_base_spec())["metrics"]["annualized_return_pct"]
     assert isinstance(ann, dict)
     assert ann["value"] is None
-    assert "252" in ann["reason"]
+    assert f"{MIN_YEARS_FOR_ANNUALIZATION}-year minimum" in ann["reason"]
+    basis = ann["annualization"]
+    # The reason quotes this sample's own span and row count, so the refusal is
+    # checkable against the data instead of resting on a bar-count constant.
+    assert f"{round(basis['elapsed_years'], 4)} years" in ann["reason"]
+    assert f"({basis['observation_count']} observations)" in ann["reason"]
+    assert basis["method_version"] == METHOD_VERSION
 
 
 # --- 26. annualized volatility unavailable for short sample ---
 def test_annualized_volatility_unavailable_short_sample():
-    result = run_backtest(_base_spec())
-    vol = result["metrics"]["annualized_volatility_pct"]
+    vol = run_backtest(_base_spec())["metrics"]["annualized_volatility_pct"]
     assert isinstance(vol, dict)
     assert vol["value"] is None
-    assert "252" in vol["reason"]
+    assert f"{MIN_YEARS_FOR_ANNUALIZATION}-year minimum" in vol["reason"]
+    basis = vol["annualization"]
+    assert f"{round(basis['elapsed_years'], 4)} years" in vol["reason"]
+    assert basis["method_version"] == METHOD_VERSION
+    # Volatility is scaled by the measured cadence, which this series has.
+    assert basis["frequency_source"] == "measured"
+    assert basis["observations_per_year"] > 0
 
 
 # --- 27. unavailable metrics are not represented as zero ---

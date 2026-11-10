@@ -25,11 +25,13 @@ Design decisions that keep the answer honest:
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, ROUND_DOWN
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+from app.engine import annualization
 from app.services.strategy_lab import LabBar
 
 RESEARCH_VERSION = "1.0.0"
@@ -147,6 +149,8 @@ class _Indicators:
     macd_signal: List[Optional[Decimal]]
     macd_hist: List[Optional[Decimal]]
     hv: List[Optional[Decimal]]  # Historical volatility (annualized)
+    hv_factor: Optional[Decimal]  # sqrt(observations per year) used to annualize hv
+    hv_basis: Dict[str, Any]  # the recorded annualization basis behind hv_factor
     atr_pct: List[Optional[Decimal]]  # ATR as percentage of close
     # MB-18: crypto-specific indicators
     open_times: List[Optional[datetime]]  # Bar open time for session detection
@@ -317,20 +321,32 @@ def prepare_indicators(bars: Sequence[LabBar], atr_window: int = DEFAULT_ATR_WIN
         if macd_line[index] is not None and macd_signal[index] is not None:
             macd_hist[index] = macd_line[index] - macd_signal[index]
 
-    # MB-17: Historical volatility (20-day annualized)
-    import math
+    # MB-17: Historical volatility, annualized on this series' own cadence.
+    # The research lane is handed bars, not an instrument, so the frequency is
+    # measured from the timestamps it actually holds: a 4h crypto series has ~6
+    # observations a day, not ~1, and a 20-bar window is not 20 days. Whatever
+    # the factor turns out to be, _sig_volatility_ratio_arb divides back out the
+    # same number, so that comparison stays paired.
+    hv_basis = annualization.measured_basis(
+        [bar.open_time for bar in bars],
+        interval_minutes=bars[0].interval_minutes if bars else None,
+    )
+    hv_opy = annualization.observations_per_year(hv_basis)
+    hv_factor = Decimal(str(math.sqrt(hv_opy))) if hv_opy else None
+
     hv: List[Optional[Decimal]] = [None] * len(bars)
-    for index in range(20, len(bars)):
-        log_returns = []
-        for offset in range(index - 19, index + 1):
-            if closes[offset - 1] > 0 and closes[offset] > 0:
-                log_ret = Decimal(str(math.log(float(closes[offset] / closes[offset - 1]))))
-                log_returns.append(log_ret)
-        if len(log_returns) == 20:
-            mean_ret = sum(log_returns, Decimal(0)) / Decimal(20)
-            variance = sum((r - mean_ret) ** 2 for r in log_returns) / Decimal(19)
-            std_dev = variance.sqrt()
-            hv[index] = std_dev * Decimal(str(math.sqrt(252)))
+    if hv_factor is not None:
+        for index in range(20, len(bars)):
+            log_returns = []
+            for offset in range(index - 19, index + 1):
+                if closes[offset - 1] > 0 and closes[offset] > 0:
+                    log_ret = Decimal(str(math.log(float(closes[offset] / closes[offset - 1]))))
+                    log_returns.append(log_ret)
+            if len(log_returns) == 20:
+                mean_ret = sum(log_returns, Decimal(0)) / Decimal(20)
+                variance = sum((r - mean_ret) ** 2 for r in log_returns) / Decimal(19)
+                std_dev = variance.sqrt()
+                hv[index] = std_dev * hv_factor
 
     # MB-17: ATR as percentage of close
     atr_pct: List[Optional[Decimal]] = [None] * len(bars)
@@ -408,6 +424,8 @@ def prepare_indicators(bars: Sequence[LabBar], atr_window: int = DEFAULT_ATR_WIN
         macd_signal=macd_signal,
         macd_hist=macd_hist,
         hv=hv,
+        hv_factor=hv_factor,
+        hv_basis=hv_basis.as_dict(),
         atr_pct=atr_pct,
         open_times=open_times,
         return_4bar=return_4bar,
@@ -1156,8 +1174,10 @@ def _sig_volatility_ratio_arb(ind: _Indicators, index: int) -> int:
     from historical volatility (long-term annualized), it suggests a volatility
     regime change that may be tradable as a convergence bet.
 
-    Thesis: if ATR% > 2x HV/sqrt(252) (daily HV), volatility is elevated
-    relative to history -> expect mean reversion in vol -> fade the move.
+    Thesis: if ATR% > 2x the per-bar HV (the annualized series divided back by
+    the same recorded factor that annualized it), volatility is elevated relative
+    to history -> expect mean reversion in vol -> fade the move. The two sides
+    share one factor, so the comparison means the same thing at every grain.
     """
     if index < 20:
         return 0
@@ -1169,10 +1189,11 @@ def _sig_volatility_ratio_arb(ind: _Indicators, index: int) -> int:
         return 0
     if atr_pct_val <= ZERO or hv_val <= ZERO:
         return 0
+    if ind.hv_factor is None or ind.hv_factor <= ZERO:
+        return 0
 
-    import math
-    daily_hv = hv_val / Decimal(str(math.sqrt(252)))
-    vol_ratio = atr_pct_val / daily_hv if daily_hv > ZERO else ZERO
+    per_bar_hv = hv_val / ind.hv_factor
+    vol_ratio = atr_pct_val / per_bar_hv if per_bar_hv > ZERO else ZERO
 
     if vol_ratio < Decimal("2.0"):
         return 0
@@ -2169,6 +2190,23 @@ def run_study(
     )
     tested_folds = sum(1 for fold in walk_forward_folds if fold.get("test"))
 
+    if ind.hv_basis["available"]:
+        hv_disclosure = (
+            f"Historical volatility is annualized by sqrt({ind.hv_basis['observations_per_year']} "
+            f"observations/year) measured from this series' own bar cadence "
+            f"(method {ind.hv_basis['method_version']}); no equity-trading-day constant is assumed."
+        )
+        hv_disclosure_zh = (
+            f"歷史波動率以本序列自身 K 線節奏量出的每年觀測數（"
+            f"{ind.hv_basis['observations_per_year']}）開方年化（方法 "
+            f"{ind.hv_basis['method_version']}），不沿用股票交易日常數。"
+        )
+    else:
+        hv_disclosure = (
+            f"Historical volatility is not annualized in this study: {ind.hv_basis['reason']}"
+        )
+        hv_disclosure_zh = f"本次研究的歷史波動率未做年化：{ind.hv_basis['reason']}"
+
     payload = {
         "lane": LANE,
         "research_version": RESEARCH_VERSION,
@@ -2188,6 +2226,10 @@ def run_study(
             "first_open_time": bars[0].open_time.isoformat(),
             "last_open_time": bars[-1].open_time.isoformat(),
             "interval_minutes": bars[0].interval_minutes,
+        },
+        "annualization": {
+            **ind.hv_basis,
+            "applies_to": "hv (annualized historical volatility over a 20-bar window)",
         },
         "settings": {
             "starting_cash": _money(settings.starting_cash),
@@ -2252,6 +2294,7 @@ def run_study(
             "Win rate is not the objective: a tight target with a wide stop can raise it "
             "while lowering expectancy.",
             "Market-data redistribution is NOT_CLEARED; internal research only.",
+            hv_disclosure,
         ],
         "disclosures_zh": [
             "此為模擬研究：不接券商、不付款、不動用真實資金。",
@@ -2261,6 +2304,7 @@ def run_study(
             "全樣本網格僅供對照，不構成優勢證據。",
             "勝率不是目標：小目標配寬停損可以推高勝率，同時拉低期望值。",
             "行情資料對外重新分發尚未取得授權，僅供內部研究。",
+            hv_disclosure_zh,
         ],
     }
     if include_trades:

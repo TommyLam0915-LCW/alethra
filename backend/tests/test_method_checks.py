@@ -1,7 +1,13 @@
 """Comprehensive tests for Phase 2B method checks."""
 import pytest
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from uuid import uuid4, UUID
+from app.engine import annualization
+from app.engine.annualization import (
+    MEAN_CALENDAR_DAYS_PER_YEAR,
+    METHOD_VERSION,
+    MIN_YEARS_FOR_ANNUALIZATION,
+)
 from app.method_checks.rules import (
     check_rc001_hypothesis,
     check_rc002_falsification,
@@ -114,6 +120,81 @@ class TestRC003DateRange:
         metrics = {"trading_days": 252}
         status, evidence = check_rc003_date_range(spec, metrics)
         assert status == "INSUFFICIENT_INFORMATION"
+
+
+class TestRC003UsesTheRunsAnnualization:
+    """The gate measures the priced sample in years, using the run's own basis."""
+
+    @staticmethod
+    def _crypto_block(rows: int, first: date = date(2024, 11, 13)) -> dict:
+        """An annualization block as a run would have stored it, from the contract."""
+        return annualization.basis_for_series(
+            "CRYPTO:KRAKEN:BTC-USD",
+            [first + timedelta(days=i) for i in range(rows)],
+        ).as_dict()
+
+    def test_recorded_window_governs_the_spec_window(self):
+        block = self._crypto_block(720)
+        spec = {"start_date": "2024-11-13", "end_date": "2026-11-02"}
+        status, evidence = check_rc003_date_range(spec, {"trading_days": 720, "annualization": block})
+        assert status == "PASS"
+        assert evidence["sample_years_source"] == "run annualization block"
+        assert block["elapsed_years"] == pytest.approx(719 / MEAN_CALENDAR_DAYS_PER_YEAR, abs=1e-6)
+        assert evidence["annualization_method"] == METHOD_VERSION
+        assert evidence["annualization_market"] == "CRYPTO"
+        assert evidence["observations_per_year"] == 365.25
+
+    def test_252_hourly_observations_are_not_a_year(self):
+        # The old rule was "trading_days >= 252", which passed 252 hourly bars.
+        stamps = [datetime(2024, 1, 2) + timedelta(hours=i) for i in range(252)]
+        block = annualization.basis_for_series(
+            "CRYPTO:KRAKEN:BTC-USD", stamps, interval_minutes=60
+        ).as_dict()
+        spec = {"start_date": "2024-01-02", "end_date": "2024-01-12"}
+        status, evidence = check_rc003_date_range(spec, {"trading_days": 252, "annualization": block})
+        assert status == "WARNING"
+        # The window is measured between observation dates, so 252 hourly bars from
+        # 2024-01-02 cover ten calendar dates however their instants are stamped.
+        assert evidence["sample_years"] == pytest.approx(
+            10 / MEAN_CALENDAR_DAYS_PER_YEAR, abs=1e-4
+        )
+        assert evidence["observations_per_year"] == 8766.0
+        assert f"{MIN_YEARS_FOR_ANNUALIZATION}-year minimum" in evidence["warning"]
+
+    def test_run_without_a_block_falls_back_to_the_spec_dates(self):
+        # Old runs are not rewritten, so their spec window still has to be gated.
+        spec = {"start_date": "2023-01-01", "end_date": "2024-01-01"}
+        status, evidence = check_rc003_date_range(spec, {"trading_days": 252})
+        assert status == "PASS"
+        assert evidence["sample_years_source"] == "spec date range"
+        assert evidence["annualization_method"] is None
+        assert evidence["sample_years"] == pytest.approx(365 / MEAN_CALENDAR_DAYS_PER_YEAR, abs=1e-4)
+
+    def test_long_request_does_not_rescue_a_short_priced_sample(self):
+        block = self._crypto_block(300)
+        spec = {"start_date": "2020-01-01", "end_date": "2026-01-01"}
+        status, evidence = check_rc003_date_range(spec, {"trading_days": 300, "annualization": block})
+        assert status == "WARNING"
+        assert evidence["sample_years"] == pytest.approx(299 / MEAN_CALENDAR_DAYS_PER_YEAR, abs=1e-4)
+        assert evidence["sample_years"] < MIN_YEARS_FOR_ANNUALIZATION
+        assert METHOD_VERSION in evidence["warning"]
+
+    def test_refused_basis_falls_back_instead_of_raising(self):
+        block = annualization.unavailable(
+            "the series carries no dated observations", market="CRYPTO"
+        ).as_dict()
+        spec = {"start_date": "2023-01-01", "end_date": "2024-01-01"}
+        status, evidence = check_rc003_date_range(spec, {"trading_days": 252, "annualization": block})
+        assert status == "PASS"
+        assert evidence["sample_years_source"] == "spec date range"
+
+    def test_explanation_states_the_gate_and_its_source(self):
+        spec = {"start_date": "2024-01-02", "end_date": "2024-02-14"}
+        status, evidence = check_rc003_date_range(spec, {"trading_days": 29})
+        text = generate_explanation("RC-003", status, evidence)
+        assert f"{MIN_YEARS_FOR_ANNUALIZATION}-year sample gate" in text
+        assert "no method version recorded on this run" in text
+        assert "252" not in text
 
 
 class TestRC004TransactionCosts:

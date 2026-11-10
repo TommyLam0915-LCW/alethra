@@ -1,6 +1,8 @@
 """Deterministic explanation templates for method checks."""
 from typing import Any, Dict, Tuple
 
+from app.engine.annualization import MIN_YEARS_FOR_ANNUALIZATION
+
 
 def generate_explanation(rule_id: str, status: str, evidence: Dict[str, Any]) -> str:
     """Generate deterministic explanation for a check result.
@@ -62,18 +64,38 @@ def _explain_rc003(status: str, evidence: Dict[str, Any]) -> str:
     start = evidence.get("start_date", "N/A")
     end = evidence.get("end_date", "N/A")
     trading_days = evidence.get("trading_days", "N/A")
+    years = evidence.get("sample_years", "N/A")
+    method = evidence.get("annualization_method") or "no method version recorded on this run"
+    frequency = evidence.get("observations_per_year")
+
+    observed = (
+        f"A. Observation: Date range {start} to {end} spans {years} elapsed year(s) "
+        f"across {trading_days} observations"
+    )
+    if frequency is not None:
+        observed += f" at {frequency} observations/year"
+    observed += ".\n"
+
+    gate = evidence.get("sample_gate_years")
+    if gate is None:
+        gate = MIN_YEARS_FOR_ANNUALIZATION
 
     if status == "PASS":
         return (
-            f"A. Observation: Date range {start} to {end} covers {trading_days} trading days.\n"
-            "B. Interpretation: At or above the engine's 252-day threshold; annualized metrics are computed under the current engine rule.\n"
-            "C. Limitation: The 252-day threshold does not establish statistical validity, data quality, or predictive performance."
+            observed
+            + f"B. Interpretation: At or above the {gate}-year sample gate of {method}; annualized "
+              "metrics are computed on that method's market calendar and bar grain, not on a "
+              "trading-day count assumed to be the same in every market.\n"
+              "C. Limitation: The sample gate does not establish statistical validity, data "
+              "quality, or predictive performance."
         )
     elif status == "WARNING":
         return (
-            f"A. Observation: Date range {start} to {end} covers only {trading_days} trading days (< 252).\n"
-            "B. Interpretation: Below the engine's 252-day threshold; annualized metrics are not provided under that rule.\n"
-            "C. Limitation: The 252-day threshold does not establish statistical validity, data quality, or predictive performance."
+            observed
+            + f"B. Interpretation: Below the {gate}-year sample gate of {method}; annualized return "
+              "and volatility are reported as unavailable rather than computed on a short sample.\n"
+              "C. Limitation: The sample gate does not establish statistical validity, data "
+              "quality, or predictive performance."
         )
     return (
         "A. Observation: Date range or trading days data is missing or invalid.\n"

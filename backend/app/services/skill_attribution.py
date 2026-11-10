@@ -20,6 +20,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.engine import annualization
 from app.models.strategy_study import StrategyStudyRun, StrategyStudyTrade
 from app.services.journal_service import _decimal, _money, _rule_family
 from app.services.strategy_research import RULE_BY_ID
@@ -29,27 +30,44 @@ from app.services.strategy_research import RULE_BY_ID
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _trades_per_year(interval_minutes: Optional[int]) -> int:
-    """Annualized trade frequency factor for Sharpe ratio.
+def _group_basis(trades: List[dict]) -> annualization.Basis:
+    """The annualization basis for a group of trades, from the trades themselves.
 
-    daily (1440) -> 252
-    4h (240)     -> 252 * 6
-    1h (60)      -> 252 * 24
-    15m (15)     -> 252 * 96
+    A Sharpe scaled by an observation frequency is only meaningful if the pooled
+    returns share that frequency, so the market and the bar grain are read off the
+    rows rather than off the caller's filter — an unfiltered request previously
+    annualized everything as 252 daily bars. A group that mixes markets or grains
+    has no single frequency and reports an unavailable basis instead of picking one.
     """
-    if interval_minutes is None or interval_minutes <= 0:
-        return 252
-    bars_per_day = 1440 // interval_minutes
-    if bars_per_day <= 0:
-        return 252
-    return 252 * bars_per_day
+    markets = {annualization.market_of(t.get("instrument_id")) for t in trades}
+    intervals = {t.get("interval_minutes") for t in trades}
+    market = next(iter(markets)) if len(markets) == 1 else None
+    interval = next(iter(intervals)) if len(intervals) == 1 else None
+
+    if len(markets) > 1:
+        return annualization.unavailable(
+            f"this group pools {len(markets)} markets, which quote different numbers of sessions "
+            "per year, so no single observation frequency annualizes it",
+            interval_minutes=interval,
+        )
+    if len(intervals) > 1:
+        return annualization.unavailable(
+            f"this group pools {len(intervals)} bar grains, so its returns are not one frequency "
+            "and cannot be annualized together",
+            market=market.value if market else None,
+        )
+
+    return annualization.basis_from_calendar(market, interval)
 
 
-def _sharpe_ratio(pnls: List[Decimal], trades_per_year: int) -> Optional[Decimal]:
-    """Compute annualized Sharpe ratio: mean / stdev * sqrt(trades_per_year).
+def _sharpe_ratio(pnls: List[Decimal], observations_per_year: Optional[float]) -> Optional[Decimal]:
+    """Compute annualized Sharpe ratio: mean / stdev * sqrt(observations per year).
 
-    Returns None when stdev is zero (single trade or all identical returns).
+    Returns None when the frequency is unknown (an unresolvable market or grain),
+    when stdev is zero (single trade or all identical returns).
     """
+    if not observations_per_year or observations_per_year <= 0:
+        return None
     n = len(pnls)
     if n < 2:
         return None
@@ -60,7 +78,7 @@ def _sharpe_ratio(pnls: List[Decimal], trades_per_year: int) -> Optional[Decimal
     stdev = variance.sqrt()
     if stdev == 0:
         return None
-    return mean / stdev * Decimal(str(math.sqrt(trades_per_year)))
+    return mean / stdev * Decimal(str(math.sqrt(observations_per_year)))
 
 
 def _max_drawdown_pct(pnls: List[Decimal]) -> Decimal:
@@ -88,7 +106,7 @@ def _profit_factor(wins: List[Decimal], losses: List[Decimal]) -> Optional[Decim
     return gross_wins / gross_losses
 
 
-def _compute_group_metrics(trades: List[dict], interval_minutes: Optional[int] = None) -> dict:
+def _compute_group_metrics(trades: List[dict]) -> dict:
     """Compute all metrics for a group of trade dicts."""
     total = len(trades)
     if total == 0:
@@ -102,6 +120,9 @@ def _compute_group_metrics(trades: List[dict], interval_minutes: Optional[int] =
             "sharpe_ratio": None,
             "max_drawdown_pct": "0",
             "profit_factor": None,
+            "annualization": annualization.unavailable(
+                "this group holds no trades, so there is no frequency to annualize"
+            ).as_dict(),
         }
 
     pnls = [_decimal(t["net_pnl"]) for t in trades]
@@ -113,8 +134,8 @@ def _compute_group_metrics(trades: List[dict], interval_minutes: Optional[int] =
     avg_trade_pnl = total_pnl / Decimal(str(total))
     expectancy = avg_trade_pnl
 
-    tpy = _trades_per_year(interval_minutes)
-    sharpe = _sharpe_ratio(pnls, tpy)
+    basis = _group_basis(trades)
+    sharpe = _sharpe_ratio(pnls, annualization.observations_per_year(basis))
     max_dd = _max_drawdown_pct(pnls)
     pf = _profit_factor(wins, losses)
 
@@ -128,6 +149,7 @@ def _compute_group_metrics(trades: List[dict], interval_minutes: Optional[int] =
         "sharpe_ratio": _money(sharpe.quantize(Decimal("0.0001"))) if sharpe is not None else None,
         "max_drawdown_pct": _money(max_dd.quantize(Decimal("0.01"))),
         "profit_factor": _money(pf.quantize(Decimal("0.01"))) if pf is not None else None,
+        "annualization": basis.as_dict(),
     }
 
 
@@ -232,7 +254,7 @@ def skill_attribution(
         label_zh = rule_obj.label_zh if rule_obj else (rule_trades[0]["rule_label_zh"] or rule_id)
         family = rule_obj.family if rule_obj else _rule_family(rule_id)
 
-        metrics = _compute_group_metrics(rule_trades, interval_minutes)
+        metrics = _compute_group_metrics(rule_trades)
         skills.append({
             "rule_id": rule_id,
             "rule_label_zh": label_zh,
@@ -355,6 +377,14 @@ def skill_heatmap_data(
         "rows": rows,
         "cols": cols,
         "cells": cells,
+        "annualization": {
+            "method_version": annualization.METHOD_VERSION,
+            "rule": (
+                "a sharpe cell is scaled by sqrt(observations per year) from that cell's own "
+                "market and bar grain; a cell whose trades pool several grains or markets "
+                "reports null rather than an assumed frequency"
+            ),
+        },
     }
 
 
@@ -376,7 +406,8 @@ def _compute_cell_metric(trades: List[dict], metric: str) -> Optional[str]:
         return _money(rate.quantize(Decimal("0.01")))
 
     elif metric == "sharpe":
-        sharpe = _sharpe_ratio(pnls, 252)  # default annualization
+        basis = _group_basis(trades)
+        sharpe = _sharpe_ratio(pnls, annualization.observations_per_year(basis))
         if sharpe is None:
             return None
         return _money(sharpe.quantize(Decimal("0.0001")))

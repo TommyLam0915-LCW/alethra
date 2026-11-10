@@ -2,7 +2,16 @@
 from datetime import datetime
 from typing import Any, Dict, Optional, Tuple
 
+from app.engine.annualization import (
+    MEAN_CALENDAR_DAYS_PER_YEAR,
+    MIN_YEARS_FOR_ANNUALIZATION,
+)
+
 # Expected metric keys for completed runs (from backend/app/engine/metrics.py)
+#
+# ``annualization`` is deliberately absent: this set is checked as
+# expected-minus-present, so listing it would report every run recorded before the
+# annualization method existed as incomplete, and those runs are not rewritten.
 EXPECTED_METRIC_KEYS = {
     "initial_cash",
     "final_equity",
@@ -61,16 +70,26 @@ def check_rc002_falsification(experiment: Any) -> Tuple[str, Dict[str, Any]]:
 def check_rc003_date_range(strategy_spec: Dict[str, Any], metrics: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
     """RC-003: Date Range Validity.
 
-    Parse dates and check trading_days >= 252.
+    Gate the sample on its elapsed length, not on a bar count: 252 bars is a year
+    of US daily data, two years of crypto daily data and three weeks of 1-hour
+    data, so the old ">= 252 trading days" test asked a different question in
+    every market. The run's own annualization block, when it has one, already
+    measured the window from the dates it priced against; the spec dates are the
+    fallback for runs recorded before the method existed.
     """
     start_date = strategy_spec.get("start_date")
     end_date = strategy_spec.get("end_date")
     trading_days = metrics.get("trading_days") if metrics else None
+    ann_block = (metrics or {}).get("annualization") or {}
 
     evidence = {
         "start_date": start_date,
         "end_date": end_date,
         "trading_days": trading_days,
+        "annualization_method": ann_block.get("method_version"),
+        "observations_per_year": ann_block.get("observations_per_year"),
+        "annualization_market": ann_block.get("market"),
+        "sample_gate_years": MIN_YEARS_FOR_ANNUALIZATION,
     }
 
     if not start_date or not end_date:
@@ -90,8 +109,21 @@ def check_rc003_date_range(strategy_spec: Dict[str, Any], metrics: Dict[str, Any
         if not isinstance(trading_days, (int, float)):
             return "INSUFFICIENT_INFORMATION", evidence
 
-        if trading_days < 252:
-            evidence["warning"] = "Less than 252 trading days"
+        recorded_years = ann_block.get("elapsed_years")
+        if isinstance(recorded_years, (int, float)):
+            sample_years = float(recorded_years)
+            evidence["sample_years_source"] = "run annualization block"
+        else:
+            sample_years = (end_dt - start_dt).days / MEAN_CALENDAR_DAYS_PER_YEAR
+            evidence["sample_years_source"] = "spec date range"
+        evidence["sample_years"] = round(sample_years, 4)
+
+        if sample_years < MIN_YEARS_FOR_ANNUALIZATION:
+            evidence["warning"] = (
+                f"Sample spans {round(sample_years, 4)} years, below the "
+                f"{MIN_YEARS_FOR_ANNUALIZATION}-year minimum in "
+                f"{ann_block.get('method_version') or 'the annualization method'}"
+            )
             return "WARNING", evidence
 
         return "PASS", evidence
