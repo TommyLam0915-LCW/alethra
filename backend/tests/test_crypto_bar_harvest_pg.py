@@ -19,12 +19,14 @@ if not os.environ.get("ALETHRA_TEST_DB", "").startswith("postgresql"):
     )
 
 from tests.conftest import TestSession
-from app.data.crypto_instruments import KRAKEN_BTC_USD
 from app.models.market_data import MarketDataBar
 from app.services.crypto_bar_harvest import harvest_interval, load_stored_bars
 from app.services.crypto_series import RawCandle, build_series
 
-INSTRUMENT = KRAKEN_BTC_USD.instrument_id
+#: These tests write synthetic candles, so they must not share an instrument id
+#: with the venue series the warehouse actually keeps: ``clear()`` below deletes
+#: every row for this id, and pointed at a live pair it would delete real bars.
+INSTRUMENT = "CRYPTO:KRAKEN:TST-HARVEST-1"
 NOW = datetime(2026, 11, 4, 6, 0, tzinfo=timezone.utc)
 
 
@@ -72,11 +74,23 @@ def daily_rows(count):
     return grid_rows(1440, count)
 
 
-def clear(db):
-    db.query(MarketDataBar).filter(
-        MarketDataBar.instrument_id == INSTRUMENT
-    ).delete()
-    db.commit()
+def clear():
+    """Empty the warehouse of this module's rows, whatever a failed test left."""
+    with TestSession() as db:
+        db.query(MarketDataBar).filter(
+            MarketDataBar.instrument_id == INSTRUMENT
+        ).delete()
+        db.commit()
+
+
+@pytest.fixture(autouse=True)
+def clean_warehouse():
+    # Clearing only after a test passes is how one failure poisoned the next
+    # run with leftover rows: a count assertion then failed for data this test
+    # never wrote.
+    clear()
+    yield
+    clear()
 
 
 def test_harvest_stores_every_completed_candle_once():
@@ -95,7 +109,6 @@ def test_harvest_stores_every_completed_candle_once():
         assert db.query(MarketDataBar).filter(
             MarketDataBar.instrument_id == INSTRUMENT
         ).count() == 10
-        clear(db)
 
 
 def test_warehouse_read_drops_rows_of_an_unknown_or_wrong_grain():
@@ -129,7 +142,6 @@ def test_warehouse_read_drops_rows_of_an_unknown_or_wrong_grain():
         assert [b.open_time for b in bars] == sorted(b.open_time for b in bars)
         assert all(b.interval_minutes == 1440 for b in bars)
         assert all(b.open_time.tzinfo is not None for b in bars)
-        clear(db)
 
 
 def test_two_grains_over_the_same_window_do_not_collide():
@@ -158,4 +170,3 @@ def test_two_grains_over_the_same_window_do_not_collide():
         assert {b.open_time for b in daily_bars} <= {b.open_time for b in four_bars}
         assert db.query(MarketDataBar).filter(
             MarketDataBar.instrument_id == INSTRUMENT).count() == 28
-        clear(db)

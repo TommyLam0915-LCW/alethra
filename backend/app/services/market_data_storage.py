@@ -5,6 +5,7 @@ Persists OHLCV bars and metadata to the database, enabling:
 - Historical analysis and backtesting
 - Data quality tracking and provenance
 """
+import json
 import logging
 from datetime import datetime, date, timedelta, timezone as dt_timezone
 from typing import List, Optional, Dict, Any, Mapping, Sequence
@@ -28,6 +29,27 @@ def _naive_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value
     return value.astimezone(dt_timezone.utc).replace(tzinfo=None)
+
+
+# ``MarketDataMetadata.provider_note`` is String(500).
+PROVIDER_NOTE_MAX_CHARS = 500
+
+
+def provenance_note(provenance: Mapping[str, Any]) -> str:
+    """Serialize a source chain for ``provider_note``, refusing to truncate it.
+
+    A silently shortened chain is no longer evidence: the hash or the commit
+    would be the part that gets cut. An import that cannot fit its chain in the
+    column has to say so before it writes, not after.
+    """
+    note = json.dumps(provenance, separators=(",", ":"), sort_keys=True)
+    if len(note) > PROVIDER_NOTE_MAX_CHARS:
+        raise ValueError(
+            f"provenance note is {len(note)} characters, over provider_note's "
+            f"{PROVIDER_NOTE_MAX_CHARS}-character column; refusing to truncate "
+            "the source chain"
+        )
+    return note
 
 
 class MarketDataStorage:
@@ -175,6 +197,50 @@ class MarketDataStorage:
                 )
             ).count()
             metadata.total_bars = bar_count
+
+    def record_offline_provenance(
+        self,
+        *,
+        instrument_id: str,
+        provider_id: str,
+        data_nature: str,
+        timezone: Optional[str],
+        currency: Optional[str],
+        provenance: Mapping[str, Any],
+        bar_dates: Sequence[date],
+    ) -> str:
+        """Attach an offline import's source chain to the instrument's metadata.
+
+        A stored bar carries no record of the file it came from, so
+        ``provider_note`` is where that chain is written: repository, commit,
+        path, the file's SHA256, and the fingerprint the venue read itself
+        produced. The chain is limited and says so — this deployment did not
+        make the request, so the values are as authentic as the file, not
+        independently authenticated against the venue.
+
+        ``data_nature`` records where the numbers originated (``live`` means a
+        venue produced them), not how well this import was witnessed. It is not
+        a credential: the readers accept a fixed vocabulary, so a stronger token
+        invented here is not believed anywhere else — it collapses to
+        ``"unknown"`` and the row ends up claiming less than it appeared to.
+        """
+        note = provenance_note(provenance)
+        self._update_metadata(
+            instrument_id=instrument_id,
+            provider_id=provider_id,
+            data_nature=data_nature,
+            adjustment_status="not_applicable",
+            timezone=timezone,
+            currency=currency,
+            provider_note=note,
+            provider_note_zh=(
+                "離線匯入：來源鏈見 provider_note。本次匯入未執行行情讀取，"
+                "數值未經本部署獨立認證。"
+            ),
+            bar_dates=list(bar_dates),
+        )
+        self.db.commit()
+        return note
 
     def store_candles(
         self,
