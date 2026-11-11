@@ -660,6 +660,39 @@ class TestContractRecordKeeping:
             assert basis.method_version == METHOD_VERSION
             assert basis.calendar_source == CALENDAR_SOURCE
 
+    def test_the_basis_records_the_window_it_was_derived_from(self):
+        rows = _btc_rows()
+        basis = basis_for_series(BTC, rows)
+        assert basis.first_observation == rows[0].isoformat()
+        assert basis.last_observation == rows[-1].isoformat()
+        # 720 consecutive days from 2024-11-13 ends on 2026-11-02.
+        assert basis.first_observation == "2024-11-13"
+        assert basis.last_observation == "2026-11-02"
+        # Re-deriving the elapsed span from the recorded window must reproduce
+        # elapsed_years, or the window and the number disagree in the record.
+        span = (date.fromisoformat(basis.last_observation) - date.fromisoformat(basis.first_observation)).days
+        assert basis.elapsed_years == round(span / MEAN, 6)
+
+    def test_a_measured_daily_basis_records_dates_and_an_intraday_basis_stamps(self):
+        daily = measured_basis(consecutive_days(date(2024, 1, 1), 10), interval_minutes=MINUTES_PER_DAY)
+        assert daily.first_observation == "2024-01-01"
+        assert daily.last_observation == "2024-01-10"
+        hourly = measured_basis(
+            [datetime(2024, 3, 1, h, 0, tzinfo=timezone.utc) for h in (14, 15, 16)],
+            interval_minutes=60,
+        )
+        assert hourly.first_observation == "2024-03-01T14:00:00+00:00"
+        assert hourly.last_observation == "2024-03-01T16:00:00+00:00"
+
+    def test_a_basis_with_no_dated_series_records_no_window(self):
+        # Journal aggregates hold a market and a grain but no observations; the
+        # window stays unknown instead of being guessed.
+        calendar_only = basis_from_calendar(Market.US, 60)
+        assert calendar_only.available is True
+        assert calendar_only.first_observation is None
+        assert calendar_only.last_observation is None
+        assert unavailable("a refusal").first_observation is None
+
     def test_dict_round_trips_the_dataclass_and_serializes(self):
         record = basis_for_series(BTC, _btc_rows()).as_dict()
         assert set(record) == {f.name for f in dataclasses.fields(Basis)}

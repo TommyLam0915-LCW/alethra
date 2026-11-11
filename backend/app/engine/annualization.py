@@ -71,6 +71,10 @@ class Basis:
         bars_per_trading_day: Observations inside one trading day.
         session_minutes_per_day: Quotable minutes per trading day.
         elapsed_years: Years between the first and last observation.
+        first_observation: ISO stamp of the earliest observation the basis was
+            derived from — a plain date for a daily-or-coarser grain, a full
+            timestamp below that. None when no dated series was supplied.
+        last_observation: ISO stamp of the latest observation, same convention.
         observation_count: Rows the series actually carries.
         expected_observations: Sessions this window holds times the bars one
             session carries — the rows the calendar says the series should hold,
@@ -98,6 +102,8 @@ class Basis:
     bars_per_trading_day: Optional[float] = None
     session_minutes_per_day: Optional[float] = None
     elapsed_years: Optional[float] = None
+    first_observation: Optional[str] = None
+    last_observation: Optional[str] = None
     observation_count: Optional[int] = None
     expected_observations: Optional[float] = None
     coverage_pct: Optional[float] = None
@@ -118,6 +124,8 @@ class Basis:
             "bars_per_trading_day": self.bars_per_trading_day,
             "session_minutes_per_day": self.session_minutes_per_day,
             "elapsed_years": self.elapsed_years,
+            "first_observation": self.first_observation,
+            "last_observation": self.last_observation,
             "observation_count": self.observation_count,
             "expected_observations": self.expected_observations,
             "coverage_pct": self.coverage_pct,
@@ -348,6 +356,8 @@ def _calendar_basis(
             interval_minutes=interval_minutes,
             observation_count=count,
             elapsed_years=round(elapsed_years, 6),
+            first_observation=first.isoformat(),
+            last_observation=last.isoformat(),
         )
 
     if interval_minutes > MINUTES_PER_DAY:
@@ -358,6 +368,8 @@ def _calendar_basis(
             frequency=frequency_name(interval_minutes),
             observation_count=count,
             elapsed_years=round(elapsed_years, 6),
+            first_observation=first.isoformat(),
+            last_observation=last.isoformat(),
         )
 
     if elapsed_years <= 0:
@@ -366,6 +378,8 @@ def _calendar_basis(
             market=market.value,
             interval_minutes=interval_minutes,
             observation_count=count,
+            first_observation=first.isoformat(),
+            last_observation=last.isoformat(),
         )
 
     days_per_year, covered = calendar_trading_days_per_year(market, first, last)
@@ -392,6 +406,8 @@ def _calendar_basis(
         bars_per_trading_day=round(per_day, 6),
         session_minutes_per_day=regular_session_minutes(market),
         elapsed_years=round(elapsed_years, 6),
+        first_observation=first.isoformat(),
+        last_observation=last.isoformat(),
         observation_count=count,
         expected_observations=round(expected, 4),
         coverage_pct=round(count / expected * 100, 4) if expected > 0 else None,
@@ -496,11 +512,18 @@ def measured_basis(
     # Whole seconds, not timedelta.days: 60 four-hour bars span 9.83 days, and
     # truncating that to 9 measures the cadence about 9% too fast.
     elapsed_days = (ordered[-1] - ordered[0]).total_seconds() / 86400.0
+    stamp_of = (
+        (lambda ts: ts.date().isoformat())
+        if interval_minutes and interval_minutes >= MINUTES_PER_DAY
+        else (lambda ts: ts.isoformat())
+    )
     if elapsed_days <= 0:
         return unavailable(
             "every observation carries the same timestamp, so no observation frequency is measurable",
             interval_minutes=interval_minutes,
             observation_count=len(stamps),
+            first_observation=stamp_of(ordered[0]),
+            last_observation=stamp_of(ordered[-1]),
         )
 
     elapsed_years = elapsed_days / MEAN_CALENDAR_DAYS_PER_YEAR
@@ -513,6 +536,8 @@ def measured_basis(
         interval_minutes=interval_minutes,
         observations_per_year=round(observations_per_year, 6),
         elapsed_years=round(elapsed_years, 6),
+        first_observation=stamp_of(ordered[0]),
+        last_observation=stamp_of(ordered[-1]),
         observation_count=len(stamps),
         inside_declared_coverage=False,
         frequency_source="measured",
