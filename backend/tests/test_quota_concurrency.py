@@ -23,10 +23,16 @@ from app.auth.entitlements import reserve_quota, settle_reservation, release_res
 from app.lib.timeutil import utcnow
 
 
-POSTGRES_URL = os.environ.get(
-    "ALETHRA_TEST_POSTGRES_URL",
-    "postgresql://test:test@localhost:5434/alethra_test"
-)
+#: An unset variable must mean "not run", not "guess a host": this module
+#: drops and recreates its whole schema at teardown, so a fallback URL turned a
+#: missing env var into an unattended DROP against whatever was listening.
+POSTGRES_URL = os.environ.get("ALETHRA_TEST_POSTGRES_URL")
+if not POSTGRES_URL:
+    pytest.skip(
+        "ALETHRA_TEST_POSTGRES_URL is not set and this module recreates its "
+        "schema, so it will not fall back to an implicit database",
+        allow_module_level=True,
+    )
 
 # Check if PostgreSQL is available at module import time
 try:
