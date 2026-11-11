@@ -26,7 +26,6 @@ ALLOWED_TEST_DATABASES = {
     'alethra_test',
     'test_ai_investment_lab',
     'alethra_owner_test',  # Added for owner verification tests
-    'alethra_test_isolated_20261109',  # approved isolated target, 2026-11-09 round
 }
 
 # Forbidden production databases (blacklist) — always rejected

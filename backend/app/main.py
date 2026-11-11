@@ -64,9 +64,8 @@ def start_auto_collection_scheduler():
     global _auto_collection_scheduler
     if settings.auto_collection_enabled:
         from app.services.auto_collection import init_scheduler
-        import os
 
-        database_url = os.environ.get('DATABASE_URL', 'postgresql://postgres:postgres@localhost:5432/ai_investment_lab')
+        database_url = settings.database_url
         init_scheduler(
             database_url=database_url,
             enabled=True,

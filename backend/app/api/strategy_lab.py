@@ -176,7 +176,11 @@ class StrategyResearchRequest(BaseModel):
         default=None,
         ge=120,
         le=10000,
-        description="Number of historical bars to fetch. If > 720, uses pagination. Default: 720",
+        description=(
+            "Number of historical bars to fetch. Kraken serves at most 720 of the "
+            "most recent buckets per interval, so a value above 720 is refused "
+            "rather than answered with a shorter series. Default: 720"
+        ),
     )
 
     @model_validator(mode="after")

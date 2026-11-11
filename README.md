@@ -97,7 +97,7 @@ source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 
 # 設定環境變數
-export DATABASE_URL=postgresql://postgres:postgres@localhost:5432/ai_investment_lab
+export DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@localhost:5432/ai_investment_lab  # POSTGRES_PASSWORD 由本機 .env 提供，不入版控
 export JWT_SECRET_KEY=your-secret-key
 
 # 啟動資料庫

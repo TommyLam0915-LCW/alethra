@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.auth.jwt import get_current_user, require_admin
+from app.config import get_settings
 from app.database import get_db
 from app.models.user import User
 from app.services.paper_trading import get_engine
@@ -118,7 +119,7 @@ def create_portfolio(
     current_user: User = Depends(get_current_user),
 ):
     """Create a new paper trading portfolio."""
-    database_url = os.environ.get('DATABASE_URL', 'postgresql://postgres:postgres@localhost:5432/ai_investment_lab')
+    database_url = get_settings().database_url
     engine = get_engine(database_url)
 
     try:
@@ -146,7 +147,7 @@ def get_status(
     db: Session = Depends(get_db),
 ):
     """Get current status of a paper trading run."""
-    database_url = os.environ.get('DATABASE_URL', 'postgresql://postgres:postgres@localhost:5432/ai_investment_lab')
+    database_url = get_settings().database_url
     engine = get_engine(database_url)
 
     try:
@@ -189,7 +190,7 @@ def get_daily_report(
     db: Session = Depends(get_db),
 ):
     """Get daily performance report for a run."""
-    database_url = os.environ.get('DATABASE_URL', 'postgresql://postgres:postgres@localhost:5432/ai_investment_lab')
+    database_url = get_settings().database_url
     engine = get_engine(database_url)
 
     try:
@@ -236,7 +237,7 @@ def execute_replay(
     db: Session = Depends(get_db),
 ):
     """Execute historical replay for a paper trading run."""
-    database_url = os.environ.get('DATABASE_URL', 'postgresql://postgres:postgres@localhost:5432/ai_investment_lab')
+    database_url = get_settings().database_url
     engine = get_engine(database_url)
 
     try:
@@ -285,7 +286,7 @@ def stop_run(
     db: Session = Depends(get_db),
 ):
     """Stop a running paper trading run."""
-    database_url = os.environ.get('DATABASE_URL', 'postgresql://postgres:postgres@localhost:5432/ai_investment_lab')
+    database_url = get_settings().database_url
     engine = get_engine(database_url)
 
     try:

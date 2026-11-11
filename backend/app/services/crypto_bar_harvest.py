@@ -157,18 +157,59 @@ class WarehouseImportRejected(Exception):
         self.detail = detail or {}
 
 
+def _lock_key(instrument_id: str, provider_id: str, interval_minutes: int) -> int:
+    """One advisory lock per series lane, so imports of the same series queue."""
+    import zlib
+
+    return zlib.crc32(f"{instrument_id}|{provider_id}|{interval_minutes}".encode()) & 0x7FFFFFFF
+
+
+def acquire_import_lock(
+    db: Session,
+    instrument_id: str,
+    provider_id: str,
+    interval_minutes: int,
+) -> str:
+    """Try to hold the series' import lock for this transaction.
+
+    ``"acquired"`` — this transaction is the only importer of the lane until it
+    commits or rolls back; ``"contended"`` — another transaction holds it, so the
+    caller must not write; ``"unsupported"`` — the dialect has no advisory lock,
+    which is reported rather than treated as a pass, because an in-process test
+    on SQLite cannot prove anything about server-side serialization.
+
+    It is a *try*, not a wait: an import that finds the lane busy refuses and
+    leaves nothing written, instead of sitting on a lock while its plan ages.
+    """
+    if db.get_bind().dialect.name != "postgresql":
+        return "unsupported"
+    from sqlalchemy import text
+
+    got = db.execute(
+        text("SELECT pg_try_advisory_xact_lock(:key)"),
+        {"key": _lock_key(instrument_id, provider_id, interval_minutes)},
+    ).scalar()
+    return "acquired" if got else "contended"
+
+
 def _stored_by_timestamp(
     db: Session,
     timestamps: List[datetime],
     *,
     instrument_id: str,
     provider_id: str,
+    for_update: bool = False,
 ) -> Dict[datetime, List[MarketDataBar]]:
-    """Every stored row at these clock times, whatever grain it claims."""
+    """Every stored row at these clock times, whatever grain it claims.
+
+    ``for_update`` locks the rows it reads. The dry-run plan does not ask for
+    it; the write path does, because a row classified as identical and then
+    changed by someone else before the UPDATE would otherwise be overwritten
+    from a plan that is no longer true.
+    """
     if not timestamps:
         return {}
-    grouped: Dict[datetime, List[MarketDataBar]] = {}
-    for row in (
+    query = (
         db.query(MarketDataBar)
         .filter(
             and_(
@@ -177,8 +218,12 @@ def _stored_by_timestamp(
                 MarketDataBar.bar_timestamp.in_(timestamps),
             )
         )
-        .all()
-    ):
+    )
+    if for_update and db.get_bind().dialect.name == "postgresql":
+        query = query.with_for_update()
+
+    grouped: Dict[datetime, List[MarketDataBar]] = {}
+    for row in query.all():
         grouped.setdefault(row.bar_timestamp, []).append(row)
     return grouped
 
@@ -215,6 +260,7 @@ def classify_series_rows(
     series: CandleSeries,
     *,
     provider_id: str = PROVIDER_ID,
+    lock_for_write: bool = False,
 ) -> Dict[str, Any]:
     """Say what writing ``series`` would do, without writing anything.
 
@@ -222,6 +268,10 @@ def classify_series_rows(
     stored with the same values, or stored with *different* values — and a
     fourth bucket catches rows that share the clock time under another or no
     grain, which the unique key would let sit beside the new row.
+
+    ``lock_for_write`` holds the rows it classified so they cannot change
+    before the write that was planned from them. A report for a human to read
+    leaves it off; :func:`store_series_bars` turns it on.
     """
     interval_minutes = series.interval_minutes
     rows = [
@@ -239,6 +289,7 @@ def classify_series_rows(
         [row["bar_timestamp"] for row in rows],
         instrument_id=series.instrument_id,
         provider_id=provider_id,
+        for_update=lock_for_write,
     )
 
     to_insert: List[Dict[str, Any]] = []
@@ -305,6 +356,13 @@ def store_series_bars(
         raise ValueError(f"unknown on_conflict policy: {on_conflict!r}")
 
     interval_minutes = series.interval_minutes
+    lock = acquire_import_lock(db, series.instrument_id, provider_id, interval_minutes)
+    if lock == "contended":
+        raise WarehouseImportRejected(
+            f"another import holds {series.instrument_id} at {interval_minutes}m; "
+            "nothing was written",
+            {"lock": "contended", "interval_minutes": interval_minutes},
+        )
     report = {
         "instrument_id": series.instrument_id,
         "provider_id": provider_id,
@@ -323,8 +381,10 @@ def store_series_bars(
         "integrity_ok": series.integrity_ok,
         "gap_count": len(series.gaps),
         "missing_intervals": series.missing_intervals,
+        "import_lock": lock,
     }
-    plan = classify_series_rows(db, series, provider_id=provider_id)
+    plan = classify_series_rows(
+        db, series, provider_id=provider_id, lock_for_write=True)
     rows = plan["rows"]
     report["bars_read"] = len(rows)
     report["bars_already_stored"] = plan["identical"]

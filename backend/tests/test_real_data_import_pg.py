@@ -33,7 +33,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from sqlalchemy import make_url, select
+from sqlalchemy import make_url, select, text
 
 if not os.environ.get("ALETHRA_TEST_DB", "").startswith("postgresql"):
     pytest.skip(
@@ -134,6 +134,18 @@ def series_of(detail, *, bars=None, interval_minutes=1440, fetched_at=FETCHED_AT
     )
 
 
+def claims_of(path):
+    """The claims the importer would carry forward for this file.
+
+    ``provenance_for`` takes those claims rather than the raw export. They are
+    built straight from the bars, the way the importer builds them, so a test
+    of the source chain reads the same values a run would store without the
+    cross-check deciding the case first.
+    """
+    detail = json.loads(Path(path).read_text())["detail"]
+    return importer.claims_from_detail(detail, series_of(detail))
+
+
 def target_url():
     """This run's DATABASE_URL, in the scheme the safety gate accepts.
 
@@ -149,6 +161,19 @@ def target_url():
             "the safety gate parses the URL itself and rejects a "
             "SQLAlchemy-only scheme")
     return url
+
+
+def live_identity():
+    """(database, role) this connection actually answers to.
+
+    The unified importer has no approved-target constant to read: a write needs
+    the operator to name the database and role, and the gate then compares those
+    two words against the live session. Asking the server here keeps the tests
+    stating what is true rather than what a URL appears to say.
+    """
+    with TestSession() as db:
+        return (db.execute(text("SELECT current_database()")).scalar(),
+                db.execute(text("SELECT current_user")).scalar())
 
 
 COLUMNS = (
@@ -250,10 +275,20 @@ def catalogue(monkeypatch):
 
 
 def argv_for(path, sha, *extra, dry=False):
+    """Flags for one importer run against this run's approved database.
+
+    Writing is never the default: the importer stores only under
+    ``--confirm-write``, and a write then also needs the instrument, the target
+    database and the target role named. ``dry`` asks for the plan instead.
+    """
     args = ["--input", str(path), "--expected-sha256", sha]
     if dry:
-        args.append("--dry-run")
-    return args + list(extra)
+        return args + ["--dry-run"] + list(extra)
+    database, role = live_identity()
+    return args + [
+        "--confirm-write", "--instrument", SCRATCH_INSTRUMENT,
+        "--expected-database", database, "--expected-role", role,
+    ] + list(extra)
 
 
 def refuse(path, sha, *extra, dry=False):
@@ -595,30 +630,52 @@ def test_without_test_mode_the_gate_refuses(monkeypatch):
     assert "TEST_MODE" in info.value.problems[0]
 
 
-def test_a_database_that_answers_under_another_name_is_refused(monkeypatch):
-    """Connected, then refused: the approval names a database, and a database
-    that merely looks right in the URL gets nothing written to it."""
-    monkeypatch.setitem(importer.APPROVED_TARGET, "database", "alethra_test")
+def test_a_database_that_answers_under_another_name_is_refused():
+    """Connected, then refused: the import is stated for one database, the
+    session answers to another, and nothing is written into the one nobody
+    named."""
+    database, _ = live_identity()
     before = bars_state()
 
     with pytest.raises(ImportRefusal) as info:
-        importer.guard_target(target_url())
+        importer.guard_target(target_url(),
+                              expected_database=database + "_not_this_one")
 
     assert info.value.stage == "target"
-    assert "approved target is" in info.value.problems[0]
+    text = " ".join(info.value.problems)
+    assert f"{database}_not_this_one" in text, (
+        "the refusal did not say what the import had been stated for")
+    assert f"Connected to database {database!r}" in text, (
+        "the refusal did not say what the session actually answered to")
     assert bars_state() == before
 
 
-def test_another_role_in_the_same_database_is_refused(monkeypatch):
-    monkeypatch.setitem(importer.APPROVED_TARGET, "user", "alethra_other_role")
+def test_another_role_in_the_same_database_is_refused():
+    database, role = live_identity()
     before = bars_state()
 
     with pytest.raises(ImportRefusal) as info:
-        importer.guard_target(target_url())
+        importer.guard_target(target_url(), expected_database=database,
+                              expected_role=role + "_other")
 
     assert info.value.stage == "target"
-    assert "approved target role is" in info.value.problems[0]
+    text = " ".join(info.value.problems)
+    assert f"Connected to role {role!r}" in text
+    assert f"{role}_other" in text
     assert bars_state() == before
+
+
+def test_stating_the_real_identity_is_what_lets_the_gate_pass():
+    """The two refusals above only mean something if the same call succeeds on
+    the identity the connection really has, instead of the comparison being
+    dead code that refuses everything."""
+    database, role = live_identity()
+
+    conn_info = importer.guard_target(target_url(), expected_database=database,
+                                      expected_role=role)
+
+    assert conn_info["database"] == database
+    assert conn_info["user"] == role
 
 
 def test_an_unreachable_whitelisted_database_is_refused_value_free():
@@ -629,17 +686,23 @@ def test_an_unreachable_whitelisted_database_is_refused_value_free():
     with pytest.raises(ImportRefusal) as info:
         importer.guard_target(str(url))
 
-    text = " ".join(info.value.problems)
     assert info.value.stage == "target"
-    assert "cannot verify the target database" in text
+    text = " ".join(info.value.problems)
+    assert "Safety gate rejected the target" in text
+    assert "Failed to connect" in text, (
+        "an allowlisted database that could not be reached was refused for a "
+        f"reason other than not being reachable: {text}")
     assert url.password not in text and "//" not in text and "@" not in text
 
 
 def test_the_importer_never_falls_back_to_application_config(monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
 
-    with pytest.raises(UsageError):
+    with pytest.raises(ImportRefusal) as info:
         importer.guard_target("")
+
+    assert info.value.stage == "target"
+    assert "no fallback target" in info.value.problems[0]
 
 
 # ------------------------------------------------------------------- provenance
@@ -666,7 +729,7 @@ def test_an_overlong_source_chain_is_refused_rather_than_truncated():
     path.write_text(json.dumps(data))
     try:
         with pytest.raises(ImportRefusal) as info:
-            importer.provenance_for(path, data["detail"], sha256_file(path))
+            importer.provenance_for(path, claims_of(path), sha256_file(path))
         assert "over provider_note" in str(info.value)
     finally:
         path.unlink(missing_ok=True)
@@ -675,7 +738,7 @@ def test_an_overlong_source_chain_is_refused_rather_than_truncated():
 def test_provenance_names_the_file_it_read(write_file):
     path, sha = write_file(payload(), name="provenance-case")
 
-    note = importer.provenance_for(path, importer.load_detail(path), sha)
+    note = importer.provenance_for(path, claims_of(path), sha)
 
     assert note["kind"] == "offline_file_import"
     assert note["file_sha256"] == sha
@@ -700,8 +763,12 @@ def test_a_clean_file_writes_once_and_labels_itself_synthetically(
     assert report["written"]["bars_new"] == DAYS
     assert report["written"]["bars_conflicting"] == 0
     assert report["written"]["fingerprint"] == report["input"]["fingerprint"]
-    assert report["target"]["database"] == importer.APPROVED_TARGET["database"]
-    assert report["target"]["verified"] is True
+    database, role = live_identity()
+    assert report["target"] == importer.summarize_target(
+        importer.guard_target(target_url(), expected_database=database,
+                              expected_role=role))
+    assert f"database={database} user={role}" in report["target"]
+    assert DUMMY_PASSWORD not in report["target"] and "@" not in report["target"]
     stored = scratch_bars()
     assert len(stored) == DAYS
     assert {row[1] for row in stored} == {1440}, "the grain is part of the row"

@@ -46,6 +46,15 @@ KRAKEN_API_BASE = "https://api.kraken.com"
 # buckets are not used by the research lane, so they are refused rather than
 # silently mapped to a different series.
 KRAKEN_INTERVALS: Tuple[int, ...] = (1, 5, 15, 30, 60, 240, 1440)
+# Verified against api.kraken.com on 2026-11-10 with BTC/USD: one OHLC request
+# returns at most 720 CLOSED of the most recent buckets for the interval (daily:
+# ~720 days back; hourly: ~720 hours back) and rides the still-forming bucket
+# along, so a full shelf answers with 721 rows. ``last`` names the newest
+# CLOSED bucket, not the newest row returned. An older ``since`` returns the
+# identical newest shelf instead of deeper history, and feeding ``last`` back as
+# ``since`` moves toward the newest bars. ``since``/``last`` are therefore a
+# polling pair, not a backward history cursor, and no page loop can widen this
+# shelf.
 MAX_OHLC_ROWS = 720
 CACHE_TTL_SECONDS = 2.0
 # Pair metadata changes only when Kraken re-lists a pair, so refetching it on
@@ -336,10 +345,13 @@ class KrakenProvider(DataProvider):
 
     @staticmethod
     def _result_key(payload: Dict[str, Any], expected: Sequence[str]) -> Tuple[str, Optional[str]]:
-        """Extract the pair key and pagination cursor from Kraken response.
+        """Extract the pair key and the ``last`` field from a Kraken OHLC response.
 
-        Returns (result_key, last_cursor) where last_cursor is the pagination
-        token for fetching older data, or None if not present.
+        Returns (result_key, last_cursor). ``last`` is a newest-side polling
+        identifier: feeding it back as ``since`` was observed to return bars
+        *newer* than the previous page, not older ones. Kraken documents no
+        special values for it, so callers must not infer meaning from any
+        particular value — only from whether it moves forward.
         """
         result = payload.get("result") or {}
         keys = [k for k in result.keys() if k != "last"]
@@ -398,6 +410,83 @@ class KrakenProvider(DataProvider):
             now=self._now(),
         )
 
+    @staticmethod
+    def _merge_page(
+        seen: Sequence[RawCandle],
+        incoming: Sequence[RawCandle],
+        instrument_id: str,
+        *,
+        not_before: Optional[datetime] = None,
+        forming_from: Optional[datetime] = None,
+    ) -> List[RawCandle]:
+        """Fold one page into the rows already collected, refusing regressions.
+
+        Kraken's ``last`` names the newest *closed* bucket, yet the same response
+        also carries the bucket still being formed. The next page therefore
+        legitimately re-serves a row older than the newest row in hand — bounding
+        on ``seen[-1]`` refused every live two-page harvest (observed against
+        api.kraken.com on 2026-11-10). What a real regression looks like is a row
+        older than the ``since`` the page answered to, or a page that decreases
+        within itself.
+
+        A repeated *closed* bucket with different content is refused: picking
+        either side would silently decide which price the ledger trusts. A bucket
+        at or after ``forming_from`` is exempt because it is still in progress and
+        is expected to move between pages; the first read of it is kept, and
+        :func:`build_series` keeps it out of ``completed`` so the ledger never
+        consumes it either way.
+        """
+        index = {row.open_time: row for row in seen}
+        fresh: List[RawCandle] = []
+        within_page: Optional[datetime] = None
+        for row in incoming:
+            if not_before is not None and row.open_time < not_before:
+                raise KrakenApiError(
+                    f"Kraken page for {instrument_id} went backwards past its cursor: "
+                    f"{row.open_time.isoformat()} precedes the "
+                    f"{not_before.isoformat()} it was asked from"
+                )
+            if within_page is not None and row.open_time < within_page:
+                raise KrakenApiError(
+                    f"Kraken page for {instrument_id} runs backwards inside the page: "
+                    f"{row.open_time.isoformat()} after {within_page.isoformat()}"
+                )
+            within_page = row.open_time
+            known = index.get(row.open_time)
+            if known is None:
+                index[row.open_time] = row
+                fresh.append(row)
+                continue
+            if forming_from is not None and row.open_time > forming_from:
+                continue
+            if (known.open, known.high, known.low, known.close, known.volume) != (
+                row.open, row.high, row.low, row.close, row.volume
+            ):
+                raise KrakenApiError(
+                    f"Kraken returned conflicting content for closed bar "
+                    f"{row.open_time.isoformat()} of {instrument_id}: refused to pick a winner"
+                )
+        return fresh
+
+    @staticmethod
+    def _cursor_instant(since: str) -> Optional[datetime]:
+        """Resolve a ``since`` cursor to the instant the venue was asked from."""
+        try:
+            value = int(since)
+        except (TypeError, ValueError):
+            return None
+        if value <= 0:
+            return None
+        return datetime.fromtimestamp(value, tz=timezone.utc)
+
+    @staticmethod
+    def _cursor_moves_forward(since: str, cursor: Any) -> bool:
+        """True only if the answered cursor is a strictly larger instant."""
+        try:
+            return int(cursor) > int(since)
+        except (TypeError, ValueError) as exc:
+            raise KrakenApiError(f"Kraken returned a non-numeric pagination cursor {cursor!r}") from exc
+
     def get_candle_series_paginated(
         self,
         instrument_id: str,
@@ -405,21 +494,28 @@ class KrakenProvider(DataProvider):
         target_bars: int = 2000,
         max_pages: int = 10,
     ) -> CandleSeries:
-        """Fetch historical bars using forward pagination from a calculated start.
+        """Collect recent bars up to the venue's shelf, refusing an undeliverable ask.
 
-        Kraken's OHLC endpoint returns up to 720 bars per request. The ``since``
-        parameter fetches FORWARD from that timestamp. To get more than 720 bars,
-        we calculate a start timestamp far enough in the past and page forward,
-        using each page's last bar timestamp as the next page's ``since``.
+        Kraken serves at most ``MAX_OHLC_ROWS`` of the most recent buckets for an
+        interval, and an older ``since`` does not deepen that shelf (verified
+        against api.kraken.com on 2026-11-10). Paging can only confirm the shelf,
+        never extend it, so ``target_bars`` beyond it is refused rather than
+        answered with a shorter series presented as the requested history.
 
         Args:
             instrument_id: The instrument to fetch (e.g., "CRYPTO:KRAKEN:BTC-USD")
             interval_minutes: Bar interval (1, 5, 15, 30, 60, 240, or 1440)
-            target_bars: Desired number of historical bars (default 2000)
+            target_bars: Required number of historical bars
             max_pages: Safety limit on number of API calls (default 10)
 
         Returns:
-            CandleSeries with up to target_bars completed candles
+            CandleSeries carrying at least ``target_bars`` buckets; the newest of
+            them may still be forming, so ``series.completed`` can be one shorter
+
+        Raises:
+            KrakenError: the venue could not lend ``target_bars`` bars
+            KrakenApiError: a page repeated a bucket with different content, or
+                the cursor stopped moving forward on a full page
         """
         instrument = self._require_instrument(instrument_id)
         if interval_minutes not in KRAKEN_INTERVALS:
@@ -460,13 +556,29 @@ class KrakenProvider(DataProvider):
             if not rows:
                 break
 
-            page_rows = [self._parse_row(row, instrument_id) for row in rows]
+            page_rows = self._merge_page(
+                all_rows,
+                [self._parse_row(row, instrument_id) for row in rows],
+                instrument_id,
+                not_before=self._cursor_instant(since_cursor),
+                forming_from=now - timedelta(minutes=interval_minutes),
+            )
             all_rows.extend(page_rows)
             pages_fetched += 1
-
-            if last_cursor is None or str(last_cursor) == since_cursor:
+            if not page_rows:
+                # The venue re-served the same shelf: there is nothing further to walk into.
+                break
+            if last_cursor is None or not self._cursor_moves_forward(since_cursor, last_cursor):
                 break
             since_cursor = str(last_cursor)
+
+        if len(all_rows) < target_bars:
+            raise KrakenError(
+                f"Kraken lends at most {MAX_OHLC_ROWS} of the most recent "
+                f"{interval_minutes}m buckets; asked for {target_bars} and collected "
+                f"{len(all_rows)} across {pages_fetched} page(s). A shorter series must "
+                "not be presented as the requested history."
+            )
 
         if len(all_rows) > target_bars:
             all_rows = all_rows[-target_bars:]
@@ -477,6 +589,174 @@ class KrakenProvider(DataProvider):
             rows=all_rows,
             now=now,
         )
+
+    def get_history_candle_series(
+        self,
+        instrument_id: str,
+        interval_minutes: int = 1,
+        start: Optional[Any] = None,
+        end: Optional[Any] = None,
+        max_pages: int = 10,
+    ) -> CandleSeries:
+        """Read the venue's history shelf for one interval, refusing overclaims.
+
+        Verified against api.kraken.com on 2026-11-10: one OHLC request answers
+        with at most ``MAX_OHLC_ROWS`` of the most recent buckets for the
+        interval, and an older ``since`` returns the same shelf instead of
+        deeper history. This method therefore treats a response as a shelf with
+        a head, never as a window it can widen, and enforces that framing:
+
+        - ``start`` earlier than the shelf head: refuse, naming the head. Only a
+          named start claims the series covers it.
+        - empty window (``start >= end``): refuse before any request.
+        - a cursor that does not move forward past the ``since`` it answered to,
+          or a page that runs backwards: refuse instead of looping or re-reading.
+        - a page that adds nothing new: the shelf is exhausted, so stop.
+        - page budget spent while the last page still contributed rows: refuse,
+          because window completeness can no longer be proven.
+        - a bucket repeated with different content: refuse, instead of letting
+          de-duplication pick which price the ledger trusts.
+
+        The forming candle is separated by :func:`build_series` and never
+        appears in ``series.completed``.
+
+        Args:
+            instrument_id: The instrument to fetch (e.g., "CRYPTO:KRAKEN:BTC-USD")
+            interval_minutes: Bar interval (1, 5, 15, 30, 60, 240, or 1440)
+            start: Optional start datetime/date (inclusive). If None, takes the
+                   whole shelf the venue lends without claiming coverage.
+            end: Optional end datetime/date (exclusive). Stops fetching after this.
+            max_pages: Safety limit on number of API calls (default 10)
+
+        Returns:
+            CandleSeries with completed candles and integrity checks
+
+        Raises:
+            KrakenError: empty window, missing head, or unprovable completeness
+            KrakenApiError: cursor that did not advance, or conflicting content
+        """
+        instrument = self._require_instrument(instrument_id)
+        if interval_minutes not in KRAKEN_INTERVALS:
+            raise KrakenError(
+                f"Unsupported interval {interval_minutes}m for Kraken; "
+                f"choose one of {list(KRAKEN_INTERVALS)}"
+            )
+        if max_pages < 1:
+            raise KrakenError(f"max_pages must be >= 1, got {max_pages}")
+
+        # Normalize start/end to datetime with timezone
+        start_dt = self._normalize_datetime(start) if start is not None else None
+        end_dt = self._normalize_datetime(end) if end is not None else None
+
+        # Validate window before any request
+        if start_dt is not None and end_dt is not None and start_dt >= end_dt:
+            raise KrakenError("history window is empty")
+
+        mapping = get_kraken_pair(instrument.instrument_id)
+        assert mapping is not None
+        expected_keys = (
+            mapping.metadata.get("result_key", ""),
+            mapping.metadata.get("result_key_alt", ""),
+        )
+
+        # Calculate initial since cursor
+        if start_dt is not None:
+            since_cursor = str(int(start_dt.timestamp()))
+        else:
+            # No start: take whatever the venue lends (harvest mode)
+            since_cursor = "0"
+
+        all_rows: List[RawCandle] = []
+        pages_fetched = 0
+        last_page_added_rows = False
+        reached_end = False
+        now = self._now()
+
+        while pages_fetched < max_pages:
+            params: Dict[str, str] = {
+                "pair": mapping.provider_symbol,
+                "interval": str(interval_minutes),
+                "since": since_cursor,
+            }
+
+            payload = self._request("/0/public/OHLC", params)
+            key, last_cursor = self._result_key(payload, expected_keys)
+
+            rows = payload["result"][key]
+            if not rows:
+                # Empty page: we've reached the end of available data
+                break
+
+            page_rows = self._merge_page(
+                all_rows,
+                [self._parse_row(row, instrument_id) for row in rows],
+                instrument_id,
+                not_before=self._cursor_instant(since_cursor),
+                forming_from=now - timedelta(minutes=interval_minutes),
+            )
+            all_rows.extend(page_rows)
+            pages_fetched += 1
+
+            # Only a named start claims the series covers it. Later pages carry
+            # newer buckets, so this head can never improve — refuse now instead
+            # of spending the rest of the budget paging to the same conclusion.
+            if start_dt is not None and all_rows[0].open_time > start_dt:
+                first_bar_time = all_rows[0].open_time
+                raise KrakenError(
+                    f"Kraken's history shelf starts at {first_bar_time.isoformat()}, "
+                    f"after the requested start {start_dt.isoformat()}: a shorter "
+                    "series must not be presented as covering the window. An older "
+                    f"``since`` does not unlock bars — the venue answers with its "
+                    f"{MAX_OHLC_ROWS} most recent {interval_minutes}m buckets."
+                )
+
+            last_page_added_rows = bool(page_rows)
+            if not page_rows:
+                break
+
+            # Stop if we've reached the end boundary
+            if end_dt is not None and all_rows[-1].open_time >= end_dt:
+                # Trim rows that are at or after end
+                all_rows = [r for r in all_rows if r.open_time < end_dt]
+                last_page_added_rows = False
+                reached_end = True
+                break
+
+            # A short page is the end of what the venue lends
+            if len(rows) < MAX_OHLC_ROWS:
+                break
+
+            if last_cursor is None:
+                break
+            if not self._cursor_moves_forward(since_cursor, last_cursor):
+                raise KrakenApiError(
+                    f"Pagination cursor did not advance: {since_cursor} -> {last_cursor}"
+                )
+            since_cursor = str(last_cursor)
+
+        # Validate short series: the budget ran out while the venue was still
+        # contributing new bars, so the window cannot be proven complete.
+        if not reached_end and pages_fetched >= max_pages and last_page_added_rows:
+            raise KrakenError(
+                f"Fetched {len(all_rows)} bars across {max_pages} pages but the "
+                "series must not be presented as the full history"
+            )
+
+        return build_series(
+            instrument_id=instrument_id,
+            interval_minutes=interval_minutes,
+            rows=all_rows,
+            now=self._now(),
+        )
+
+    @staticmethod
+    def _normalize_datetime(value: Any) -> datetime:
+        """Convert date or datetime to timezone-aware datetime."""
+        if isinstance(value, datetime):
+            return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        if isinstance(value, date):
+            return datetime(value.year, value.month, value.day, tzinfo=timezone.utc)
+        raise KrakenError(f"Cannot normalize {type(value).__name__} to datetime")
 
     @staticmethod
     def _parse_row(row: Any, instrument_id: str) -> RawCandle:
