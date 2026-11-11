@@ -287,6 +287,94 @@ class TestIrregularObservations:
 
 
 # ---------------------------------------------------------------------------
+# Leap years: the span comes from the calendar, not from a year length
+# ---------------------------------------------------------------------------
+
+
+class TestLeapDay:
+    """2024 has 366 calendar days and 252 US sessions; 2025 has 365 and 250.
+
+    Elapsed years are ``(last - first).days / 365.25``, so a leap day has to
+    show up as one more day of span and one more observation — never as a
+    longer year, and never as a rate of 366.
+    """
+
+    def test_the_leap_day_is_a_real_observation(self):
+        leap = consecutive_days(date(2024, 2, 26), 5)
+        assert leap == [
+            date(2024, 2, 26),
+            date(2024, 2, 27),
+            date(2024, 2, 28),
+            date(2024, 2, 29),
+            date(2024, 3, 1),
+        ]
+        # Five names from the same start land on a different last date in a
+        # year without a 29 February.
+        plain = consecutive_days(date(2025, 2, 26), 5)
+        assert plain == [
+            date(2025, 2, 26),
+            date(2025, 2, 27),
+            date(2025, 2, 28),
+            date(2025, 3, 1),
+            date(2025, 3, 2),
+        ]
+
+    def test_span_across_the_leap_day_counts_the_extra_day(self):
+        leap = basis_for_series(BTC, consecutive_days(date(2024, 2, 26), 6))
+        plain = basis_for_series(BTC, consecutive_days(date(2025, 2, 26), 5))
+        assert leap.observation_count == 6
+        assert plain.observation_count == 5
+        # 2024-02-26..2024-03-02 is 5 days apart; 2025-02-26..2025-03-02 is 4.
+        assert leap.elapsed_years == round(5 / MEAN, 6)
+        assert plain.elapsed_years == round(4 / MEAN, 6)
+        assert leap.elapsed_years != plain.elapsed_years
+
+    def test_a_full_leap_year_spans_365_days_not_366(self):
+        basis = basis_for_series(BTC, consecutive_days(date(2024, 1, 1), 366))
+        assert basis.observation_count == 366
+        assert basis.available is True
+        # 2024-01-01 to 2024-12-31 is 365 days of span even though the year has
+        # 366 of them: the first day carries no span before it.
+        assert basis.elapsed_years == round(365 / MEAN, 6)
+        assert basis.elapsed_years == pytest.approx(0.999316, abs=1e-6)
+
+    def test_a_full_common_year_spans_one_day_less(self):
+        leap = basis_for_series(BTC, consecutive_days(date(2024, 1, 1), 366))
+        common = basis_for_series(BTC, consecutive_days(date(2025, 1, 1), 365))
+        assert common.observation_count == 365
+        assert common.elapsed_years == round(364 / MEAN, 6)
+        assert common.elapsed_years == pytest.approx(0.996578, abs=1e-6)
+        assert round(leap.elapsed_years - common.elapsed_years, 6) == round(1 / MEAN, 6)
+
+    def test_leap_day_does_not_become_the_observations_per_year(self):
+        basis = basis_for_series(BTC, consecutive_days(date(2024, 1, 1), 366))
+        # The rate is the mean calendar year, defined once for the contract;
+        # it is never the count of days in the sample's own year.
+        assert basis.observations_per_year == MEAN
+        assert basis.observations_per_year not in (366.0, 365.0, 364.0)
+
+    def test_two_years_around_a_leap_day_keep_their_real_span(self):
+        basis = basis_for_series(BTC, consecutive_days(date(2024, 1, 1), 731))
+        assert basis.observation_count == 731
+        # 2024-01-01..2025-12-31 is 730 days: 366 + 365 - 1.
+        assert basis.elapsed_years == round(730 / MEAN, 6)
+        assert basis.elapsed_years == pytest.approx(1.998631, abs=1e-6)
+
+    def test_the_us_calendar_lists_the_leap_day_session(self):
+        sessions_2024 = us_sessions(date(2024, 1, 1), date(2024, 12, 31))
+        sessions_2025 = us_sessions(date(2025, 1, 1), date(2025, 12, 31))
+        assert len(sessions_2024) == 252
+        assert len(sessions_2025) == 250
+        assert date(2024, 2, 29) in sessions_2024
+        assert date(2025, 2, 28) in sessions_2025
+        # Equity keeps its own session count across the leap year: 252 sessions
+        # 364 days apart, so the rate is derived, not assumed to be 252.
+        basis = basis_for_series(AAPL, sessions_2024)
+        assert basis.elapsed_years == round(364 / MEAN, 6)
+        assert basis.observations_per_year == round(252 * MEAN / 364, 6)
+
+
+# ---------------------------------------------------------------------------
 # Observation frequency per grain
 # ---------------------------------------------------------------------------
 
