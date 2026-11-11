@@ -37,6 +37,16 @@ jobs:
         working-directory: frontend
         run: npx playwright install --with-deps chromium
 
+      - name: Generate per-run acceptance credentials
+        # Exists only for this job; the stack is removed with `down -v` below.
+        run: |
+          pg_password="$(openssl rand -hex 24)"
+          jwt_secret="$(openssl rand -hex 32)"
+          echo "::add-mask::$pg_password"
+          echo "::add-mask::$jwt_secret"
+          echo "POSTGRES_PASSWORD=$pg_password" >> "$GITHUB_ENV"
+          echo "JWT_SECRET_KEY=$jwt_secret" >> "$GITHUB_ENV"
+
       - name: Start acceptance stack
         run: docker compose -f docker-compose.acceptance.yml up --build -d
 

@@ -252,12 +252,15 @@ npm run build
 
 | Variable | Value |
 |----------|-------|
-| `DATABASE_URL` | `postgresql://postgres:postgres@db:5432/ai_investment_lab_acceptance` |
-| `JWT_SECRET_KEY` | `acceptance-test-secret-minimum-32-chars-long` |
+| `DATABASE_URL` | `postgresql://postgres:${POSTGRES_PASSWORD:?…}@db:5432/ai_investment_lab_acceptance` |
+| `JWT_SECRET_KEY` | `${JWT_SECRET_KEY:?…}` — required, no default |
 | `AI_PROVIDER` | `mock` |
 | `DATA_PROVIDER` | `demo` |
 | `CORS_ORIGINS` | `http://localhost:3001` |
 | `NEXT_PUBLIC_API_URL` | `http://localhost:8001` |
+
+`POSTGRES_PASSWORD` and `JWT_SECRET_KEY` are supplied per run (CI generates them at
+job time); the compose file refuses to render without them.
 
 **Bind mounts and volume strategy:**
 
@@ -330,6 +333,15 @@ jobs:
       - name: Install Playwright browsers
         working-directory: frontend
         run: npx playwright install --with-deps chromium
+
+      - name: Generate per-run acceptance credentials
+        run: |
+          pg_password="$(openssl rand -hex 24)"
+          jwt_secret="$(openssl rand -hex 32)"
+          echo "::add-mask::$pg_password"
+          echo "::add-mask::$jwt_secret"
+          echo "POSTGRES_PASSWORD=$pg_password" >> "$GITHUB_ENV"
+          echo "JWT_SECRET_KEY=$jwt_secret" >> "$GITHUB_ENV"
 
       - name: Start acceptance stack
         run: docker compose -f docker-compose.acceptance.yml up --build -d
