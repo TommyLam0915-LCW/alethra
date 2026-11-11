@@ -11,7 +11,10 @@ Already proven elsewhere and deliberately not repeated here:
 * active-version CAS — ``test_personal_comparison_validity.py::
   test_postgres_two_sessions_block_on_the_record_lock``
 * reservation settle/settle, settle/release, counter-creation races —
-  ``test_quota_concurrency.py``
+  ``test_quota_concurrency.py``, which is excluded from the default PostgreSQL
+  pass and skips until ``ALETHRA_PG_QUOTA_CONCURRENCY_ENABLE=1`` is set against
+  a migration-built dedicated database; on the default pass those cases are
+  skipped, not covered
 * paper order idempotency and ledger-failure rollback —
   ``test_manual_decision_books_linked_portfolio.py``
 * stale-claim reclaim and cancel-after-claim, sequentially —

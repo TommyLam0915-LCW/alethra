@@ -131,7 +131,7 @@ def test_importing_without_the_variable_skips_instead_of_connecting(tmp_path):
     """Behaviour, not text: the guard branch must skip before any engine exists."""
     lines = TARGET.read_text(encoding="utf-8").splitlines()
     start = next(i for i, line in enumerate(lines) if line.startswith("POSTGRES_URL = "))
-    end = next(i for i, line in enumerate(lines) if line.startswith("# Check if PostgreSQL"))
+    end = next(i for i, line in enumerate(lines) if line.startswith("OPT_IN = "))
     assert "pytest.skip" in "\n".join(lines[start:end]), "the slice no longer holds the guard"
     (tmp_path / "guard_branch.py").write_text(
         "import os\nimport pytest\n\n" + "\n".join(lines[start:end]) + "\n",

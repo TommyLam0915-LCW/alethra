@@ -85,6 +85,10 @@ if [ "$MODE" = "pg" ]; then
   export DATABASE_URL="$ALETHRA_PG_TEST_URL"
   export ALETHRA_TEST_DB="$ALETHRA_PG_TEST_URL"
   export ALETHRA_PG_DATABASE_URL="$ALETHRA_PG_TEST_URL"
+  # This export stays even though tests/test_quota_concurrency.py is not part of
+  # this pass: the environment contract requires all four DB variables, and the
+  # exclusion is the module's own opt-in (ALETHRA_PG_QUOTA_CONCURRENCY_ENABLE),
+  # so the module skips by name here instead of rewriting the target at DDL time.
   export ALETHRA_TEST_POSTGRES_URL="$ALETHRA_PG_TEST_URL"
   export ALETHRA_TEST_REQUIRED_DB_PREFIX=${ALETHRA_TEST_REQUIRED_DB_PREFIX:-alethra_}
   export TEST_MODE=true
