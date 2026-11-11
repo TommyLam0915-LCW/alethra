@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import { api, ApiError } from '@/lib/api';
+import { describeBasis, type AnnualizationBasis } from '@/lib/annualizationBasis';
 import { BENCHMARK_METRIC_KEYS, describeBenchmark, describeRecordedBenchmark } from '@/lib/benchmarkState';
 import { describeRunStatus } from '@/lib/runStatus';
 import { formatDateTime, formatParamMap, formatRatePercent } from '@/lib/format';
@@ -47,7 +48,6 @@ const METRIC_KEYS: [string, string][] = [
   ['profit_factor', 'Profit factor (gross profit / gross loss)'],
   ['average_realized_r', 'Average realized R'],
   ['sharpe_ratio', 'Sharpe ratio'],
-  ['annualized_return_pct', 'Annualized return (%)'],
 ];
 
 interface UnavailableMetric {
@@ -83,6 +83,11 @@ interface WeekdayBreakdown extends UnavailableMetric {
 }
 
 const PANEL_METRIC_KEYS = ['pnl_cross_check', 'day_of_week_breakdown', 'time_of_day_breakdown', 'round_trip_summary'];
+
+// The annualization block and the figures it produced stay together: an
+// annualized number without its basis is not interpretable, so none of these
+// belong to the generic metric groups.
+const BASIS_METRIC_KEYS = ['annualization', 'annualized_return_pct', 'annualized_volatility_pct'];
 
 const EXIT_POLICY_LABELS: Record<string, string> = {
   source: 'Policy source',
@@ -272,9 +277,14 @@ export default function RunDetailPage() {
   const isStruct = (v: unknown): v is Record<string, unknown> =>
     typeof v === 'object' && v !== null && !Array.isArray(v);
   const flatExtraCount = Object.keys(recorded).filter(
-    (k) => !METRIC_KEYS.some(([m]) => m === k) && !PANEL_METRIC_KEYS.includes(k)
+    (k) =>
+      !METRIC_KEYS.some(([m]) => m === k) &&
+      !PANEL_METRIC_KEYS.includes(k) &&
+      !BASIS_METRIC_KEYS.includes(k)
   ).length;
   const crossCheck = isStruct(recorded.pnl_cross_check) ? (recorded.pnl_cross_check as CrossCheck) : null;
+  const basis = isStruct(recorded.annualization) ? (recorded.annualization as AnnualizationBasis) : null;
+  const basisView = describeBasis(basis, recorded);
   const weekday = isStruct(recorded.day_of_week_breakdown) ? (recorded.day_of_week_breakdown as WeekdayBreakdown) : null;
   const timeOfDay = isStruct(recorded.time_of_day_breakdown) ? (recorded.time_of_day_breakdown as UnavailableMetric) : null;
   const fills = Array.isArray(resultMeta.transactions) ? (resultMeta.transactions as JournalRow[]) : [];
@@ -361,7 +371,12 @@ export default function RunDetailPage() {
               <h4 style={{ margin: '16px 0 8px', fontSize: '13px', color: 'var(--text-muted)' }}>Other metrics</h4>
               <div style={{ display: 'grid', gridTemplateColumns: '200px 1fr', gap: '6px 16px', fontSize: '12px', color: 'var(--text-secondary)' }}>
                 {Object.entries(recorded)
-                  .filter(([k]) => !METRIC_KEYS.some(([m]) => m === k) && !PANEL_METRIC_KEYS.includes(k))
+                  .filter(
+                    ([k]) =>
+                      !METRIC_KEYS.some(([m]) => m === k) &&
+                      !PANEL_METRIC_KEYS.includes(k) &&
+                      !BASIS_METRIC_KEYS.includes(k)
+                  )
                   .map(([k, v]) => {
                     const { text, reason } = fmtMetric(v);
                     return (
@@ -373,6 +388,67 @@ export default function RunDetailPage() {
                   })}
               </div>
             </>
+          )}
+        </div>
+      </div>
+
+      <div className="dash-panel" style={{ marginBottom: '16px' }} data-testid="annualization-basis-panel">
+        <div className="dash-panel-body" style={{ padding: '20px' }}>
+          <h3 style={{ margin: '0 0 12px', fontSize: '15px' }}>年化計算基準</h3>
+          {basisView.state === 'unrecorded' ? (
+            <div style={{ fontSize: '13px', color: 'var(--text-muted)' }} data-testid="annualization-basis-unrecorded">
+              未記錄年化基準 — this run completed before the annualization basis was recorded, so no
+              annualized figure is implied here.
+            </div>
+          ) : (
+            <div style={{ display: 'grid', gridTemplateColumns: '200px 1fr', gap: '8px 16px', fontSize: '13px', color: 'var(--text-secondary)' }}>
+              <div>狀態</div>
+              <div>
+                <span
+                  data-testid="annualization-basis-available"
+                  style={{ fontWeight: 600, color: basisView.state === 'available' ? 'var(--text-white)' : 'var(--text-muted)' }}
+                >
+                  {basisView.heading}
+                </span>
+                {basisView.reason && (
+                  <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }} data-testid="annualization-basis-reason">
+                    {basisView.reason}
+                  </div>
+                )}
+              </div>
+              {basisView.rows.map((row) => (
+                <div key={row.testid} style={{ display: 'contents' }}>
+                  <div>{row.label}</div>
+                  <div>
+                    <span data-testid={row.testid}>
+                      {row.value}
+                      {row.note && <span style={{ color: 'var(--text-muted)' }}> · {row.note}</span>}
+                    </span>
+                  </div>
+                </div>
+              ))}
+              {basisView.derived.map((entry) => (
+                <div key={entry.testid} style={{ display: 'contents' }}>
+                  <div>
+                    {entry.label}
+                    <span style={{ color: 'var(--text-muted)' }}> · derived</span>
+                  </div>
+                  <div>
+                    <span
+                      data-testid={entry.testid}
+                      style={{ fontWeight: 600, color: entry.reason ? 'var(--text-muted)' : 'var(--text-white)' }}
+                      title={entry.reason}
+                    >
+                      {entry.value}
+                    </span>
+                    <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>
+                      {entry.note}
+                      {entry.reason ? ` · ${entry.reason}` : ''}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
           )}
         </div>
       </div>
