@@ -12,14 +12,32 @@ Exit codes: 0 all checks PASS, 1 failure.
 import bcrypt
 import json
 import os
+import re
 import subprocess
 import sys
 import uuid
 
 import psycopg2
 
-PG = os.environ.get("E2E_LEGACY_DB_URL",
-                    "postgresql://postgres:postgres@127.0.0.1:5434/alethra_e2e_legacy")
+
+def _required_url(name: str) -> str:
+    """Fail closed: this script used to fall back to the container's default credentials."""
+    value = os.environ.get(name)
+    if not value:
+        sys.exit(
+            f"REFUSING: required environment variable {name} is not set (or is empty). "
+            "No database was created, dropped, or migrated."
+        )
+    return value
+
+
+def _redact(url: str) -> str:
+    """Keep the connection target readable in the log without the password."""
+    return re.sub(r"(?<=://)([^:/]+):[^@]+(?=@)", r"\1:***", url)
+
+
+PG = _required_url("E2E_LEGACY_DB_URL")
+ADMIN_URL = _required_url("E2E_LEGACY_ADMIN_URL")
 BACKEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backend")
 PY = os.environ.get("E2E_PY", sys.executable)
 PRE_REVISION = "a1b2c3d4e5f6"
@@ -48,14 +66,14 @@ def conn():
 
 # ── 0. Recreate the disposable legacy database ───────────────────
 print("\n=== E8.0 — create disposable legacy database ===")
-admin = psycopg2.connect("postgresql://postgres:postgres@127.0.0.1:5434/postgres")
+admin = psycopg2.connect(ADMIN_URL)
 admin.autocommit = True
 cur = admin.cursor()
 cur.execute("DROP DATABASE IF EXISTS alethra_e2e_legacy")
 cur.execute("CREATE DATABASE alethra_e2e_legacy")
 cur.close()
 admin.close()
-check("database created", True, PG)
+check("database created", True, _redact(PG))
 
 # ── 1. Build the legacy v1 fixture ────────────────────────────────
 print("\n=== E8.1 — build representative legacy-v1 fixture ===")

@@ -22,15 +22,26 @@ import uuid
 
 import requests
 
+
+def _required_env(name: str) -> str:
+    """A missing input is an environment-blocked run (exit 2), not a test failure."""
+    value = os.environ.get(name)
+    if not value:
+        print(
+            f"REFUSING: required environment variable {name} is not set (or is empty). "
+            "No backend was started and no database was touched.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    return value
+
+
 BASE = os.environ.get("E2E_BASE", "http://127.0.0.1:8100")
 API = f"{BASE}/api/v1"
 AUTH = f"{BASE}/api/auth"
 BACKEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backend")
 PY = os.environ.get("E2E_PY", sys.executable)
-DB_URL = os.environ.get(
-    "E2E_DATABASE_URL",
-    "postgresql://postgres:postgres@127.0.0.1:5434/alethra_e2e",
-)
+DB_URL = _required_env("E2E_DATABASE_URL")
 WEBHOOK_SECRET = "test-webhook-secret"  # TestPaymentAdapter default
 
 RUN_ID = uuid.uuid4().hex[:8]
