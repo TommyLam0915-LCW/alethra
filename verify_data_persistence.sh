@@ -9,7 +9,14 @@ TIMESTAMP=$(date +%s)
 EMAIL="persistence-${TIMESTAMP}@example.com"
 PASSWORD="testpass123"
 
+# Required inputs, checked before the first curl. The restart in step 5 used to
+# hardcode a postgresql://localhost:5434 target that no longer listens.
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scripts/require_acceptance_inputs.sh"
+require_db_target DATABASE_URL
+require_secret JWT_SECRET_KEY 32
+
 echo "=== Milestone 2: Data Persistence Verification ==="
+echo "database target: $(describe_db_target)"
 echo ""
 
 # Step 1: Register user and create data
@@ -61,8 +68,14 @@ echo "Experiment $EXP_ID exists: $EXP_EXISTS_BEFORE"
 
 # Step 3: Record database state
 echo "3. Recording database state..."
-docker exec alethra-e2e-db psql -U test -d alethra_acceptance -c "SELECT COUNT(*) as conversation_count FROM ai_conversations;" -t
-docker exec alethra-e2e-db psql -U test -d alethra_acceptance -c "SELECT COUNT(*) as experiment_count FROM experiments;" -t
+echo "  Declared target: $(describe_db_target)"
+echo "  SQL counts: NOT CAPTURED by this script"
+echo "    Reason: this step used to run psql inside a fixed container name with a"
+echo "    fixed -U user, which is a database target outside the required input above"
+echo "    and aborts the whole run wherever that container is absent."
+echo "    A direct SQL read needs a credential path that never enters argv"
+echo "    (PGPASSFILE or an approved runner); until that is in place the"
+echo "    HTTP-derived counts in steps 2 and 7 are the persistence evidence."
 
 # Step 4: Kill backend
 echo "4. Killing backend process..."
@@ -88,8 +101,8 @@ echo "Backend stopped."
 echo "5. Restarting backend..."
 cd "$BACKEND_DIR"
 source venv/bin/activate
-export DATABASE_URL="postgresql://test:test@localhost:5434/alethra_acceptance"
-export JWT_SECRET_KEY="acceptance-test-secret-minimum-32-chars-long"
+# The same target the top-level check validated; no credential literal here.
+export DATABASE_URL JWT_SECRET_KEY
 export AI_PROVIDER="mock"
 export DATA_PROVIDER="demo"
 export APP_ENV="development"

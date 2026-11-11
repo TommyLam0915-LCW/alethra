@@ -6,6 +6,12 @@ set -e
 
 BASE_URL="http://localhost:8001"
 
+# Required input, checked before the first curl. Service 3 below used to print a
+# fixed "Container: alethra-e2e-db / Port: 5434 / OPERATIONAL" claim that this
+# script never verified and that has not been true since the :5434 stack stopped.
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scripts/require_acceptance_inputs.sh"
+require_db_target DATABASE_URL
+
 echo "=== Milestone 3: External Service Verification ==="
 echo ""
 
@@ -50,10 +56,9 @@ echo "  Status: ✅ OPERATIONAL (mock mode)"
 echo ""
 
 echo "=== Service 3: PostgreSQL Database ==="
-echo "Status: CONNECTED (Docker container)"
-echo "  Container: alethra-e2e-db"
-echo "  Port: 5434"
-echo "  Status: ✅ OPERATIONAL"
+echo "  Declared target: $(describe_db_target)"
+echo "  Credentials: not printed by this script"
+echo "  Status: NOT PROBED — this script exercises HTTP endpoints only and opens no database connection"
 echo ""
 
 echo "=== Service 4: Stripe Billing ==="

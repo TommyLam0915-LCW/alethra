@@ -9,7 +9,15 @@ EMAIL="quota-persistence-${TIMESTAMP}@example.com"
 PASSWORD="testpass123"
 WORKTREE="/Users/tommylam0915/Documents/Qoder/2026-10-08/alethra-integration-auto"
 
+# Required inputs, checked before the first curl and before any backend restart.
+# Step 8 used to hardcode a postgresql://localhost:5434 target that no longer
+# listens, so the "restart" proved nothing about the database it claimed.
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scripts/require_acceptance_inputs.sh"
+require_db_target DATABASE_URL
+require_secret JWT_SECRET_KEY 32
+
 echo "=== Milestone 2: Quota Persistence Verification (Actual Restart) ==="
+echo "database target: $(describe_db_target)"
 echo ""
 
 # Step 1: Register user
@@ -119,8 +127,8 @@ BACKEND_DIR="/Users/tommylam0915/Documents/Qoder/2026-10-08/alethra-integration-
 
 cd "$BACKEND_DIR"
 source venv/bin/activate
-export DATABASE_URL="postgresql://test:test@localhost:5434/alethra_acceptance"
-export JWT_SECRET_KEY="acceptance-test-secret-minimum-32-chars-long"
+# The same target the top-level check validated; no credential literal here.
+export DATABASE_URL JWT_SECRET_KEY
 export AI_PROVIDER="mock"
 export DATA_PROVIDER="demo"
 export APP_ENV="development"

@@ -9,7 +9,15 @@ TIMESTAMP=$(date +%s)
 EMAIL="journey-b-worker-${TIMESTAMP}@example.com"
 PASSWORD="testpass123"
 
+# Required inputs, checked before the first pgrep/curl/worker start. This script
+# used to hardcode a postgresql://localhost:5434 target that no longer listens,
+# so it ran to completion against nothing.
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scripts/require_acceptance_inputs.sh"
+require_db_target DATABASE_URL
+require_secret JWT_SECRET_KEY 32
+
 echo "=== Journey B: Real ML Training with Worker ==="
+echo "database target: $(describe_db_target)"
 echo ""
 
 # Step 0: Start worker process if not running
@@ -19,8 +27,8 @@ if [ -z "$WORKER_PID" ]; then
   echo "Starting training worker..."
   cd "$BACKEND_DIR"
   source venv/bin/activate
-  export DATABASE_URL="postgresql://test:test@localhost:5434/alethra_acceptance"
-  export JWT_SECRET_KEY="acceptance-test-secret-minimum-32-chars-long"
+  # Already validated above; exported so the worker inherits the same target.
+  export DATABASE_URL JWT_SECRET_KEY
   export AI_PROVIDER="mock"
   export DATA_PROVIDER="demo"
   export APP_ENV="development"
