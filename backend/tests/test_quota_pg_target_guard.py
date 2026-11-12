@@ -1,12 +1,15 @@
 """``test_quota_concurrency.py`` must never fall back to an implicit database.
 
-The module is the only test that wipes a PostgreSQL schema: its ``pg_engine``
-fixture teardown calls ``Base.metadata.drop_all(engine)``. It used to resolve its
-target with ``os.environ.get("ALETHRA_TEST_POSTGRES_URL", "<literal URL>")``, so
-running it *without* the variable did not skip — it connected to whichever
-database the literal named and left the DROP armed. The replacement contract is
-that an unset variable produces an explicit module-level skip, and the only way
-to reach the DDL is to name a target.
+The module used to be the only test that wiped a PostgreSQL schema: its
+``pg_engine`` fixture teardown called ``Base.metadata.drop_all(engine)``, and it
+resolved its target with ``os.environ.get("ALETHRA_TEST_POSTGRES_URL",
+"<literal URL>")``, so running it *without* the variable did not skip — it
+connected to whichever database the literal named and left the DROP armed. It
+now issues no DDL of any kind (``test_quota_concurrency_safety_guard.py`` holds
+that line), so naming a target is a precondition for connecting at all rather
+than for reaching a schema-wide statement. What this file guards is the half of
+that contract that has to survive any later rewrite: an unset variable produces
+an explicit module-level skip, never a guessed host.
 
 Nothing here connects to a database: the behavioural check imports only the
 guard branch, which raises ``Skipped`` before it can build an engine, and the
