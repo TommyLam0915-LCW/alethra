@@ -5,14 +5,19 @@ and ``drop_all``) and to swallow whatever the teardown raised, so a run could
 erase an entire database and still report no problem. It also turned a failed
 connection into a skip, which is how a run against the wrong host looked clean.
 
-The rework promises five things, and each is tested against the module's own
+The rework promises these things, and each is tested against the module's own
 functions rather than against a description of them:
 
-1. an unset target skips;
-2. a supplied target that cannot be verified FAILS — never skips;
-3. the module issues no DDL, and refuses to continue when the schema is missing;
+1. an unset target skips, and a supplied target that cannot be verified FAILS;
+2. the identity the gate saw is re-read on the connection the engine hands out,
+   and compared with the concrete target — not with "some loopback instance";
+3. the module issues no DDL, and refuses to continue when a required relation
+   is missing;
 4. cleanup errors surface instead of being caught and dropped;
-5. a concurrency test cannot pass on a partial result set.
+5. cleanup is refused outright while a worker this round started is still
+   running, so no DELETE is issued beside a thread that can still write;
+6. a concurrency test cannot pass on a partial result set, and a database-level
+   failure is never counted as a quota denial.
 
 Nothing here connects to a database. This host has a live PostgreSQL on
 127.0.0.1:5432, so every path that could reach it is either given a port with no
@@ -25,9 +30,11 @@ import os
 import re
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
+from sqlalchemy.exc import DBAPIError
 
 BACKEND = Path(__file__).resolve().parents[1]
 TARGET = BACKEND / "tests" / "test_quota_concurrency.py"
@@ -134,9 +141,28 @@ def test_no_sleep_only_synchronization():
 
 
 def test_threads_are_joined_and_proven_stopped():
-    source = _source()
-    assert "thread.join(timeout)" in source
-    assert "is_alive()" in source, "a join without an is_alive check accepts a hung thread"
+    """Checked as syntax, not as one literal string a rewrite can rename.
+
+    A bare `join()` can block the suite forever, and a `join(timeout)` says
+    nothing about whether the thread stopped, so the module has to pass a
+    deadline and then ask `is_alive()` — both recorded and asserted.
+    """
+    joins, alive = [], 0
+    for node in ast.walk(ast.parse(_source())):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            if node.func.attr == "join":
+                joins.append(len(node.args))
+            elif node.func.attr == "is_alive":
+                alive += 1
+
+    assert joins, "no thread join at all"
+    assert all(count == 1 for count in joins), (
+        f"every join needs a timeout argument, got arg counts {joins}"
+    )
+    assert alive >= 2, (
+        f"is_alive() appears {alive} times: stop state must be recorded per worker "
+        "and asserted before cleanup"
+    )
 
 
 def test_partial_results_cannot_satisfy_the_concurrency_assertions():
@@ -194,6 +220,139 @@ def test_the_loopback_answer_the_target_named_is_accepted(mod):
 
 
 # --------------------------------------------------------------------------
+# 2b. The identity is read again on the connection the tests will actually use.
+
+
+APPROVED = {
+    "database": "alethra_owner_test",
+    "user": "alethra_runner",
+    "server_addr": "127.0.0.1",
+    "server_port": 5432,
+}
+
+#: The target shape the provisioning approval names. Only ever parsed here:
+#: `_confirm_target_on_test_engine` is handed a fake engine, so no socket is
+#: opened and the credential stays a sentinel that belongs to no role.
+APPROVED_URL = (
+    f"postgresql://alethra_runner:{SENTINEL_PASSWORD}@127.0.0.1:5432/alethra_owner_test"
+)
+
+
+def _answers(mod, identity, url=APPROVED_URL, approved=None):
+    """Run the engine-side confirmation and return what it reported."""
+    statements: list[tuple[str, dict]] = []
+    engine = _FakeEngine(statements, present=set(), identity=identity)
+    answers = mod._confirm_target_on_test_engine(engine, url, approved or APPROVED)
+    return answers, statements
+
+
+def test_the_engine_connection_reports_the_approved_target(mod):
+    answers, statements = _answers(mod, MATCHING_IDENTITY)
+    assert answers == {
+        "database": "alethra_owner_test",
+        "role": "alethra_runner",
+        "server_addr": "127.0.0.1",
+        "server_port": 5432,
+    }
+    assert len(statements) == 1, "one identity read is enough; it must not go hunting"
+    assert statements[0][0].strip().upper().startswith("SELECT"), statements
+    for function in ("current_database()", "current_user", "inet_server_addr()", "inet_server_port()"):
+        assert function in statements[0][0], statements
+
+
+def test_an_engine_connection_on_another_database_is_refused(mod):
+    with pytest.raises(RuntimeError) as excinfo:
+        _answers(mod, ("alethra_acceptance", "alethra_runner", "127.0.0.1", 5432))
+    assert "current_database()='alethra_acceptance'" in str(excinfo.value)
+
+
+def test_an_engine_connection_logged_in_as_another_role_is_refused(mod):
+    with pytest.raises(RuntimeError) as excinfo:
+        _answers(mod, ("alethra_owner_test", "postgres", "127.0.0.1", 5432))
+    assert "current_user='postgres'" in str(excinfo.value)
+
+
+def test_a_different_loopback_stack_is_not_the_declared_target(mod):
+    """The rule is the concrete approved target, not "some loopback answered".
+
+    A URL that names 127.0.0.1 must be answered as 127.0.0.1. The other loopback
+    address is a different socket on the same machine, and accepting it would be
+    substituting a broader contract than the one that was approved.
+    """
+    with pytest.raises(RuntimeError) as excinfo:
+        _answers(mod, ("alethra_owner_test", "alethra_runner", "::1", 5432))
+    message = str(excinfo.value)
+    assert "answered as '::1'" in message and "target names host '127.0.0.1'" in message, message
+
+
+def test_localhost_may_be_answered_on_either_loopback_stack(mod):
+    """One documented exception, because `localhost` resolves to both addresses."""
+    answers, _ = _answers(mod,
+        ("alethra_owner_test", "alethra_runner", "::1", 5432),
+        url="postgresql://alethra_runner:pw@localhost:5432/alethra_owner_test",
+    )
+    assert answers["server_addr"] == "::1"
+
+
+def test_an_engine_connection_on_another_port_is_refused(mod):
+    with pytest.raises(RuntimeError) as excinfo:
+        _answers(mod, ("alethra_owner_test", "alethra_runner", "127.0.0.1", 5433))
+    assert "answered on port 5433" in str(excinfo.value)
+
+
+def test_an_engine_connection_over_a_unix_socket_is_refused(mod):
+    with pytest.raises(RuntimeError) as excinfo:
+        _answers(mod, ("alethra_owner_test", "alethra_runner", None, None))
+    assert "socket answer cannot be matched" in str(excinfo.value)
+
+
+def test_engine_and_preflight_connections_must_agree(mod):
+    """The point of reading twice: a pooled connection may not be the checked one."""
+    with pytest.raises(RuntimeError) as excinfo:
+        _answers(mod,
+            ("alethra_other", "alethra_runner", "127.0.0.1", 5432),
+            approved={"database": "alethra_owner_test", "user": "alethra_runner"},
+        )
+    assert "the gate's preflight connection reported" in str(excinfo.value)
+
+
+def test_the_engine_identity_refusal_does_not_echo_the_credential(mod):
+    raised = _raised(
+        lambda: _answers(mod, ("alethra_other", "alethra_runner", "127.0.0.1", 5432))
+    )
+    assert isinstance(raised, RuntimeError), raised
+    assert SENTINEL_PASSWORD not in str(raised), str(raised)
+
+
+def test_the_engine_is_built_before_the_identity_and_disposed_on_refusal(mod, monkeypatch):
+    """Order inside _open_gated_engine: gate, preflight answer, engine, identity, relations."""
+    from test_safety_gate import TestDatabaseGateError  # noqa: F401 - keeps the gate import real
+
+    calls = []
+    monkeypatch.setattr(mod, "POSTGRES_URL", APPROVED_URL)
+    monkeypatch.setattr(
+        "test_safety_gate.verify_test_database",
+        lambda _url: calls.append("gate") or dict(APPROVED),
+    )
+    engine = _FakeEngine([], present=set(), identity=("alethra_other", "alethra_runner", "127.0.0.1", 5432))
+
+    def fake_create_engine(*a, **k):
+        calls.append("engine")
+        return engine
+
+    def record_relations(_engine):
+        calls.append("relations")
+
+    monkeypatch.setattr(mod, "create_engine", fake_create_engine)
+    monkeypatch.setattr(mod, "_require_required_relations", record_relations)
+
+    raised = _raised(mod._open_gated_engine)
+    assert isinstance(raised, RuntimeError), raised
+    assert calls == ["gate", "engine"], f"relations were read from an unverified connection: {calls}"
+    assert engine.disposed, "a refused engine must not be handed to a test"
+
+
+# --------------------------------------------------------------------------
 # 3. The schema must already exist; the module reads, never builds.
 
 
@@ -204,16 +363,28 @@ class _FakeResult:
     def scalar(self):
         return self._value
 
+    def one(self):
+        return self._value
+
 
 class _FakeConn:
-    """Records every statement, and answers to_regclass from `present`."""
+    """Records every statement; answers identity reads and to_regclass reads."""
 
-    def __init__(self, statements, present):
+    def __init__(self, statements, present, identity=None):
         self._statements = statements
         self._present = present
+        self._identity = identity
 
     def execute(self, statement, params=None):
-        self._statements.append((str(statement), dict(params or {})))
+        text = str(statement)
+        self._statements.append((text, dict(params or {})))
+        if "current_database()" in text:
+            if self._identity is None:
+                raise AssertionError(
+                    "the fake connection was asked for engine identity without an "
+                    "answer configured; add identity=(database, role, addr, port)"
+                )
+            return _FakeResult(self._identity)
         table = (params or {}).get("qualified", "").split(".")[1:]
         found = table[0] if table and table[0] in self._present else None
         return _FakeResult(found)
@@ -225,24 +396,29 @@ class _FakeConn:
         return False
 
 
+#: What a correctly provisioned target answers on the engine's own connection.
+MATCHING_IDENTITY = ("alethra_owner_test", "alethra_runner", "127.0.0.1", 5432)
+
+
 class _FakeEngine:
-    def __init__(self, statements, present):
+    def __init__(self, statements, present, identity=None):
         self._statements = statements
         self._present = present
+        self._identity = identity
         self.disposed = False
 
     def connect(self):
-        return _FakeConn(self._statements, self._present)
+        return _FakeConn(self._statements, self._present, self._identity)
 
     def dispose(self):
         self.disposed = True
 
 
-def test_missing_schema_is_reported_without_any_ddl(mod, monkeypatch):
+def test_missing_relations_are_reported_without_any_ddl(mod, monkeypatch):
     statements: list[tuple[str, dict]] = []
-    monkeypatch.setattr(mod, "REQUIRED_TABLES", ("users", "quota_counters"))
+    monkeypatch.setattr(mod, "REQUIRED_RELATIONS", ("users", "quota_counters"))
     with pytest.raises(RuntimeError) as excinfo:
-        mod._require_migration_built_schema(_FakeEngine(statements, present={"users"}))
+        mod._require_required_relations(_FakeEngine(statements, present={"users"}))
 
     message = str(excinfo.value)
     assert "quota_counters" in message, message
@@ -250,14 +426,41 @@ def test_missing_schema_is_reported_without_any_ddl(mod, monkeypatch):
     assert not any(DDL.search(text) for text, _ in statements), statements
 
 
-def test_existing_schema_is_verified_with_reads_only(mod, monkeypatch):
+def test_existing_relations_are_verified_with_reads_only(mod, monkeypatch):
     statements: list[tuple[str, dict]] = []
-    tables = ("users", "pilot_entitlements", "quota_counters", "quota_reservations")
-    monkeypatch.setattr(mod, "REQUIRED_TABLES", tables)
-    mod._require_migration_built_schema(_FakeEngine(statements, present=set(tables)))
+    relations = ("users", "pilot_entitlements", "quota_counters", "quota_reservations")
+    monkeypatch.setattr(mod, "REQUIRED_RELATIONS", relations)
+    mod._require_required_relations(_FakeEngine(statements, present=set(relations)))
 
-    assert len(statements) == len(tables)
+    assert len(statements) == len(relations)
     assert all(text.strip().upper().startswith("SELECT") for text, _ in statements), statements
+
+
+def test_the_relation_check_does_not_claim_migration_provenance(mod, monkeypatch):
+    """`to_regclass` proves presence; the revision belongs to provisioning evidence.
+
+    A message that said "migration verified" would be reading a fact the query
+    cannot return, and probing `alembic_version` would need privileges the test
+    role is not granted — so the check must not issue that read either.
+    """
+    relations = ("users", "pilot_entitlements", "quota_counters", "quota_reservations")
+    monkeypatch.setattr(mod, "REQUIRED_RELATIONS", relations)
+
+    statements: list[tuple[str, dict]] = []
+    mod._require_required_relations(_FakeEngine(statements, present=set(relations)))
+    assert len(statements) == len(relations), statements
+    assert not [text for text, _ in statements if "alembic_version" in text], statements
+
+    statements = []
+    monkeypatch.setattr(mod, "REQUIRED_RELATIONS", ("quota_counters",))
+    with pytest.raises(RuntimeError) as excinfo:
+        mod._require_required_relations(_FakeEngine(statements, present=set()))
+    message = str(excinfo.value)
+    assert "required relations missing" in message, message
+    assert "provisioning evidence" in message, message
+    assert "does not create relations" in message, message
+    for claim in ("migration verified", "schema verified", "revision confirmed"):
+        assert claim not in message.lower(), f"the check over-claims: {message}"
 
 
 # --------------------------------------------------------------------------
@@ -448,6 +651,12 @@ def _factory(events, deleted, remaining, pool):
     return make
 
 
+def _lifecycle(mod) -> object:
+    """A round record with no workers and no users — the shape cleanup sees
+    when the test body finished and every thread it started has stopped."""
+    return mod._RoundLifecycle()
+
+
 def test_a_cleanup_commit_error_is_not_swallowed(mod):
     """The old teardown caught every exception; a half-cleaned database vanished."""
     class Boom(_FakeSession):
@@ -463,7 +672,7 @@ def test_a_cleanup_commit_error_is_not_swallowed(mod):
         return session
 
     with pytest.raises(RuntimeError, match="deadlock"):
-        mod._delete_round_rows(factory, "user-1")
+        mod._delete_round_rows(factory, "user-1", _lifecycle(mod))
     assert made[0].rolled_back and made[0].closed
 
 
@@ -478,7 +687,7 @@ def test_surviving_rows_are_reported(mod):
     )
 
     with pytest.raises(AssertionError, match="quota_counters"):
-        mod._delete_round_rows(factory, "user-1")
+        mod._delete_round_rows(factory, "user-1", _lifecycle(mod))
     assert len(sessions) == 2, "delete and verify are separate commits, so both must be visible"
     assert sessions[0].committed and not sessions[1].committed
 
@@ -492,9 +701,111 @@ def test_clean_rows_leave_nothing_behind(mod):
         [],
     )
 
-    mod._delete_round_rows(factory, "user-1")
+    mod._delete_round_rows(factory, "user-1", _lifecycle(mod))
     assert [kind for kind, _ in events].count("delete") == 4
     assert [kind for kind, _ in events].count("count") == 4
+
+
+# --------------------------------------------------------------------------
+# 5b. No DELETE is issued beside a worker that can still write (§一).
+
+
+def _blocked_worker(lifecycle, release: threading.Event, name: str = "quota-stuck"):
+    """Start one real thread and register it with the round, as the module does."""
+    thread = threading.Thread(target=release.wait, name=name, daemon=True)
+    lifecycle.start([thread])
+    return thread
+
+
+def test_cleanup_refuses_to_run_while_a_worker_is_blocked(mod):
+    """The ordered case the owner asked for: a blocked worker, then teardown.
+
+    Nothing is deleted, so the row set the next person inherits is the row set
+    this worker can still write — and the failure says so instead of reporting a
+    clean teardown.
+    """
+    release = threading.Event()
+    lifecycle = mod._RoundLifecycle()
+    thread = _blocked_worker(lifecycle, release)
+    assert thread.is_alive(), "the worker must actually be blocked for this to prove anything"
+
+    events: list = []
+    sessions: list = []
+    lifecycle.add_user("user-1")
+    raised = _raised(
+        lambda: mod._delete_round_rows(_factory(events, {}, {}, sessions), "user-1", lifecycle)
+    )
+
+    assert isinstance(raised, AssertionError), f"cleanup was not refused: {raised!r}"
+    assert "cleanup refused" in str(raised), str(raised)
+    assert events == [] and sessions == [], (
+        f"a worker was alive and cleanup still touched the database: {events}"
+    )
+    assert lifecycle.refusals, "the refusal was not recorded on the round"
+
+    release.set()
+    thread.join(timeout=5)
+    assert not thread.is_alive(), "the released worker must actually end"
+    assert thread.daemon, "this test must not leave a non-daemon thread behind"
+
+
+def test_the_refusal_names_the_worker_and_the_state_left_behind(mod):
+    release = threading.Event()
+    lifecycle = mod._RoundLifecycle()
+    thread = _blocked_worker(lifecycle, release, name="quota-a")
+    lifecycle.add_user("user-1")
+
+    raised = _raised(
+        lambda: mod._delete_round_rows(_factory([], {}, {}, []), "user-1", lifecycle)
+    )
+    message = str(raised)
+    assert "quota-a" in message, f"the live worker is not named: {message}"
+    assert "user-1" in message, f"the user whose rows remain is not named: {message}"
+    assert "cancel_reason=None" in message, f"no cancel reason reported: {message}"
+
+    release.set()
+    thread.join(timeout=5)
+
+
+def test_the_refusal_carries_the_execution_error_it_would_have_hidden(mod):
+    """Both errors survive: the round's first failure is quoted in the refusal."""
+    release = threading.Event()
+    lifecycle = mod._RoundLifecycle()
+    thread = _blocked_worker(lifecycle, release)
+    lifecycle.note_error(RuntimeError("deadlock detected while settling a reservation"))
+
+    raised = _raised(
+        lambda: mod._delete_round_rows(_factory([], {}, {}, []), "user-1", lifecycle)
+    )
+    assert "Primary execution error preserved" in str(raised)
+    assert "deadlock detected while settling a reservation" in str(raised), str(raised)
+
+    release.set()
+    thread.join(timeout=5)
+
+
+def test_a_later_error_does_not_replace_the_first_one(mod):
+    """note_error keeps the primary failure; a cleanup error cannot overwrite it."""
+    lifecycle = mod._RoundLifecycle()
+    lifecycle.note_error(RuntimeError("first: the statement this round actually hit"))
+    lifecycle.note_error(AssertionError("second: cleanup did not complete"))
+
+    assert lifecycle.residual_state()["primary_error"].startswith("RuntimeError: first:")
+
+
+def test_cleanup_proceeds_once_every_worker_has_stopped(mod):
+    """The guard is a gate, not a permanent ban: after the join, cleanup runs."""
+    release = threading.Event()
+    lifecycle = mod._RoundLifecycle()
+    thread = _blocked_worker(lifecycle, release)
+    release.set()
+    thread.join(timeout=5)
+    assert lifecycle.live_workers() == []
+
+    events: list = []
+    mod._delete_round_rows(_factory(events, {}, {}, []), "user-1", lifecycle)
+    assert [kind for kind, _ in events].count("delete") == 4
+    assert lifecycle.refusals == []
 
 
 # --------------------------------------------------------------------------
@@ -502,27 +813,61 @@ def test_clean_rows_leave_nothing_behind(mod):
 
 
 def test_a_thread_still_running_after_join_is_reported(mod):
-    import threading
-
+    """The whole chain, with a real blocked worker: timeout → cancel → no DELETE."""
     release = threading.Event()
-    blocked = threading.Thread(target=release.wait, name="quota-stuck")
+    lifecycle = mod._RoundLifecycle()
+    blocked = threading.Thread(target=release.wait, name="quota-stuck", daemon=True)
     try:
-        with pytest.raises(AssertionError, match="still running after"):
-            mod._start_and_join([blocked], timeout=0.05)
+        raised = _raised(lambda: mod._start_and_join([blocked], lifecycle, timeout=0.05))
+        assert isinstance(raised, AssertionError), f"the live thread was accepted: {raised!r}"
+        assert "still running after" in str(raised), str(raised)
+        assert blocked.is_alive(), (
+            "the round stopped a worker it does not own; it may only set its own flag"
+        )
+        assert lifecycle.cancel.is_set(), "the round did not raise its own cancel flag"
+        assert "quota-stuck" in lifecycle.cancel_reason
+        assert "no other backend session was terminated" in str(raised)
+        assert lifecycle.residual_state()["primary_error"].startswith(
+            "AssertionError: threads still running"
+        )
+        assert lifecycle.live_workers() == ["quota-stuck"]
+
+        events: list = []
+        refusal = _raised(
+            lambda: mod._delete_round_rows(_factory(events, {}, {}, []), "user-1", lifecycle)
+        )
+        assert isinstance(refusal, AssertionError) and "cleanup refused" in str(refusal)
+        assert events == [], f"cleanup deleted rows beside the live worker: {events}"
     finally:
         release.set()
     blocked.join(timeout=5)
     assert not blocked.is_alive(), "the released thread must actually end"
+    assert blocked.daemon, "this test must not leave a non-daemon thread behind"
 
 
 def test_started_threads_are_all_joined(mod):
-    import threading
-
     done = []
+    lifecycle = mod._RoundLifecycle()
     threads = [threading.Thread(target=done.append, args=(i,), name=f"t{i}") for i in range(3)]
-    mod._start_and_join(threads, timeout=10)
+    mod._start_and_join(threads, lifecycle, timeout=10)
     assert sorted(done) == [0, 1, 2]
-    assert not any(thread.is_alive() for thread in threads)
+    assert lifecycle.live_workers() == []
+    assert [entry["stopped"] for entry in lifecycle.entries] == [True, True, True], (
+        "each worker's stop state is recorded, not assumed from the join returning"
+    )
+
+
+def test_a_cancelled_round_leaves_its_workers_off_the_database(mod):
+    """Once the round has requested cancel, a worker that has not begun reports
+    "cancelled" instead of starting a transaction nobody is waiting for."""
+    lifecycle = mod._RoundLifecycle()
+    lifecycle.request_cancel("threads still running after 0.05s: ['quota-stuck']")
+    ran = []
+
+    outcomes = mod._threaded([("a", lambda: ran.append("a"))], lifecycle, timeout=5)
+
+    assert outcomes.results == {"a": "cancelled"}, outcomes.results
+    assert ran == [], "a worker ran after the round asked for cancellation"
 
 
 def test_an_unexpected_thread_exception_is_not_counted_as_a_denial(mod):
@@ -540,16 +885,103 @@ def test_a_missing_outcome_is_not_treated_as_complete(mod):
         outcomes.require_complete()
 
 
-def test_only_the_expected_refusal_counts_as_denied(mod):
-    def refused():
-        raise RuntimeError("429 quota_exceeded for this user")
+# --------------------------------------------------------------------------
+# 6b. A database failure is never counted as a quota denial (§四 step 6).
 
-    def unrelated():
-        raise ValueError("connection reset")
 
-    assert mod._classify("quota_exceeded", refused) == "denied"
-    with pytest.raises(ValueError):
-        mod._classify("quota_exceeded", unrelated)
+class _DriverError(Exception):
+    """Stand-in for what psycopg2 (`pgcode`) / psycopg3 (`sqlstate`) attach."""
+
+    def __init__(self, message, code=None, attribute="pgcode"):
+        super().__init__(message)
+        if code is not None:
+            setattr(self, attribute, code)
+
+
+def _dbapi_error(message, code=None, driver_error=None):
+    orig = driver_error if driver_error is not None else _DriverError(message, code)
+    return DBAPIError("SELECT 1 FROM quota_reservations", None, orig)
+
+
+def _raiser(exc):
+    def go():
+        raise exc
+    return go
+
+
+@pytest.mark.parametrize(
+    ("sqlstate", "label"),
+    [
+        ("55P03", "lock_not_available"),
+        ("40P01", "deadlock_detected"),
+        ("40001", "serialization_failure"),
+        ("57014", "query_canceled"),
+        ("08006", "connection_exception"),
+    ],
+)
+def test_a_database_failure_is_never_counted_as_a_quota_denial(mod, sqlstate, label):
+    """The failure this replaces: text matching scored a lock timeout as the
+    quota guard refusing, which would read as concurrency behaviour proven."""
+    raised = _raised(
+        lambda: mod._classify("quota_exceeded", _raiser(_dbapi_error("could not serialize", sqlstate)))
+    )
+
+    assert isinstance(raised, AssertionError), (
+        f"SQLSTATE {sqlstate} was not refused as a denial, it returned/raised {raised!r}"
+    )
+    assert "not a quota denial" in str(raised), str(raised)
+    assert sqlstate in str(raised), f"the error code is not in the report: {raised}"
+    assert label in str(raised), f"{label} not named: {raised}"
+
+
+def test_a_driver_error_that_carries_no_sqlstate_is_still_not_a_denial(mod):
+    raised = _raised(
+        lambda: mod._classify(
+            "quota_exceeded",
+            _raiser(_dbapi_error("connection reset by peer",
+                                 driver_error=ConnectionResetError("connection reset by peer"))),
+        )
+    )
+    assert isinstance(raised, AssertionError), f"a DBAPIError was scored as denied: {raised!r}"
+    assert "database error" in str(raised), str(raised)
+
+
+def test_an_error_message_that_merely_contains_the_marker_is_not_a_denial(mod):
+    for kind, message in (
+        ("quota_exceeded", "429 quota_exceeded while pruning stale reservations"),
+        ("reservation_state", "Reservation 7f2a is not in 'reserved' status"),
+    ):
+        raised = _raised(lambda m=message, k=kind: mod._classify(k, _raiser(RuntimeError(m))))
+        assert isinstance(raised, RuntimeError), (
+            f"{kind}: a RuntimeError whose text matched was scored as a denial ({raised!r})"
+        )
+
+
+def test_the_real_refusals_are_still_scored_as_denied(mod):
+    def over_limit():
+        raise mod.HTTPException(
+            status_code=429, detail={"error": "quota_exceeded", "limit": 2}
+        )
+
+    def wrong_state():
+        raise ValueError("Reservation 7f2a is not in 'reserved' status")
+
+    assert mod._classify("quota_exceeded", over_limit) == "denied"
+    assert mod._classify("reservation_state", wrong_state) == "denied"
+
+
+def test_the_quota_contract_shape_is_what_counts_not_the_number_429(mod):
+    """A 429 without the error field, and the right field at another status,
+    are both re-raised: neither says the quota guard refused this reservation."""
+    def plain_429():
+        raise mod.HTTPException(status_code=429, detail="too many requests")
+
+    def wrong_status():
+        raise mod.HTTPException(status_code=400, detail={"error": "quota_exceeded"})
+
+    for fn in (plain_429, wrong_status):
+        raised = _raised(lambda: mod._classify("quota_exceeded", fn))
+        assert isinstance(raised, mod.HTTPException), f"scored as denied: {raised!r}"
 
 
 # --------------------------------------------------------------------------
