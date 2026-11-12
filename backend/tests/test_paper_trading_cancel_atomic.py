@@ -2913,10 +2913,15 @@ class TestBatchBMinimalIntegration:
         injected_exception = RuntimeError("Injected after cancel committed")
         
         # Track results — Requirement 四: all will be asserted unconditionally
+        # Worker bootstrap failures never reach `results`, so each body records that
+        # it was entered before any other statement can fail.
         results = {
             "replay_exception": None,
+            "cancel_thread_exception": None,
             "cancel_thread_done": False,
             "replay_thread_done": False,
+            "cancel_body_entered": False,
+            "replay_body_entered": False,
             "caught_exception": None,
             "injected_exception": injected_exception,  # Pre-built instance (requirement 8)
             "final_status": None,
@@ -2958,14 +2963,33 @@ class TestBatchBMinimalIntegration:
             shared_results=results,  # Wire shared results for tracking
         )
         
+        # Bounded wait budget for worker-side waits: equal to the main flow's replay
+        # completion budget, so a bound can never end the normal path earlier.
+        worker_wait_timeout = 10.0
+
+        class _EitherAbort:
+            """abort_aware_wait takes one abort event; these workers are aborted by
+            either the shared test event or the event start_worker injects."""
+
+            def __init__(self, events):
+                self._events = tuple(events)
+
+            def is_set(self):
+                return any(abort.is_set() for abort in self._events)
+
         # Gap 三: Cancel thread uses formal un-hooked cancel_engine
-        def submit_cancel():
+        def submit_cancel(abort_event):
+            results["cancel_body_entered"] = True
             try:
-                # Gap 1: Wait supports abort — use abort_aware_wait
-                if not abort_aware_wait(acquisition_committed, abort_test):
+                # Gap 1: Bounded abort-aware wait — honours both abort signals
+                if not abort_aware_wait(
+                    acquisition_committed,
+                    _EitherAbort((abort_test, abort_event)),
+                    timeout=worker_wait_timeout,
+                ):
                     cancel_failed.set()
                     return
-                if abort_test.is_set():
+                if abort_test.is_set() or abort_event.is_set():
                     cancel_failed.set()
                     return
                 # Call formal cancel_run method on cancel_engine (un-hooked)
@@ -2979,7 +3003,8 @@ class TestBatchBMinimalIntegration:
                 cancel_committed.set()  # Release even on error
         
         # Gap 三: Replay thread uses replay_engine with hooked session_factory
-        def execute_replay():
+        def execute_replay(abort_event):
+            results["replay_body_entered"] = True
             try:
                 # Use hooked session factory for replay_engine only
                 replay_engine.session_factory = hooked_session_factory
@@ -3025,8 +3050,42 @@ class TestBatchBMinimalIntegration:
             replay_worker = next(w for w in lifecycle.workers if w['name'] == 'replay_thread')
             replay_worker['abort_event'] = abort_test
             
+            # Fail fast: an unexpected worker exception, or a thread that died without
+            # entering its body (a bootstrap error never reaches `results`), must not
+            # wait out the completion timeout below.
+            deadline = time.monotonic() + worker_wait_timeout
+            worker_error = None
+            while True:
+                if results["replay_exception"] is not None:
+                    worker_error = f"Replay worker raised: {results['replay_exception']!r}"
+                    break
+                if results["cancel_thread_exception"] is not None:
+                    worker_error = f"Cancel worker raised: {results['cancel_thread_exception']!r}"
+                    break
+                if replay_completed.wait(timeout=0.05):
+                    break
+                if not replay_thread.is_alive() and not results["replay_body_entered"]:
+                    worker_error = (
+                        "replay_thread stopped without entering its body — "
+                        "start_worker injects abort_event, the target must accept it"
+                    )
+                    break
+                if not cancel_thread.is_alive() and not results["cancel_body_entered"]:
+                    worker_error = (
+                        "cancel_thread stopped without entering its body — "
+                        "start_worker injects abort_event, the target must accept it"
+                    )
+                    break
+                if time.monotonic() >= deadline:
+                    break
+
+            if worker_error is not None:
+                lifecycle.abort_all()
+                release_all.set()
+                raise AssertionError(worker_error)
+
             # Wait for completion with timeout
-            if not replay_completed.wait(timeout=10.0):
+            if not replay_completed.is_set():
                 # Timeout - abort test using lifecycle helper
                 lifecycle.abort_all()
                 release_all.set()  # Also set the shared release event
@@ -3048,6 +3107,8 @@ class TestBatchBMinimalIntegration:
                 raise AssertionError(f"Replay thread failed: {results['replay_exception']}")
             if results.get("cancel_thread_exception"):
                 raise AssertionError(f"Cancel thread failed: {results['cancel_thread_exception']}")
+            assert results["replay_body_entered"], "Replay worker body never executed"
+            assert results["cancel_body_entered"], "Cancel worker body never executed"
             assert results["replay_thread_done"], "Replay thread did not complete successfully"
             assert results["cancel_thread_done"], "Cancel thread did not complete successfully"
             

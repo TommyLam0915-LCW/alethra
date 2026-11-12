@@ -1132,3 +1132,82 @@ class TestFinalizeDirectCall:
             lifecycle.abort_all()
             if thread.is_alive():
                 thread.join(timeout=1.0)
+
+
+class TestWorkerStartContractBodyEntry:
+    """start_worker's abort_event contract and real body entry.
+
+    A thread that has stopped is not proof that its body ran: a target that does
+    not accept the injected abort_event dies during thread bootstrap, before its
+    first statement. B's integration test uses this same contract, so both cases
+    are pinned here without a database.
+    """
+
+    def test_injected_abort_event_reaches_worker_body(self):
+        """Compliant target enters its body and receives the event abort_all() sets."""
+        lifecycle = WorkerLifecycle()
+
+        body_entered = threading.Event()
+        received = {}
+
+        def worker_target(abort_event):
+            # First statement: records real body entry, not thread liveness
+            body_entered.set()
+            received['abort_event'] = abort_event
+            abort_event.wait(timeout=5.0)
+
+        thread, abort_event = lifecycle.start_worker(
+            target=worker_target,
+            name="contract_worker"
+        )
+
+        try:
+            assert body_entered.wait(timeout=2.0), "Worker body did not execute"
+            assert received['abort_event'] is abort_event, (
+                "start_worker must pass the abort event it returns to the target"
+            )
+
+            lifecycle.abort_all()
+            thread.join(timeout=2.0)
+
+            assert abort_event.is_set(), "abort_all did not set the injected event"
+            assert not thread.is_alive(), "Worker thread did not stop"
+            assert lifecycle.verify_all_stopped() == []
+        finally:
+            lifecycle.abort_all()
+            if thread.is_alive():
+                thread.join(timeout=1.0)
+
+    def test_thread_stopped_does_not_prove_body_entered(self):
+        """Negative control: a non-compliant target stops without entering its body.
+
+        start_worker injects abort_event as a kwarg, so this target's bootstrap call
+        raises TypeError inside the thread. pytest reports that as an unhandled thread
+        exception warning, which this test neither asserts away nor filters; the
+        assertions below pin the observable state that the body never ran.
+        """
+        lifecycle = WorkerLifecycle()
+
+        body_entered = threading.Event()
+
+        def noncompliant_target():
+            body_entered.set()
+
+        thread, abort_event = lifecycle.start_worker(
+            target=noncompliant_target,
+            name="noncompliant_worker"
+        )
+        thread.join(timeout=2.0)
+
+        # Stopped: an assertion that only checked this would pass vacuously
+        assert not thread.is_alive(), "Worker thread should have exited"
+        assert lifecycle.verify_all_stopped() == []
+
+        # Entered: the predicate B's fail-fast wait adds on top of stop confirmation
+        assert not body_entered.is_set(), (
+            "Body must not have executed; a target that does not accept the "
+            "injected abort_event dies during thread bootstrap"
+        )
+        assert not abort_event.is_set(), (
+            "Nothing may set the abort event before abort_all() is called"
+        )
