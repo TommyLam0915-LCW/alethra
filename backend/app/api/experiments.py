@@ -705,10 +705,23 @@ def create_revision(
                 )
 
     base_spec = base.strategy_spec or {}
-    intraday_keys = sorted(set(base_spec) & INTRADAY_KEYS)
+    # Value-oriented, not presence-oriented: a version authored through the
+    # official API may declare timeframe="1d" legitimately, and refusing it
+    # would make exactly the versions the daily lane supports unrevisable. Any
+    # other declaration stays refused by its value — including None and "", so
+    # an illegal value is never read as "undeclared" by truthiness. "session"
+    # has no value the revision surface covers, so it stays refused outright.
+    offending = sorted(
+        key
+        for key in set(base_spec) & INTRADAY_KEYS
+        if key != "timeframe"
+        or not (
+            isinstance(base_spec[key], str) and base_spec[key].strip().lower() == "1d"
+        )
+    )
     base_canonical = _canonical_spec(base_spec)
-    if intraday_keys or base_canonical is None:
-        unsupported = ", ".join(intraday_keys) if intraday_keys else "非日線頻率"
+    if offending or base_canonical is None:
+        unsupported = ", ".join(offending) if offending else "非日線頻率"
         raise HTTPException(
             status_code=400,
             detail=(

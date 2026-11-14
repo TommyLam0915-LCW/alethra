@@ -440,3 +440,161 @@ class TestRevisionAudit:
         )
         assert created_event["payload_json"]["revision_of_version_number"] == 1
         assert created_event["payload_json"]["changed_fields"] == ["commission_rate"]
+
+
+class TestDeclaredDailyTimeframeRevisions:
+    """A version that declares ``timeframe="1d"`` is an ordinary daily strategy.
+
+    The revision guard used to reject on key presence, which refused exactly
+    the versions the official authoring API accepts and persists. Proofs 1-3 go
+    through POST /experiments and POST /revisions rather than ORM seeds, so the
+    whole customer lane is covered, not a hand-made row.
+    """
+
+    DAILY_SPEC = {**BASE_SPEC, "timeframe": "1d"}
+
+    def _create(self, client, headers, spec, title="Declared Grain Experiment"):
+        resp = client.post(
+            "/api/v1/experiments/",
+            headers=headers,
+            json={
+                "title": title,
+                "hypothesis": "宣告日線 grain 之後仍能進入既有修訂流程",
+                "research_type": "quantitative",
+                "strategy_spec": dict(spec),
+            },
+        )
+        assert resp.status_code == 201, resp.text
+        return resp.json()
+
+    def _stored_spec(self, client, headers, experiment_id, version_id):
+        return next(
+            v["strategy_spec"]
+            for v in _versions(client, headers, experiment_id)
+            if v["id"] == version_id
+        )
+
+    def test_declared_1d_source_version_is_revisable(self, client, auth_headers):
+        exp = self._create(client, auth_headers, self.DAILY_SPEC)
+        source_id = exp["current_version_id"]
+        assert self._stored_spec(client, auth_headers, exp["id"], source_id)[
+            "timeframe"
+        ] == "1d", "the declaration must persist through the official API first"
+
+        resp = client.post(
+            f"/api/v1/experiments/{exp['id']}/revisions",
+            headers=auth_headers,
+            json=_revision_body(source_id, timeframe="1d", commission_rate=0.002),
+        )
+        assert resp.status_code == 201, resp.text
+        body = resp.json()
+        assert body["changed_fields"] == ["commission_rate"]
+        assert body["change_kind"] == "strategy_only"
+        # Unlocked source, so the revision takes the current pointer exactly
+        # like any other daily strategy: declaring 1d changes nothing here.
+        assert body["is_current"] is True
+        assert body["version"]["version_number"] == 2
+
+    def test_revision_keeps_the_timeframe_declaration(self, client, auth_headers):
+        exp = self._create(client, auth_headers, self.DAILY_SPEC)
+        created = client.post(
+            f"/api/v1/experiments/{exp['id']}/revisions",
+            headers=auth_headers,
+            json=_revision_body(
+                exp["current_version_id"], timeframe="1d", slippage_rate=0.002
+            ),
+        ).json()
+
+        revision_spec = self._stored_spec(
+            client, auth_headers, exp["id"], created["version"]["id"]
+        )
+        assert revision_spec["timeframe"] == "1d"
+        assert revision_spec["slippage_rate"] == 0.002
+        # The source version is untouched by the revision.
+        assert self._stored_spec(
+            client, auth_headers, exp["id"], exp["current_version_id"]
+        )["timeframe"] == "1d"
+
+    def test_undeclared_to_declared_1d_is_a_strategy_change_not_a_no_op(
+        self, client, auth_headers
+    ):
+        from app.models.research_run import ResearchRun
+        from tests.conftest import TestSession
+
+        exp = self._create(client, auth_headers, BASE_SPEC)
+        source_id = exp["current_version_id"]
+        source_spec = self._stored_spec(client, auth_headers, exp["id"], source_id)
+        assert "timeframe" not in source_spec, "legacy authoring stays undeclared"
+
+        resp = client.post(
+            f"/api/v1/experiments/{exp['id']}/revisions",
+            headers=auth_headers,
+            json=_revision_body(source_id, timeframe="1d"),
+        )
+        assert resp.status_code == 201, resp.text
+        body = resp.json()
+        # Owner ruling: declaring 1d can move a replay from unlabelled mixed
+        # bars to strict 1440-minute bars, so it is a research change.
+        assert body["changed_fields"] == ["timeframe"]
+        assert body["change_kind"] == "strategy_only"
+
+        revision_id = body["version"]["id"]
+        source_hash = next(
+            v["config_hash"]
+            for v in _versions(client, auth_headers, exp["id"])
+            if v["id"] == source_id
+        )
+        assert body["version"]["config_hash"] != source_hash, (
+            "same research signature would let old evidence be read as the new "
+            "configuration's"
+        )
+        db = TestSession()
+        try:
+            runs = (
+                db.query(ResearchRun)
+                .filter(ResearchRun.experiment_version_id == uuid.UUID(revision_id))
+                .count()
+            )
+        finally:
+            db.close()
+        assert runs == 0, "a revision must not inherit the source's research runs"
+
+    def test_guard_boundaries_are_not_loosened(self, client, auth_headers):
+        """Illegal base declarations stay refused.
+
+        These rows cannot be produced by the official API (the schema validator
+        rejects them), so they are written the way the existing guard test does
+        it — to prove the guard, not to substitute for the authoring lane above.
+        """
+        from tests.conftest import TestSession
+
+        from app.models.experiment_version import ExperimentVersion
+
+        exp = _create_experiment(client, auth_headers)
+        for override in (
+            {"timeframe": "5m"},
+            {"timeframe": "1h"},
+            {"timeframe": "4h"},
+            {"timeframe": None},
+            {"timeframe": ""},
+            {"session": {"timeframe": "5m"}},
+        ):
+            db = TestSession()
+            try:
+                version = db.query(ExperimentVersion).filter(
+                    ExperimentVersion.id == uuid.UUID(exp["current_version_id"])
+                ).first()
+                version.strategy_spec = {**BASE_SPEC, **override}
+                db.commit()
+            finally:
+                db.close()
+
+            resp = client.post(
+                f"/api/v1/experiments/{exp['id']}/revisions",
+                headers=auth_headers,
+                json=_revision_body(exp["current_version_id"], commission_rate=0.002),
+            )
+            assert resp.status_code == 400, f"{override} accepted: {resp.text}"
+            assert "不會自動降級" in resp.json()["detail"]
+
+        assert len(_versions(client, auth_headers, exp["id"])) == 1

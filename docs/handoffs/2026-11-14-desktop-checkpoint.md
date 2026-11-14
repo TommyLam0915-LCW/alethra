@@ -461,3 +461,86 @@ echo "EXIT=${pipestatus[1]}"
 - **§10.3**：`frontend/src/components/experiments/RevisionPanel.tsx:99` 的 presence 導向鏡像；且本機 `frontend/node_modules` 仍是 `package.json` 變更（`c2a3db5`／`73709f6`）之前的狀態，動前端前需 `npm ci`。
 - **真實資料閉環**：§9 的資料＋授權阻礙未解。
 - **舊桌面 evidence 未搬移**：本機 `find ~` 查證 `~/Backups/alethra-grain-http-20261113-run1`、`alethra-grain-patch-20261113-run1`、`alethra-kraken-1440m-download-20261113-run1`、`alethra-p0-probe-20261112-run1`、`alethra-pytest-batch1/2-20261112-run1`、`alethra-pg15` **全部 ABSENT**，`alethra-customer-evidence` 亦未在本機 clone。因此 §6／§7 的原始輸出與 H1–H3／M1–M7 腳本**無法在本機覆核**；本節引用它們時只作為舊桌面歷史，不作為本機量測。真實 1440 payload 依 §11.2 的 pinned commit／blob 可重建，本輪未下載、未 harvest。
+
+## 18. 本機接手增量（2026-11-14，新桌面）— §10.2 修訂守衛改為值判定
+
+本節是**追加**記錄，不覆寫 §1–§17 的任何歷史數字。
+
+### 18.1 程式差異（1 檔、1 個 hunk：`@@ -705,10 +705,23 @@`）
+
+`backend/app/api/experiments.py:708-727`（`create_revision`）由「`timeframe`／`session` key 是否存在」改為**依值判定**：
+
+- `timeframe` 值經 `strip().lower()` 後等於 `1d` → 不列入 `offending`，進入既有修訂流程；經正式 API 合法宣告 `1d` 的版本不再被自己的守衛擋掉。
+- `5m`／`1h`／`4h`／`None`／`""`／任何 `session` → 仍由**值**觸發 400，狀態碼與 detail 文字未變。**不用 truthiness** 把非法值當成「未宣告」。
+- key 完全不存在（legacy 版本）→ 走原本 `_canonical_spec` 路徑，未宣告行為與本輪之前相同。
+- lock、版本隔離、擁有權、quota、event、重複設定拒絕、research 觸發邏輯零改動；未擴大 intraday 能力，也未繞過正式 API。
+
+| 路徑 | sha256 |
+|---|---|
+| `backend/app/api/experiments.py` | `26350f70cb2357b2ac7dd4a5e833ec4a022ff9c63fa8efd7c437a88ae4468a57` |
+| `backend/tests/test_experiment_revisions.py` | `ea5328930251c8643d756a274576904f3bacb12e86fc6b5eee1fe1abe47dca15` |
+
+### 18.2 四條新增回歸證明（`tests/test_experiment_revisions.py:445-600`，class `TestDeclaredDailyTimeframeRevisions`）
+
+四條都走正式 API（`POST /api/v1/experiments/` → `POST /api/v1/experiments/{id}/revisions`），不以 ORM seed 代替整條驗收：
+
+| # | 測試 | 斷言 |
+|---|---|---|
+| 1 | `test_declared_1d_source_version_is_revisable` :477 | 先確認持久化的 `timeframe == "1d"`，再取 201；`changed_fields == ["commission_rate"]`、`change_kind == "strategy_only"`、`is_current is True`、`version_number == 2` |
+| 2 | `test_revision_keeps_the_timeframe_declaration` :498 | 新版本 spec 仍宣告 `1d`（並帶上新成本），來源版本 spec 未被改寫 |
+| 3 | `test_undeclared_to_declared_1d_is_a_strategy_change_not_a_no_op` :518 | 來源未宣告（無 `timeframe` key）時，只宣告 `1d` 的修訂 → `changed_fields == ["timeframe"]`、`strategy_only`、新版本 `config_hash` 不同於來源、該新版本 id 的 `ResearchRun` 列數 `== 0` |
+| 4 | `test_guard_boundaries_are_not_loosened` :562 | `5m/1h/4h/None/""` 與 `session={"timeframe":"5m"}` 各自 400（detail 含「不會自動降級」），最後版本數仍為 1 |
+
+第 4 條的 base 列以 ORM 寫入，因為這些值無法經正式 API 產生（`app/api/schemas.py` 的 `timeframe` 驗證器先擋）；它只證明守衛本身，不代替第 1–3 條的驗收路徑，手法與既有 `test_intraday_source_version_is_refused_not_downgraded` :304 一致。
+
+**Owner 產品決定（2026-11-14）已固化在測試中**：「未宣告 → 明示 `1d`」保留為 `strategy_only` 變更，不是 no-op、不是純展示變更——它可能把 legacy 未標註的混合讀取改為嚴格 1440 分鐘柱，因此不得沿用舊研究結果並冒稱等價。沿用既有研究失效／重研究機制，未另造新系統。
+
+### 18.3 `is_current` 的既有契約（本輪未改，記錄以免下一個代理誤讀）
+
+未鎖定的來源版本被修訂後，`app/api/experiments.py:796` 仍把 `experiment.current_version_id` 移到新版本，回應 `is_current is True`；既有 `tests/test_experiment_revisions.py:94` 已釘住同一行為。宣告 `1d` 不改變這件事，lock 分支也未觸碰。
+
+### 18.4 證據範圍（**不得擴大解讀**）
+
+第 3 條證明的只有兩件事：(a) 新版本自身的 `ExperimentVersion.config_hash` 不同於來源；(b) 以該新版本 id 為 `experiment_version_id` 的 `ResearchRun` 列數為 0。其機制依據是 `app/services/research_runs.py:92-98`——每次建立 run 時以 `compute_config_hash(spec)` 寫入該列。
+
+這**不等於**已驗證所有下游研究結果使用路徑：本輪未逐一查證其他讀 `config_hash`／`ResearchRun` 的消費端（run 比對、匯出、學習／建議通道、前端展示等）在「未宣告 → 明示 `1d`」情境下是否全部正確失效並要求重新研究。那些路徑狀態為 **NOT RUN**，不可引用本節宣稱已完成。
+
+### 18.5 可重跑的完整命令（12 paths，於 repo root）
+
+```bash
+DATA_PROVIDER=demo ALETHRA_PYTHON=$PWD/backend/.venv/bin/python \
+  ./backend/scripts/run_tests.sh sqlite \
+  tests/test_experiment_revisions.py \
+  tests/test_experiment_version_lock.py \
+  tests/test_experiment_continuation.py \
+  tests/test_experiment_record.py \
+  tests/test_durable_run_customer_path.py \
+  tests/test_model_version_lifecycle.py \
+  tests/test_run_comparison.py \
+  tests/test_strategy_preflight.py \
+  tests/test_strategy_spec_contract.py \
+  tests/test_daily_grain_http_authoring_roundtrip.py \
+  tests/test_daily_replay_reads_stored_bars.py \
+  tests/test_market_data_grain_contract.py \
+  -p no:warnings -q -rf -rs
+echo "EXIT=${pipestatus[1]}"
+```
+
+選檔依據（本機實測）：`grep -rln '/revisions' tests/*.py` 命中 7 檔，其中 6 檔真正 POST 實驗修訂端點（`test_durable_run_customer_path.py:152`、`test_experiment_continuation.py:75`、`test_experiment_record.py:50`、`test_experiment_version_lock.py:219`、`test_model_version_lifecycle.py:48` 與 `test_experiment_revisions.py`）；`test_research_drafts.py:197` 是 `/research-drafts/{id}/revisions` 的不同語意，故不列入。`test_personalization.py`／`test_personal_strategy_learning.py` 只命中 `revisions` 字樣、非該端點，同樣不列入。其餘 6 檔為 §17.4 中與 grain／preflight／contract 直接相關的 lane。
+
+### 18.6 結果（同一離線 lane、`DATA_PROVIDER=demo`）
+
+| 範圍 | 結果 | exit |
+|---|---|---|
+| 上述 12 paths（最終程式） | `161 passed in 99.39s (0:01:39)`、0 failed、0 skipped（`-rs` 無 skip 行可印） | 0 |
+| `tests/test_experiment_revisions.py` 單檔（最終程式） | `20 passed in 13.97s`（既有 16 條 + 新增 4 條） | 0 |
+
+非空洞性檢查於交付前已執行，本輪不再新增變體：M1 還原為 presence 拒絕 → `2 failed, 18 passed`（恰好是證明 1、2，其餘 18 條仍綠，表示沒有既有測試依賴「拒絕 `1d`」）；M2 完全移除值檢查 → `2 failed, 18 passed`（既有 intraday 測試＋證明 4 一起紅）；M3 把 `timeframe` 塞進 `IGNORED_CHANGE_FIELDS` → `1 failed, 19 passed`（恰好是證明 3）。三個變體之後都以 sha256 驗證逐位元組還原為上表的兩個 hash。
+
+這是「直接相關回歸集合」，**不是 full suite**。本機未執行、也未聲稱完成：PostgreSQL 連線／測試、`CREATE ROLE`／`CREATE DATABASE`／`GRANT`、Alembic migration、真實 import、服務啟動、真實帳號註冊／登入、瀏覽器驗收、任何 provider 外呼、以真實 Kraken 1440 柱跑通的 session 閉環 —— 全部維持 **NOT RUN**（與 §8、§17.6 相同）。
+
+### 18.7 仍未完成
+
+- **§10.3**：`frontend/src/components/experiments/RevisionPanel.tsx` 的 presence 導向鏡像——本轮批准開始處理，交付前該檔尚未修改，前端結果另節記錄。
+- §10.2 未涵蓋的子效應（例如 `_classify_change` 對其他欄位的標註語義、§18.4 列出的下游消費端）維持未實施／NOT RUN。
+- 真實資料閉環與 §11／§17.7 未搬移的 `~/Backups/*` evidence 目錄狀態不變。
