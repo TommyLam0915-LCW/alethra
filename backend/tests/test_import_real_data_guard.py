@@ -263,3 +263,103 @@ def test_dry_run_still_refuses_an_unapproved_target(tmp_path, monkeypatch, capsy
             "--expected-instrument", INSTRUMENT,
         ])
     assert "Stored" not in capsys.readouterr().out
+
+
+# -- grain: the importer names 1440 on the rows it writes -------------------
+#
+# Storage keys a bar by (instrument, provider, interval_minutes, bar_timestamp),
+# and one midnight can already hold a four-hour bar under that key. An importer
+# that writes 1440 and one that writes nothing look identical in a code review;
+# only the argument actually handed to ``store_bars`` distinguishes them. These
+# cases run ``main`` and read that argument.
+
+GRAIN_ARGS = [
+    "--database-url", UNREACHABLE_ALLOWED_URL,
+    "--expected-instrument", INSTRUMENT,
+    "--confirm-write",
+]
+
+
+@pytest.fixture
+def storage_spy(monkeypatch):
+    """Let ``main`` reach ``store_bars``, and record what it was told.
+
+    Nothing connects: the target gate, the engine and the storage write are all
+    replaced. ``UNREACHABLE_ALLOWED_URL`` is only the string handed to the stub
+    gate, which the fixture still records so the gate stays on this path. The
+    app's shared ``Base.metadata`` is pre-set through monkeypatch so the bind
+    ``main`` assigns is deleted again on teardown.
+    """
+    import sqlalchemy
+    import sqlalchemy.orm
+    from app.database import Base
+    from app.services.market_data_storage import MarketDataStorage
+
+    seen: Dict[str, Any] = {"gate_urls": [], "calls": [], "raises": None,
+                            "closed": False}
+
+    def fake_guard(url):
+        seen["gate_urls"].append(url)
+        return {"database": "ai_investment_lab_test", "user": "alethra_test",
+                "server_addr": "localhost", "server_port": 5432}
+
+    def record(self, **kwargs):
+        seen["calls"].append(kwargs)
+        if seen["raises"] is not None:
+            raise seen["raises"]
+        return len(kwargs["bars"])
+
+    monkeypatch.setenv("TEST_MODE", "true")
+    monkeypatch.setattr(importer, "guard_target", fake_guard)
+    monkeypatch.setattr(Base.metadata, "bind", None, raising=False)
+    monkeypatch.setattr(sqlalchemy, "create_engine", lambda url: object())
+    monkeypatch.setattr(
+        sqlalchemy.orm, "sessionmaker",
+        lambda **kwargs: (lambda: type(
+            "_Session", (), {"close": lambda self: seen.__setitem__("closed", True)}
+        )()),
+    )
+    monkeypatch.setattr(MarketDataStorage, "store_bars", record)
+    return seen
+
+
+def test_importer_names_the_daily_grain_on_the_write(storage_spy, tmp_path):
+    path = write_payload(tmp_path, payload())
+    assert importer.main(["--json-path", str(path), *GRAIN_ARGS]) == 0
+
+    assert len(storage_spy["calls"]) == 1, storage_spy["calls"]
+    assert storage_spy["calls"][0]["interval_minutes"] == 1440
+    assert storage_spy["gate_urls"] == [UNREACHABLE_ALLOWED_URL], \
+        "the target gate is not on the storage path any more"
+
+
+def test_importer_grain_constant_matches_the_storage_service():
+    """The importer keeps its own 1440 rather than importing the service's.
+
+    Two literals for one key can drift apart, and a drift would re-key every
+    imported bar rather than upserting it, so the agreement is asserted here.
+    """
+    from app.services.market_data_storage import DAILY_INTERVAL_MINUTES as service_grain
+
+    assert importer.DAILY_INTERVAL_MINUTES == service_grain
+
+
+def test_grain_conflict_refuses_the_import_instead_of_rewriting_the_row(
+    storage_spy, tmp_path, capsys
+):
+    from app.services.market_data_storage import GrainConflictError
+
+    storage_spy["raises"] = GrainConflictError(
+        "2026-01-01T00:00:00+00:00 already stores interval_minutes=240 for "
+        "CRYPTO:KRAKEN:BTC-USD/kraken"
+    )
+    path = write_payload(tmp_path, payload())
+
+    with pytest.raises(importer.ImportRefusal, match="another grain") as exc:
+        importer.main(["--json-path", str(path), *GRAIN_ARGS])
+
+    assert "Nothing was written" in str(exc.value)
+    assert "does not re-stamp" in str(exc.value)
+    assert isinstance(exc.value.__cause__, GrainConflictError)
+    assert storage_spy["closed"], "the refused run left its session open"
+    assert "Stored" not in capsys.readouterr().out

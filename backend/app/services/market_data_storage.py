@@ -30,6 +30,21 @@ def _naive_utc(value: datetime) -> datetime:
     return value.astimezone(dt_timezone.utc).replace(tzinfo=None)
 
 
+DAILY_INTERVAL_MINUTES = 1440
+
+
+class GrainConflictError(RuntimeError):
+    """A stored row already occupies this key at a different bar grain.
+
+    ``market_data_bars`` rows are identified by
+    (instrument_id, provider_id, interval_minutes, bar_timestamp), so a daily
+    bar and a four-hour bar legitimately share one midnight as two rows.
+    Overwriting or re-stamping the other grain would silently rewrite a series
+    a reader selects by the grain it was written with, so the whole write is
+    refused before any row is touched.
+    """
+
+
 class MarketDataStorage:
     """Storage layer for market data bars and metadata."""
 
@@ -47,60 +62,93 @@ class MarketDataStorage:
         currency: Optional[str] = None,
         provider_note: Optional[str] = None,
         provider_note_zh: Optional[str] = None,
+        *,
+        interval_minutes: Optional[int] = None,
     ) -> int:
         """Store OHLCV bars for an instrument.
 
-        Uses upsert logic: if a bar with the same instrument_id, bar_timestamp,
-        and provider_id exists, it's updated; otherwise it's inserted.
+        A row is identified by the same four columns as the unique constraint:
+        instrument, provider, ``interval_minutes`` and bar timestamp. Passing
+        the grain writes that grain's own series, so a 1440 bar and a 240 bar
+        at one midnight are two rows that never overwrite each other and a
+        re-import of the same four columns updates in place. Leaving it as
+        ``None`` is the unlabelled writer it has always been: it updates its own
+        NULL-grain row, and neither kind re-stamps or replaces the other —
+        a row whose grain differs from the write's is refused whole.
 
         Returns the number of bars stored.
+
+        Raises:
+            GrainConflictError: one of these keys is already held by a row of a
+                different grain, or holds more than one row of the grain being
+                written. No row from this call is modified when it raises.
         """
         if not bars:
             return 0
 
+        timestamps = [
+            datetime.combine(
+                date.fromisoformat(bar.date) if isinstance(bar.date, str) else bar.date,
+                datetime.min.time(),
+            )
+            for bar in bars
+        ]
+
+        stored_rows = (
+            self.db.query(MarketDataBar)
+            .filter(
+                MarketDataBar.instrument_id == instrument_id,
+                MarketDataBar.provider_id == provider_id,
+                MarketDataBar.bar_timestamp.in_(set(timestamps)),
+            )
+            .all()
+        )
+        rows_by_timestamp: Dict[datetime, List[MarketDataBar]] = {}
+        for row in stored_rows:
+            rows_by_timestamp.setdefault(row.bar_timestamp, []).append(row)
+
+        # Every key is decided before any row is touched, so a conflict on the
+        # last bar cannot leave the earlier ones already updated.
+        targets = {
+            bar_timestamp: self._resolve_grain_row(
+                rows_by_timestamp.get(bar_timestamp, []),
+                interval_minutes=interval_minutes,
+                instrument_id=instrument_id,
+                provider_id=provider_id,
+                bar_timestamp=bar_timestamp,
+            )
+            for bar_timestamp in dict.fromkeys(timestamps)
+        }
+
         stored_count = 0
         bar_dates = []
+        touched: Dict[datetime, MarketDataBar] = {}
 
-        for bar in bars:
-            if isinstance(bar.date, str):
-                bar_date_obj = date.fromisoformat(bar.date)
-            else:
-                bar_date_obj = bar.date
+        for bar, bar_timestamp in zip(bars, timestamps):
+            bar_date_obj = bar_timestamp.date()
 
-            bar_timestamp = datetime.combine(bar_date_obj, datetime.min.time())
+            existing = touched.get(bar_timestamp)
+            if existing is None:
+                existing = targets[bar_timestamp]
+                if existing is None:
+                    existing = MarketDataBar(
+                        instrument_id=instrument_id,
+                        provider_id=provider_id,
+                        bar_date=bar_date_obj,
+                        bar_timestamp=bar_timestamp,
+                        interval_minutes=interval_minutes,
+                    )
+                    self.db.add(existing)
+                touched[bar_timestamp] = existing
 
-            existing = self.db.query(MarketDataBar).filter(
-                and_(
-                    MarketDataBar.instrument_id == instrument_id,
-                    MarketDataBar.bar_timestamp == bar_timestamp,
-                    MarketDataBar.provider_id == provider_id,
-                )
-            ).first()
-
-            if existing:
-                existing.open = bar.open
-                existing.high = bar.high
-                existing.low = bar.low
-                existing.close = bar.close
-                existing.volume = bar.volume
-                existing.adjustment_factor = getattr(bar, 'adjustment_factor', None)
-                existing.is_adjusted = getattr(bar, 'is_adjusted', None)
-                existing.fetched_at = utcnow()
-            else:
-                new_bar = MarketDataBar(
-                    instrument_id=instrument_id,
-                    provider_id=provider_id,
-                    bar_date=bar_date_obj,
-                    bar_timestamp=bar_timestamp,
-                    open=bar.open,
-                    high=bar.high,
-                    low=bar.low,
-                    close=bar.close,
-                    volume=bar.volume,
-                    adjustment_factor=getattr(bar, 'adjustment_factor', None),
-                    is_adjusted=getattr(bar, 'is_adjusted', None),
-                )
-                self.db.add(new_bar)
+            existing.open = bar.open
+            existing.high = bar.high
+            existing.low = bar.low
+            existing.close = bar.close
+            existing.volume = bar.volume
+            existing.adjustment_factor = getattr(bar, 'adjustment_factor', None)
+            existing.is_adjusted = getattr(bar, 'is_adjusted', None)
+            existing.fetched_at = utcnow()
 
             bar_dates.append(bar_date_obj)
             stored_count += 1
@@ -121,6 +169,51 @@ class MarketDataStorage:
         self.db.commit()
         logger.info(f"Stored {stored_count} bars for {instrument_id} from {provider_id}")
         return stored_count
+
+    @staticmethod
+    def _resolve_grain_row(
+        rows: List[MarketDataBar],
+        *,
+        interval_minutes: Optional[int],
+        instrument_id: str,
+        provider_id: str,
+        bar_timestamp: datetime,
+    ) -> Optional[MarketDataBar]:
+        """The one row this write owns at ``bar_timestamp``, or None to insert.
+
+        A grain is only interchangeable with itself: an unlabelled (NULL) write
+        may update only the NULL row, and a labelled write only the row stamped
+        with its own interval. Any other row sharing the key belongs to a
+        different series, and several rows of the same grain mean the key is
+        already corrupted, so neither case is resolved by picking one.
+        """
+        key = f"{instrument_id}/{provider_id} at {bar_timestamp.isoformat()}"
+        if interval_minutes is None:
+            own = [row for row in rows if row.interval_minutes is None]
+            blocking = [row for row in rows if row.interval_minutes is not None]
+        else:
+            own = [row for row in rows if row.interval_minutes == interval_minutes]
+            # Another labelled grain is a different series that shares this
+            # instant by design, so only an unlabelled row can be confused with
+            # the one this write owns.
+            blocking = [row for row in rows if row.interval_minutes is None]
+
+        if len(own) > 1:
+            raise GrainConflictError(
+                f"{key} has {len(own)} rows of grain {interval_minutes!r}; refusing "
+                "to choose one of them."
+            )
+        if own:
+            return own[0]
+        if blocking:
+            held = sorted(
+                {row.interval_minutes for row in blocking}, key=lambda grain: (grain is None, grain)
+            )
+            raise GrainConflictError(
+                f"{key} already holds grain {held}, which a write of grain "
+                f"{interval_minutes!r} must not overwrite or re-stamp."
+            )
+        return None
 
     def _update_metadata(
         self,

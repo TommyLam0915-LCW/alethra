@@ -73,7 +73,7 @@ from app.services.risk_policy import (
     evaluate_risk,
     value_open_positions,
 )
-from app.services.market_data_storage import MarketDataStorage
+from app.services.market_data_storage import DAILY_INTERVAL_MINUTES, MarketDataStorage
 from app.models.market_data import MarketDataBar
 from app.providers import get_data_provider
 from sqlalchemy import distinct, func
@@ -104,7 +104,7 @@ def _get_session_with_ownership(session_id: UUID, db: Session, current_user: Use
     return session
 
 
-def _load_stored_ohlcv(symbol: str, start_date: str, end_date: str, db: Session, provider_id: str = None) -> pd.DataFrame:
+def _load_stored_ohlcv(symbol: str, start_date: str, end_date: str, db: Session, provider_id: str = None, *, interval_minutes: int = None) -> pd.DataFrame:
     """Load OHLCV bars from stored market data.
     
     Args:
@@ -113,6 +113,10 @@ def _load_stored_ohlcv(symbol: str, start_date: str, end_date: str, db: Session,
         end_date: End date (YYYY-MM-DD)
         db: Database session
         provider_id: Provider filter (e.g., 'twelvedata', 'demo'). If None, loads all providers.
+        interval_minutes: Read only bars written with this grain. A daily
+            series shares midnight with four-hour bars, so without this the
+            frame would mix two frequencies. None keeps whatever is stored,
+            which is what a session whose spec never declared a grain reads.
     """
     query = db.query(MarketDataBar).filter(
         MarketDataBar.instrument_id == symbol,
@@ -122,6 +126,9 @@ def _load_stored_ohlcv(symbol: str, start_date: str, end_date: str, db: Session,
     
     if provider_id:
         query = query.filter(MarketDataBar.provider_id == provider_id)
+
+    if interval_minutes is not None:
+        query = query.filter(MarketDataBar.interval_minutes == interval_minutes)
     
     bars = query.order_by(MarketDataBar.bar_date).all()
     
@@ -236,6 +243,21 @@ def _get_next_stored_snapshot_date(ohlcv_df: pd.DataFrame, current_snapshot_date
 def _session_timeframe(version: ExperimentVersion) -> str:
     """The timeframe a version's spec declares. Absent/'1d' means the daily path."""
     return str((version.strategy_spec or {}).get("timeframe", "1d"))
+
+
+def _declared_daily_interval_minutes(strategy_spec: Optional[Dict[str, Any]]) -> Optional[int]:
+    """The strict daily grain, but only for a spec that declares ``1d`` itself.
+
+    ``_session_timeframe`` reports '1d' as a *default* for versions written
+    before the key existed, and their stored bars carry no grain. Asking those
+    for ``interval_minutes = 1440`` would empty a replay that works today, so
+    an absent or unrecognised declaration keeps the unlabelled read rather than
+    inventing a grain the writer never stamped.
+    """
+    raw = (strategy_spec or {}).get("timeframe")
+    if isinstance(raw, str) and raw.strip().lower() == "1d":
+        return DAILY_INTERVAL_MINUTES
+    return None
 
 
 def _is_intraday_timeframe(timeframe: Optional[str]) -> bool:
@@ -1356,8 +1378,16 @@ def advance_simulation(
     # saw, and a catalog instrument (US:AAPL, HK:0700) has no fixture rows at all,
     # so its replay would silently walk a different series' calendar.
     provider_id = session.provider_id or _resolve_session_provider(session, db)
+    interval_minutes = _declared_daily_interval_minutes(spec)
     stored = (
-        _load_stored_ohlcv(symbol, start_date, end_date, db, provider_id=provider_id)
+        _load_stored_ohlcv(
+            symbol,
+            start_date,
+            end_date,
+            db,
+            provider_id=provider_id,
+            interval_minutes=interval_minutes,
+        )
         if provider_id
         else pd.DataFrame()
     )
@@ -1715,6 +1745,7 @@ def _observed_bar_close(
     symbol: str,
     provider_id: Optional[str],
     cutoff: str,
+    interval_minutes: Optional[int] = None,
 ) -> Optional[float]:
     """The close of the bar the user was watching, read from the bound dataset.
 
@@ -1722,6 +1753,10 @@ def _observed_bar_close(
     trade: the executable price is the next bar's open, taken by the executor.
     Returns None when the bound dataset has no such row, so the caller says the
     estimate is unavailable instead of assuming zero.
+
+    ``interval_minutes`` keeps that estimate on the same daily series the
+    replay cursor is walking; one date can hold a daily and a four-hour row at
+    the same midnight, and picking between them by sort order is not a rule.
     """
     query = db.query(MarketDataBar).filter(MarketDataBar.instrument_id == symbol)
     if provider_id:
@@ -1730,6 +1765,8 @@ def _observed_bar_close(
         query = query.filter(MarketDataBar.bar_timestamp == session.current_bar_timestamp)
     else:
         query = query.filter(MarketDataBar.bar_date == date.fromisoformat(cutoff))
+        if interval_minutes is not None:
+            query = query.filter(MarketDataBar.interval_minutes == interval_minutes)
 
     bar = query.order_by(MarketDataBar.bar_date, MarketDataBar.bar_timestamp).first()
     return float(bar.close) if bar is not None else None
@@ -1840,7 +1877,12 @@ def _submit_manual_order(
     provider_id = session.provider_id or _resolve_session_provider(session, db)
     warnings: List[str] = []
     observed_close = _observed_bar_close(
-        db, session=session, symbol=symbol, provider_id=provider_id, cutoff=cutoff
+        db,
+        session=session,
+        symbol=symbol,
+        provider_id=provider_id,
+        cutoff=cutoff,
+        interval_minutes=_declared_daily_interval_minutes(spec),
     )
 
     # The same policy the other lanes ask, answered before an intent exists: a

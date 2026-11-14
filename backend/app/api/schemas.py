@@ -3,7 +3,14 @@ from typing import Any, Literal, Optional, List, Dict
 from uuid import UUID
 import math
 import re
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from app.providers.instruments import parse_crypto_instrument_id
 
@@ -38,6 +45,9 @@ class StrategySpec(BaseModel):
     template_type: str = Field(..., pattern="^(buy_and_hold|sma_crossover|price_change_fixed_hold)$")
     asset_ids: List[str] = Field(..., min_length=1)
     frequency: str = Field(default="1d", pattern="^1d$")
+    # The bar grain the spec declares. Readers use it to filter to 1440-minute
+    # bars; an unset declaration must persist exactly as it did before.
+    timeframe: Optional[str] = None
     start_date: str
     end_date: str
     initial_cash: float = Field(..., gt=0)
@@ -74,6 +84,26 @@ class StrategySpec(BaseModel):
         if "start_date" in info.data and v <= info.data["start_date"]:
             raise ValueError("end_date must be after start_date")
         return v
+
+    @field_validator("timeframe")
+    @classmethod
+    def validate_timeframe(cls, v):
+        if v is None:
+            return None
+        if v.strip().lower() != "1d":
+            raise ValueError(
+                'timeframe must be "1d" on this endpoint; intraday grains '
+                "(1m/5m/15m/30m/1h) are not executed here and are never "
+                "relabelled as daily bars"
+            )
+        return "1d"
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_timeframe(self, handler):
+        data = handler(self)
+        if data.get("timeframe") is None:
+            data.pop("timeframe", None)
+        return data
 
 
 class ExperimentCreate(BaseModel):

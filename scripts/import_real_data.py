@@ -14,10 +14,11 @@ Every check runs before a single row is written:
 
 The 2026-11-09 run did none of this: it took ``DATABASE_URL`` at face value,
 wrote into a database the safety gate does not approve, and collapsed each bar
-onto a date. If you are adapting this for a different grain, the storage
-identity is ``(instrument_id, provider_id, interval_minutes, bar_timestamp)``
-and ``MarketDataStorage.store_bars`` leaves ``interval_minutes`` NULL — a
-sub-daily payload must go through a timestamp-exact writer instead.
+onto a date. Storage identity is ``(instrument_id, provider_id,
+interval_minutes, bar_timestamp)``, and this script writes the daily grain it
+validated rather than leaving it unlabelled. A payload of another frequency
+must pass its own ``interval_minutes`` — one midnight can hold a daily and a
+four-hour bar as two separate rows.
 
 Usage:
     TEST_MODE=true \
@@ -238,7 +239,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     from app.database import Base
     from app.providers.data_provider import OHLCVBar
-    from app.services.market_data_storage import MarketDataStorage
+    from app.services.market_data_storage import GrainConflictError, MarketDataStorage
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
 
@@ -270,14 +271,20 @@ def main(argv: Optional[List[str]] = None) -> int:
                 f"Imported from {Path(args.json_path).name} "
                 f"(sha256 {digest[:16]}, harvest {str(payload['harvest_fingerprint'])[:16]})"
             ),
+            interval_minutes=DAILY_INTERVAL_MINUTES,
             provider_note_zh="经由安全閘門核對目標後匯入的真實日線資料",
         )
-        print(f"\nStored {stored} bars. Re-running upserts the same "
-              f"(instrument, provider, midnight) rows rather than duplicating them; "
-              "note that store_bars leaves interval_minutes NULL, so this lane is "
-              "readable only as a daily series.")
+    except GrainConflictError as exc:
+        raise ImportRefusal(
+            f"{exc} Nothing was written: the rows already holding these keys belong "
+            "to another grain, and this importer does not re-stamp them."
+        ) from exc
     finally:
         session.close()
+
+    print(f"\nStored {stored} bars at interval_minutes={DAILY_INTERVAL_MINUTES}. "
+          "Re-running upserts the same (instrument, provider, interval_minutes, "
+          "midnight) rows rather than duplicating them.")
     return 0
 
 
