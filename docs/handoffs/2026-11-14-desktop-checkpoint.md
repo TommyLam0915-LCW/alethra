@@ -363,3 +363,101 @@ Homebrew `postgresql@15`，由 launchd `KeepAlive` 託管 —— **不得 kill**
 ## 16. 一句話狀態
 
 Grain slice 的 storage／reader／importer 與**正式 HTTP `timeframe` 持久化**已在 SQLite 離線層實作並通過 T1 層回歸（12 passed），但（a）preflight 的 `unsupported` 契約由本輪改動產生 2 條已知紅燈尚未修，（b）修訂守衛仍會拒絕對外合法宣告 `1d` 的版本，（c）所有 PostgreSQL／grant／import／服務／真實資料／瀏覽器層**完全未驗證**。本 commit 是 checkpoint，不是完成版。
+
+---
+
+## 17. 本機接手增量（2026-11-14，新桌面）— §10.1 preflight 契約修復
+
+本節是**追加**記錄，不覆寫 §1–§16 的任何歷史數字；§6／§7 屬舊桌面的量測，本機未重跑整套已完成項目，因此那些數字仍只代表舊桌面當時狀態。
+
+### 17.1 接手基準與取得過程（皆為本機實測）
+
+| 項目 | 值 |
+|---|---|
+| repo root | `~/Documents/Qoder/2026-11-03/ac51e592/alethra`（本機絕對路徑依本檔慣例不記錄） |
+| OS | Darwin 22.4.0（macOS 13.3）arm64，host `ChakdeMac-mini.local` |
+| `git remote get-url origin` | `https://github.com/TommyLam0915-LCW/alethra.git`（與 §1 相符） |
+| `git remote get-url github` | 同一 URL（本 checkout 有兩個同 URL remote） |
+| 接手起點 | `live1-impl` @ `dd948f4`，**0 ahead / 13 behind**，working tree 乾淨，`stash@{0}`／`stash@{1}` 未動 |
+| `git ls-remote origin live1-impl` | `920a9c52d5bce7944ca07ffb4c6e1eb945d042fc` |
+| 更新方式 | `git merge --ff-only github/live1-impl` → HEAD = `920a9c52…`，與 checkpoint 逐字相同 |
+| 未使用 | 無 merge commit、無 rebase、無 force-push、無 `reset --hard`、無 `git clean`、未改任何 fetch／upstream 配置 |
+
+配置事實（供下一個代理避免誤判）：本 checkout 的 `remote.origin.fetch` refspec 只映射 `feat/strategy-revision-and-research`，所以 `origin/live1-impl` 這個 remote-tracking ref 在本機**不存在**；`live1-impl` 的遠端狀態一律以 `git ls-remote` 直接查詢，或走同 URL 的 `github` ref。
+
+### 17.2 本輪修改（3 檔）
+
+程式差異（`backend/app/api/strategy_templates.py`）：
+1. `preflight_strategy_spec`：把 intraday grain 分支**移到** `StrategySpec.model_validate` 之前，與既有 `template_type` 的 unsupported 分支同優先序 —— 根因是 `schemas.py` 的 `timeframe` 驗證器只收 `1d`，`5m` 會先撞驗證器而誤報 `invalid`。
+2. 搬移後的 `template_type` 由 `parsed.template_type` 改為 `template_type if isinstance(template_type, str) else None`（搬移後 `parsed` 尚未存在，寫法與既有分支一致）。
+3. `_EXECUTED_FIELDS` 加入 `"timeframe"`；`_FIELD_SEMANTICS` 新增 `timeframe` 列。依據是本輪查證：`app/engine/backtest.py:287` 與 `app/api/simulations.py:244-260` 確實讀這個 key，沿用預設文字「Stored; the engine does not read it.」會成為不實陳述。
+
+測試差異：
+- `tests/test_strategy_preflight.py`：新增 `test_declared_daily_timeframe_is_valid_and_an_unknown_grain_is_invalid`（釘住宣告 `1d` 仍 `valid`、`4h` 仍屬 `invalid`，未擴大 intraday 能力）。
+- `tests/test_strategy_spec_contract.py`：把 `frequency`、`timeframe` 納入 `executed_by_engine is True` 的斷言集合。
+- 兩條原紅燈的斷言**未刪除、未跳過、未削弱**。
+
+修復後工作區內容（提交前）：
+
+| 路徑 | sha256 |
+|---|---|
+| `backend/app/api/strategy_templates.py` | `d90edcf76eede819787c84d39446abb59441e0766cdda5604ec5433df7c290f1` |
+| `backend/tests/test_strategy_preflight.py` | `b4cbe49bdd1ab09da3e5ff4a34906bb9d1ab93cd89b273c2510b91f9cdd1d914` |
+| `backend/tests/test_strategy_spec_contract.py` | `35d980493849e05f102322504183e6cbbe58ce2ae796deee4a065e0a7e968afb` |
+
+### 17.3 `DATA_PROVIDER=demo` 是本離線 lane 的必要配置
+
+- 本機 `backend/.env` 設 `DATA_PROVIDER=twelvedata`，`app/services/research_runs.py:133` 會先解析 provider；因此**在未修改的乾淨 checkout 上**，`tests/test_experiment_revisions.py::TestCreateRevision::test_revision_can_be_researched_directly` 就會以 `BacktestRefused: Unsupported asset: DEMO-ALPHA` 失敗（`app/engine/backtest.py:372-377`）。這是**配置差異**，不是程式回退； attribution 方式：以 `920a9c52` 的乾淨工作樹跑同一條測試，照樣紅。
+- 該拒絕發生在取用行情**之前**，所以這一輪沒有任何 provider 外呼。
+- 本輪所有正式結果一律加 `DATA_PROVIDER=demo` 前綴，讓 lane 與舊桌面的離線基準等價。
+- 對照用工作樹的陷阱：`git worktree` 不含未追蹤的 `backend/.env`／DB 檔／`.venv`，直接拿來當「基準」等於換了一套配置；必須先對齊 `.env` 才可比較。
+
+### 17.4 可重跑的完整命令（14 paths，於 repo root）
+
+```bash
+DATA_PROVIDER=demo ALETHRA_PYTHON=$PWD/backend/.venv/bin/python \
+  ./backend/scripts/run_tests.sh sqlite \
+  tests/test_strategy_preflight.py \
+  tests/test_strategy_spec_contract.py \
+  tests/test_daily_grain_http_authoring_roundtrip.py \
+  tests/test_daily_replay_reads_stored_bars.py \
+  tests/test_market_data_grain_contract.py \
+  tests/test_import_real_data_guard.py \
+  tests/test_stored_market_data.py \
+  tests/test_experiment_version_lock.py \
+  tests/test_experiment_revisions.py \
+  tests/test_experiment_continuation.py \
+  tests/test_run_comparison.py \
+  tests/test_intraday_simulation_api.py \
+  tests/test_intraday_opening_range.py \
+  tests/test_intraday_rest_refresh.py \
+  -p no:warnings -q -rf
+echo "EXIT=${pipestatus[1]}"
+```
+
+直譯器為本機 `backend/.venv/bin/python`（Python 3.12.16；`backend/requirements.txt` 在這 13 個 commit 未變更，`pip check` 無破損）。
+
+### 17.5 結果（同一 lane、同一命令的前後對照）
+
+| 狀態 | 範圍 | 結果 | exit |
+|---|---|---|---|
+| `920a9c52` 基準 | 僅 T1＋T2 兩檔 | `25 passed in 14.49s` | 0 |
+| `920a9c52` 乾淨（未修） | 上述 14 paths（`DATA_PROVIDER=demo`） | `2 failed, 203 passed, 15 skipped in 84.28s` | 1 |
+| 本輪修復後（最終程式） | 同上 14 paths | `206 passed, 15 skipped in 86.00s` | 0 |
+| 本輪修復後（最終程式） | 4 條節點級目標 | `4 passed in 2.53s`，4 條皆 `PASSED` | 0 |
+
+206 = 203 + 轉綠的 2 條 + 本輪新增 1 條，加總自洽。修復前的兩條失敗訊息仍是 `assert 'invalid' == 'unsupported'`。
+突變檢查 M1（把 `timeframe` 從 `_EXECUTED_FIELDS` 移除）→ `test_every_spec_field_states_whether_the_engine_reads_it` 失敗（`assert False is True`），證明新增斷言會真的偵測到；還原後檔案 sha256 與上表逐位元組相同。
+
+### 17.6 15 條 skip 的代表意義
+
+**skip 不等於 PostgreSQL 通過**。15 條全來自 `ALETHRA_PG_DATABASE_URL` 未設定的跳過判定（主要落在 `tests/test_intraday_simulation_api.py`）。本機 PG 相關變數（`ALETHRA_PG_TEST_URL`／`ALETHRA_TEST_POSTGRES_URL`）皆 UNSET，PG 層維持 **ENV_BLOCKED / NOT RUN**。
+
+本輪未執行、也未聲稱完成：PostgreSQL 測試、`CREATE ROLE`／`CREATE DATABASE`／`GRANT`、Alembic migration、真實 import、服務啟動、真實帳號註冊／登入／瀏覽器驗收、任何 provider 外呼、以真實 Kraken 1440 柱跑通的 session 閉環。
+
+### 17.7 仍未完成（下一步）
+
+- **§10.2**：`backend/app/api/experiments.py:707-719` 的修訂守衛仍以「`timeframe` key 是否存在」拒絕，導致經正式 API 合法宣告 `1d` 的版本無法被修訂。本節只記錄，尚未實施。
+- **§10.3**：`frontend/src/components/experiments/RevisionPanel.tsx:99` 的 presence 導向鏡像；且本機 `frontend/node_modules` 仍是 `package.json` 變更（`c2a3db5`／`73709f6`）之前的狀態，動前端前需 `npm ci`。
+- **真實資料閉環**：§9 的資料＋授權阻礙未解。
+- **舊桌面 evidence 未搬移**：本機 `find ~` 查證 `~/Backups/alethra-grain-http-20261113-run1`、`alethra-grain-patch-20261113-run1`、`alethra-kraken-1440m-download-20261113-run1`、`alethra-p0-probe-20261112-run1`、`alethra-pytest-batch1/2-20261112-run1`、`alethra-pg15` **全部 ABSENT**，`alethra-customer-evidence` 亦未在本機 clone。因此 §6／§7 的原始輸出與 H1–H3／M1–M7 腳本**無法在本機覆核**；本節引用它們時只作為舊桌面歷史，不作為本機量測。真實 1440 payload 依 §11.2 的 pinned commit／blob 可重建，本輪未下載、未 harvest。

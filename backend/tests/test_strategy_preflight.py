@@ -154,6 +154,31 @@ def test_intraday_spec_is_unsupported_on_the_batch_path(client, auth_headers):
     assert body["errors"][0]["field"] == "timeframe"
 
 
+def test_declared_daily_timeframe_is_valid_and_an_unknown_grain_is_invalid(
+    client, auth_headers
+):
+    """Unsupported is reserved for the grains the intraday path really runs.
+
+    "4h" is not a member of INTRADAY_TIMEFRAMES, so it stays a schema error
+    rather than being advertised as a capability that exists elsewhere.
+    """
+    declared = client.post(
+        "/api/v1/strategy-specs/preflight",
+        headers=auth_headers,
+        json=make_spec("buy_and_hold", timeframe="1d"),
+    ).json()
+    assert declared["status"] == "valid"
+    assert declared["errors"] == []
+
+    unknown = client.post(
+        "/api/v1/strategy-specs/preflight",
+        headers=auth_headers,
+        json=make_spec("buy_and_hold", timeframe="4h"),
+    ).json()
+    assert unknown["status"] == "invalid"
+    assert "timeframe" in {error["field"] for error in unknown["errors"]}
+
+
 def test_preflight_requires_authentication(client):
     response = client.post(
         "/api/v1/strategy-specs/preflight", json=make_spec("buy_and_hold")

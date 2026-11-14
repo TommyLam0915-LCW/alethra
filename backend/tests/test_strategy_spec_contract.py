@@ -53,6 +53,8 @@ def test_every_spec_field_states_whether_the_engine_reads_it(client, auth_header
     for executed in (
         "template_type",
         "asset_ids",
+        "frequency",
+        "timeframe",
         "start_date",
         "end_date",
         "initial_cash",

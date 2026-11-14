@@ -170,6 +170,7 @@ _EXECUTED_FIELDS = {
     "template_type",
     "asset_ids",
     "frequency",
+    "timeframe",
     "start_date",
     "end_date",
     "initial_cash",
@@ -185,6 +186,10 @@ _FIELD_SEMANTICS: Dict[str, str] = {
     "template_type": "Selects the engine implementation; an unknown value is refused.",
     "asset_ids": "Every id is loaded for bars; the daily engine trades only the first one.",
     "frequency": "Must be 1d on the batch path; intraday specs are refused there.",
+    "timeframe": "Declares the bar grain: 1d is the only value this path executes, "
+                 "intraday values are refused, and a stored-bar replay reads only "
+                 "1440-minute bars when 1d is declared. An undeclared spec keeps the "
+                 "unlabelled legacy read.",
     "start_date": "Inclusive first date of the window the engine loads bars for.",
     "end_date": "Inclusive last date of that window.",
     "initial_cash": "Starting cash used for position size and the equity curve.",
@@ -437,20 +442,15 @@ def preflight_strategy_spec(
             reason=f"Template '{template_type}' is not implemented, so no run can use it.",
         )
 
-    try:
-        parsed = StrategySpec.model_validate(spec)
-    except ValidationError as exc:
-        return _result(
-            "invalid",
-            template_type if isinstance(template_type, str) else None,
-            errors=_validation_errors(exc),
-        )
-
+    # Capability is judged before field-level validation, as it already is for
+    # template_type above: an intraday grain is "not implemented on this path",
+    # not a malformed spec, so it must stay unsupported even though the schema
+    # validator only accepts 1d.
     timeframe = str(spec.get("timeframe", "1d"))
     if timeframe in INTRADAY_TIMEFRAMES:
         return _result(
             "unsupported",
-            parsed.template_type,
+            template_type if isinstance(template_type, str) else None,
             errors=[
                 {
                     "field": "timeframe",
@@ -461,6 +461,15 @@ def preflight_strategy_spec(
                 }
             ],
             reason="This capability is not supported on this path.",
+        )
+
+    try:
+        parsed = StrategySpec.model_validate(spec)
+    except ValidationError as exc:
+        return _result(
+            "invalid",
+            template_type if isinstance(template_type, str) else None,
+            errors=_validation_errors(exc),
         )
 
     signal_errors = validate_signal_parameters(parsed.template_type, parsed.signal_parameters)
