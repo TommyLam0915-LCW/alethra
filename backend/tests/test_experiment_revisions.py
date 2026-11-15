@@ -565,6 +565,11 @@ class TestDeclaredDailyTimeframeRevisions:
         These rows cannot be produced by the official API (the schema validator
         rejects them), so they are written the way the existing guard test does
         it — to prove the guard, not to substitute for the authoring lane above.
+        The non-string rows belong here for a different reason than the grain
+        rows: a guard that only inspects values it can compare as text still
+        refuses 5m/4h/None/"" but would let ``5``, ``True`` or ``["5m"]`` through
+        as if nothing had been declared. These rows pin the outcome — no revision
+        is created — whichever of the two value checks reports it.
         """
         from tests.conftest import TestSession
 
@@ -577,6 +582,12 @@ class TestDeclaredDailyTimeframeRevisions:
             {"timeframe": "4h"},
             {"timeframe": None},
             {"timeframe": ""},
+            {"timeframe": 5},
+            {"timeframe": 5.5},
+            {"timeframe": ["5m"]},
+            {"timeframe": {"grain": "5m"}},
+            {"timeframe": True},
+            {"timeframe": False},
             {"session": {"timeframe": "5m"}},
         ):
             db = TestSession()

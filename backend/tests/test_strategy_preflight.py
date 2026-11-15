@@ -9,6 +9,11 @@ from pydantic import ValidationError
 
 from app.api.schemas import ALLOWED_TEMPLATES, ExperimentCreate, StrategySpec
 from app.engine.backtest import SIGNAL_PARAMETER_RULES
+from app.engine.intraday import INTRADAY_TIMEFRAMES
+
+# The grains the batch path documents as "not executed here". Written out as a
+# literal so the test stays independent of the constant it checks.
+DOCUMENTED_INTRADAY_TIMEFRAMES = ("1m", "5m", "15m", "30m", "1h")
 
 
 def make_spec(template: str = "buy_and_hold", **overrides):
@@ -145,13 +150,57 @@ def test_unsupported_template_is_distinct_from_field_errors(client, auth_headers
     assert body["errors"] == []
 
 
-def test_intraday_spec_is_unsupported_on_the_batch_path(client, auth_headers):
-    spec = make_spec("buy_and_hold", timeframe="5m")
+@pytest.mark.parametrize("timeframe", DOCUMENTED_INTRADAY_TIMEFRAMES)
+def test_intraday_spec_is_unsupported_on_the_batch_path(
+    client, auth_headers, timeframe
+):
+    spec = make_spec("buy_and_hold", timeframe=timeframe)
     body = client.post(
         "/api/v1/strategy-specs/preflight", headers=auth_headers, json=spec
     ).json()
     assert body["status"] == "unsupported"
     assert body["errors"][0]["field"] == "timeframe"
+
+
+def test_the_refused_grain_set_is_exactly_the_documented_boundary(client, auth_headers):
+    """The advertised capability is bounded on both sides.
+
+    ``INTRADAY_TIMEFRAMES`` is read by the preflight, the batch engine and the
+    intraday HTTP lanes, so a grain appearing here without an amendment is a
+    silent capability claim; a grain missing here stops being refused.
+    """
+    assert INTRADAY_TIMEFRAMES == frozenset(DOCUMENTED_INTRADAY_TIMEFRAMES)
+
+    for grain in ("2h", "8h", "1w", "abc"):
+        body = client.post(
+            "/api/v1/strategy-specs/preflight",
+            headers=auth_headers,
+            json=make_spec("buy_and_hold", timeframe=grain),
+        ).json()
+        assert body["status"] != "unsupported", (
+            f"{grain!r} is outside the documented intraday register, so the "
+            f"intraday lane cannot be offered as its alternative: {body}"
+        )
+
+
+@pytest.mark.parametrize(
+    "timeframe", [5, 5.5, ["5m"], {"grain": "5m"}, True, False, ""]
+)
+def test_a_malformed_timeframe_is_a_schema_error_not_a_capability_gap(
+    client, auth_headers, timeframe
+):
+    """Only a real grain can be called unsupported.
+
+    The capability branch stringifies the declared value, so a non-string has to
+    fall through to the validator instead of being labelled as a missing feature.
+    """
+    body = client.post(
+        "/api/v1/strategy-specs/preflight",
+        headers=auth_headers,
+        json=make_spec("buy_and_hold", timeframe=timeframe),
+    ).json()
+    assert body["status"] == "invalid", f"{timeframe!r} read as {body}"
+    assert "timeframe" in {error["field"] for error in body["errors"]}
 
 
 def test_declared_daily_timeframe_is_valid_and_an_unknown_grain_is_invalid(
