@@ -544,3 +544,101 @@ echo "EXIT=${pipestatus[1]}"
 - **§10.3**：`frontend/src/components/experiments/RevisionPanel.tsx` 的 presence 導向鏡像——本轮批准開始處理，交付前該檔尚未修改，前端結果另節記錄。
 - §10.2 未涵蓋的子效應（例如 `_classify_change` 對其他欄位的標註語義、§18.4 列出的下游消費端）維持未實施／NOT RUN。
 - 真實資料閉環與 §11／§17.7 未搬移的 `~/Backups/*` evidence 目錄狀態不變。
+
+## 19. §10.3 前端：RevisionPanel 的支援性判斷改與後端契約對齊（本節為該輪唯一保存）
+
+本節記錄 2026-11-14 那一輪「僅本機修改」的前端交付，並由本節的 commit 保存。修改範圍只有三個檔案加本文件；`backend/app/api/experiments.py`（§18）在本輪完全未被觸碰，後端仍是支援性與拒絕的唯一權威。
+
+### 19.1 檔案與逐位元組狀態
+
+| 檔案 | 行數 | sha256（前 12） |
+| --- | --- | --- |
+| `frontend/src/lib/revisionSpec.ts`（新） | 115 | `c14c8649c3b3` |
+| `frontend/tests/revisionSpec.test.mjs`（新） | 158 | `32dc0bec2160` |
+| `frontend/src/components/experiments/RevisionPanel.tsx`（840 → 768，`+6/−78`） | 768 | `0cb19b4e580b` |
+
+`frontend/tsconfig.json`、`frontend/package.json`、`frontend/package-lock.json`、`backend/requirements.txt` 的最終 diff 為空。需要交代的中途副作用：`npm run build` 曾自動在 `frontend/tsconfig.json` 的 `include` 追加 `".next-build-20261114/types/**/*.ts"`（那是本輪自己引入的 scratch dist 目錄），已用 `git restore --source=HEAD -- frontend/tsconfig.json` 還原，scratch 目錄已刪除；所有度量（typecheck／build／unit）都在該自動編輯之前取得，因此不受影響。
+
+### 19.2 helper 搬移與兩項有意義行為變更
+
+搬移（非行為變更）：`SPEC_DEFAULTS`、`IGNORED_FIELDS`、`canonicalSpec`、`flatten`、`diffSpecs`、`isUnsupportedSpec` 從 `RevisionPanel.tsx` 移到 `src/lib/revisionSpec.ts` 並 `export`。以 unified diff 逐行比對過：除 `export` 關鍵字與新增的 `timeframe` 條目（見 19.2b）外內容相同。這個「純函式放 `src/lib/`」的模式是倉庫既有的做法（`src/lib/strategyPreflight.ts`），不是為本輪新造的結構。元件在 `RevisionPanel.tsx:146` 呼叫搬移後的 `isUnsupportedSpec(base.strategy_spec)`。
+
+有意義行為變更只有兩項：
+
+- **(a) presence + truthiness → 值導向。** 舊 guard `if (spec.session || spec.timeframe)`（`RevisionPanel.tsx` 舊檔）只要 key 存在就把版本顯示為不支援。新實作（`revisionSpec.ts:39-63`）用 `REVISION_KEY_CAPABILITY`：`timeframe` 只有在 `typeof value === 'string' && value.trim().toLowerCase() === '1d'` 時被授權。因此合法明示 `"1d"`（含 `' 1d '`、`'1D'`）的來源版本現在按鈕可用、表單可開、不顯示 unsupported banner——這是本輪要修的東西。
+- **(b) 非法值一律阻擋，且 `1d` 不豁免其他欄位。** `timeframe` 為 `null`/`""`/`"  "`/`0`/`1`/`true`/`'daily'`/`'5m'`/`'1h'`/`'4h'`/`'15m'`/`'30m'` 時仍阻擋，reason 點名 `timeframe` 並保留「backend 不會降為日線」的措辭；`frequency !== '1d'` 仍是第一個阻塞條件（`revisionSpec.ts:98-105`），`5m` + 明示 `1d` 的組合仍阻擋；`timeframe: '1d'` 與 `session` 同時存在時仍阻擋且 reason 點名 `session`。`"1d"` 沒有取得豁免其他不支援欄位的能力。
+
+### 19.3 `session: null` 改為拒絕 = 與後端對齊，不是前端自創限制
+
+舊前端以 truthiness 讀 spec，所以 `session: null` 被當成「未宣告」→ 允許修訂；§10.2 的後端 guard（`backend/app/api/experiments.py:714-724`）以值判斷，`session` 對**任何**值（含 `null`）回 400 並說明不會自動降級為日線。新前端把 `session: () => false`（`revisionSpec.ts:53`）寫成「沒有任何值可由這個表單授權」，於是 `session: null` 在 UI 顯示為不支援。
+
+這是把**必定發生的後端拒絕**往前挪到 UI，而不是用前端驗證取代後端拒絕：後端那條 400 完全沒改、本輪也沒重跑 §18 那批後端測試（owner 明確要求不重跑）。代價要誠實寫出來：手上若已有 `session: null` 的來源版本，先前能開表單、填完後收到 400；現在直接不开表單。使用者看到的訊息從「錯誤」變成「這個版本不支援修訂，請建立受支援的日線實驗」。
+
+### 19.4 80 pass 的組成與完整可重跑命令
+
+`cd frontend && node22 --test 'tests/*.test.mjs'` → **80 tests / 80 pass / 0 fail / 0 skipped / exit 0**。
+
+| 檔案 | pass |
+| --- | --- |
+| `tests/revisionSpec.test.mjs`（本輪新增） | 15 |
+| `tests/userErrors.test.mjs` | 27 |
+| `tests/displayHelpers.test.mjs` | 15 |
+| `tests/benchmarkState.test.mjs` | 7 |
+| `tests/apiRequestCorrelation.test.mjs` | 6 |
+| `tests/strategyPreflight.test.mjs` | 6 |
+| `tests/feedbackDraft.test.mjs` | 4 |
+| 合計 | **80** |
+
+15 條新增測試：11 條行為（直接 import `src/lib/revisionSpec.ts`，見 19.7）＋ 4 條接線斷言。加總核對：65（改動前基線，同一命令在同一機器取得）＋ 15 = 80。
+
+命令必須用 glob 形式 `tests/*.test.mjs`。`node22 --test tests/` 會報 `Cannot find module '.../frontend/tests'`（這個 Node 版本把目錄參數當模組 import），所以别把它寫成資料夾形式。
+
+### 19.5 typecheck / build / lint（皆在最終位元組狀態取得）
+
+| 檢查 | 命令 | 結果 |
+| --- | --- | --- |
+| 型別 | `npm run typecheck`（`tsc --noEmit`） | **0 errors，exit 0** |
+| 建置 | `NEXT_DEV_DIST_DIR=.next-build-20261114 npm run build` | `✓ Compiled successfully`，**exit 0** |
+| Lint | `npx eslint src/lib/revisionSpec.ts src/components/experiments/RevisionPanel.tsx tests/revisionSpec.test.mjs` | **無輸出，exit 0** |
+
+`NEXT_DEV_DIST_DIR` 是 `frontend/next.config.js` 既有的 per-runtime dist 隔离開關（`distDir: process.env.NEXT_DEV_DIST_DIR || '.next'`），用它只是為了不覆寫既有 `.next`，沒有引入新框架，也没有啟動 dev server。
+
+### 19.6 撤回：「原本已有 11 個型別錯誤」是錯的
+
+我在那一輪中曾回報「`tsc --noEmit` 原本就有 11 條 `TS18047`」以及「`next build` 在 `src/app/experiments/[id]/page.tsx:141:24` 中止」，並據此暗示前端倉庫原本是紅的。**這個判斷錯誤，在此正式撤回；那 11 條錯誤與 `page.tsx` 中止都不是倉庫既有狀態。**
+
+原因就是我自己的臨時操作：為了讓 `npm ci` 可逆，我把舊依賴樹改名留在 repo 內變成 `frontend/node_modules.pre-ci-20261114/`。`frontend/tsconfig.json` 是 `include: ["**/*.ts", "**/*.tsx", ...]` 而 `exclude` 只有 `["node_modules"]`；點開頭目錄被 tsc 的 glob 隱式跳過，但 `node_modules.pre-ci-20261114` 不是點開頭，於是那棵樹裡的 `next`／`@types` 原始檔被納入編譯 program，11 條 `TS18047` 全部來自那裡。把該目錄移出 repo（現在在 `~/.local/share/alethra-frontend-node_modules.pre-ci-20261114`）之後，同一命令得到 0 errors、build exit 0。
+
+教訓已反映在本節的 pre-commit 檢查：repo 內目前沒有任何 `node_modules*`／`.next*` 備份或 scratch 產物（`git status --porcelain --ignored=matching -unormal frontend` 只列出被 gitignore 的 `node_modules`、`.next`、`tsconfig.tsbuildinfo`）。
+
+### 19.7 靜態接線不是 mount/render 證據
+
+- 11 條行為測試是直接 `import` 產品模組 `src/lib/revisionSpec.ts` 的真實函式呼叫——測的就是元件實際 call 的那條 function，不是測試檔自己重寫一份邏輯。
+- 4 條接線測試是**靜態**的：用 `readFileSync` 讀 `RevisionPanel.tsx` 原始檔字串，assert (i) import 自 `@/lib/revisionSpec` 的四個符號、(ii) 檔內已無這些 helper 的本地副本、(iii) `unsupported.blocked` 仍綁在 `openForm()` 的 early return（:174）、`disabled`（:347）與 banner（:358）、(iv) 舊的 `if (spec.session || spec.timeframe)` 已不存在。
+- 這**不等於**任何執行期證據：沒有 React mount、沒有 props 實際傳遞、沒有點擊真的開出表單、也沒有驗證 submit payload 真的帶來源的 `timeframe: '1d'`。現有 `node:test` harness 無 DOM／JSX 能力，做不到這一層；`e2e/strategy-revision.spec.ts` 只點 `revision-open`（:174）與看 `revision-preview`（:178/:186），完全沒有 unsupported／timeframe／session 的斷言。要補這一層就是下一節的方案，尚未執行。
+
+### 19.8 `diffSpecs` 認得新增的 `timeframe`，不等於表單有 timeframe 控件
+
+`SPEC_FIELDS` 只多了 `'timeframe'` 一項，作用是讓 diff／change kind 能把「來源未宣告 → draft 明示 `1d`」正確標為 `changed_fields = ['timeframe']`、`strategy_only`，因此不會像 owner 要求的那樣顯示成「無變更」；同期對照：兩邊都同樣宣告 `1d` 時只剩 `commission_rate`，完全未改的 legacy spec 得到 `[]`。
+
+表單 UI 沒有新增任何 timeframe 下拉或輸入。`draftSpec` 仍從 `{ ...spec }` 展開（`RevisionPanel.tsx`），所以來源既有的 `1d` 宣告被原樣帶進 submit payload；使用者無法在 UI 把日線版本改成 intraday，也沒有「加一個 timeframe 欄位」的新能力。
+
+### 19.9 本機附加的 Node 版本與實際執行方式
+
+這台機器預設 `node` 是 **v18.20.8**，不支援 TS type stripping，所以 `node --test tests/*.test.mjs` 在既有 6 個單元檔中的 5 個上直接失敗（它們 import `.ts` 產品模組）。本輪**附加**安裝官方 Node **v22.23.5**：下載後先比對官方 sha256（`d0c68c321161bb2c6483efea9a343010dea8e5e7f60d73c6a7eba140016d662f`）通過才解壓，只以 alias `node22`／`npm22`／`npx22` 暴露；預設 `node`／`npm` 未改、PATH 未改、無 brew／sudo／系統層安裝。
+
+因此 19.4 的命令**只在「本機存在 `node22` 別名」這個前提下成立**。別把它當成跨機器通用工具寫進 CI 或其他文件；換機器時要改用絕對路徑或先在專案內固定工具鏈。
+
+依賴恢復是依 lockfile 的 `npm ci`，未升級任何版本、未重寫 lockfile；執行前先審過攻擊面：`frontend/package.json` 沒有 root lifecycle script、`package-lock.json` 中 `hasInstallScript` 標記的 package 數量為 **0**、playwright 的 postinstall script 為空——所以不會有任何服務或瀏覽器被自動啟動／下載。
+
+### 19.10 Node 20 CI 目前未執行這條單元 lane
+
+`.github/workflows/frontend-build.yml` 固定 Node **20**，只跑 `npm ci` + `npm run build`；`browser-acceptance.yml` 亦為 Node 20，跑 Playwright e2e。兩者都**沒有** `node --test` 步驟，`frontend/package.json` 也沒有可被 CI 撿起的 unit-test script。
+
+所以本節 80 pass 是**純本機**結果；不得宣稱 CI 已通過或已覆蓋新增測試——CI 對這 15 條新測試的真實狀態是 **NOT RUN**。讓 CI 涵蓋需要另批工作（workflow 引入 Node ≥ 22.6 與 `node --test` 步驟），本輪未批准、未做。
+
+### 19.11 本節保存範圍與仍 NOT RUN 的事
+
+本節的 commit 只含 19.1 的三個檔案加上本文件的 tail-only 追加。以下全部維持 **NOT RUN**，且本輪未聲稱完成：瀏覽器驗收、前端 dev server 或任何服務啟動、後端／PostgreSQL 連線或測試、`GRANT`／`CREATE ROLE`／`CREATE DATABASE`、Alembic migration、真實 import、真實帳號註冊／登入、任何行情 provider 外呼、部署、依賴版本升級。
+
+下一步只交付「最小 UI 驗證方案」（能不能沿用既有 Playwright、以頁面級 API mock 驗 RevisionPanel 而毋須啟動後端或連 DB），方案本身不在本節執行，也尚未寫入本文件。
