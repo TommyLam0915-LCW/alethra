@@ -115,6 +115,12 @@ class Settings(BaseSettings):
     # Off by default; requires explicit opt-in to consume provider quota.
     auto_collection_enabled: bool = False
     auto_collection_interval_hours: int = 4
+    # Age threshold for the research-run reclaim. The reclaim reads it to decide
+    # what to list as a candidate and then refuses to act: an aged row is not
+    # proof its process died, so an active run blocks its version and holds its
+    # quota unit until an outcome is written. Lowering this number changes only
+    # what the refusal names, not what it does.
+    research_run_stale_after_seconds: int = 900
     # Live trading daemon: real-time paper trading via Kraken WebSocket.
     # Off by default; requires explicit opt-in.
     live_trading_enabled: bool = False

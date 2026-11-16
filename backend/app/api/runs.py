@@ -22,12 +22,29 @@ from app.api.schemas import (
 from app.engine.backtest import compute_config_hash
 from app.auth.entitlements import require_entitlement
 from app.auth.api_keys import check_api_key_scope
-from app.services.research_runs import execute_backtest_run
+from app.services.research_runs import (
+    execute_backtest_run,
+)
 
 router = APIRouter(tags=["runs"])
 
 
-@router.post("/versions/{version_id}/runs", response_model=ResearchRunResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/versions/{version_id}/runs",
+    response_model=ResearchRunResponse,
+    status_code=status.HTTP_201_CREATED,
+    responses={
+        status.HTTP_409_CONFLICT: {
+            "description": (
+                "This version already has a committed, still-active run; its "
+                "run id is in the detail. The refusal is re-read inside the "
+                "admission transaction, under the version row lock, so an "
+                "admission that committed in between cannot be missed — but an "
+                "active row is not proof the process is alive."
+            )
+        }
+    },
+)
 def create_run(
     version_id: UUID,
     request: Request,
@@ -37,6 +54,26 @@ def create_run(
     current_user: User = Depends(require_entitlement(quota_type="research_run")),
     _scope_check=Depends(check_api_key_scope("write")),
 ):
+    """Run one backtest of a stored version, billed as one research run.
+
+    Answered with 201 and the completed run, 409 while this version still has
+    an active run, or 429 when the allowance is spent. The attempt — run row,
+    quota reservation and its linkage, ``research_run_started`` — is committed
+    before the engine starts, so it is visible to other sessions while it
+    computes and survives the death of this process. The outcome, its
+    settlement and its audit event are committed together afterwards.
+
+    Three repeat shapes, which this endpoint answers differently:
+
+    1. the same version while its run is still active → 409, nothing written;
+    2. a finished run, then a deliberate re-run → a new run and a new unit;
+    3. **the same request repeated because the response was lost → also a new
+       run and a new unit.** Persistent request de-duplication (an
+       ``Idempotency-Key`` stored beside the attempt) is NOT IMPLEMENTED: this
+       slice stores no key, so shape 3 is indistinguishable from shape 2 here,
+       and a caller that retries can be billed twice. That gap is stated
+       rather than papered over; closing it is a separate bounded item.
+    """
     version = db.query(ExperimentVersion).filter(
         ExperimentVersion.id == version_id
     ).first()
@@ -50,6 +87,12 @@ def create_run(
     if not experiment:
         raise HTTPException(status_code=403, detail="Not authorized")
 
+    # Admission is decided inside the service, under the version row lock, and
+    # it re-reads the active run there rather than trusting anything queried
+    # above: a check like this one, done without the lock, can only ever see a
+    # committed row and can be answered by an admission that commits in between.
+    # The ownership check above still runs first, so another account cannot use
+    # a 409 to read this user's run ids.
     return execute_backtest_run(
         db,
         user=current_user,
