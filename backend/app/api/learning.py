@@ -141,18 +141,42 @@ def trigger_learning_job(
 ) -> dict:
     """Manually trigger a research + analysis cycle.
 
-    Creates a LearningJob record and dispatches the work to the scheduler
-    worker. If the scheduler is not running, the job stays in ``pending``
-    until the next scheduler tick or a manual run.
+    Creates a ``pending`` LearningJob record and, when the scheduler is running,
+    dispatches the work immediately. The dispatch creates its own ``running`` job
+    row for the batch: this row is the request record, not the run record, and no
+    scheduler tick claims it.
     """
+    from app.workers.learning_scheduler import (
+        SCHEDULED_INSTRUMENTS,
+        SCHEDULED_INTERVALS,
+    )
+
+    # `None` means "not specified" and takes the scheduled default grid. `[]`
+    # means the caller asked for no instruments (or no grains), which used to be
+    # silently rewritten into the full 3 x 4 workload — a bigger run than the
+    # request, charged to the owner's compute.
+    if payload.instruments is not None and not payload.instruments:
+        raise HTTPException(
+            status_code=400,
+            detail="instruments must not be empty; omit the field to use the scheduled default set",
+        )
+    if payload.intervals is not None and not payload.intervals:
+        raise HTTPException(
+            status_code=400,
+            detail="intervals must not be empty; omit the field to use the scheduled default set",
+        )
     config = {
         "job_type": payload.job_type,
-        "instruments": payload.instruments or [
-            "CRYPTO:KRAKEN:BTC-USD",
-            "CRYPTO:KRAKEN:ETH-USD",
-            "CRYPTO:KRAKEN:SOL-USD",
-        ],
-        "intervals": payload.intervals or [1440, 240, 60, 15],
+        "instruments": (
+            list(SCHEDULED_INSTRUMENTS)
+            if payload.instruments is None
+            else list(payload.instruments)
+        ),
+        "intervals": (
+            list(SCHEDULED_INTERVALS)
+            if payload.intervals is None
+            else list(payload.intervals)
+        ),
     }
 
     job = LearningJob(
@@ -186,7 +210,11 @@ def trigger_learning_job(
             if payload.job_type == "scheduled_study":
                 thread = threading.Thread(
                     target=run_scheduled_research,
-                    kwargs={"scope": "manual"},
+                    kwargs={
+                        "scope": "manual",
+                        "instruments": config["instruments"],
+                        "intervals": config["intervals"],
+                    },
                     daemon=True,
                 )
                 thread.start()

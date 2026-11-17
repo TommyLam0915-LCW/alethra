@@ -2012,15 +2012,27 @@ def _select_combo(
             )
     if not candidates:
         return None
-    candidates.sort(
-        key=lambda row: (
-            row["train_expectancy"],
-            Decimal(row["train_profit_factor"]) if row["train_profit_factor"] else Decimal(0),
-            row["train_trades"],
-        ),
-        reverse=True,
-    )
+    candidates.sort(key=_train_selection_rank, reverse=True)
     return candidates[0]
+
+
+def _train_selection_rank(row: dict) -> tuple:
+    """Ordering key for train-window candidates; undefined is not zero.
+
+    ``summarize`` reports ``profit_factor`` as None when the train window
+    recorded no losing trade, because gross-profit-over-gross-loss has no
+    denominator. Coercing that to Decimal(0) made an all-win config tie-break
+    *below* a config that measurably lost more than it won. A measured profit
+    factor wins the tie-break; an undefined one is neither rewarded nor
+    penalised beyond the ordering itself.
+    """
+    profit_factor = row["train_profit_factor"]
+    return (
+        row["train_expectancy"],
+        1 if profit_factor is not None else 0,
+        Decimal(profit_factor) if profit_factor is not None else Decimal(0),
+        row["train_trades"],
+    )
 
 
 def _selection_payload(selected: dict) -> dict:

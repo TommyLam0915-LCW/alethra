@@ -16,6 +16,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import SessionLocal
+from app.lib.measurement import measured, percent_ratio, summed
 from app.services.paper_trading_exceptions import (
     AuthorizationError,
     ResourceNotFoundError,
@@ -23,6 +24,25 @@ from app.services.paper_trading_exceptions import (
 )
 
 logger = logging.getLogger(__name__)
+
+LONG_ONLY_SIDES = ("long", "buy")
+
+
+def _require_long_only_side(direction, source_trade_id) -> str:
+    """Fail closed on the long-only guard: a blank side is not a long side.
+
+    The replay used to coalesce an unrecorded side onto the literal default
+    ``long`` before the guard could reject it, which turned the safety check
+    into a no-op for exactly the rows that needed it. The column is NOT NULL,
+    so the value that reaches this point blank is a study row whose side was
+    never decided — refusing it is the only honest option.
+    """
+    if not direction or direction.lower() not in LONG_ONLY_SIDES:
+        raise ValueError(
+            f"Long-only mode: cannot replay short trade {source_trade_id} "
+            f"with direction={direction!r}. Paper trading currently supports long positions only."
+        )
+    return direction.lower()
 
 
 class PaperTradingEngine:
@@ -280,12 +300,7 @@ class PaperTradingEngine:
 
             # Long-only enforcement: reject any short positions
             for trade in trades:
-                direction = trade.direction or "long"
-                if direction.lower() not in ["long", "buy"]:
-                    raise ValueError(
-                        f"Long-only mode: cannot replay short trade {trade.source_trade_id} "
-                        f"with direction={direction!r}. Paper trading currently supports long positions only."
-                    )
+                _require_long_only_side(trade.direction, trade.source_trade_id)
 
             # Atomic conditional UPDATE: only acquire execution rights if status allows
             # AND cancel has not been requested. PostgreSQL re-checks WHERE condition on
@@ -661,7 +676,10 @@ class PaperTradingEngine:
                     entry_position_value = proposed_position_value
                     entry_price_dec = Decimal(str(entry_price))
                     trade_quantity = entry_position_value / entry_price_dec
-                    is_long = (direction or "long").lower() in ["long", "buy"]
+                    is_long = (
+                        _require_long_only_side(direction, source_trade_id)
+                        in LONG_ONLY_SIDES
+                    )
                     side = "BUY" if is_long else "SELL"
 
                     # Apply entry commission and slippage (non-zero costs)
@@ -906,8 +924,11 @@ class PaperTradingEngine:
             cumulative_pnl = 0
             for trade_date, metrics in sorted(daily_pnl.items()):
                 cumulative_pnl += metrics["pnl"]
-                win_rate = (metrics["wins"] / metrics["trades"] * 100) if metrics["trades"] > 0 else 0
-
+                # drawdown_pct is written NULL, not 0: nothing in this loop
+                # computes a drawdown, and a stored 0.00% reads back as "this
+                # day never went into drawdown" — a flattering measurement that
+                # was never made. The daily report reads run.max_drawdown_pct,
+                # so no consumer sees a difference today.
                 db.execute(
                     text("""
                     INSERT INTO paper_trading_daily_metrics (
@@ -916,7 +937,7 @@ class PaperTradingEngine:
                     )
                     VALUES (
                         :metric_id, :run_id, :date, :trades, :wins, :losses,
-                        :daily_pnl, :cum_pnl, 0
+                        :daily_pnl, :cum_pnl, NULL
                     )
                     ON CONFLICT (run_id, date) DO UPDATE SET
                         trades_count = EXCLUDED.trades_count,
@@ -940,10 +961,10 @@ class PaperTradingEngine:
             # Update run with final results
             total_trades = len(executed_trades)
             total_pnl = total_equity - Decimal(str(initial_capital))
-            win_rate = (
-                sum(1 for t in executed_trades if t["net_pnl"] > 0) / total_trades * 100
-                if total_trades > 0
-                else 0
+            # A replay that selected no entries has no win rate, not a win rate of
+            # zero: storing 0 here would read back as "every trade lost" forever.
+            win_rate = percent_ratio(
+                sum(1 for t in executed_trades if t["net_pnl"] > 0), total_trades
             )
 
             # Final completion: only set status='completed' if cancel was NOT requested.
@@ -1513,18 +1534,20 @@ class PaperTradingEngine:
                 "portfolio": {
                     "starting_capital": float(run.initial_capital),
                     "current_value": float(portfolio.current_virtual_cash) if portfolio else 0,
-                    "daily_pnl": float(metrics.daily_pnl) if metrics else 0,
-                    "total_pnl": float(run.total_pnl) if run.total_pnl else 0,
+                    "daily_pnl": summed(metrics.daily_pnl) if metrics else 0.0,
+                    "total_pnl": measured(run.total_pnl),
                 },
                 "trades": {
                     "count": metrics.trades_count if metrics else 0,
                     "wins": metrics.wins if metrics else 0,
                     "losses": metrics.losses if metrics else 0,
-                    "win_rate": (metrics.wins / metrics.trades_count * 100) if metrics and metrics.trades_count > 0 else 0,
+                    "win_rate": (
+                        percent_ratio(metrics.wins, metrics.trades_count) if metrics else None
+                    ),
                 },
                 "risk": {
-                    "max_drawdown_pct": float(run.max_drawdown_pct) if run.max_drawdown_pct else 0,
-                    "sharpe_7d": float(metrics.sharpe_7d) if metrics and metrics.sharpe_7d else 0,
+                    "max_drawdown_pct": measured(run.max_drawdown_pct),
+                    "sharpe_7d": measured(metrics.sharpe_7d) if metrics else None,
                 },
             }
 
@@ -1557,9 +1580,9 @@ class PaperTradingEngine:
                 "instrument_id": run.instrument_id,
                 "initial_capital": float(run.initial_capital),
                 "current_capital": float(portfolio.current_virtual_cash) if portfolio else 0,
-                "total_pnl": float(run.total_pnl) if run.total_pnl else 0,
+                "total_pnl": measured(run.total_pnl),
                 "total_trades": run.total_trades,
-                "win_rate": float(run.win_rate) if run.win_rate else 0,
+                "win_rate": measured(run.win_rate),
                 "start_date": run.start_date.isoformat() if run.start_date else None,
                 "end_date": run.end_date.isoformat() if run.end_date else None,
             }

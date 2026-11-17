@@ -975,7 +975,15 @@ def _intraday_book(
             "shares": shares,
             "entry_price": entry_price,
             "entry_date": entry_ts.date().isoformat() if entry_ts else target_date,
-            "unrealized_pnl": round((close - float(entry_price)) * shares, 4) if entry_price else 0.0,
+            # A holding can exist with no recorded entry price (an adopted fill
+            # has no cost basis yet). `if entry_price` reported that as a
+            # measured $0.00 flat, which is the flattering reading; there is no
+            # basis to mark against, so the figure is undefined.
+            "unrealized_pnl": (
+                round((close - float(entry_price)) * shares, 4)
+                if entry_price is not None
+                else None
+            ),
         }
     return cash, shares, position
 

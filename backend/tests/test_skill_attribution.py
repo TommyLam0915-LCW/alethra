@@ -289,8 +289,15 @@ class TestComputeGroupMetrics:
     def test_empty_group(self):
         result = _compute_group_metrics([])
         assert result["trade_count"] == 0
+        # Additive / flat-over-nothing measures are genuinely 0 for an empty set.
         assert result["total_pnl"] == "0"
-        assert result["win_rate"] == "0"
+        assert result["max_drawdown_pct"] == "0"
+        # Ratios over the trade count have no denominator, so 0 would be a
+        # measurement ("this skill wins 0% of its trades") rather than an
+        # absence. They must stay None.
+        assert result["win_rate"] is None
+        assert result["avg_trade_pnl"] is None
+        assert result["expectancy"] is None
         assert result["sharpe_ratio"] is None
         assert result["profit_factor"] is None
 
@@ -439,6 +446,13 @@ class TestSkillAttributionService:
                 assert "total_pnl" in entry
                 assert "trade_count" in entry
                 assert "win_rate" in entry
+                # A cross-tab group exists only because a trade was appended to
+                # it, so its denominator exists and win_rate is a measured
+                # number. This is the invariant that lets the `else Decimal("0")`
+                # arm go: a "0.00" below means "none of these trades won".
+                assert entry["trade_count"] >= 1
+                assert entry["win_rate"] is not None
+                Decimal(entry["win_rate"])
 
             # breakout_trend on BTC: 4 trades (150, -80, 100, -40)
             bt_btc = next(
@@ -449,6 +463,19 @@ class TestSkillAttributionService:
             assert bt_btc is not None
             assert bt_btc["trade_count"] == 4
             assert Decimal(bt_btc["total_pnl"]) == Decimal("130")
+            assert Decimal(bt_btc["win_rate"]) == Decimal("50.00")
+
+            # bollinger_mean_reversion on ETH: its single trade lost, which is
+            # an answer, not an absence of one.
+            boll = next(
+                (c for c in cross
+                 if c["rule_id"] == "bollinger_mean_reversion"
+                 and c["instrument_id"] == INSTRUMENT_ETH),
+                None,
+            )
+            assert boll is not None
+            assert boll["trade_count"] == 1
+            assert Decimal(boll["win_rate"]) == Decimal("0.00")
         finally:
             db.close()
 
@@ -464,6 +491,9 @@ class TestSkillAttributionService:
                 assert "total_pnl" in entry
                 assert "trade_count" in entry
                 assert "win_rate" in entry
+                assert entry["trade_count"] >= 1
+                assert entry["win_rate"] is not None
+                Decimal(entry["win_rate"])
 
             # breakout_trend on daily (1440): 2 trades (150, -80)
             bt_daily = next(
@@ -473,6 +503,7 @@ class TestSkillAttributionService:
             )
             assert bt_daily is not None
             assert bt_daily["trade_count"] == 2
+            assert Decimal(bt_daily["win_rate"]) == Decimal("50.00")
 
             # breakout_trend on 4h (240): 2 trades (100, -40)
             bt_4h = next(

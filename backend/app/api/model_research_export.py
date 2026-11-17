@@ -458,7 +458,10 @@ def _build_research_summary_md(
 
     lines.extend(["", "## Evaluations", f"Total: {len(evaluations)}"])
     for e in evaluations:
-        lines.append(f"- [{e.evaluation_type.value}] {e.result_summary or 'No summary'} ({e.data_cutoff_at})")
+        lines.append(
+            f"- [{e.evaluation_type.value}] {e.result_summary or 'No summary'} "
+            f"({e.data_cutoff_at or 'unknown'})"
+        )
 
     if card:
         lines.extend(["", "## Model Card", f"Card exists: {card.data_cutoff}"])
@@ -495,7 +498,7 @@ def _build_methodology_md(
             f"### {e.evaluation_type.value}",
             f"- Engine: {e.engine_version}",
             f"- Evaluator: {e.evaluator.value if e.evaluator else 'unknown'}",
-            f"- Data Cutoff: {e.data_cutoff_at}",
+            f"- Data Cutoff: {e.data_cutoff_at or 'unknown'}",
         ])
         if e.methodology_version:
             lines.append(f"- Methodology Version: {e.methodology_version}")

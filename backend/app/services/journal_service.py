@@ -194,8 +194,10 @@ def _row_to_dict(trade: StrategyStudyTrade, run_instrument_id: str,
         "instrument_id": run_instrument_id,
         "interval_minutes": run_interval_minutes,
         "starting_cash": _money(
-            _decimal(run_settings_json.get("starting_cash", "0"))
-            if run_settings_json else Decimal("0")
+            _decimal(run_settings_json["starting_cash"])
+            if run_settings_json
+            and run_settings_json.get("starting_cash") is not None
+            else None
         ),
         "trade_index": trade.trade_index,
         "fold": trade.fold,
@@ -416,11 +418,16 @@ def journal_summary(
 
     total_trades = len(trades)
     if total_trades == 0:
+        # This is the reachable "no trades match your filter" case. The additive
+        # total and the flat equity curve really are 0, but the win rate and the
+        # average trade are ratios over a denominator that has no observations:
+        # reporting "0.0%" and "0.00" there claims every trade lost. profit_factor
+        # below already returns None for its undefined case; these follow it.
         return {
             "total_trades": 0,
             "total_pnl": "0",
-            "win_rate": "0",
-            "avg_trade_pnl": "0",
+            "win_rate": None,
+            "avg_trade_pnl": None,
             "profit_factor": None,
             "max_drawdown_pct": "0",
             "best_trade": None,
@@ -551,8 +558,10 @@ def equity_curve_series(
 ) -> List[dict]:
     """Returns [{ date, equity, drawdown_pct }, ...].
 
-    Starting cash from first run's settings_json.starting_cash.
-    Tracks peak equity for drawdown calculation.
+    Starting cash comes from the first run's settings_json.starting_cash; when
+    that run records none the curve is cumulative net P&L from zero.
+    drawdown_pct is None while the running peak is not positive, because a
+    percentage of a zero-or-negative peak has no answer.
     """
     trades = _fetch_rows(
         db,
@@ -575,10 +584,10 @@ def equity_curve_series(
     if not trades:
         return []
 
-    # Starting cash from the first run encountered
-    starting_cash = _decimal(trades[0].get("starting_cash", "10000"))
-    equity = starting_cash
-    peak = starting_cash
+    # Starting cash from the first run encountered; absent means no baseline.
+    recorded_cash = trades[0].get("starting_cash")
+    equity = _decimal(recorded_cash) if recorded_cash is not None else Decimal("0")
+    peak = equity
     result = []
 
     for t in trades:
@@ -586,14 +595,13 @@ def equity_curve_series(
         equity += net
         if equity > peak:
             peak = equity
-        if peak > 0:
-            dd_pct = (peak - equity) / peak * Decimal("100")
-        else:
-            dd_pct = Decimal("0")
+        dd_pct = (peak - equity) / peak * Decimal("100") if peak > 0 else None
         result.append({
             "date": t["entry_time"],
             "equity": _money(equity),
-            "drawdown_pct": _money(dd_pct.quantize(Decimal("0.01"))),
+            "drawdown_pct": (
+                _money(dd_pct.quantize(Decimal("0.01"))) if dd_pct is not None else None
+            ),
         })
 
     return result

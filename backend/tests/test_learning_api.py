@@ -44,11 +44,22 @@ def _make_user_and_get_headers(client, email: str = "learning-api@alethra.io"):
 
 
 def _get_user_id(headers: dict) -> uuid.UUID:
-    """Extract user_id from auth headers by decoding the JWT."""
-    import jwt
+    """Extract user_id from auth headers by decoding the JWT.
 
+    Decoded with the same library and secret the auth dependency uses
+    (`jose`, `app/config.py:37-38`), so the signature is verified rather than
+    skipped — this helper previously imported `jwt` (PyJWT), which is not a
+    declared dependency and could never resolve.
+    """
+    from jose import jwt
+
+    from app.config import get_settings
+
+    settings = get_settings()
     token = headers["Authorization"].split(" ")[1]
-    payload = jwt.decode(token, options={"verify_signature": False})
+    payload = jwt.decode(
+        token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm]
+    )
     return uuid.UUID(payload["sub"])
 
 

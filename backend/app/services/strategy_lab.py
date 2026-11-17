@@ -399,7 +399,10 @@ STRATEGY_BY_ID: Dict[str, StrategySpec] = {spec.strategy_id: spec for spec in ST
 
 
 def select_strategies(strategy_ids: Optional[Sequence[str]]) -> Tuple[StrategySpec, ...]:
-    if not strategy_ids:
+    # Only `None` means "the whole catalog". Treating a falsy test that way made an
+    # explicit empty selection indistinguishable from an omitted one and expanded
+    # it into the largest run available; `run_lab` refuses the empty selection.
+    if strategy_ids is None:
         return STRATEGIES
     unknown = [sid for sid in strategy_ids if sid not in STRATEGY_BY_ID]
     if unknown:
@@ -837,7 +840,11 @@ def run_lab(
     strategies: Optional[Sequence[StrategySpec]] = None,
     include_trades: bool = False,
 ) -> dict:
-    selected = tuple(strategies or STRATEGIES)
+    # `None` is the documented "run the catalog" default. An empty selection is a
+    # different request, and `tuple([] or STRATEGIES)` used to expand it into the
+    # whole catalog, which made the refusal below unreachable — it can only fire on
+    # an empty `STRATEGIES`, which is a constant.
+    selected = STRATEGIES if strategies is None else tuple(strategies)
     if not selected:
         raise StrategyLabError("no_strategies", "At least one strategy must be selected.")
 

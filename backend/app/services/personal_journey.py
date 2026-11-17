@@ -313,8 +313,12 @@ def _worker_status(pending_jobs: List[TrainingJob], running_jobs: List[TrainingJ
                         "state": "idle",
                         "label_zh": "背景 worker 閒置待命",
                         "detail_zh": (
-                            f"心跳在 {int(age) if age is not None else 0} 秒前；"
-                            f"每 {interval:g} 秒檢查一次排隊工作。"
+                            (
+                                f"心跳在 {int(age)} 秒前；"
+                                if age is not None
+                                else "心跳檔沒有可解讀的時間戳；"
+                            )
+                            + f"每 {interval:g} 秒檢查一次排隊工作。"
                         ),
                     }
                 )

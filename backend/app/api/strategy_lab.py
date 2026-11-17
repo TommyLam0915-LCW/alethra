@@ -25,6 +25,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.api.crypto_failures import crypto_failure
+from app.lib.error_safety import safe_error_message
 from app.auth.jwt import get_current_user
 from app.auth.safety import rate_limit
 from app.data.crypto_instruments import CRYPTO_INSTRUMENTS, get_crypto_instrument
@@ -110,13 +111,20 @@ class StrategyLabRunRequest(BaseModel):
     include_trades: bool = False
 
     @model_validator(mode="after")
-    def _validate_balances_and_intervals(self) -> "StrategyLabRunRequest":
+    def _validate_selection_and_balances(self) -> "StrategyLabRunRequest":
         if self.starting_cash < self.notional_per_trade:
             raise ValueError("starting_cash must be greater than or equal to notional_per_trade")
         if not self.intervals:
             raise ValueError("at least one interval is required")
         if len(set(self.intervals)) != len(self.intervals):
             raise ValueError("intervals must not repeat")
+        # Omitting the field means "the whole catalog"; an explicit empty list
+        # means "none of them", and the selector's falsy branch used to rewrite
+        # that into the largest run available. Refuse instead of widening.
+        if self.strategy_ids is not None and not self.strategy_ids:
+            raise ValueError(
+                "strategy_ids must not be empty; omit the field to run the whole catalog"
+            )
         return self
 
 
@@ -313,7 +321,7 @@ def _research_study(
                 detail={
                     "reason": "provider_error",
                     "provider": provider.provider_id,
-                    "message": str(exc),
+                    "message": safe_error_message(exc),
                 },
             )
         raise
@@ -569,7 +577,7 @@ def arbitrage_backtest(
             status_code=status.HTTP_409_CONFLICT,
             detail={
                 "reason": "arbitrage_error",
-                "message": str(exc),
+                "message": safe_error_message(exc),
             },
         )
 
@@ -659,7 +667,7 @@ def market_making_backtest(
             status_code=status.HTTP_409_CONFLICT,
             detail={
                 "reason": "market_making_error",
-                "message": str(exc),
+                "message": safe_error_message(exc),
             },
         )
 
@@ -740,7 +748,7 @@ def pairs_trading_backtest(
             status_code=status.HTTP_409_CONFLICT,
             detail={
                 "reason": "pairs_trading_error",
-                "message": str(exc),
+                "message": safe_error_message(exc),
             },
         )
 
@@ -808,7 +816,7 @@ def seasonality_analyze(
             status_code=status.HTTP_409_CONFLICT,
             detail={
                 "reason": "seasonality_error",
-                "message": str(exc),
+                "message": safe_error_message(exc),
             },
         )
 

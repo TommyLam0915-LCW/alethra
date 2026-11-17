@@ -53,7 +53,7 @@ class PaperTradingDailyMetric(Base):
     losses = Column(Integer, default=0)
     daily_pnl = Column(Numeric(15, 2), default=0)
     cumulative_pnl = Column(Numeric(15, 2), default=0)
-    drawdown_pct = Column(Numeric(8, 4), default=0)
+    drawdown_pct = Column(Numeric(8, 4), nullable=True)
     sharpe_7d = Column(Numeric(8, 4), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 

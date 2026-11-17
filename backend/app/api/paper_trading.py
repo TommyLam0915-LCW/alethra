@@ -16,6 +16,8 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.auth.jwt import get_current_user, require_admin
+from app.lib.error_safety import safe_error_message
+from app.lib.measurement import measured
 from app.config import get_settings
 from app.database import get_db
 from app.models.user import User
@@ -71,18 +73,43 @@ class PortfolioResponse(BaseModel):
 
 
 class StatusResponse(BaseModel):
-    """Current status of a paper trading run."""
+    """Current status of a paper trading run.
+
+    ``total_pnl`` and ``win_rate`` are Optional because the columns are nullable
+    until the replay completes: ``app/models/paper_trading_run.py:29`` and ``:31``.
+    A null here means the run never measured it, which is not the same claim as the
+    number zero -- ``win_rate: 0`` reads as "every trade lost".
+    """
     run_id: str
     status: str
     skill: str
     instrument_id: str
     initial_capital: float
     current_capital: float
-    total_pnl: float
+    total_pnl: Optional[float]
     total_trades: int
-    win_rate: float
+    win_rate: Optional[float]
     start_date: Optional[str]
     end_date: Optional[str]
+
+
+class DailyPortfolioBlock(BaseModel):
+    starting_capital: float
+    current_value: float
+    daily_pnl: float
+    total_pnl: Optional[float]
+
+
+class DailyTradesBlock(BaseModel):
+    count: int
+    wins: int
+    losses: int
+    win_rate: Optional[float]
+
+
+class DailyRiskBlock(BaseModel):
+    max_drawdown_pct: Optional[float]
+    sharpe_7d: Optional[float]
 
 
 class DailyReportResponse(BaseModel):
@@ -91,9 +118,9 @@ class DailyReportResponse(BaseModel):
     run_id: str
     skill: str
     instrument_id: str
-    portfolio: dict
-    trades: dict
-    risk: dict
+    portfolio: DailyPortfolioBlock
+    trades: DailyTradesBlock
+    risk: DailyRiskBlock
 
 
 class ReplayRequest(BaseModel):
@@ -104,12 +131,16 @@ class ReplayRequest(BaseModel):
 
 
 class ReplayResponse(BaseModel):
-    """Response from historical replay."""
+    """Response from historical replay.
+
+    ``win_rate`` is Optional: a replay that selected no entries completes with zero
+    trades, and a zero-trade run has no win rate rather than a win rate of 0.
+    """
     run_id: str
     status: str
     total_trades: int
     total_pnl: float
-    win_rate: float
+    win_rate: Optional[float]
     final_capital: float
 
 
@@ -136,7 +167,7 @@ def create_portfolio(
         logger.exception("Failed to create portfolio")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={"reason": "creation_failed", "message": str(exc)},
+            detail={"reason": "creation_failed", "message": safe_error_message(exc)},
         )
 
 
@@ -178,7 +209,7 @@ def get_status(
         logger.exception("Failed to get status")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={"reason": "status_failed", "message": str(exc)},
+            detail={"reason": "status_failed", "message": safe_error_message(exc)},
         )
 
 
@@ -225,7 +256,7 @@ def get_daily_report(
         logger.exception("Failed to generate report")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={"reason": "report_failed", "message": str(exc)},
+            detail={"reason": "report_failed", "message": safe_error_message(exc)},
         )
 
 
@@ -275,7 +306,7 @@ def execute_replay(
         logger.exception("Replay failed")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={"reason": "replay_failed", "message": str(exc)},
+            detail={"reason": "replay_failed", "message": safe_error_message(exc)},
         )
 
 
@@ -318,7 +349,7 @@ def stop_run(
         logger.exception("Failed to stop run")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={"reason": "stop_failed", "message": str(exc)},
+            detail={"reason": "stop_failed", "message": safe_error_message(exc)},
         )
 
 
@@ -365,10 +396,10 @@ def get_history(
                 "interval_minutes": r.interval_minutes,
                 "status": r.status,
                 "initial_capital": float(r.initial_capital),
-                "final_capital": float(r.final_capital) if r.final_capital else None,
-                "total_pnl": float(r.total_pnl) if r.total_pnl else 0,
+                "final_capital": measured(r.final_capital),
+                "total_pnl": measured(r.total_pnl),
                 "total_trades": r.total_trades,
-                "win_rate": float(r.win_rate) if r.win_rate else 0,
+                "win_rate": measured(r.win_rate),
                 "start_date": r.start_date.isoformat() if r.start_date else None,
                 "end_date": r.end_date.isoformat() if r.end_date else None,
                 "run_type": r.run_type,
@@ -379,7 +410,7 @@ def get_history(
         logger.exception("Failed to get history")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={"reason": "history_failed", "message": str(exc)},
+            detail={"reason": "history_failed", "message": safe_error_message(exc)},
         )
 
 

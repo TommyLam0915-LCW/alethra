@@ -586,12 +586,22 @@ class TestAdminDashboard:
         assert data["funnel"]["first_experiment_created"] >= 1
         assert data["funnel"]["first_run_completed"] >= 1
         assert data["activation"]["activated_at_least_one_experiment"] >= 1
+        # The paired case: with an activation the ratio is defined, so the None
+        # above comes from the empty denominator and not from a blanket null.
+        assert isinstance(data["cost_summary"]["cost_per_active_user"], float)
 
-    def test_dashboard_cost_per_user_no_divide_by_zero(self, client, admin_headers):
+    def test_dashboard_cost_per_active_user_undefined_without_activation(
+        self, client, admin_headers
+    ):
+        # No activated user means the denominator does not exist; max(n, 1) used
+        # to invent one and reported the whole recorded spend as a single user's
+        # cost. cost_per_user keeps its value because the admin is a user.
         resp = client.get("/api/v1/pilot/admin/dashboard", headers=admin_headers)
         data = resp.json()
+        assert data["funnel"]["total_users"] >= 1
+        assert data["activation"]["activated_at_least_one_experiment"] == 0
         assert isinstance(data["cost_summary"]["cost_per_user"], float)
-        assert isinstance(data["cost_summary"]["cost_per_active_user"], float)
+        assert data["cost_summary"]["cost_per_active_user"] is None
 
 
 class TestHypothesesDashboard:

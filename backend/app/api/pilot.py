@@ -21,6 +21,7 @@ from app.models.pilot import (
     HypothesisStatus,
 )
 from app.auth.jwt import get_current_user, require_admin
+from app.lib.measurement import ratio
 from app.api.schemas import (
     PilotApplicationCreate,
     PilotApplicationResponse,
@@ -502,13 +503,19 @@ def admin_dashboard(
     )
     breakdown_by_type = {str(ct.value): float(amt) for ct, amt in type_breakdown_rows}
 
-    active_user_count = max(activated_users, 1)
+    # cost_per_active_user divides by an activation count that is legitimately
+    # zero on an early deployment. The previous max(activated_users, 1) invented
+    # a denominator of one, so the entire recorded spend was reported as the cost
+    # of a single active user. With no activated users the figure is undefined.
+    per_active_user = ratio(total_cost, activated_users)
     cost_summary = CostSummary(
         total_cost=float(total_cost),
         total_actual=float(total_actual),
         total_estimate=float(total_estimate),
         cost_per_user=round(float(total_cost) / total_users, 4) if total_users > 0 else 0.0,
-        cost_per_active_user=round(float(total_cost) / active_user_count, 4),
+        cost_per_active_user=(
+            round(per_active_user, 4) if per_active_user is not None else None
+        ),
         breakdown_by_type=breakdown_by_type,
     )
 

@@ -92,13 +92,18 @@ def _compute_group_metrics(trades: List[dict], interval_minutes: Optional[int] =
     """Compute all metrics for a group of trade dicts."""
     total = len(trades)
     if total == 0:
+        # An empty group has no win rate, no average and no expectancy: those are
+        # ratios over the trade count, and dividing by nothing has no answer. The
+        # additive total_pnl and the flat-curve max_drawdown_pct stay "0" because
+        # both are genuinely 0 for no trades -- the same distinction profit_factor
+        # and sharpe_ratio below already draw with None.
         return {
             "total_pnl": "0",
             "trade_count": 0,
             "win_count": 0,
-            "win_rate": "0",
-            "avg_trade_pnl": "0",
-            "expectancy": "0",
+            "win_rate": None,
+            "avg_trade_pnl": None,
+            "expectancy": None,
             "sharpe_ratio": None,
             "max_drawdown_pct": "0",
             "profit_factor": None,
@@ -254,7 +259,7 @@ def skill_attribution(
         total_pnl = sum(pnls, Decimal("0"))
         total_count = len(group)
         win_count = sum(1 for p in pnls if p > 0)
-        win_rate = Decimal(str(win_count)) / Decimal(str(total_count)) * Decimal("100") if total_count > 0 else Decimal("0")
+        win_rate = Decimal(str(win_count)) / Decimal(str(total_count)) * Decimal("100")
         cross_instrument.append({
             "rule_id": rule_id,
             "instrument_id": inst_id,
@@ -274,7 +279,7 @@ def skill_attribution(
         total_pnl = sum(pnls, Decimal("0"))
         total_count = len(group)
         win_count = sum(1 for p in pnls if p > 0)
-        win_rate = Decimal(str(win_count)) / Decimal(str(total_count)) * Decimal("100") if total_count > 0 else Decimal("0")
+        win_rate = Decimal(str(win_count)) / Decimal(str(total_count)) * Decimal("100")
         cross_interval.append({
             "rule_id": rule_id,
             "interval_minutes": intv,

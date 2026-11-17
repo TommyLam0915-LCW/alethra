@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.auth.jwt import get_current_user
 from app.database import get_db
+from app.lib.measurement import measured, ratio, summed
 from app.models.user import User
 from app.services import journal_service as svc
 from app.services import skill_attribution as skill_svc
@@ -211,10 +212,13 @@ def journal_equity_curve(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> dict:
-    """Returns { baseline_cash: str, series: [{ name, points }] }.
+    """Returns { baseline_cash: str | null, series: [{ name, points }] }.
 
     When group_by is set, the equity curve is split into sub-series by the
     given dimension. Otherwise a single series named 'all' is returned.
+    baseline_cash is None when the runs behind the curve record no starting
+    cash (the curve then reads as cumulative net P&L from zero), and each
+    point's drawdown_pct is None while the running peak is not positive.
     """
     fk = _filter_kwargs(
         user_id=current_user.id,
@@ -232,13 +236,13 @@ def journal_equity_curve(
     if group_by is None:
         points = svc.equity_curve_series(db, **fk)
         if not points:
-            return {"baseline_cash": "10000", "series": []}
-        # baseline_cash is the starting cash before any trades; fetch it from
-        # the first trade's run settings, or default to 10000.
+            return {"baseline_cash": None, "series": []}
+        # baseline_cash is the starting cash before any trades, taken from the
+        # first trade's run settings; a run that records none leaves it None.
         all_trades = svc._fetch_rows(
             db, **fk, sort_by="entry_time", sort_dir="asc", limit=1, offset=0,
         )
-        baseline = all_trades[0]["starting_cash"] if all_trades else "10000"
+        baseline = all_trades[0]["starting_cash"] if all_trades else None
         return {"baseline_cash": baseline, "series": [{"name": "all", "points": points}]}
 
     # Grouped: fetch all trades unsorted, split by group key, compute per-group
@@ -246,9 +250,9 @@ def journal_equity_curve(
         db, **fk, sort_by="entry_time", sort_dir="asc", limit=100_000, offset=0,
     )
     if not trades:
-        return {"baseline_cash": "10000", "series": []}
+        return {"baseline_cash": None, "series": []}
 
-    baseline_cash = trades[0].get("starting_cash", "10000")
+    baseline_cash = trades[0].get("starting_cash")
     groups: dict = {}
     for t in trades:
         key = t.get(group_by) or t.get("instrument_id", "unknown")
@@ -256,7 +260,10 @@ def journal_equity_curve(
 
     series_list = []
     for name, group_trades in sorted(groups.items()):
-        equity = Decimal(str(baseline_cash))
+        equity = (
+            Decimal(str(baseline_cash)) if baseline_cash is not None
+            else Decimal("0")
+        )
         peak = equity
         pts = []
         for t in group_trades:
@@ -264,15 +271,17 @@ def journal_equity_curve(
             equity += net
             if equity > peak:
                 peak = equity
-            dd = (peak - equity) / peak * Decimal("100") if peak > 0 else Decimal("0")
+            dd = (peak - equity) / peak * Decimal("100") if peak > 0 else None
             pts.append({
                 "date": t["entry_time"],
                 "equity": svc._money(equity),
-                "drawdown_pct": svc._money(dd.quantize(Decimal("0.01"))),
+                "drawdown_pct": (
+                    svc._money(dd.quantize(Decimal("0.01"))) if dd is not None else None
+                ),
             })
         series_list.append({"name": str(name), "points": pts})
 
-    return {"baseline_cash": svc._money(Decimal(str(baseline_cash))), "series": series_list}
+    return {"baseline_cash": baseline_cash, "series": series_list}
 
 
 # ---------------------------------------------------------------------------
@@ -387,17 +396,25 @@ def journal_compare(
             WHERE run_id = :run_id
         '''), {'run_id': run_id}).fetchone()
         
-        if not trades_result or trades_result[0] == 0:
+        if not trades_result:
+            # COUNT(*) always returns one row, so a missing row means the query
+            # itself did not run. A run with zero trades is real data and must
+            # stay in the comparison: dropping it would silently shrink the set
+            # the user asked to compare and move the best/worst highlights.
             continue
         
         total_trades = trades_result[0]
         wins = trades_result[1]
         losses = trades_result[2]
-        total_pnl = float(trades_result[3] or 0)
-        avg_pnl = float(trades_result[4] or 0)
-        avg_win = float(trades_result[5] or 0)
-        avg_loss = float(trades_result[6] or 0)
-        win_rate = wins / total_trades if total_trades > 0 else 0
+        # SUM over no trades is the empty sum, so 0 is the honest answer there.
+        # AVG and the win rate have no value at all when the set is empty -- SQL
+        # returns NULL precisely because there is no answer -- so they stay None
+        # instead of being read back as a measured zero.
+        total_pnl = summed(trades_result[3])
+        avg_pnl = measured(trades_result[4])
+        avg_win = measured(trades_result[5])
+        avg_loss = measured(trades_result[6])
+        win_rate = ratio(wins, total_trades)
         
         # Compute Sharpe (simplified)
         pnl_values = db.execute(text('''
@@ -409,9 +426,9 @@ def journal_compare(
             mean = sum(pnls) / len(pnls)
             variance = sum((p - mean) ** 2 for p in pnls) / (len(pnls) - 1)
             stdev = variance ** 0.5 if variance > 0 else 0
-            sharpe = mean / stdev if stdev > 0 else 0
+            sharpe = mean / stdev if stdev > 0 else None
         else:
-            sharpe = 0
+            sharpe = None
         
         # Compute max drawdown
         cash_result = db.execute(text('''
@@ -450,26 +467,29 @@ def journal_compare(
             'max_drawdown_pct': max_dd,
         })
     
-    # Find best/worst per metric
-    if comparisons:
-        best_sharpe = max(comparisons, key=lambda x: x['sharpe'])
-        worst_sharpe = min(comparisons, key=lambda x: x['sharpe'])
-        best_pnl = max(comparisons, key=lambda x: x['total_pnl'])
-        worst_pnl = min(comparisons, key=lambda x: x['total_pnl'])
-        best_win_rate = max(comparisons, key=lambda x: x['win_rate'])
-        worst_win_rate = min(comparisons, key=lambda x: x['win_rate'])
-        
-        highlights = {
-            'best_sharpe': best_sharpe['run_id'],
-            'worst_sharpe': worst_sharpe['run_id'],
-            'best_pnl': best_pnl['run_id'],
-            'worst_pnl': worst_pnl['run_id'],
-            'best_win_rate': best_win_rate['run_id'],
-            'worst_win_rate': worst_win_rate['run_id'],
-        }
-    else:
-        highlights = {}
-    
+    # Find best/worst per metric.
+    #
+    # A highlight is a claim about which run is best, so an unmeasured metric
+    # cannot take part in the ranking: sorting on None either raises or lets
+    # whichever row happens to come first win by default. Each key is emitted
+    # only when at least one compared run actually measured that metric, so the
+    # client renders no highlight rather than a fabricated one. max_drawdown is
+    # highlighted by the *lowest* drawdown, which is the better outcome.
+    highlights = {}
+    for key, field, lower_is_better in (
+        ('sharpe', 'sharpe', False),
+        ('pnl', 'total_pnl', False),
+        ('win_rate', 'win_rate', False),
+        ('max_drawdown', 'max_drawdown_pct', True),
+    ):
+        ranked = [c for c in comparisons if c[field] is not None]
+        if not ranked:
+            continue
+        best_fn = min if lower_is_better else max
+        worst_fn = max if lower_is_better else min
+        highlights[f'best_{key}'] = best_fn(ranked, key=lambda c: c[field])['run_id']
+        highlights[f'worst_{key}'] = worst_fn(ranked, key=lambda c: c[field])['run_id']
+
     return {
         'comparisons': comparisons,
         'highlights': highlights,
@@ -578,13 +598,13 @@ def journal_unified(
                 'exit_id': row[5],
                 'entry_time': row[6].isoformat() if row[6] else None,
                 'exit_time': row[7].isoformat() if row[7] else None,
-                'entry_price': float(row[8]) if row[8] else None,
-                'exit_price': float(row[9]) if row[9] else None,
-                'net_pnl': float(row[10]) if row[10] else None,
+                'entry_price': measured(row[8]),
+                'exit_price': measured(row[9]),
+                'net_pnl': measured(row[10]),
                 'exit_reason': row[11],
                 'bars_held': row[12],
-                'mfe': float(row[13]) if row[13] else None,
-                'mae': float(row[14]) if row[14] else None,
+                'mfe': measured(row[13]),
+                'mae': measured(row[14]),
                 'interval_minutes': row[15],
             })
     
@@ -639,8 +659,8 @@ def journal_unified(
                 'order_id': str(row[2]),
                 'instrument_id': row[3],
                 'entry_time': row[4].isoformat() if row[4] else None,
-                'entry_price': float(row[5]) if row[5] else None,
-                'quantity': float(row[6]) if row[6] else None,
+                'entry_price': measured(row[5]),
+                'quantity': measured(row[6]),
                 'side': row[7],
                 'order_type': row[8],
                 'created_at': row[9].isoformat() if row[9] else None,
@@ -657,9 +677,9 @@ def journal_unified(
     research_trades = [t for t in unified_trades if t['source'] == 'research']
     paper_trades = [t for t in unified_trades if t['source'] == 'paper']
     
-    research_pnl = sum(t['net_pnl'] or 0 for t in research_trades)
-    research_wins = len([t for t in research_trades if (t.get('net_pnl') or 0) > 0])
-    research_win_rate = research_wins / len(research_trades) if research_trades else 0
+    research_pnl = sum(summed(t['net_pnl']) for t in research_trades)
+    research_wins = len([t for t in research_trades if summed(t['net_pnl']) > 0])
+    research_win_rate = ratio(research_wins, len(research_trades))
     
     return {
         'trades': unified_trades,
@@ -676,7 +696,7 @@ def journal_unified(
             'rule_id': rule_id,
             'date_from': date_from.isoformat() if date_from else None,
             'date_to': date_to.isoformat() if date_to else None,
-            'pnl_min': float(pnl_min) if pnl_min else None,
-            'pnl_max': float(pnl_max) if pnl_max else None,
+            'pnl_min': measured(pnl_min),
+            'pnl_max': measured(pnl_max),
         },
     }

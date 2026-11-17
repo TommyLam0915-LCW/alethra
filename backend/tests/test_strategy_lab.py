@@ -20,12 +20,14 @@ from app.providers.kraken_provider import KrakenProvider
 from app.services.strategy_lab import (
     MAX_WARMUP_BARS,
     STRATEGIES,
+    STRATEGY_BY_ID,
     LabSettings,
     StrategyLabError,
     StrategySpec,
     assemble_dataset,
     run_lab,
     run_strategy,
+    select_strategies,
 )
 
 INSTRUMENT = "CRYPTO:KRAKEN:BTC-USD"
@@ -276,6 +278,13 @@ def test_run_lab_completes_1000_trades_per_strategy_in_isolated_wallets():
     assert all(pair["identical_signal_series"] is False for pair in pairs)
 
 
+def test_select_strategies_separates_an_omitted_selection_from_an_empty_one():
+    assert len(select_strategies(None)) == len(STRATEGIES)
+    assert select_strategies(["momentum_roc"]) == (STRATEGY_BY_ID["momentum_roc"],)
+    # The widening this pins: `[]` used to be indistinguishable from `None`.
+    assert select_strategies([]) == ()
+
+
 def test_run_lab_is_deterministic_and_order_independent():
     dataset = _full_dataset()
     settings = LabSettings(
@@ -292,6 +301,25 @@ def test_run_lab_is_deterministic_and_order_independent():
         }
 
     assert fingerprint(first) == fingerprint(second) == fingerprint(reversed_run)
+
+
+def test_run_lab_refuses_an_empty_selection_instead_of_running_the_catalog():
+    dataset = _full_dataset()
+    settings = LabSettings(
+        1, Decimal("10000"), Decimal("1000"), Decimal("0.001"), Decimal("0.001")
+    )
+    with pytest.raises(StrategyLabError) as excinfo:
+        run_lab(dataset, settings=settings, strategies=[])
+    assert excinfo.value.reason == "no_strategies"
+
+
+def test_run_lab_treats_an_omitted_selection_as_the_whole_catalog():
+    dataset = _full_dataset()
+    settings = LabSettings(
+        1, Decimal("10000"), Decimal("1000"), Decimal("0.001"), Decimal("0.001")
+    )
+    omitted = run_lab(dataset, settings=settings, strategies=None)
+    assert len(omitted["strategies"]) == len(STRATEGIES)
 
 
 def test_trade_cap_is_exact():
@@ -462,6 +490,42 @@ def test_run_can_select_one_strategy(client, auth_headers):
     assert len(body["strategies"]) == 1
     assert body["strategies"][0]["strategy_id"] == "momentum_roc"
     assert body["totals"]["trades_requested"] == 5
+
+
+def test_run_refuses_an_empty_strategy_selection_without_widening_it(
+    client, auth_headers
+):
+    # An empty rows map is deliberate: the request must be refused before any
+    # bar is fetched, so a regression here cannot silently widen [] into the
+    # whole catalog and spend a five-strategy run on the venue.
+    _install({})
+    response = client.post(
+        "/api/v1/strategy-lab/run",
+        headers=auth_headers,
+        json={"trades_per_strategy": 5, "strategy_ids": []},
+    )
+    assert response.status_code == 422, response.text
+    assert "strategy_ids" in str(response.json()["detail"])
+
+
+def test_omitting_the_strategy_selection_still_runs_the_declared_catalog(
+    client, auth_headers
+):
+    _install(
+        {
+            240: _ohlc_rows(240, seed=1),
+            60: _ohlc_rows(60, seed=2),
+            5: _ohlc_rows(5, seed=3),
+            1: _ohlc_rows(1, seed=4),
+        }
+    )
+    response = client.post(
+        "/api/v1/strategy-lab/run",
+        headers=auth_headers,
+        json={"trades_per_strategy": 5},
+    )
+    assert response.status_code == 200, response.text
+    assert len(response.json()["strategies"]) == 5
 
 
 def test_run_refuses_venue_outage_without_fallback(client, auth_headers):

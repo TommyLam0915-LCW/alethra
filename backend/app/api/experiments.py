@@ -228,10 +228,12 @@ def update_experiment(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    # Row lock on the parent: version numbers are derived from the versions that
+    # exist, so two concurrent writes must not both compute the same next number.
     experiment = db.query(Experiment).filter(
         Experiment.id == experiment_id,
         Experiment.owner_id == current_user.id
-    ).first()
+    ).with_for_update().first()
     if not experiment:
         raise HTTPException(status_code=404, detail="Experiment not found")
 
@@ -282,16 +284,21 @@ def update_experiment(
                 detail="change_reason is required when modifying strategy parameters"
             )
 
-        max_version = db.query(ExperimentVersion).filter(
-            ExperimentVersion.experiment_id == experiment_id
-        ).count()
+        # The highest existing number, not the row count: a count repeats a
+        # number as soon as any version is missing from the sequence.
+        top_number = (
+            db.query(func.max(ExperimentVersion.version_number))
+            .filter(ExperimentVersion.experiment_id == experiment_id)
+            .scalar()
+            or 0
+        )
 
         spec_dict = experiment_data.strategy_spec.model_dump()
         data_cutoff = spec_dict.get("end_date")
 
         new_version = ExperimentVersion(
             experiment_id=experiment.id,
-            version_number=max_version + 1,
+            version_number=top_number + 1,
             strategy_spec=spec_dict,
             assumptions={},
             change_reason=experiment_data.change_reason,
@@ -357,10 +364,12 @@ def lock_version(
     a parameter change, and so an experiment that is already marked locked but
     whose version never got a lock stamp can be repaired without direct SQL.
     """
+    # Row lock: without it two concurrent lock requests can both read
+    # locked_at IS NULL and freeze the same version twice.
     experiment = db.query(Experiment).filter(
         Experiment.id == experiment_id,
         Experiment.owner_id == current_user.id,
-    ).first()
+    ).with_for_update().first()
     if not experiment:
         raise HTTPException(status_code=404, detail="Experiment not found")
 
@@ -678,7 +687,7 @@ def create_revision(
     experiment = db.query(Experiment).filter(
         Experiment.id == experiment_id,
         Experiment.owner_id == current_user.id,
-    ).first()
+    ).with_for_update().first()
     if not experiment:
         raise HTTPException(status_code=404, detail="Experiment not found")
 

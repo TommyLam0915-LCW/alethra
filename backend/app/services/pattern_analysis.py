@@ -519,15 +519,48 @@ def validate_proposal(
         }
 
     # Reconstruct ResearchSettings from the original run (not default)
-    # This ensures baseline and proposed use same costs, capital, windows
+    # This ensures baseline and proposed use same costs, capital, windows.
+    # The recorded names are the ones strategy_research writes (`*_per_side`);
+    # the bare names are read as a fallback for rows written before that key
+    # existed. A run that records neither cannot be compared: the baseline trades
+    # below were simulated with money this database never wrote down, so the
+    # alternative to refusing is to invent a cost and call the difference a
+    # measured improvement.
     run_settings_dict = run.settings_json or {}
+
+    def _recorded(*names: str) -> Optional[str]:
+        for name in names:
+            value = run_settings_dict.get(name)
+            if value is not None:
+                return value
+        return None
+
+    recorded_values = {
+        "starting_cash": _recorded("starting_cash"),
+        "notional_per_trade": _recorded("notional_per_trade"),
+        "commission_rate": _recorded("commission_rate_per_side", "commission_rate"),
+        "slippage_rate": _recorded("slippage_rate_per_side", "slippage_rate"),
+        "atr_window": _recorded("atr_window"),
+        "cost_multiple": _recorded("cost_multiple"),
+    }
+    unrecorded = [name for name, value in recorded_values.items() if value is None]
+    if unrecorded:
+        return {
+            "passed": False,
+            "error": "unrecorded_run_settings",
+            "message": (
+                f"The stored run records no {'/'.join(unrecorded)}; the proposed exit cannot be "
+                "replayed under the same costs as the baseline, so no comparison is claimed."
+            ),
+        }
+
     settings = ResearchSettings(
-        starting_cash=_decimal(run_settings_dict.get("starting_cash", "10000")),
-        notional_per_trade=_decimal(run_settings_dict.get("notional_per_trade", "1000")),
-        commission_rate=_decimal(run_settings_dict.get("commission_rate", "0.001")),
-        slippage_rate=_decimal(run_settings_dict.get("slippage_rate", "0.001")),
-        atr_window=int(run_settings_dict.get("atr_window", 14)),
-        cost_multiple=_decimal(run_settings_dict.get("cost_multiple", "2.0")),
+        starting_cash=_decimal(recorded_values["starting_cash"]),
+        notional_per_trade=_decimal(recorded_values["notional_per_trade"]),
+        commission_rate=_decimal(recorded_values["commission_rate"]),
+        slippage_rate=_decimal(recorded_values["slippage_rate"]),
+        atr_window=int(recorded_values["atr_window"]),
+        cost_multiple=_decimal(recorded_values["cost_multiple"]),
     )
     ind = prepare_indicators(bars, settings.atr_window)
     bounds = fold_bounds(len(bars), WARMUP_BARS, min(5, len(bars) // 30 or 1))

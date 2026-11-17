@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from app.auth.jwt import require_admin
 from app.config import get_settings
 from app.database import get_db
+from app.lib.error_safety import safe_error_message
 from app.models.user import User
 from app.services.auto_collection import (
     get_collection_history,
@@ -79,7 +80,7 @@ def collection_trigger(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={
                 "reason": "collection_failed",
-                "message": str(exc),
+                "message": safe_error_message(exc),
             },
         )
 

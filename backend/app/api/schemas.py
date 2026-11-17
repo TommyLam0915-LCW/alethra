@@ -293,7 +293,7 @@ class RunComparisonField(BaseModel):
     value_a: Any
     value_b: Any
     comparison_status: str  # "match", "differ", "insufficient"
-    provenance_a: str  # "captured", "current", "absent", "unavailable", "derived"
+    provenance_a: str  # "captured", "spec_verified", "current", "absent", "derived"
     provenance_b: str
     evidence_source: Optional[str] = None
     evidence_detail: Optional[dict] = None  # source_category, record_id, field_path, derivation
@@ -1340,7 +1340,9 @@ class CostSummary(BaseModel):
     total_actual: float
     total_estimate: float
     cost_per_user: float
-    cost_per_active_user: float
+    # None when no user has activated yet: the per-active-user cost has no
+    # denominator, and 0.00 would read as "active users cost nothing".
+    cost_per_active_user: Optional[float]
     breakdown_by_type: dict
 
 

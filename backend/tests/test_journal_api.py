@@ -82,8 +82,13 @@ def _trade(db, run, *, index, rule_id, net_pnl, entry_day_offset,
     return trade
 
 
+_UNSET = object()
+
+
 def _run(db, user_id, *, instrument=INSTRUMENT_BTC, interval=1440,
-         starting_cash="10000", trade_count=0):
+         starting_cash="10000", trade_count=0, settings=_UNSET):
+    if settings is _UNSET:
+        settings = None  # filled below from the named fields
     run = StrategyStudyRun(
         id=uuid.uuid4(),
         user_id=user_id,
@@ -101,12 +106,15 @@ def _run(db, user_id, *, instrument=INSTRUMENT_BTC, interval=1440,
         dataset_integrity_ok=True,
         dataset_gap_count=0,
         dataset_missing_intervals=0,
-        settings_json={
-            "starting_cash": starting_cash,
-            "notional_per_trade": "1000",
-            "commission_rate": "0.001",
-            "slippage_rate": "0.0005",
-        },
+        settings_json=(
+            settings if settings is not None
+            else {
+                "starting_cash": starting_cash,
+                "notional_per_trade": "1000",
+                "commission_rate": "0.001",
+                "slippage_rate": "0.0005",
+            }
+        ),
         walk_forward_json={"folds": [{"fold": 1}]},
         highlights_json=None,
         disclosures_json=None,
@@ -158,6 +166,24 @@ def seeded_user_id(user_id):
     db = TestSession()
     try:
         _seed_multi_run_data(db, user_id)
+        return user_id
+    finally:
+        db.close()
+
+
+@pytest.fixture()
+def unrecorded_cash_user_id(user_id):
+    """A run whose settings blob is empty and whose only trade loses.
+
+    Nothing in the record states the starting cash, and equity never rises
+    above zero, so neither the baseline nor the drawdown has a measured value.
+    """
+    db = TestSession()
+    try:
+        run = _run(db, user_id, settings={}, trade_count=1)
+        _trade(db, run, index=0, rule_id="breakout_trend", net_pnl="-80",
+               entry_day_offset=0, outcome="loss", exit_reason="stop_loss")
+        db.commit()
         return user_id
     finally:
         db.close()
@@ -402,6 +428,64 @@ class TestEquityCurve:
         resp = client.get("/api/v1/journal/equity-curve", headers=headers)
         data = resp.json()
         assert data["series"] == []
+        # No trades also means no recorded baseline: 10000 used to be asserted
+        # out of thin air beside an empty series.
+        assert data["baseline_cash"] is None
+
+    def test_equity_curve_without_recorded_starting_cash(
+        self, client, unrecorded_cash_user_id
+    ):
+        headers = _auth_headers(client, unrecorded_cash_user_id)
+        data = client.get(
+            "/api/v1/journal/equity-curve", headers=headers
+        ).json()
+        assert data["baseline_cash"] is None
+        point = data["series"][0]["points"][0]
+        # With no baseline the curve is cumulative net P&L from zero.
+        assert Decimal(point["equity"]) == Decimal("-80")
+        # A percentage of a non-positive peak has no answer.
+        assert point["drawdown_pct"] is None
+
+    def test_equity_curve_grouped_without_recorded_starting_cash(
+        self, client, unrecorded_cash_user_id
+    ):
+        headers = _auth_headers(client, unrecorded_cash_user_id)
+        data = client.get(
+            "/api/v1/journal/equity-curve",
+            params={"group_by": "instrument"},
+            headers=headers,
+        ).json()
+        assert data["baseline_cash"] is None
+        point = data["series"][0]["points"][0]
+        assert Decimal(point["equity"]) == Decimal("-80")
+        assert point["drawdown_pct"] is None
+
+    def test_equity_curve_drawdown_is_measured_once_peak_is_positive(
+        self, client, user_id
+    ):
+        db = TestSession()
+        try:
+            run = _run(db, user_id, trade_count=1)
+            _trade(db, run, index=0, rule_id="breakout_trend", net_pnl="-80",
+                   entry_day_offset=0, outcome="loss", exit_reason="stop_loss")
+            db.commit()
+        finally:
+            db.close()
+        headers = _auth_headers(client, user_id)
+        points = client.get(
+            "/api/v1/journal/equity-curve", headers=headers
+        ).json()["series"][0]["points"]
+        # 10000 - 80 = 9920 against a peak of 10000: the None arm above is
+        # keyed on the peak, not on the loss, so this stays a measured number.
+        assert Decimal(points[0]["drawdown_pct"]) == Decimal("0.80")
+
+    def test_trades_starting_cash_stays_none_when_run_records_none(
+        self, client, unrecorded_cash_user_id
+    ):
+        headers = _auth_headers(client, unrecorded_cash_user_id)
+        trade = client.get("/api/v1/journal/trades", headers=headers).json()["trades"][0]
+        # "0" claimed the run was funded with nothing; the settings blob is empty.
+        assert trade["starting_cash"] is None
 
 
 class TestCsvExport:

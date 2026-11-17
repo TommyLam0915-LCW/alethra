@@ -16,6 +16,7 @@ import logging
 import uuid
 from typing import Any, Dict, Optional
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.lib.error_safety import safe_error_message
@@ -228,12 +229,17 @@ def execute_personal_training(db: Session, job_id: uuid.UUID) -> TrainingJob:
         )
 
         record = _record_for(db, job.user_id, snapshot.strategy_version_id)
+        # Same rule as the API's version insert: serialize on the parent record
+        # and number from the highest existing version, not the row count.
+        db.query(ModelResearchRecord).filter(
+            ModelResearchRecord.id == record.id
+        ).with_for_update().first()
         next_number = (
-            db.query(ModelVersion)
+            db.query(func.max(ModelVersion.version_number))
             .filter(ModelVersion.model_research_record_id == record.id)
-            .count()
-            + 1
-        )
+            .scalar()
+            or 0
+        ) + 1
         version = ModelVersion(
             model_research_record_id=record.id,
             version_number=next_number,

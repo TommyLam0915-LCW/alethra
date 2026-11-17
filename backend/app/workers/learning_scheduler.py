@@ -104,12 +104,23 @@ def _get_first_user_id(db: Session) -> Optional[UUID]:
     return user.id if user else None
 
 
-def run_scheduled_research(scope: str = "daily"):
+def run_scheduled_research(
+    scope: str = "daily",
+    instruments: Optional[List[str]] = None,
+    intervals: Optional[List[int]] = None,
+):
     """For each instrument x interval combo, run strategy_research.run_study()
     and persist via strategy_study_store.persist_study().
 
-    Creates a LearningJob record to track the batch.
+    Creates a LearningJob record to track the batch. ``instruments``/``intervals``
+    narrow the grid for a manual trigger; ``None`` takes the scheduled default,
+    while an explicitly empty list runs nothing — the two are different requests
+    and must not collapse into each other.
     """
+    if instruments is None:
+        instruments = SCHEDULED_INSTRUMENTS
+    if intervals is None:
+        intervals = SCHEDULED_INTERVALS
     db = SessionLocal()
     try:
         user_id = _get_first_user_id(db)
@@ -123,8 +134,8 @@ def run_scheduled_research(scope: str = "daily"):
             job_type="scheduled_study",
             config_json={
                 "scope": scope,
-                "instruments": SCHEDULED_INSTRUMENTS,
-                "intervals": SCHEDULED_INTERVALS,
+                "instruments": instruments,
+                "intervals": intervals,
             },
             started_at=utcnow_aware(),
         )
@@ -135,8 +146,8 @@ def run_scheduled_research(scope: str = "daily"):
         results: List[dict] = []
         errors: List[str] = []
 
-        for instrument_id in SCHEDULED_INSTRUMENTS:
-            for interval in SCHEDULED_INTERVALS:
+        for instrument_id in instruments:
+            for interval in intervals:
                 try:
                     result = _run_single_study(db, user_id, instrument_id, interval)
                     results.append(
@@ -163,7 +174,7 @@ def run_scheduled_research(scope: str = "daily"):
         job.result_json = {
             "results": results,
             "errors": errors,
-            "total_combos": len(SCHEDULED_INSTRUMENTS) * len(SCHEDULED_INTERVALS),
+            "total_combos": len(instruments) * len(intervals),
             "successful": len(results),
             "failed": len(errors),
         }

@@ -189,6 +189,24 @@ def _session_cursor(session: SimulationSession):
         return None
 
 
+def _bound_session_provider(db: Session, session) -> Optional[str]:
+    """The provider lane a bound session's own replay would read.
+
+    ``provider_id`` is nullable, and "no filter" is not the same claim as "no
+    provider recorded": dropping the filter lets a read take whichever lane holds
+    the newest bar, which is data the session never replayed. An unbound session
+    therefore resolves through the same helper the replay uses, and a session
+    whose lane cannot be resolved yields None so that callers say "unavailable"
+    instead of pricing from a stranger.
+    """
+    provider_id = session.provider_id
+    if provider_id:
+        return provider_id
+    from app.api.simulations import _resolve_session_provider
+
+    return _resolve_session_provider(session, db)
+
+
 def _session_bound_marks(
     db: Session, portfolio: PaperPortfolio, asset_ids: Iterable[str]
 ) -> Dict[str, dict]:
@@ -208,10 +226,14 @@ def _session_bound_marks(
 
     kind, value = cursor
     marks: Dict[str, dict] = {}
+    provider_id = _bound_session_provider(db, session)
+    if not provider_id:
+        return {}
     for asset_id in {a for a in asset_ids if a}:
-        query = db.query(MarketDataBar).filter(MarketDataBar.instrument_id == asset_id)
-        if session.provider_id:
-            query = query.filter(MarketDataBar.provider_id == session.provider_id)
+        query = db.query(MarketDataBar).filter(
+            MarketDataBar.instrument_id == asset_id,
+            MarketDataBar.provider_id == provider_id,
+        )
         if kind == "timestamp":
             query = query.filter(MarketDataBar.bar_timestamp <= value)
         else:
@@ -326,7 +348,7 @@ def _portfolio_response(
     as_of = sorted({bar.get("as_of") or bar["date"] for bar in marks.values()})
 
     if session_valuation:
-        provider = session.provider_id or "stored_market_data"
+        provider = _bound_session_provider(db, session) or "unknown"
         cursor = _session_cursor(session)
         note = (
             "估值使用此回放 session 已儲存行情 bar，並以其游標為上限；"
@@ -829,7 +851,7 @@ def _order_lifecycle_view(db: Session, portfolio: PaperPortfolio, order: PaperOr
             order=order,
             portfolio=portfolio,
             instrument_id=instrument_id,
-            provider_id=session.provider_id,
+            provider_id=_bound_session_provider(db, session),
             start_date=spec.get("start_date") or order.data_cutoff_at or "",
             end_date=spec.get("end_date") or "9999-12-31",
             market_clock_date=session.current_snapshot_date,
