@@ -14,7 +14,7 @@ from app.services.kill_switch import (
     get_kill_switch,
     list_kill_switches,
 )
-from app.auth.jwt import get_current_user
+from app.auth.jwt import require_admin
 
 router = APIRouter(prefix="/kill-switches", tags=["kill-switches"])
 
@@ -59,28 +59,18 @@ def _validate_scope(scope_str: str) -> KillSwitchScope:
         )
 
 
-def _require_admin(current_user: User):
-    """Require admin user for kill switch operations."""
-    if not current_user.is_admin:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Kill switch operations require admin privileges",
-        )
-
-
 # ── Routes ─────────────────────────────────────────────────────────────
 
 
 @router.get("", response_model=List[KillSwitchResponse])
 def list_all_kill_switches(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_admin),
 ):
     """List all kill switches.
     
     Requires admin privileges.
     """
-    _require_admin(current_user)
     return list_kill_switches(db)
 
 
@@ -88,13 +78,12 @@ def list_all_kill_switches(
 def get_kill_switch_status(
     scope: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_admin),
 ):
     """Get kill switch status for a specific scope.
     
     Requires admin privileges.
     """
-    _require_admin(current_user)
     scope_enum = _validate_scope(scope)
     switch = get_kill_switch(db, scope_enum)
     
@@ -111,7 +100,7 @@ def get_kill_switch_status(
 def activate(
     payload: KillSwitchActivate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_admin),
 ):
     """Activate kill switch for a scope.
     
@@ -120,7 +109,6 @@ def activate(
     When activated, blocks new submissions for the specified scope.
     Does NOT cancel already-submitted broker orders or running jobs.
     """
-    _require_admin(current_user)
     scope_enum = _validate_scope(payload.scope)
     
     switch = activate_kill_switch(
@@ -137,13 +125,12 @@ def activate(
 def deactivate(
     payload: KillSwitchDeactivate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_admin),
 ):
     """Deactivate kill switch for a scope.
     
     Requires admin privileges.
     """
-    _require_admin(current_user)
     scope_enum = _validate_scope(payload.scope)
     
     switch = deactivate_kill_switch(db, scope_enum)

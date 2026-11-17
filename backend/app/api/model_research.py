@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from typing import List, Optional
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.user import User
@@ -115,13 +116,23 @@ def _insert_model_version(
     linked_experiment_version_ids: Optional[List[UUID]] = None,
     source: Optional[str] = None,
 ) -> ModelVersion:
-    existing_count = db.query(ModelVersion).filter(
-        ModelVersion.model_research_record_id == record.id
-    ).count()
+    # Serialize on the parent record, then take the highest existing number:
+    # a count repeats a number as soon as any version is missing from the
+    # sequence, and two concurrent writers would otherwise pick the same one.
+    db.query(ModelResearchRecord).filter(
+        ModelResearchRecord.id == record.id
+    ).with_for_update().first()
+
+    top_number = (
+        db.query(func.max(ModelVersion.version_number))
+        .filter(ModelVersion.model_research_record_id == record.id)
+        .scalar()
+        or 0
+    )
 
     version = ModelVersion(
         model_research_record_id=record.id,
-        version_number=existing_count + 1,
+        version_number=top_number + 1,
         model_type=model_type,
         model_specification_json=model_specification_json,
         linked_experiment_version_ids=(
