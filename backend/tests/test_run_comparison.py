@@ -689,3 +689,127 @@ def test_compare_runs_period_source_labelled(client, auth_headers, setup_db):
     assert data["period_overlap"]["run_a_period"]["source"] == "run_captured"
     assert data["period_overlap"]["run_b_period"]["source"] == "version_spec"
 
+
+
+# ===========================================================================
+# D-4: a spec field whose spec is proven to be the executed one is not
+# "current metadata".
+# ===========================================================================
+
+def _spec_verified_run(db, user, spec):
+    """One experiment/version/run whose config_hash really is its spec's hash."""
+    from app.engine.backtest import compute_config_hash
+
+    experiment = Experiment(id=uuid4(), owner_id=user.id, title="Exp",
+                            status="draft", visibility="private")
+    db.add(experiment)
+    version = ExperimentVersion(id=uuid4(), experiment_id=experiment.id,
+                                version_number=1, strategy_spec=spec,
+                                created_by=user.id)
+    db.add(version)
+    run = ResearchRun(id=uuid4(), experiment_version_id=version.id,
+                      engine_version="1.1.0",
+                      config_hash=compute_config_hash(spec),
+                      status=RunStatus.completed,
+                      metrics={"total_return_pct": 1.7, "final_equity": 10169.86,
+                               "total_trades": 4},
+                      result_json={"start_date": "2024-01-01",
+                                   "end_date": "2024-06-30"})
+    db.add(run)
+    db.commit()
+    return version, run
+
+
+SPEC_A = {
+    "template_type": "sma_crossover",
+    "asset_ids": ["DEMO-ALPHA"],
+    "start_date": "2024-01-01",
+    "end_date": "2024-06-30",
+    "initial_cash": 10000,
+    "commission_rate": 0.001,
+    "slippage_rate": 0.0,
+    "benchmark_id": "",
+}
+
+
+def test_d4_spec_field_is_verified_when_the_run_hash_matches(client, auth_headers, setup_db):
+    db = TestSession()
+    user = db.query(User).filter(User.email == "test@alethra.io").first()
+    version_a, run_a = _spec_verified_run(db, user, SPEC_A)
+    # Side B: the same spec, but the run was executed against a different one.
+    from app.engine.backtest import compute_config_hash
+    drifted = dict(SPEC_A, commission_rate=0.002)
+    version_b, run_b = _spec_verified_run(db, user, drifted)
+    run_b.config_hash = compute_config_hash(dict(drifted, commission_rate=0.003))
+    db.commit()
+
+    ids = (str(run_a.id), str(run_b.id))
+    version_a_id, run_b_id = str(version_a.id), str(run_b.id)
+    db.close()
+
+    data = client.get(
+        f"/api/v1/runs/compare?run_a={ids[0]}&run_b={ids[1]}", headers=auth_headers
+    ).json()
+    conditions = {f["field"]: f for f in data["conditions_comparison"]}
+
+    # A is proven: the stored spec hashes to the run's own config_hash.
+    sides = {s["run_id"]: s for s in data["sides"]}
+    assert sides[ids[0]]["spec_source"] == "run_verified"
+    assert conditions["commission_rate"]["provenance_a"] == "spec_verified"
+    assert conditions["slippage_rate"]["provenance_a"] == "spec_verified"
+    assert conditions["benchmark_id"]["provenance_a"] == "spec_verified"
+    assert conditions["template_type"]["provenance_a"] == "spec_verified"
+
+    proof = conditions["commission_rate"]["evidence_detail"]["run_a"]
+    assert proof["source_category"] == "run_verified_spec"
+    assert proof["record_id"] == ids[0], "the proof lives on the run, not the version"
+    assert proof["field_path"] == "strategy_spec.commission_rate"
+    assert proof["proof"]["run_config_hash"] == proof["proof"]["spec_config_hash"]
+
+    # B is not: its spec no longer hashes to what the run recorded.
+    assert sides[ids[1]]["spec_source"] == "version_current_unverified"
+    assert conditions["commission_rate"]["provenance_b"] == "current"
+    note = conditions["commission_rate"]["evidence_detail"]["run_b"]["note"]
+    assert "may not equal the spec at run execution time" in note
+
+
+def test_d4_run_captured_fields_are_never_downgraded(client, auth_headers, setup_db):
+    """Hash proof must not be allowed to relabel run-recorded values."""
+    db = TestSession()
+    user = db.query(User).filter(User.email == "test@alethra.io").first()
+    version_a, run_a = _spec_verified_run(db, user, SPEC_A)
+    version_b, run_b = _spec_verified_run(db, user, SPEC_A)
+    del version_a, version_b
+    ida, idb = str(run_a.id), str(run_b.id)
+    db.close()
+
+    data = client.get(
+        f"/api/v1/runs/compare?run_a={ida}&run_b={idb}", headers=auth_headers
+    ).json()
+    conditions = {f["field"]: f for f in data["conditions_comparison"]}
+
+    # start_date comes from result_json, so it stays captured, not spec_verified.
+    assert conditions["start_date"]["provenance_a"] == "captured"
+    # engine_version is a run column.
+    assert conditions["engine_version"]["provenance_a"] == "captured"
+    # total return is a derived metric and is unaffected by the spec proof.
+    metrics = {f["field"]: f for f in data["metrics_comparison"]}
+    assert metrics["total_return_pct"]["provenance_a"] == "derived"
+
+
+def test_d4_verified_spec_source_does_not_trigger_the_unverified_dimension(
+    client, auth_headers, setup_db
+):
+    db = TestSession()
+    user = db.query(User).filter(User.email == "test@alethra.io").first()
+    _, run_a = _spec_verified_run(db, user, SPEC_A)
+    _, run_b = _spec_verified_run(db, user, SPEC_A)
+    ida, idb = str(run_a.id), str(run_b.id)
+    db.close()
+
+    data = client.get(
+        f"/api/v1/runs/compare?run_a={ida}&run_b={idb}", headers=auth_headers
+    ).json()
+    dims = {d["dimension"]: d for d in data["comparability"]["dimensions"]}
+    assert dims["spec_source"]["status"] == "match"
+    assert not any("未證實" in m or "只屬目前版本資料" in m for m in data["limitations"])

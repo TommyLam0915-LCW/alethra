@@ -74,18 +74,25 @@ def create_run(
        and a caller that retries can be billed twice. That gap is stated
        rather than papered over; closing it is a separate bounded item.
     """
-    version = db.query(ExperimentVersion).filter(
-        ExperimentVersion.id == version_id
-    ).first()
+    # The version is loaded through its experiment's owner, so a version id
+    # belonging to another account answers the same way an id that was never
+    # written does. Loading it first and rejecting on the parent answered 403,
+    # which told the caller the id exists and who does not own it.
+    version = (
+        db.query(ExperimentVersion)
+        .join(Experiment, Experiment.id == ExperimentVersion.experiment_id)
+        .filter(
+            ExperimentVersion.id == version_id,
+            Experiment.owner_id == current_user.id,
+        )
+        .first()
+    )
     if not version:
         raise HTTPException(status_code=404, detail="Version not found")
 
-    experiment = db.query(Experiment).filter(
-        Experiment.id == version.experiment_id,
-        Experiment.owner_id == current_user.id
-    ).first()
-    if not experiment:
-        raise HTTPException(status_code=403, detail="Not authorized")
+    # The join above already loaded and scoped the parent, so this is the
+    # identity-mapped row rather than a second query.
+    experiment = version.experiment
 
     # Admission is decided inside the service, under the version row lock, and
     # it re-reads the active run there rather than trusting anything queried
@@ -142,21 +149,23 @@ def compare_versions(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    version_a = db.query(ExperimentVersion).filter(
-        ExperimentVersion.id == v1
-    ).first()
-    version_b = db.query(ExperimentVersion).filter(
-        ExperimentVersion.id == v2
-    ).first()
+    # Each version is loaded through its own experiment's owner. Filtering only
+    # one side would return the other user's strategy_spec field values.
+    def _load_owned_version(version_id: UUID) -> ExperimentVersion:
+        return (
+            db.query(ExperimentVersion)
+            .join(Experiment, Experiment.id == ExperimentVersion.experiment_id)
+            .filter(
+                ExperimentVersion.id == version_id,
+                Experiment.owner_id == current_user.id,
+            )
+            .first()
+        )
+
+    version_a = _load_owned_version(v1)
+    version_b = _load_owned_version(v2)
     if not version_a or not version_b:
         raise HTTPException(status_code=404, detail="Version not found")
-
-    experiment = db.query(Experiment).filter(
-        Experiment.id == version_a.experiment_id,
-        Experiment.owner_id == current_user.id
-    ).first()
-    if not experiment:
-        raise HTTPException(status_code=403, detail="Not authorized")
 
     spec_a = version_a.strategy_spec or {}
     spec_b = version_b.strategy_spec or {}
@@ -235,8 +244,16 @@ _SOURCE_CATEGORY_BY_KIND = {
     "version_spec": "version_metadata",
 }
 
+# A spec field stops being "current metadata" only when this run's own
+# config_hash matches the stored spec, which ties the value to the settings
+# the run was launched with rather than to whatever the version says today.
+_SPEC_VERIFIED_PROVENANCE = "spec_verified"
+_SPEC_VERIFIED_CATEGORY = "run_verified_spec"
 
-def _provenance_from_kind(kind: str) -> str:
+
+def _provenance_from_kind(kind: str, spec_verified: bool = False) -> str:
+    if kind == "version_spec" and spec_verified:
+        return _SPEC_VERIFIED_PROVENANCE
     return _PROVENANCE_BY_KIND.get(kind, "absent")
 
 
@@ -245,9 +262,29 @@ def _get_evidence_detail(
     version: ExperimentVersion,
     kind: str,
     path: Optional[str],
+    spec_verified: bool = False,
 ) -> Optional[dict]:
     if kind == "absent":
         return None
+    if kind == "version_spec" and spec_verified:
+        # The run row is the authority for a field whose spec hashes to this
+        # run's recorded config_hash, so the record id points at the run that
+        # carries the proof, not at the version that supplied the value.
+        return {
+            "source_category": _SPEC_VERIFIED_CATEGORY,
+            "record_id": str(run.id),
+            "field_path": path,
+            "proof": {
+                "spec_config_hash": compute_config_hash(version.strategy_spec or {}),
+                "run_config_hash": run.config_hash,
+            },
+            "note": (
+                "The stored version spec hashes to the config_hash this run "
+                "recorded at start, so this value is the one the run was "
+                "launched with. The hash matches the record, not an observation "
+                "of the engine re-reading the field."
+            ),
+        }
     record_id = str(version.id) if kind == "version_spec" else str(run.id)
     detail = {
         "source_category": _SOURCE_CATEGORY_BY_KIND.get(kind, "run_record"),
@@ -271,6 +308,9 @@ def _compare_field(
     spec_b: dict,
     result_a: Optional[dict],
     result_b: Optional[dict],
+    *,
+    spec_verified_a: bool,
+    spec_verified_b: bool,
 ) -> RunComparisonField:
     val_a, kind_a, path_a = _resolve_field(field, run_a, spec_a, result_a)
     val_b, kind_b, path_b = _resolve_field(field, run_b, spec_b, result_b)
@@ -285,11 +325,11 @@ def _compare_field(
     else:
         comparison_status = "differ"
 
-    prov_a = _provenance_from_kind(kind_a)
-    prov_b = _provenance_from_kind(kind_b)
+    prov_a = _provenance_from_kind(kind_a, spec_verified_a)
+    prov_b = _provenance_from_kind(kind_b, spec_verified_b)
 
-    evidence_a = _get_evidence_detail(run_a, version_a, kind_a, path_a)
-    evidence_b = _get_evidence_detail(run_b, version_b, kind_b, path_b)
+    evidence_a = _get_evidence_detail(run_a, version_a, kind_a, path_a, spec_verified_a)
+    evidence_b = _get_evidence_detail(run_b, version_b, kind_b, path_b, spec_verified_b)
 
     return RunComparisonField(
         field=field,
@@ -334,6 +374,23 @@ def _spec_source(run: ResearchRun, version: ExperimentVersion) -> tuple:
     )
 
 
+def _is_missing(value) -> bool:
+    """None, a blank string, or a component dict with a blank part = no evidence.
+
+    Two runs storing ``""`` (or ``{"checksum": None, "provider": None}``) for a
+    provenance field are equal, and equality of two absences would otherwise be
+    reported as a match on that dimension — which is what makes the comparison
+    look vetted when nothing was recorded.
+    """
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    if isinstance(value, dict):
+        return any(_is_missing(part) for part in value.values())
+    return False
+
+
 def _comparability_dimension(
     name: str,
     value_a,
@@ -342,7 +399,7 @@ def _comparability_dimension(
     missing_reason: str,
     differ_reason: str,
 ) -> ComparabilityDimension:
-    if value_a is None or value_b is None:
+    if _is_missing(value_a) or _is_missing(value_b):
         return ComparabilityDimension(
             dimension=name,
             status="unknown",
@@ -471,18 +528,23 @@ def compare_runs(
     result_a = run_a_obj.result_json or {}
     result_b = run_b_obj.result_json or {}
 
+    # Whether each side's stored spec is provably the spec its run executed.
+    # Resolved before the field loops because the same proof is what decides
+    # whether a spec-sourced field is current metadata or run evidence.
+    spec_source_a, spec_note_a = _spec_source(run_a_obj, version_a)
+    spec_source_b, spec_note_b = _spec_source(run_b_obj, version_b)
+    spec_verified_a = spec_source_a == "run_verified"
+    spec_verified_b = spec_source_b == "run_verified"
+
     # Compare metrics
     metrics_comparison = []
     for field in METRICS_FIELDS:
-        metrics_comparison.append(_compare_field(field, run_a_obj, run_b_obj, version_a, version_b, spec_a, spec_b, result_a, result_b))
+        metrics_comparison.append(_compare_field(field, run_a_obj, run_b_obj, version_a, version_b, spec_a, spec_b, result_a, result_b, spec_verified_a=spec_verified_a, spec_verified_b=spec_verified_b))
 
     # Compare conditions
     conditions_comparison = []
     for field in CONDITION_FIELDS:
-        conditions_comparison.append(_compare_field(field, run_a_obj, run_b_obj, version_a, version_b, spec_a, spec_b, result_a, result_b))
-
-    spec_source_a, spec_note_a = _spec_source(run_a_obj, version_a)
-    spec_source_b, spec_note_b = _spec_source(run_b_obj, version_b)
+        conditions_comparison.append(_compare_field(field, run_a_obj, run_b_obj, version_a, version_b, spec_a, spec_b, result_a, result_b, spec_verified_a=spec_verified_a, spec_verified_b=spec_verified_b))
 
     # Check period overlap
     period_overlap = None
@@ -637,9 +699,9 @@ def compare_runs(
     # Check for missing critical fields (dataset_checksum resolved from run column,
     # data_provider resolved from result_json — provider_id column does not exist here)
     missing_fields = []
-    if not checksum_a or not checksum_b:
+    if _is_missing(checksum_a) or _is_missing(checksum_b):
         missing_fields.append("dataset_checksum")
-    if not provider_a or not provider_b:
+    if _is_missing(provider_a) or _is_missing(provider_b):
         missing_fields.append("data_provider")
 
     if missing_fields:
