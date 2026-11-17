@@ -165,11 +165,19 @@ def run_parameter_sweep(
             return job
 
         # Rank results: primary=total_return_pct (desc), secondary=max_drawdown_pct (asc)
+        # A metric that is absent sorts last instead of as zero: `or 0` would
+        # hand the top rank to a run with no recorded return and present an
+        # unmeasured drawdown as the safest one, and rank 1 becomes best_params.
         def sort_key(entry):
-            m = entry.get("metrics", {})
-            total_return = m.get("total_return_pct", 0) or 0
-            max_dd = m.get("max_drawdown_pct", 0) or 0
-            return (-total_return, max_dd)
+            m = entry.get("metrics") or {}
+            total_return = m.get("total_return_pct")
+            max_dd = m.get("max_drawdown_pct")
+            return (
+                total_return is None,
+                -(total_return or 0.0),
+                max_dd is None,
+                max_dd or 0.0,
+            )
 
         ranked = sorted(successful_results, key=sort_key)
         for rank, entry in enumerate(ranked, 1):
