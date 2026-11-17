@@ -25,17 +25,19 @@ a no-op here and no two transactions genuinely interleave. What is proven is
 therefore (a) that each write sits on the documented side of its commit — the
 ``in_transaction`` / ``rollback`` probes below are falsifiable, because an
 uncommitted admission would vanish when the probe rolls back — and (b) the
-decision rules. Cross-connection mutual exclusion, a PostgreSQL run, a
-cross-process race and a real ``SIGKILL`` are a different evidence level and are
-NOT RUN here; nor has the migration that adds the linkage column been executed
-against PostgreSQL. The foreign key is not exercised either: this lane turns
-``PRAGMA foreign_keys`` off, so ``RESTRICT`` is asserted as schema intent only.
+decision rules. Cross-connection mutual exclusion, a cross-process race and a
+real ``SIGKILL`` are a different evidence level and are NOT RUN here. The
+migration that adds the linkage column has since been executed against a fresh
+PostgreSQL database in the integration lane — that is DDL evidence only, and it
+does not reach the interleaving this file cannot produce. The foreign key is not
+exercised here either: this lane turns ``PRAGMA foreign_keys`` off, so
+``RESTRICT`` is asserted as schema intent only.
 """
 
 import re
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi import HTTPException
@@ -650,15 +652,22 @@ def test_the_linkage_index_allows_exactly_one_unit_per_run(
 
 # ── 二b、the schema that makes the contract enforceable ────────────────────
 #
-# The migration has not been run against PostgreSQL, so these are the parts of
-# it that can be decided without a database: that Alembic can load at all, and
-# that the two files which describe the same constraint still describe the same
-# constraint. Both are read from the source text — this interpreter has no
-# alembic installed, and a gate that cannot run is not a gate.
+# Two things about this chain are decidable without touching a database: that
+# Alembic can load at all, and that the two files which describe the same
+# constraint still describe the same constraint. Both are read from the source
+# text instead of through the ``alembic`` API, because the suite runs under
+# interpreters that do and do not have alembic installed — a gate that only
+# exists in one of them is not a gate. Executing the chain against PostgreSQL is
+# a separate check with its own evidence, and does not replace these.
 
 _MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations" / "versions"
 LINKAGE_REVISION = "d0e1f2a3b4c5"
 LINKAGE_FILE = f"{LINKAGE_REVISION}_add_quota_reservation_run_link.py"
+# The feedback slice shipped against ``c9d0e1f2a3b4`` — the head this branch
+# started from — so integrating it re-parented it under the linkage revision
+# rather than leaving two heads on the same parent.
+FEEDBACK_REVISION = "e1f2a3b4c5d6"
+FEEDBACK_FILE = f"{FEEDBACK_REVISION}_add_user_feedback.py"
 
 
 def _revision_rows():
@@ -682,6 +691,12 @@ def test_the_linkage_revision_is_unique_and_is_the_only_head():
     mid-chain by ``add_intent_cancel_requested``, which would have made every
     ``alembic upgrade`` die on ``DuplicateRevision`` before touching the
     database. Nothing in the suite caught that until this test existed.
+
+    The head is no longer the linkage revision: the feedback slice now sits on
+    top of it, so this asserts one head and pins where it hangs. Two heads would
+    be the other way this file can fail — ``alembic upgrade head`` refuses to
+    choose between them — which is why the assertion compares the whole sorted
+    list instead of testing that the revision is merely reachable.
     """
     rows = _revision_rows()
     assert rows, "no migration scripts found: this test would pass on an empty scan"
@@ -692,14 +707,23 @@ def test_the_linkage_revision_is_unique_and_is_the_only_head():
 
     referenced = {parent for _, _, parents in rows for parent in parents}
     heads = sorted(set(ids) - referenced)
-    assert heads == [LINKAGE_REVISION], (
-        f"expected one head, the linkage revision; got {heads}"
+    assert heads == [FEEDBACK_REVISION], (
+        f"expected one head, the feedback revision on top of the linkage; got {heads}"
     )
 
     parents = [row for row in rows if row[1] == LINKAGE_REVISION][0][2]
     assert parents == ["c9d0e1f2a3b4"], (
         "the linkage revision must sit on the head this branch started from, "
         f"not branch off it: {parents}"
+    )
+
+    feedback_parents = [row for row in rows if row[1] == FEEDBACK_REVISION][0][2]
+    assert feedback_parents == [LINKAGE_REVISION], (
+        "the feedback revision must re-parent onto the linkage instead of "
+        f"branching off the base again: {feedback_parents}"
+    )
+    assert (_MIGRATIONS_DIR / FEEDBACK_FILE).exists(), (
+        f"the head is named for {FEEDBACK_FILE}, which is not on disk"
     )
 
 
@@ -1274,8 +1298,18 @@ def test_another_account_cannot_read_an_active_run_id(
     """Ownership is answered before admission, so a 409 is not an oracle.
 
     The refusal detail carries a run id, which is why the duplicate check cannot
-    move in front of the ownership test: another account must get 403 and learn
-    nothing about this user's rows.
+    move in front of the ownership test: another account must be refused and
+    learn nothing about this user's rows.
+
+    ``5a34e3fe`` answered that refusal with 403, which is itself a disclosure:
+    it confirms the version id exists and that someone other than the caller
+    owns it. This line answers 404, the same way it answers an id that was never
+    written. That is the convention the whole module already keeps — every
+    ownership refusal in ``app/api/runs.py`` is a 404 and none is a 403, as it
+    is on the continuation route pinned by ``test_experiment_continuation.py`` —
+    and only the number moved here. The properties this test exists to protect —
+    no run id in the refusal, no row added, no unit reserved — are asserted
+    unchanged below.
     """
     version_id = _create_experiment(client, auth_headers)
     user_id = _user_id(db)
@@ -1298,11 +1332,21 @@ def test_another_account_cannot_read_an_active_run_id(
     other = _headers(client, "other-admission@alethra.io")
     resp = _start_run(client, other, version_id)
 
-    assert resp.status_code == 403, resp.text
+    assert resp.status_code == 404, resp.text
     assert str(settled_run_id) not in resp.text
     assert str(live.id) not in resp.text
     assert len(_runs_for(version_id)) == 2, "a refusal adds no row"
     assert _get_reserved(db, user_id, _QUOTA) == 0
+
+    # The 404 is only a privacy gain if it is the same answer an id that was
+    # never written produces. If the two details differ, the status code stopped
+    # hiding existence and this test has to be read as a regression.
+    absent = _start_run(client, other, uuid4())
+    assert absent.status_code == resp.status_code, (
+        f"another owner's version answered {resp.status_code}, a version that "
+        f"does not exist answered {absent.status_code}"
+    )
+    assert absent.json()["detail"] == resp.json()["detail"]
 
 
 # ── 五、every lane that admits goes through this lock ────────────────────────

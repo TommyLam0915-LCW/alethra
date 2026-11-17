@@ -847,8 +847,13 @@ def test_another_account_cannot_read_the_in_flight_run_id(
     other_headers = _headers(client, "other-recovery@alethra.io")
     resp = _start_run(client, other_headers, version_id)
 
-    assert resp.status_code == 403, resp.text
+    # 404, not 403: this line refuses another account's version the same way it
+    # refuses an id that was never written, so the status itself stops being an
+    # existence oracle. The non-leak property this test exists for is unchanged,
+    # and is measured on the number, the refusal body and the row count below.
+    assert resp.status_code == 404, resp.text
     assert str(live.id) not in resp.text, "the refusal is not an id leak"
+    assert len(_runs_for(db, version_id)) == 1, "a refusal adds no row"
 
 
 def test_a_late_writer_does_not_resurrect_a_closed_run(
