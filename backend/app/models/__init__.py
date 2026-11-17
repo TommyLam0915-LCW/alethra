@@ -5,6 +5,7 @@ from app.models.experiment_version import ExperimentVersion, VersionStatus
 from app.models.research_run import ResearchRun, RunStatus
 from app.models.dataset import Dataset, DatasetSnapshot, SourceType
 from app.models.research_note import ResearchNote
+from app.models.user_feedback import UserFeedback
 from app.models.saved_comparison import SavedComparison
 from app.models.audit_event import AuditEvent
 from app.models.simulation import SimulationSession, SimulationStatus, SimulationDecision, DecisionType
@@ -268,4 +269,5 @@ __all__ = [
     "LearningProposal",
     "PaperTradingRun",
     "PaperTradingDailyMetric",
+    "UserFeedback",
 ]

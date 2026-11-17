@@ -6,6 +6,7 @@ import {
   type CandidateStatus,
 } from './candidate';
 import type { CryptoOverview, CryptoSeriesPayload } from './cryptoBars';
+import type { FeedbackSubmitRequest } from './feedbackDraft';
 import type { IntradayCapability, IntradaySeriesPayload } from './intradayBars';
 
 export const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
@@ -365,6 +366,12 @@ export const api = {
     list: (experimentId: string) => apiFetch(`/api/v1/experiments/${experimentId}/notes`),
     create: (experimentId: string, data: { content: string; version_id?: string }) =>
       apiFetch(`/api/v1/experiments/${experimentId}/notes`, { method: 'POST', body: JSON.stringify(data) }),
+  },
+  feedback: {
+    submit: (data: FeedbackSubmitRequest) =>
+      apiFetch('/api/v1/feedback', { method: 'POST', body: JSON.stringify(data) }),
+    list: (limit = 20) => apiFetch(`/api/v1/feedback?limit=${limit}`),
+    get: (feedbackId: string) => apiFetch(`/api/v1/feedback/${feedbackId}`),
   },
   versions: {
     compare: (v1Id: string, v2Id: string) =>
