@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '@/lib/api';
+import { formatDate, formatMoney, formatNumber, formatPercentFraction } from '@/lib/format';
 
 interface UnifiedTrade {
   source: 'research' | 'paper';
@@ -10,19 +11,24 @@ interface UnifiedTrade {
   order_id?: string;
   instrument_id: string;
   rule_id?: string;
-  exit_id?: string;
-  entry_time?: string;
-  exit_time?: string;
-  filled_at?: string;
-  entry_price?: number;
-  exit_price?: number;
-  price?: number;
-  quantity?: number;
+  exit_id?: string | null;
+  // Every timestamp is serialised as `value.isoformat() if value else None`.
+  entry_time?: string | null;
+  exit_time?: string | null;
+  entry_price?: number | null;
+  exit_price?: number | null;
+  quantity?: number | null;
   side?: string;
-  net_pnl?: number;
+  // A paper fill carries no settled P&L: the endpoint sends the key with null,
+  // which is not the same thing as the key being missing.
+  net_pnl?: number | null;
   exit_reason?: string;
-  bars_held?: number;
-  interval_minutes?: number;
+  bars_held?: number | null;
+  mfe?: number | null;
+  mae?: number | null;
+  interval_minutes?: number | null;
+  order_type?: string;
+  created_at?: string | null;
 }
 
 interface UnifiedSummary {
@@ -30,17 +36,19 @@ interface UnifiedSummary {
   research_count: number;
   paper_count: number;
   research_total_pnl: number;
-  research_win_rate: number;
+  // A proportion, not a percent: 0.625 means 62.5%. None when no research trade
+  // matched, because an empty denominator has no win rate.
+  research_win_rate: number | null;
 }
 
 interface FiltersApplied {
   source: string;
-  instrument_id?: string;
-  rule_id?: string;
-  date_from?: string;
-  date_to?: string;
-  pnl_min?: number;
-  pnl_max?: number;
+  instrument_id: string | null;
+  rule_id: string | null;
+  date_from: string | null;
+  date_to: string | null;
+  pnl_min: number | null;
+  pnl_max: number | null;
 }
 
 export default function UnifiedJournalView() {
@@ -91,7 +99,7 @@ export default function UnifiedJournalView() {
     };
   };
 
-  const getPnlColor = (pnl: number | undefined) => {
+  const getPnlColor = (pnl: number | null | undefined) => {
     if (pnl === undefined || pnl === null) return 'var(--text-secondary)';
     return pnl >= 0 ? 'var(--positive, #36C7A0)' : 'var(--negative, #E2636E)';
   };
@@ -175,7 +183,7 @@ export default function UnifiedJournalView() {
               Research Total PnL
             </div>
             <div style={{ fontSize: 18, fontWeight: 600, color: getPnlColor(summary.research_total_pnl) }}>
-              ${summary.research_total_pnl.toFixed(2)}
+              {formatMoney(summary.research_total_pnl)}
             </div>
           </div>
           <div>
@@ -183,7 +191,7 @@ export default function UnifiedJournalView() {
               Research Win Rate
             </div>
             <div style={{ fontSize: 18, fontWeight: 600, color: 'var(--text-primary)' }}>
-              {(summary.research_win_rate * 100).toFixed(1)}%
+              {formatPercentFraction(summary.research_win_rate)}
             </div>
           </div>
         </div>
@@ -240,11 +248,7 @@ export default function UnifiedJournalView() {
                       </span>
                     </td>
                     <td style={{ padding: '10px 12px', color: 'var(--text-primary)' }}>
-                      {trade.entry_time 
-                        ? new Date(trade.entry_time).toLocaleDateString()
-                        : trade.filled_at
-                        ? new Date(trade.filled_at).toLocaleDateString()
-                        : 'N/A'}
+                      {formatDate(trade.entry_time)}
                     </td>
                     <td style={{ padding: '10px 12px', color: 'var(--text-primary)' }}>
                       {trade.instrument_id}
@@ -253,13 +257,13 @@ export default function UnifiedJournalView() {
                       {trade.rule_id || trade.side || 'N/A'}
                     </td>
                     <td style={{ padding: '10px 12px', textAlign: 'right', color: 'var(--text-primary)', fontFamily: 'monospace' }}>
-                      {trade.entry_price?.toFixed(2) || trade.price?.toFixed(2) || 'N/A'}
+                      {formatNumber(trade.entry_price, 2)}
                     </td>
                     <td style={{ padding: '10px 12px', textAlign: 'right', color: 'var(--text-primary)', fontFamily: 'monospace' }}>
-                      {trade.exit_price?.toFixed(2) || 'N/A'}
+                      {formatNumber(trade.exit_price, 2)}
                     </td>
                     <td style={{ padding: '10px 12px', textAlign: 'right', color: getPnlColor(trade.net_pnl), fontWeight: 500, fontFamily: 'monospace' }}>
-                      {trade.net_pnl !== undefined ? `$${trade.net_pnl.toFixed(2)}` : 'N/A'}
+                      {formatMoney(trade.net_pnl)}
                     </td>
                     <td style={{ padding: '10px 12px', color: 'var(--text-secondary)', fontSize: 12 }}>
                       {trade.exit_reason || 'N/A'}

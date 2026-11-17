@@ -1,4 +1,6 @@
 /** Run status is the last state the server recorded, not proof the run is alive. */
+import { parseApiTimestamp } from './format';
+
 export const RUN_STATUS_LABELS: Record<string, string> = {
   pending: 'Not started',
   running: 'Running',
@@ -23,7 +25,7 @@ export function describeRunStatus(
   const base = RUN_STATUS_LABELS[status] ?? `Unknown status (${status})`;
   if (status !== 'running') return { label: base, stale: false };
 
-  const started = startedAt ? Date.parse(startedAt) : NaN;
+  const started = parseApiTimestamp(startedAt)?.getTime() ?? NaN;
   if (!Number.isFinite(started) || now - started <= STALE_RUNNING_MS) {
     return { label: base, stale: false };
   }

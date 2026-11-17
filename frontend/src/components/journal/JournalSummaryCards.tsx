@@ -129,8 +129,11 @@ export default function JournalSummaryCards({ summary, loading }: Props) {
   }
 
   const totalPnlNum = Number(summary.total_pnl);
-  const avgPnlNum = Number(summary.avg_trade_pnl);
-  const winRateNum = Number(summary.win_rate);
+  // avg_trade_pnl and win_rate are ratios over the trade count, so the empty-filter
+  // response sends null. Number(null) is 0 and 0 >= 0 is true, which would make the
+  // sign and threshold glyphs below claim a verdict nothing was measured against.
+  const avgPnlNum = summary.avg_trade_pnl == null ? null : Number(summary.avg_trade_pnl);
+  const winRateNum = summary.win_rate == null ? null : Number(summary.win_rate);
   const profitFactorNum =
     summary.profit_factor != null ? Number(summary.profit_factor) : null;
   const maxDdNum = Number(summary.max_drawdown_pct);
@@ -186,22 +189,31 @@ export default function JournalSummaryCards({ summary, loading }: Props) {
           Win Rate
           <HelpIcon tooltip="Percentage of trades that made a profit. Check = above 50%, warning = below 50%." />
         </div>
-        <div style={cardValueStyle} aria-label={`Win rate ${formatPct(summary.win_rate)}`}>
+        <div
+          style={cardValueStyle}
+          aria-label={
+            winRateNum === null
+              ? 'Win rate not measured'
+              : `Win rate ${formatPct(summary.win_rate)}`
+          }
+        >
           {formatPct(summary.win_rate)}
-          <span
-            style={{
-              fontSize: 11,
-              color:
-                winRateNum >= 50
-                  ? 'var(--positive, #36C7A0)'
-                  : 'var(--negative, #E2636E)',
-              marginLeft: 6,
-              fontWeight: 500,
-            }}
-            aria-hidden="true"
-          >
-            {winRateNum >= 50 ? '\u2713' : '!'}
-          </span>
+          {winRateNum !== null && (
+            <span
+              style={{
+                fontSize: 11,
+                color:
+                  winRateNum >= 50
+                    ? 'var(--positive, #36C7A0)'
+                    : 'var(--negative, #E2636E)',
+                marginLeft: 6,
+                fontWeight: 500,
+              }}
+              aria-hidden="true"
+            >
+              {winRateNum >= 50 ? '\u2713' : '!'}
+            </span>
+          )}
         </div>
       </div>
 
@@ -219,11 +231,17 @@ export default function JournalSummaryCards({ summary, loading }: Props) {
             alignItems: 'center',
             gap: 6,
           }}
-          aria-label={`Average trade P&L ${avgPnlNum >= 0 ? 'positive' : 'negative'} ${formatMoney(summary.avg_trade_pnl)}`}
+          aria-label={
+            avgPnlNum === null
+              ? 'Average trade P&L not measured'
+              : `Average trade P&L ${avgPnlNum >= 0 ? 'positive' : 'negative'} ${formatMoney(summary.avg_trade_pnl)}`
+          }
         >
-          <span style={{ fontSize: 18, fontWeight: 600 }} aria-hidden="true">
-            {avgPnlNum >= 0 ? '+' : '\u2212'}
-          </span>
+          {avgPnlNum !== null && (
+            <span style={{ fontSize: 18, fontWeight: 600 }} aria-hidden="true">
+              {avgPnlNum >= 0 ? '+' : '\u2212'}
+            </span>
+          )}
           {formatMoney(summary.avg_trade_pnl)}
         </div>
       </div>

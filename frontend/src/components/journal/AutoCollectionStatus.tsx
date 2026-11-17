@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '@/lib/api';
+import { formatDateTime } from '@/lib/format';
 
 interface SchedulerStatus {
   enabled: boolean;
@@ -152,7 +153,7 @@ export default function AutoCollectionStatus() {
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <span style={{ fontSize: 14, color: 'var(--text-secondary)' }}>Next Run</span>
                 <span style={{ fontSize: 14, fontWeight: 500 }}>
-                  {new Date(status.next_run).toLocaleString()}
+                  {formatDateTime(status.next_run)}
                 </span>
               </div>
             )}
@@ -248,7 +249,7 @@ export default function AutoCollectionStatus() {
                 {history.map((run) => (
                   <tr key={run.id} style={{ borderBottom: '1px solid var(--border-subtle)' }}>
                     <td style={{ padding: '8px 12px', color: 'var(--text-primary)' }}>
-                      {run.created_at ? new Date(run.created_at).toLocaleString() : 'N/A'}
+                      {formatDateTime(run.created_at)}
                     </td>
                     <td style={{ padding: '8px 12px', color: 'var(--text-primary)' }}>
                       {run.instrument_id}

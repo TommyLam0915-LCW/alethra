@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '@/lib/api';
+import { formatDate, formatMoney, formatNumber, formatPercentFraction, formatPercentPoints } from '@/lib/format';
 
 interface RunComparison {
   run_id: string;
@@ -11,25 +12,23 @@ interface RunComparison {
   total_trades: number;
   wins: number;
   losses: number;
-  win_rate: number;
+  // A run that has not traded has no win rate, and a run with one trade (or with
+  // identical P&L on every trade) has no Sharpe: the API sends null for both and
+  // the cell must not read either as a measured zero.
+  win_rate: number | null;
   total_pnl: number;
-  avg_pnl: number;
-  avg_win: number;
-  avg_loss: number;
-  sharpe: number;
+  avg_pnl: number | null;
+  avg_win: number | null;
+  avg_loss: number | null;
+  sharpe: number | null;
   max_drawdown_pct: number;
 }
 
+type MetricStem = 'sharpe' | 'pnl' | 'win_rate' | 'max_drawdown';
+
 interface ComparisonResult {
   comparisons: RunComparison[];
-  highlights: {
-    best_sharpe?: string;
-    worst_sharpe?: string;
-    best_pnl?: string;
-    worst_pnl?: string;
-    best_win_rate?: string;
-    worst_win_rate?: string;
-  };
+  highlights: Partial<Record<`best_${MetricStem}` | `worst_${MetricStem}`, string>>;
   count: number;
 }
 
@@ -116,20 +115,16 @@ export default function CrossRunComparison() {
     setComparison(null);
   };
 
-  const getMetricStyle = (runId: string, metric: keyof ComparisonResult['highlights'], value: number, invert: boolean = false) => {
+  // Highlights are keyed `best_<stem>` / `worst_<stem>`, and `max_drawdown` is a
+  // two-word stem: splitting the best key on `_` asked for `worst_max`, a key the
+  // API never sends, so the worst drawdown was never marked. Lower-is-better is
+  // decided server side, where the ranking happens.
+  const getMetricStyle = (runId: string, stem: MetricStem) => {
     if (!comparison?.highlights) return {};
-    
-    const isBest = comparison.highlights[metric] === runId;
-    const isWorst = comparison.highlights[`worst_${metric.split('_')[1]}` as keyof ComparisonResult['highlights']] === runId;
-    
-    if (invert) {
-      // For metrics where lower is better (e.g., max_drawdown)
-      return {
-        color: isBest ? 'var(--positive, #36C7A0)' : isWorst ? 'var(--negative, #E2636E)' : 'inherit',
-        fontWeight: isBest || isWorst ? 600 : 400,
-      };
-    }
-    
+
+    const isBest = comparison.highlights[`best_${stem}`] === runId;
+    const isWorst = comparison.highlights[`worst_${stem}`] === runId;
+
     return {
       color: isBest ? 'var(--positive, #36C7A0)' : isWorst ? 'var(--negative, #E2636E)' : 'inherit',
       fontWeight: isBest || isWorst ? 600 : 400,
@@ -198,7 +193,7 @@ export default function CrossRunComparison() {
                       {run.instrument_id} @ {run.interval_minutes}m
                     </div>
                     <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 2 }}>
-                      {run.trade_count} trades · {new Date(run.created_at).toLocaleDateString()}
+                      {run.trade_count} trades · {formatDate(run.created_at)}
                     </div>
                   </div>
                   <div style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'monospace' }}>
@@ -286,17 +281,17 @@ export default function CrossRunComparison() {
                     <td style={{ padding: '10px 12px', textAlign: 'right', color: 'var(--text-primary)' }}>
                       {run.total_trades}
                     </td>
-                    <td style={{ padding: '10px 12px', textAlign: 'right', ...getMetricStyle(run.run_id, 'best_win_rate', run.win_rate) }}>
-                      {(run.win_rate * 100).toFixed(1)}%
+                    <td style={{ padding: '10px 12px', textAlign: 'right', ...getMetricStyle(run.run_id, 'win_rate') }}>
+                      {formatPercentFraction(run.win_rate)}
                     </td>
-                    <td style={{ padding: '10px 12px', textAlign: 'right', ...getMetricStyle(run.run_id, 'best_pnl', run.total_pnl) }}>
-                      ${run.total_pnl.toFixed(2)}
+                    <td style={{ padding: '10px 12px', textAlign: 'right', ...getMetricStyle(run.run_id, 'pnl') }}>
+                      {formatMoney(run.total_pnl)}
                     </td>
-                    <td style={{ padding: '10px 12px', textAlign: 'right', ...getMetricStyle(run.run_id, 'best_sharpe', run.sharpe) }}>
-                      {run.sharpe.toFixed(3)}
+                    <td style={{ padding: '10px 12px', textAlign: 'right', ...getMetricStyle(run.run_id, 'sharpe') }}>
+                      {formatNumber(run.sharpe, 3)}
                     </td>
-                    <td style={{ padding: '10px 12px', textAlign: 'right', ...getMetricStyle(run.run_id, 'best_sharpe', run.max_drawdown_pct, true) }}>
-                      {run.max_drawdown_pct.toFixed(2)}%
+                    <td style={{ padding: '10px 12px', textAlign: 'right', ...getMetricStyle(run.run_id, 'max_drawdown') }}>
+                      {formatPercentPoints(run.max_drawdown_pct, 2)}
                     </td>
                   </tr>
                 ))}

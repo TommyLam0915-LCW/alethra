@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { createChart, LineSeries, ColorType, CrosshairMode, type IChartApi } from 'lightweight-charts';
 import { api } from '@/lib/api';
+import { parseApiTimestamp } from '@/lib/format';
 import type { JournalFilters } from './JournalDashboard';
 
 interface Props {
@@ -12,7 +13,9 @@ interface Props {
 interface EquityPoint {
   date: string;
   equity: string;
-  drawdown_pct: string;
+  // None while the running peak is not positive: a percentage of a zero-or
+  // negative peak has no answer.
+  drawdown_pct: string | null;
 }
 
 interface EquitySeries {
@@ -21,7 +24,8 @@ interface EquitySeries {
 }
 
 interface EquityCurveResponse {
-  baseline_cash: string;
+  // None when the runs behind the curve record no starting cash.
+  baseline_cash: string | null;
   series: EquitySeries[];
 }
 
@@ -37,8 +41,8 @@ const SERIES_COLORS = [
 ];
 
 function dateToUnix(dateStr: string): number {
-  const d = new Date(dateStr);
-  return Math.floor(d.getTime() / 1000);
+  const parsed = parseApiTimestamp(dateStr);
+  return Math.floor((parsed ? parsed.getTime() : NaN) / 1000);
 }
 
 export default function EquityCurveChart({ filters }: Props) {

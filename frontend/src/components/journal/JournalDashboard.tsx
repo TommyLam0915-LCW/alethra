@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { api, formatErrorDetail, ApiError } from '@/lib/api';
+import { classifySummaryStatus } from '@/lib/journalSummaryStatus';
 import AppShell from '@/components/shell/AppShell';
 import JournalFilterBar from './JournalFilterBar';
 import JournalSummaryCards from './JournalSummaryCards';
@@ -79,8 +80,10 @@ export interface JournalTrade {
 export interface JournalSummary {
   total_trades: number;
   total_pnl: string;
-  win_rate: string;
-  avg_trade_pnl: string;
+  // None when no trade matches the filters: a win rate and an average trade are
+  // ratios over a denominator with no observations, so they are not 0 either.
+  win_rate: string | null;
+  avg_trade_pnl: string | null;
   profit_factor: string | null;
   max_drawdown_pct: string;
   best_trade: { trade_id: string; net_pnl: string; entry_time: string; instrument_id: string; rule_label_zh: string } | null;
@@ -174,24 +177,13 @@ function PerformanceSummary({ summary, skills }: { summary: JournalSummary; skil
   const worstSkill = sortedSkills[sortedSkills.length - 1];
 
   const totalPnl = Number(summary.total_pnl);
-  const winRate = Number(summary.win_rate);
-
-  let status: string;
-  let statusColor: string;
-
-  if (totalPnl > 0 && winRate > 50) {
-    status = 'Your strategies are profitable';
-    statusColor = 'var(--positive, #36C7A0)';
-  } else if (totalPnl > 0) {
-    status = 'Your strategies are profitable, but win rate could improve';
-    statusColor = 'var(--positive, #36C7A0)';
-  } else if (totalPnl < -1000) {
-    status = 'Your strategies are losing money';
-    statusColor = 'var(--negative, #E2636E)';
-  } else {
-    status = 'Your strategies are slightly negative';
-    statusColor = 'var(--negative, #E2636E)';
-  }
+  const status = classifySummaryStatus(summary);
+  const statusColor =
+    status.tone === 'positive'
+      ? 'var(--positive, #36C7A0)'
+      : status.tone === 'negative'
+        ? 'var(--negative, #E2636E)'
+        : 'var(--text-secondary)';
 
   return (
     <div
@@ -204,7 +196,7 @@ function PerformanceSummary({ summary, skills }: { summary: JournalSummary; skil
       }}
     >
       <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 8, color: statusColor }}>
-        {status}
+        {status.message}
       </div>
       <div style={{ fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.6 }}>
         Total P&L:{' '}
@@ -327,7 +319,9 @@ function PerformanceInsights({ summary, skills, trades }: { summary: JournalSumm
   }
 
   // Insight 4: Win rate
-  // Evidence gating: only comment on win rate if total_trades >= 30
+  // Evidence gating: only comment on win rate if total_trades >= 30. That gate is
+  // also what makes the coercion below safe: the endpoint sends win_rate null only
+  // in the total_trades === 0 response, so Number() here never sees null.
   const winRate = Number(summary.win_rate);
   const totalTrades = summary.total_trades;
   

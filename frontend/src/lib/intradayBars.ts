@@ -11,6 +11,7 @@
  *   backoff/quota window.
  */
 
+import { parseApiTimestamp } from './format';
 export interface IntradayCandle {
   open_time: string;
   close_time: string;
@@ -137,9 +138,9 @@ export interface IntradayCapability {
 /** Chart timestamp: epoch seconds, or null for a value the chart cannot place. */
 export function chartTime(iso: string | null | undefined): number | null {
   if (!iso) return null;
-  const ms = Date.parse(iso);
-  if (Number.isNaN(ms)) return null;
-  return Math.floor(ms / 1000);
+  const parsed = parseApiTimestamp(iso);
+  if (!parsed) return null;
+  return Math.floor(parsed.getTime() / 1000);
 }
 
 /** Closed bars followed by the forming bar, ascending and de-duplicated. */

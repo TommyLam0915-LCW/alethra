@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { createChart, LineSeries, LineStyle, ColorType, CrosshairMode, type IChartApi, type ISeriesApi } from 'lightweight-charts';
 import { api } from '@/lib/api';
+import { parseApiTimestamp } from '@/lib/format';
 import type { JournalFilters } from './JournalDashboard';
 
 interface Props {
@@ -24,8 +25,8 @@ interface CumPnlResponse {
 }
 
 function dateToUnix(dateStr: string): number {
-  const d = new Date(dateStr);
-  return Math.floor(d.getTime() / 1000);
+  const parsed = parseApiTimestamp(dateStr);
+  return Math.floor((parsed ? parsed.getTime() : NaN) / 1000);
 }
 
 export default function CumulativePnlChart({ filters }: Props) {
