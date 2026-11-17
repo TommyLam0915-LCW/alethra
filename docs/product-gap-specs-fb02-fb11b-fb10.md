@@ -175,6 +175,29 @@
 - 前端：登入後頁面提供固定入口；送出前後明確區分「草稿／未提交」與「已提交」；由草稿產生的匯出或下載必須標示「未提交」，不得呈現成已送達。
 - 最小版明確不含：附件或圖片上傳、email／Slack／webhook 等外部投遞、外部工單系統串接、客戶可見的營運回覆。這些需要額外的儲存、掃描或外部服務，另案決定。
 
+### 4.1 實作對照（as-built，2026-11-16，基準 `b08418f2` + 修復分支）
+
+本節只記錄程式實際長出來的樣子，不改寫上方規格原文。
+
+已實作（有程式與測試可追溯）：
+
+- `POST /api/v1/feedback`（201）、`GET /api/v1/feedback?limit=`（列自己的）、`GET /api/v1/feedback/{id}`：`backend/app/api/feedback.py:110`、`:131`、`:147`。`user_id` 一律取自 token（`:117`），不接受本文欄位指定。
+- 新資料表 `user_feedback` 與 additive migration `backend/migrations/versions/e1f2a3b4c5d6_add_user_feedback.py`；未重用 `support_logs`。
+- 站內入口與表單：`frontend/src/app/feedback/page.tsx`；草稿／匯出「未提交」標示：`page.tsx:185`、`:190`、`:341`、`:423` 與 `frontend/src/lib/feedbackDraft.ts:99`（英文文案 “not submitted”，非本規格所用的中文）。
+- 跨使用者隔離：非本人 id 回 404，且與不存在的 id 回應完全相同（`feedback.py:153-167`，測試 `backend/tests/test_feedback_api.py:195`）。未登入回 401（`test_feedback_api.py:55`）。
+
+與本規格 §4 的偏離（屬實作決定，非規格完成）：
+
+- 類別值不同：規格寫 `bug`／`usability`／`data_issue`／`feature_request`／`other`；實作為產品區分類的 `research_results`／`strategy_setup`／`data_instruments`／`paper_trading`／`account_access`／`other`（`feedback.py:28-35`，前端 `feedbackDraft.ts` 同步）。
+- 欄位不同：規格要「主旨（1–200）」＋「內容（1–5000）」；實作拆為 `steps`（必填 ≤4000）、`actual`（必填 ≤4000）、`expected`（≤2000）、`page`（≤200）、`error_reference`（≤200）。沒有「可選關聯對象（限自己的實驗／run／版本）」欄位。
+- 列表路由是 `GET /api/v1/feedback`，不是規格寫死的 `GET /api/v1/feedback/mine`。
+
+未實作（維持「未實作」，不得對客戶宣稱可用）：
+
+- 狀態生命週期 `submitted → triaged／closed`：`user_feedback` 沒有 status 欄（`backend/app/models/user_feedback.py:21-29`），因此 §6 驗收條件 1 的「狀態為 submitted」與條件 5「管理員可看到並轉換狀態」不成立；管理端路由亦不存在。
+- 提交率限制與 429（§6 條件 4 的後半部）：路由內無任何速率限制。
+- 瀏覽器端正常點擊驗收：本輪仍為 BLOCKED，僅有 API／測試層證據。
+
 ### 5. API／schema／權限影響
 
 - 新增回饋資料表與 additive migration；新增客戶路由與管理路由。
@@ -205,6 +228,6 @@
 
 ## 共通交付邊界
 
-- 以上三項目前皆為「規格已寫、功能未實作」；不得在對客戶的說明中寫成已可用。
+- 本文件寫成時，三項皆為「規格已寫、功能未實作」。到 `b08418f2` 修復分支為止，這個敘述已不再全部成立，逐項現況為：FB-02 仍未實作（`backend/app/api/schemas.py:18` 的 `ALLOWED_TEMPLATES` 只有 `buy_and_hold`／`sma_crossover`／`price_change_fixed_hold`）；FB-11B 第一階段的「策略作為一級物件＋版本化＋由既有版本產生修訂」已有路由與回歸測試（`backend/app/api/experiments.py:674` 的 `create_revision`、`backend/tests/test_experiment_revisions.py`），批量匯入與第二階段未實作；FB-10 的最小提交路徑與站內入口已實作，但狀態生命週期、管理端分流與速率限制未實作，詳見 §4.1。客戶說明仍以各條目的「未實作」清單為準，不得以本文某段存在就宣稱該能力可用。
 - 實作時不得順帶新增未核准的資料供應商、外部服務、套件或權限模型變更；FB-11B 第二階段與 FB-10 的附件／外部投遞需另行批准。
 - 任何新能力都必須有對應的離線測試與（可行時）瀏覽器驗收；只有 OpenAPI 描述或文件存在，不算行為已驗證。
