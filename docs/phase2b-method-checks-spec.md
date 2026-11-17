@@ -136,9 +136,12 @@ All checks are computed from existing data. No LLM, no external AI, no market da
 - **Category:** A (evaluation)
 
 #### RC-006: Benchmark Comparison Available
-- **Input:** `benchmark_id` (nullable); `metrics.benchmark_total_return_pct` (always key, None if absent)
-- **Logic:** benchmark_id NOT NULL AND metric NOT NULL → PASS; benchmark_id NOT NULL AND metric NULL → WARNING; benchmark_id NULL → NOT_APPLICABLE
-- **INSUFFICIENT_INFORMATION:** run not completed
+- **Input:** `strategy_spec.benchmark_id` (key presence and type both matter); `metrics.benchmark_total_return_pct`
+- **Intent classification** (`not_requested` / `configured` / `malformed`), aligned with the StrategySpec validator and the engine:
+  - key absent, `None`, or `""` → `not_requested` — the spec validator normalises all three to the no-benchmark case and the engine treats `""` as falsy
+  - non-empty string that is not blank when stripped → `configured`
+  - whitespace-only string, or any non-string type → `malformed` (the spec validator would have rejected it, so it did not arrive through the create path)
+- **Logic:** `not_requested` → NOT_APPLICABLE (and if the run nonetheless records a benchmark return, `evidence.anomaly` says so — a stray metric never earns a PASS); `malformed` → INSUFFICIENT_INFORMATION; `configured` + run not completed → INSUFFICIENT_INFORMATION; `configured` + metric NULL → WARNING; `configured` + metric present → PASS
 - **Category:** A (evaluation)
 
 #### RC-007: Result Completeness
@@ -147,9 +150,12 @@ All checks are computed from existing data. No LLM, no external AI, no market da
 - **Category:** A (evaluation)
 
 #### RC-008: Engine Version Recorded
-- **Input:** `ResearchRun.engine_version` (String(50), NOT NULL)
-- **Logic:** Non-empty → PASS
-- **INSUFFICIENT_INFORMATION:** null or empty (should not occur given NOT NULL constraint)
+- **Input:** `ResearchRun.engine_version` (String(50), NOT NULL) — and whether a completed run was selected at all
+- **Who writes it:** the run path (`app/services/research_runs.py`) sets it on the run row when it inserts it. The create path never writes it, and the lock path writes only `experiment_versions.engine_version`, which is a nullable column this check does not read.
+- **Logic:** non-empty → PASS
+- **INSUFFICIENT_INFORMATION:** two distinct cases, reported differently, because they mean different things:
+  - `run_present=false` — no completed run exists, so nothing has executed and no engine can be named. This is the expected state before the first run, **not** a constraint violation.
+  - `run_present=true` with a blank version — the run column is NOT NULL and the run path always writes a value, so this row was not created by the current run path.
 - **Category:** A (evaluation)
 
 #### RC-009: Zero-Cost Warning Consistency

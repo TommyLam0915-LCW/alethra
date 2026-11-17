@@ -2,6 +2,8 @@
 import pytest
 from datetime import datetime, timedelta
 from uuid import uuid4, UUID
+from pydantic import ValidationError
+from app.api.schemas import StrategySpec
 from app.method_checks.rules import (
     check_rc001_hypothesis,
     check_rc002_falsification,
@@ -227,6 +229,7 @@ class TestRC006Benchmark:
         run = ResearchRun(status=RunStatus.completed, metrics={})
         status, evidence = check_rc006_benchmark(spec, run)
         assert status == "WARNING"
+        assert evidence["benchmark_intent"] == "configured"
 
     def test_not_applicable_no_benchmark(self):
         spec = {"benchmark_id": None}
@@ -239,6 +242,94 @@ class TestRC006Benchmark:
         run = ResearchRun(status=RunStatus.pending, metrics={})
         status, evidence = check_rc006_benchmark(spec, run)
         assert status == "INSUFFICIENT_INFORMATION"
+
+    # --- D-3 boundary: the three spellings of "no benchmark" -----------------
+    # The acceptance UI sends benchmark_id: "" for its "no benchmark" choice,
+    # which the spec validator accepts (app/api/schemas.py) and the engine
+    # treats as falsy (app/engine/backtest.py). RC-006 used to call that value
+    # a configured benchmark with missing metrics.
+
+    @pytest.mark.parametrize("spec", [
+        {},
+        {"benchmark_id": None},
+        {"benchmark_id": ""},
+    ], ids=["absent", "None", "empty-string"])
+    def test_no_benchmark_spellings_are_not_applicable(self, spec):
+        run = ResearchRun(status=RunStatus.completed, metrics={})
+        status, evidence = check_rc006_benchmark(spec, run)
+        assert status == "NOT_APPLICABLE"
+        assert evidence["benchmark_intent"] == "not_requested"
+
+    @pytest.mark.parametrize("spec", [
+        {},
+        {"benchmark_id": None},
+        {"benchmark_id": ""},
+    ], ids=["absent", "None", "empty-string"])
+    def test_no_benchmark_never_passes_on_a_stray_metric(self, spec):
+        """A recorded benchmark return cannot turn "no benchmark" into a comparison."""
+        run = ResearchRun(status=RunStatus.completed, metrics={"benchmark_total_return_pct": 3.2})
+        status, evidence = check_rc006_benchmark(spec, run)
+        assert status == "NOT_APPLICABLE"
+        assert "no benchmark was requested" in evidence["anomaly"].lower()
+
+    def test_whitespace_only_is_reported_not_normalised_away(self):
+        """StrategySpec rejects "   ", so RC-006 must not launder it into "absent"."""
+        spec = {"benchmark_id": "   "}
+        run = ResearchRun(status=RunStatus.completed, metrics={})
+        status, evidence = check_rc006_benchmark(spec, run)
+        assert status == "INSUFFICIENT_INFORMATION"
+        assert evidence["benchmark_intent"] == "malformed"
+
+    def test_non_string_is_reported(self):
+        spec = {"benchmark_id": 12}
+        run = ResearchRun(status=RunStatus.completed, metrics={})
+        status, evidence = check_rc006_benchmark(spec, run)
+        assert status == "INSUFFICIENT_INFORMATION"
+        assert evidence["benchmark_intent"] == "malformed"
+
+    def test_whitespace_benchmark_id_is_rejected_by_the_spec(self):
+        """Pins the contract the rule defers to: "" is valid, "   " is not."""
+        base = dict(
+            template_type="sma_crossover",
+            asset_ids=["DEMO-ALPHA"],
+            start_date="2025-01-01",
+            end_date="2025-06-01",
+            initial_cash=10000.0,
+        )
+        assert StrategySpec(**base, benchmark_id="").benchmark_id == ""
+        assert StrategySpec(**base).benchmark_id is None
+        with pytest.raises(ValidationError):
+            StrategySpec(**base, benchmark_id="   ")
+
+    def test_padded_identifier_still_counts_as_configured(self):
+        """Not a spelling of "none": a real id must stay under the microscope."""
+        spec = {"benchmark_id": " DEMO-BENCHMARK "}
+        run = ResearchRun(status=RunStatus.completed, metrics={})
+        status, evidence = check_rc006_benchmark(spec, run)
+        assert status == "WARNING"
+        assert evidence["benchmark_intent"] == "configured"
+
+    # --- D-3 copy: the sentence shown beside the status ----------------------
+
+    def test_empty_string_explains_no_benchmark(self):
+        run = ResearchRun(status=RunStatus.completed, metrics={})
+        status, evidence = check_rc006_benchmark({"benchmark_id": ""}, run)
+        explanation = generate_explanation("RC-006", status, evidence)
+        assert "No benchmark configured." in explanation
+        assert "incomplete run results" not in explanation
+
+    def test_malformed_explains_the_contract_disagreement(self):
+        run = ResearchRun(status=RunStatus.completed, metrics={})
+        status, evidence = check_rc006_benchmark({"benchmark_id": "  "}, run)
+        explanation = generate_explanation("RC-006", status, evidence)
+        assert "not a usable identifier" in explanation
+
+    def test_configured_missing_metric_copy_unchanged(self):
+        run = ResearchRun(status=RunStatus.completed, metrics={})
+        status, evidence = check_rc006_benchmark({"benchmark_id": "DEMO-BENCHMARK"}, run)
+        explanation = generate_explanation("RC-006", status, evidence)
+        assert "Benchmark DEMO-BENCHMARK configured but metric is missing." in explanation
+        assert "This indicates incomplete run results." in explanation
 
 
 class TestRC007ResultCompleteness:
@@ -290,6 +381,47 @@ class TestRC008EngineVersion:
         run = ResearchRun(engine_version="   ")
         status, evidence = check_rc008_engine_version(run)
         assert status == "INSUFFICIENT_INFORMATION"
+
+    def test_run_absent_is_recorded_as_no_run(self):
+        status, evidence = check_rc008_engine_version(None)
+        assert status == "INSUFFICIENT_INFORMATION"
+        assert evidence["run_present"] is False
+
+    def test_existing_run_is_recorded_as_run_present(self):
+        run = ResearchRun(status=RunStatus.completed, engine_version=None)
+        status, evidence = check_rc008_engine_version(run)
+        assert status == "INSUFFICIENT_INFORMATION"
+        assert evidence["run_present"] is True
+
+    def test_no_run_copy_does_not_promise_a_constraint(self):
+        # D-1: before the first run nothing has executed, so a missing engine
+        # version is the expected state. Claiming a database violation here
+        # accused rows that no constraint could have covered.
+        status, evidence = check_rc008_engine_version(None)
+        text = generate_explanation("RC-008", status, evidence)
+        assert "should not occur given database constraints" not in text
+        assert "no completed run exists" in text
+        assert "not a database-constraint violation" in text
+
+    def test_existing_run_copy_names_the_anomaly(self):
+        run = ResearchRun(status=RunStatus.completed, engine_version=None)
+        status, evidence = check_rc008_engine_version(run)
+        text = generate_explanation("RC-008", status, evidence)
+        assert "A completed run exists but its engine_version is empty" in text
+        assert "no completed run exists" not in text
+
+    def test_pass_copy_unchanged(self):
+        text = generate_explanation("RC-008", "PASS", {"engine_version": "1.1.0"})
+        assert text.startswith("A. Observation: Engine version 1.1.0 is recorded.")
+
+    def test_version_execution_columns_are_nullable(self):
+        # The create path legitimately leaves these NULL; the NOT NULL column is
+        # the run's, which is what RC-008 reads. Pinning the difference keeps a
+        # future constraint from reviving the false claim above.
+        assert ExperimentVersion.__table__.c.engine_version.nullable is True
+        assert ExperimentVersion.__table__.c.data_source.nullable is True
+        assert ExperimentVersion.__table__.c.data_timezone.nullable is True
+        assert ResearchRun.__table__.c.engine_version.nullable is False
 
 
 class TestRC009ZeroCostWarnings:

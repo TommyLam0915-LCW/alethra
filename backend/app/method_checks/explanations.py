@@ -144,10 +144,22 @@ def _explain_rc006(status: str, evidence: Dict[str, Any]) -> str:
             "C. Limitation: This indicates incomplete run results."
         )
     elif status == "NOT_APPLICABLE":
-        return (
+        text = (
             "A. Observation: No benchmark configured.\n"
             "B. Interpretation: Benchmark comparison is not applicable.\n"
             "C. Limitation: Benchmark comparison requires explicit configuration."
+        )
+        anomaly = evidence.get("anomaly")
+        if anomaly:
+            text += f"\nD. Inconsistency: {anomaly}."
+        return text
+    if evidence.get("benchmark_intent") == "malformed":
+        return (
+            "A. Observation: The stored benchmark_id is not a usable identifier, so no conclusion "
+            "is drawn about a benchmark comparison.\n"
+            "B. Interpretation: The value could not have been created through the strategy spec "
+            "contract, so the record and the contract disagree.\n"
+            "C. Limitation: This check cannot say whether a benchmark comparison was intended."
         )
     return (
         "A. Observation: Benchmark data is not available.\n"
@@ -188,10 +200,22 @@ def _explain_rc008(status: str, evidence: Dict[str, Any]) -> str:
             "B. Interpretation: Run was executed with a specific engine version.\n"
             "C. Limitation: Engine version does not guarantee correctness."
         )
+    if evidence.get("run_present"):
+        return (
+            "A. Observation: A completed run exists but its engine_version is empty.\n"
+            "B. Interpretation: The run path writes a non-empty engine version when it "
+            "inserts the row, and the column is declared NOT NULL, so this row was not "
+            "created by the current run path.\n"
+            "C. Limitation: This check can report that no engine is named; it cannot "
+            "infer which engine executed."
+        )
     return (
-        "A. Observation: Engine version is not recorded.\n"
-        "B. Interpretation: Cannot verify engine version.\n"
-        "C. Limitation: This should not occur given database constraints."
+        "A. Observation: Engine version is not recorded, because no completed run exists.\n"
+        "B. Interpretation: Nothing has executed yet, so there is no engine to name. A "
+        "newly saved version records only its spec and config hash; the engine version is "
+        "written when a run is created, and this review reads only completed runs.\n"
+        "C. Limitation: This is the expected state before the first completed run, not a "
+        "database-constraint violation."
     )
 
 

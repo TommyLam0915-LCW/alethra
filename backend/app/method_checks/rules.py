@@ -190,25 +190,65 @@ def check_rc005_trade_count(run: Any) -> Tuple[str, Dict[str, Any]]:
     return "INSUFFICIENT_INFORMATION", evidence
 
 
+def _benchmark_intent(strategy_spec: Dict[str, Any]) -> str:
+    """Classify the stored benchmark_id against the StrategySpec contract.
+
+    "not_requested" — key absent, None or "". app/api/schemas.py:77 special-cases
+    "" so the UI's explicit "no benchmark" is valid input, and
+    app/engine/backtest.py:579 treats the same value as falsy; frontend
+    benchmarkState.ts:72 renders it as "None requested". The rule must agree.
+    "malformed" — present but not a usable identifier (whitespace-only or a
+    non-string). StrategySpec rejects these, so seeing one means the value
+    arrived outside the create/run contract; it is neither a valid request nor a
+    legitimate absence, and reporting it as either would hide the inconsistency.
+    "configured" — a non-empty identifier.
+    """
+    if "benchmark_id" not in strategy_spec:
+        return "not_requested"
+    benchmark_id = strategy_spec["benchmark_id"]
+    if benchmark_id is None:
+        return "not_requested"
+    if isinstance(benchmark_id, str):
+        if benchmark_id == "":
+            return "not_requested"
+        if not benchmark_id.strip():
+            return "malformed"
+        return "configured"
+    return "malformed"
+
+
 def check_rc006_benchmark(strategy_spec: Dict[str, Any], run: Any) -> Tuple[str, Dict[str, Any]]:
     """RC-006: Benchmark Comparison Available.
 
-    Check benchmark_id and metrics.benchmark_total_return_pct.
+    Absent, None and "" all mean no benchmark was requested and make the check
+    not applicable. A benchmark that really was requested still reports WARNING
+    when its metric is missing on a completed run.
     """
+    intent = _benchmark_intent(strategy_spec)
     benchmark_id = strategy_spec.get("benchmark_id")
 
-    evidence = {"benchmark_id": benchmark_id}
-
-    if benchmark_id is None:
-        return "NOT_APPLICABLE", evidence
-
-    if not run or getattr(run, "status", None) != "completed":
-        return "INSUFFICIENT_INFORMATION", evidence
+    evidence = {"benchmark_id": benchmark_id, "benchmark_intent": intent}
 
     metrics = getattr(run, "metrics", None) or {}
     benchmark_return = metrics.get("benchmark_total_return_pct")
-
     evidence["benchmark_total_return_pct"] = benchmark_return
+
+    if intent == "not_requested":
+        if benchmark_return is not None:
+            evidence["anomaly"] = (
+                "No benchmark was requested, yet the run records a benchmark return"
+            )
+        return "NOT_APPLICABLE", evidence
+
+    if intent == "malformed":
+        evidence["reason"] = (
+            "benchmark_id is present but is not a usable benchmark identifier; "
+            "StrategySpec would reject this value, so it did not arrive through the create path"
+        )
+        return "INSUFFICIENT_INFORMATION", evidence
+
+    if not run or getattr(run, "status", None) != "completed":
+        return "INSUFFICIENT_INFORMATION", evidence
 
     if benchmark_return is None:
         evidence["warning"] = "Benchmark configured but metric missing"
@@ -246,11 +286,17 @@ def check_rc007_result_completeness(run: Any) -> Tuple[str, Dict[str, Any]]:
 def check_rc008_engine_version(run: Any) -> Tuple[str, Dict[str, Any]]:
     """RC-008: Engine Version Recorded.
 
-    Check if engine_version is present.
+    Only a completed run can carry an engine version: the review loader selects
+    ``status == completed``, and the run path writes ``engine_version`` when it
+    inserts the row. So an absent run is the pre-first-run state, while a run
+    with a blank version is a row the current run path did not create.
     """
     engine_version = getattr(run, "engine_version", None) if run else None
 
-    evidence = {"engine_version": engine_version}
+    evidence = {
+        "engine_version": engine_version,
+        "run_present": run is not None,
+    }
 
     if engine_version and str(engine_version).strip():
         return "PASS", evidence
