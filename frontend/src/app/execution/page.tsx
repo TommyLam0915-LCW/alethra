@@ -1,9 +1,10 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
+import { createRequestGuard } from '@/lib/latestRequest';
 import { brand } from '@/lib/brand';
 import { statusPillClass } from '@/lib/status-styles';
 import { formatDateTime } from '@/lib/format';
@@ -61,6 +62,7 @@ export default function ExecutionPage() {
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [authTokenInputs, setAuthTokenInputs] = useState<Record<string, string>>({});
   const [actionError, setActionError] = useState<string | null>(null);
+  const requestGuard = useRef(createRequestGuard()).current;
 
   useEffect(() => {
     const token = localStorage.getItem('token');
@@ -73,15 +75,18 @@ export default function ExecutionPage() {
   }, [router]);
 
   const loadIntents = async () => {
+    const token = requestGuard.begin();
     try {
       setError(null);
       const data = await api.execution.listIntents();
+      if (!requestGuard.isCurrent(token)) return;
       setIntents(data);
     } catch (err) {
+      if (!requestGuard.isCurrent(token)) return;
       console.error('Failed to load intents:', err);
       setError('無法載入執行意圖。請稍後再試。');
     } finally {
-      setLoading(false);
+      if (requestGuard.isCurrent(token)) setLoading(false);
     }
   };
 

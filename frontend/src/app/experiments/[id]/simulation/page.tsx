@@ -1,9 +1,10 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import Link from 'next/link';
 import { api, ApiError } from '@/lib/api';
+import { createRequestGuard } from '@/lib/latestRequest';
 import { formatDateTime } from '@/lib/format';
 
 interface SimulationSession {
@@ -166,6 +167,13 @@ export default function SimulationPage() {
   const [currentVersion, setCurrentVersion] = useState<VersionSummary | null>(null);
   const [showLockConfirm, setShowLockConfirm] = useState(false);
   const [locking, setLocking] = useState(false);
+  const experimentRequestGuard = useRef(createRequestGuard()).current;
+  const versionSessionsRequestGuard = useRef(createRequestGuard()).current;
+  const availableProvidersRequestGuard = useRef(createRequestGuard()).current;
+  const linkedPortfolioRequestGuard = useRef(createRequestGuard()).current;
+  // One button per archived session, none disabled while in flight: clicking
+  // two rows in a row must never leave the older session on screen.
+  const reopenSessionRequestGuard = useRef(createRequestGuard()).current;
 
   useEffect(() => {
     const token = localStorage.getItem('token');
@@ -177,22 +185,26 @@ export default function SimulationPage() {
   }, [experimentId, router]);
 
   const loadExperiment = async () => {
+    const token = experimentRequestGuard.begin();
     try {
       const exp = await api.experiments.get(experimentId);
+      if (!experimentRequestGuard.isCurrent(token)) return;
       setExperiment(exp);
       // The backend gates session creation on the *version's* lock stamp, not on
       // the experiment status. Read both so the page can distinguish "ready",
       // "needs locking" and "legacy row marked locked without a version stamp".
       if (exp.current_version_id) {
         const versions: VersionSummary[] = (await api.experiments.versions(experimentId)) || [];
+        if (!experimentRequestGuard.isCurrent(token)) return;
         setCurrentVersion(versions.find((v) => v.id === exp.current_version_id) ?? null);
         loadAvailableProviders(exp.current_version_id);
         loadVersionSessions(exp.current_version_id);
       }
     } catch (err: any) {
+      if (!experimentRequestGuard.isCurrent(token)) return;
       setError(err.message || 'Could not load the experiment.');
     } finally {
-      setLoading(false);
+      if (experimentRequestGuard.isCurrent(token)) setLoading(false);
     }
   };
 
@@ -214,45 +226,73 @@ export default function SimulationPage() {
   };
 
   const loadLinkedPortfolio = async (sessionId: string) => {
+    const token = linkedPortfolioRequestGuard.begin();
     try {
       const portfolios: LinkedPortfolio[] = await api.paperPortfolio.list();
+      if (!linkedPortfolioRequestGuard.isCurrent(token)) return;
       setLinkedPortfolio(
         (portfolios || []).find((p) => p.simulation_session_id === sessionId) || null
       );
     } catch {
+      if (!linkedPortfolioRequestGuard.isCurrent(token)) return;
       setLinkedPortfolio(null);
     }
   };
 
   const loadVersionSessions = async (versionId: string) => {
+    const token = versionSessionsRequestGuard.begin();
     try {
       const list: SimulationSession[] = (await api.simulations.listForVersion(versionId)) || [];
+      if (!versionSessionsRequestGuard.isCurrent(token)) return;
       setPriorSessions(list);
       const resumable = list.find((s) =>
         ['pending', 'active', 'paused'].includes(s.status)
       );
       if (!resumable) return;
       setSession(resumable);
-      setDecisions((await api.simulations.decisions(resumable.id)) || []);
+      const resumableDecisions = (await api.simulations.decisions(resumable.id)) || [];
+      if (!versionSessionsRequestGuard.isCurrent(token)) return;
+      setDecisions(resumableDecisions);
       loadLinkedPortfolio(resumable.id);
     } catch (err: any) {
+      if (!versionSessionsRequestGuard.isCurrent(token)) return;
       setError(err.message || 'Could not load the replay sessions.');
     }
   };
 
+  // The sessions-list panel keeps its own copy of every session's status, so a
+  // status change on one session is stale there until the list is re-read.
+  // Deliberately does not touch `session`: that row is already the server's answer.
+  const refreshVersionSessions = async () => {
+    if (!experiment?.current_version_id) return;
+    const token = versionSessionsRequestGuard.begin();
+    try {
+      const list: SimulationSession[] =
+        (await api.simulations.listForVersion(experiment.current_version_id)) || [];
+      if (!versionSessionsRequestGuard.isCurrent(token)) return;
+      setPriorSessions(list);
+    } catch {
+      if (!versionSessionsRequestGuard.isCurrent(token)) return;
+      setError('Could not reload the replay session list.');
+    }
+  };
+
   const loadAvailableProviders = async (versionId: string) => {
+    const token = availableProvidersRequestGuard.begin();
     setLoadingProviders(true);
     try {
       const result = await api.simulations.getAvailableProviders(versionId);
+      if (!availableProvidersRequestGuard.isCurrent(token)) return;
       setAvailableProviders(result.available_providers || []);
       // Auto-select if only one provider available
       if (result.available_providers?.length === 1) {
         setSelectedProvider(result.available_providers[0].provider_id);
       }
     } catch (err: any) {
+      if (!availableProvidersRequestGuard.isCurrent(token)) return;
       console.error('Failed to load providers:', err);
     } finally {
-      setLoadingProviders(false);
+      if (availableProvidersRequestGuard.isCurrent(token)) setLoadingProviders(false);
     }
   };
 
@@ -291,7 +331,7 @@ export default function SimulationPage() {
       setSession(s);
       setDecisions([]);
       setLinkedPortfolio(null);
-      setPriorSessions((prev) => [s, ...prev.filter((p) => p.id !== s.id)]);
+      await refreshVersionSessions();
       setShowCreateForm(false);
     } catch (err: any) {
       setError(err.message || 'Could not create the replay session.');
@@ -310,6 +350,7 @@ export default function SimulationPage() {
       const d = await api.simulations.decisions(session.id);
       setDecisions(d);
       loadLinkedPortfolio(session.id);
+      await refreshVersionSessions();
     } catch (err: any) {
       setError(err.message || 'Could not advance the replay session.');
     } finally {
@@ -322,6 +363,7 @@ export default function SimulationPage() {
     try {
       const s = await api.simulations.pause(session.id);
       setSession(s);
+      await refreshVersionSessions();
     } catch (err: any) {
       setError(err.message);
     }
@@ -332,6 +374,7 @@ export default function SimulationPage() {
     try {
       const s = await api.simulations.resume(session.id);
       setSession(s);
+      await refreshVersionSessions();
     } catch (err: any) {
       setError(err.message);
     }
@@ -349,6 +392,7 @@ export default function SimulationPage() {
     try {
       const s = await api.simulations.retire(session.id);
       setSession(s);
+      await refreshVersionSessions();
     } catch (err: any) {
       setError(err.message);
     }
@@ -364,6 +408,7 @@ export default function SimulationPage() {
         simulation_session_id: session.id,
       });
       setLinkedPortfolio(created);
+      await loadLinkedPortfolio(session.id);
     } catch (err: any) {
       setError(err.message || 'Could not create the paper portfolio.');
     } finally {
@@ -386,6 +431,7 @@ export default function SimulationPage() {
   };
 
   const handleReopenSession = async (target: SimulationSession) => {
+    const token = reopenSessionRequestGuard.begin();
     setError('');
     setShowCreateForm(false);
     try {
@@ -393,10 +439,12 @@ export default function SimulationPage() {
         api.simulations.get(target.id),
         api.simulations.decisions(target.id),
       ]);
+      if (!reopenSessionRequestGuard.isCurrent(token)) return;
       setSession(s);
       setDecisions(d || []);
       loadLinkedPortfolio(s.id);
     } catch (err: any) {
+      if (!reopenSessionRequestGuard.isCurrent(token)) return;
       setError(err.message || 'Could not open the replay session.');
     }
   };

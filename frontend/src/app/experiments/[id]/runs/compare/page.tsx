@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useRouter, useParams, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { api, ApiError } from '@/lib/api';
+import { createRequestGuard } from '@/lib/latestRequest';
 import { formatRatePercent } from '@/lib/format';
 import { RUN_STATUS_LABELS, label } from '@/lib/copy';
 
@@ -12,6 +13,8 @@ interface EvidenceDetail {
   record_id?: string;
   field_path?: string;
   derivation?: string;
+  proof?: { spec_config_hash?: string; run_config_hash?: string };
+  note?: string;
 }
 
 interface ComparisonField {
@@ -19,8 +22,8 @@ interface ComparisonField {
   value_a: any;
   value_b: any;
   comparison_status: 'match' | 'differ' | 'insufficient';
-  provenance_a: 'captured' | 'current' | 'absent' | 'unavailable' | 'derived';
-  provenance_b: 'captured' | 'current' | 'absent' | 'unavailable' | 'derived';
+  provenance_a: 'captured' | 'current' | 'absent' | 'derived' | 'spec_verified';
+  provenance_b: 'captured' | 'current' | 'absent' | 'derived' | 'spec_verified';
   evidence_source?: string;
   evidence_detail?: { run_a?: EvidenceDetail; run_b?: EvidenceDetail };
 }
@@ -103,19 +106,27 @@ function describeDimensionValue(dimension: string, value: any): string {
 
 const PROVENANCE_LABELS: Record<string, string> = {
   captured: 'Captured',
+  spec_verified: 'Verified by config hash',
   current: 'Current metadata',
   absent: 'Absent',
-  unavailable: 'Unavailable',
   derived: 'Derived',
 };
 
 const PROVENANCE_COLORS: Record<string, string> = {
   captured: 'rgba(34,197,94,0.14)',
+  spec_verified: 'rgba(20,184,166,0.16)',
   current: 'rgba(245,158,11,0.14)',
   absent: 'var(--surface-2)',
-  unavailable: 'rgba(239,68,68,0.12)',
   derived: 'rgba(59,130,246,0.16)',
 };
+
+// 'spec_verified' is a record-level match: the stored version spec hashes to the
+// config_hash this run wrote when it started. That attributes the displayed
+// value to the run's own recorded settings; it is not an observation that the
+// engine re-read the field. 'unavailable' used to be listed here and in the
+// response type, but no backend path returns it, so the badge could claim a
+// source state that never occurs.
+const UNVERIFIED_PROVENANCE = new Set(['current', 'absent']);
 
 type FieldKind = 'rate' | 'percent' | 'currency' | 'count' | 'ratio' | 'text' | 'list';
 
@@ -193,6 +204,7 @@ export default function RunComparisonPage() {
   // Guards against a slow response for a previously-opened record overwriting
   // the currently-selected record (stale write / data leak across switches).
   const activeSavedIdRef = useRef<string | null>(null);
+  const requestGuard = useRef(createRequestGuard()).current;
 
   useEffect(() => {
     const token = localStorage.getItem('token');
@@ -277,13 +289,16 @@ export default function RunComparisonPage() {
   };
 
   const loadComparison = async () => {
+    const token = requestGuard.begin();
     setLoading(true);
     setError('');
     setErrorStatus(null);
     try {
       const data = await api.runs.compare(runA!, runB!);
+      if (!requestGuard.isCurrent(token)) return;
       setComparison(data);
     } catch (err: any) {
+      if (!requestGuard.isCurrent(token)) return;
       if (err instanceof ApiError) {
         setErrorStatus(err.status);
         if (err.status === 404) {
@@ -297,7 +312,7 @@ export default function RunComparisonPage() {
         setError('The comparison could not be loaded');
       }
     } finally {
-      setLoading(false);
+      if (requestGuard.isCurrent(token)) setLoading(false);
     }
   };
 
@@ -470,10 +485,8 @@ export default function RunComparisonPage() {
         );
       }
       const sourcedFromMetadata =
-        field.provenance_a === 'current' ||
-        field.provenance_b === 'current' ||
-        field.provenance_a === 'absent' ||
-        field.provenance_b === 'absent';
+        UNVERIFIED_PROVENANCE.has(field.provenance_a) ||
+        UNVERIFIED_PROVENANCE.has(field.provenance_b);
       if (sourcedFromMetadata) {
         notes.push(
           `${labelText}: at least one side is not run-captured (source status "${PROVENANCE_LABELS[field.provenance_a] ?? field.provenance_a}" / "${PROVENANCE_LABELS[field.provenance_b] ?? field.provenance_b}"). The setting shown may not be the setting the run actually used, so treat any difference or match as unverified.`,
@@ -501,6 +514,12 @@ export default function RunComparisonPage() {
         {evidence.source_category && <span> {evidence.source_category}</span>}
         {evidence.field_path && <span> · <code style={{ fontSize: '11px' }}>{evidence.field_path}</code></span>}
         {evidence.derivation && <div style={{ color: 'var(--text-secondary)', fontSize: '12px', marginTop: '2px' }}>{evidence.derivation}</div>}
+        {evidence.note && <div style={{ color: 'var(--text-secondary)', fontSize: '12px', marginTop: '2px' }}>{evidence.note}</div>}
+        {evidence.proof && (
+          <div style={{ color: 'var(--text-secondary)', fontSize: '11px', marginTop: '2px' }}>
+            spec hash <code>{evidence.proof.spec_config_hash ?? '—'}</code> · run hash <code>{evidence.proof.run_config_hash ?? '—'}</code>
+          </div>
+        )}
       </div>
     );
   };
@@ -752,7 +771,8 @@ export default function RunComparisonPage() {
           <summary style={{ cursor: 'pointer' }}>How to read the source status</summary>
           <ul style={{ margin: '8px 0 0 20px', lineHeight: 1.7 }}>
             <li><strong>Captured</strong> — recorded in the run itself when it executed.</li>
-            <li><strong>Current metadata</strong> — read from the strategy version&apos;s settings today; it may have changed since the run.</li>
+            <li><strong>Verified by config hash</strong> — read from the strategy version&apos;s stored spec, and that spec hashes to the run&apos;s recorded config_hash, so it is provably the spec this run executed. Proof: the two hashes in the field&apos;s evidence.</li>
+            <li><strong>Current metadata</strong> — read from the strategy version&apos;s settings today; the version&apos;s spec does not hash to this run&apos;s config_hash, so it may not be what the run used.</li>
             <li><strong>Derived</strong> — computed from the run&apos;s recorded trades and equity.</li>
             <li><strong>Absent / Unavailable</strong> — nothing was recorded for that side.</li>
           </ul>

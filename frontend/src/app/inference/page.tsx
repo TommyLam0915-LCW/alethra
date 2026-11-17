@@ -1,9 +1,10 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { api, ApiError } from '@/lib/api';
+import { createRequestGuard } from '@/lib/latestRequest';
 import { formatDateTime } from '@/lib/format';
 import { statusPillClass } from '@/lib/status-styles';
 
@@ -79,6 +80,8 @@ export default function InferencePage() {
   const [formError, setFormError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [expandedRunId, setExpandedRunId] = useState<string | null>(null);
+  const runsRequestGuard = useRef(createRequestGuard()).current;
+  const versionsRequestGuard = useRef(createRequestGuard()).current;
 
   useEffect(() => {
     const token = localStorage.getItem('token');
@@ -91,20 +94,24 @@ export default function InferencePage() {
   }, [router]);
 
   const loadRuns = async () => {
+    const token = runsRequestGuard.begin();
     setRunsLoading(true);
     try {
       const data = await api.inference.listRuns();
+      if (!runsRequestGuard.isCurrent(token)) return;
       setRuns(Array.isArray(data) ? data : []);
       setRunsError(null);
     } catch (err) {
+      if (!runsRequestGuard.isCurrent(token)) return;
       console.error('Failed to load inference runs:', err);
       setRunsError(describeError(err, '無法載入推論紀錄。'));
     } finally {
-      setRunsLoading(false);
+      if (runsRequestGuard.isCurrent(token)) setRunsLoading(false);
     }
   };
 
   const loadVersions = async () => {
+    const token = versionsRequestGuard.begin();
     setVersionsLoading(true);
     try {
       const records = await api.modelResearch.list();
@@ -123,6 +130,7 @@ export default function InferencePage() {
           }));
         }),
       );
+      if (!versionsRequestGuard.isCurrent(token)) return;
       const flattened = perRecord.flat();
       flattened.sort((a, b) =>
         a.record_title === b.record_title
@@ -132,12 +140,13 @@ export default function InferencePage() {
       setVersions(flattened);
       setVersionsError(null);
     } catch (err) {
+      if (!versionsRequestGuard.isCurrent(token)) return;
       console.error('Failed to load model versions:', err);
       // The raw detail alone ("Internal Server Error") does not say which
       // panel failed, so the context is always prefixed.
       setVersionsError(`無法載入你的模型版本：${describeError(err, '請稍後再試。')}`);
     } finally {
-      setVersionsLoading(false);
+      if (versionsRequestGuard.isCurrent(token)) setVersionsLoading(false);
     }
   };
 

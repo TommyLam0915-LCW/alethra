@@ -1,15 +1,16 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { api, ApiError, API_BASE_URL } from '@/lib/api';
+import { createRequestGuard } from '@/lib/latestRequest';
 import { classifyWriteError, parseParameterGridJson } from '@/lib/userErrors';
 import { statusPillClass } from '@/lib/status-styles';
 import AppShell from '@/components/shell/AppShell';
 import PersonalizationPanel from '@/components/training/PersonalizationPanel';
 import PersonalStrategyLearningPanel from '@/components/training/PersonalStrategyLearningPanel';
-import { formatDate, formatDateTime } from '@/lib/format';
+import { formatDate, formatDateTime, parseApiTimestamp } from '@/lib/format';
 import { explainMlFailure, describeStoredJobFailure } from '@/lib/mlFailureMessages';
 
 interface TrainingJob {
@@ -206,6 +207,9 @@ export default function TrainingPage() {
   const [modelActionErrors, setModelActionErrors] = useState<Record<string, string>>({});
   const [deletingModelId, setDeletingModelId] = useState<string | null>(null);
   const [copiedModelApi, setCopiedModelApi] = useState<string | null>(null);
+  const jobsRequestGuard = useRef(createRequestGuard()).current;
+  const experimentsRequestGuard = useRef(createRequestGuard()).current;
+  const mlDataRequestGuard = useRef(createRequestGuard()).current;
 
   const hasActiveJobs = jobs.some((job) => ACTIVE_JOB_STATUSES.has(job.status));
   const quotaExhausted = quota !== null && quota.remaining !== null && quota.remaining <= 0;
@@ -235,15 +239,18 @@ export default function TrainingPage() {
   }, [hasActiveJobs]);
 
   const loadJobs = async () => {
+    const token = jobsRequestGuard.begin();
     try {
       const data = await api.training.listJobs();
+      if (!jobsRequestGuard.isCurrent(token)) return;
       setJobs(data);
       setError(null);
     } catch (err) {
+      if (!jobsRequestGuard.isCurrent(token)) return;
       console.error('Failed to load training jobs:', err);
       setError('載入訓練任務失敗');
     } finally {
-      setLoading(false);
+      if (jobsRequestGuard.isCurrent(token)) setLoading(false);
     }
   };
 
@@ -257,12 +264,15 @@ export default function TrainingPage() {
   // If the list cannot be loaded, the manual input stays available instead of
   // blocking job creation.
   const loadExperiments = async () => {
+    const token = experimentsRequestGuard.begin();
     try {
       const data = await api.experiments.list();
+      if (!experimentsRequestGuard.isCurrent(token)) return;
       const list: ExperimentOption[] = Array.isArray(data) ? data : [];
       setExperiments(list);
       setExperimentsError(null);
     } catch (err) {
+      if (!experimentsRequestGuard.isCurrent(token)) return;
       console.error('Failed to load experiments:', err);
       setExperimentsError('無法載入你的研究實驗清單，可改為手動輸入實驗 ID。');
       setManualExperiment(true);
@@ -338,17 +348,20 @@ export default function TrainingPage() {
   };
 
   const loadMLData = async () => {
+    const token = mlDataRequestGuard.begin();
     try {
       const [instData, modelData, quotaData] = await Promise.all([
         api.instruments.list(),
         api.ml.listModels(),
         api.ml.entitlement(),
       ]);
+      if (!mlDataRequestGuard.isCurrent(token)) return;
       setMlInstruments(instData.instruments || []);
       setMlModels(modelData.models || []);
       setQuota(quotaData);
       setMlLoadError(null);
     } catch (err) {
+      if (!mlDataRequestGuard.isCurrent(token)) return;
       // Silent failure left the instrument picker, model list and quota card
       // looking like an empty account instead of a failed request.
       console.error('Failed to load ML data:', err);
@@ -419,7 +432,7 @@ export default function TrainingPage() {
     setDeletingModelId(modelId);
     try {
       await api.ml.deleteModel(modelId);
-      setMlModels((prev) => prev.filter((m) => m.model_id !== modelId));
+      await loadMLData();
     } catch (err) {
       console.error('Delete model failed:', err);
       const failure = classifyWriteError(err, '刪除模型');
@@ -471,9 +484,14 @@ export default function TrainingPage() {
     return id.length > 8 ? `${id.substring(0, 8)}...` : id;
   };
 
-  const isQueueStale = (job: TrainingJob) =>
-    ACTIVE_JOB_STATUSES.has(job.status) &&
-    Date.now() - new Date(job.created_at).getTime() > QUEUE_STALE_MS;
+  const isQueueStale = (job: TrainingJob) => {
+    const created = parseApiTimestamp(job.created_at);
+    return (
+      created !== null &&
+      ACTIVE_JOB_STATUSES.has(job.status) &&
+      Date.now() - created.getTime() > QUEUE_STALE_MS
+    );
+  };
 
   const bestModelId = (job: TrainingJob): string | null =>
     job.best_params && typeof job.best_params.model_id === 'string'

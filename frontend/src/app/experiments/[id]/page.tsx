@@ -1,9 +1,10 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import Link from 'next/link';
 import { api, ApiError } from '@/lib/api';
+import { createRequestGuard } from '@/lib/latestRequest';
 import { describeRunStatus } from '@/lib/runStatus';
 import { brand } from '@/lib/brand';
 import { statusPillClass } from '@/lib/status-styles';
@@ -30,6 +31,7 @@ interface Run {
   id: string;
   experiment_version_id: string;
   status: string;
+  engine_version: string;
   metrics: any;
   warnings: string[] | null;
   config_hash: string;
@@ -161,6 +163,16 @@ export default function ExperimentDetailPage() {
   const [selectedRuns, setSelectedRuns] = useState<string[]>([]);
   const [savedComparisons, setSavedComparisons] = useState<SavedComparisonSummary[]>([]);
   const [dataVersion, setDataVersion] = useState(0);
+  // Writes here can overlap (run, then note, then lock). Each write tags its
+  // own follow-up reads, so a slower reply from an earlier write can never
+  // overwrite what the newest write put on screen.
+  const refreshSeq = useRef(0);
+  // The version diff is keyed to the pair picked at click time, and the Compare
+  // button is not disabled while a diff is in flight, so two clicks can overlap.
+  const diffRequestGuard = useRef(createRequestGuard()).current;
+  // Three handlers load the method review (initial load, after a run, and the
+  // Refresh button), so one guard orders that slot across all of them.
+  const methodReviewRequestGuard = useRef(createRequestGuard()).current;
   // A failed initial load is not an empty experiment. Keep the reason so the page
   // can tell "you do not have this research" apart from "the service is down",
   // and offer a retry instead of silently rendering a not-found screen.
@@ -176,6 +188,8 @@ export default function ExperimentDetailPage() {
   }, [experimentId, router]);
 
   const loadData = async () => {
+    const seq = ++refreshSeq.current;
+    const reviewToken = methodReviewRequestGuard.begin();
     try {
       const [exp, runsData, versionsData, timelineData, notesData, reviewData, savedComparisonsData] = await Promise.all([
         api.experiments.get(experimentId),
@@ -186,18 +200,20 @@ export default function ExperimentDetailPage() {
         api.experiments.methodReview(experimentId).catch(() => null),
         api.savedComparisons.list(experimentId).catch(() => []),
       ]);
+      if (refreshSeq.current !== seq) return;
       setExperiment(exp);
       setRuns(runsData);
       setVersions(versionsData);
       setTimeline(timelineData);
       setNotes(notesData);
-      setMethodReview(reviewData);
+      if (methodReviewRequestGuard.isCurrent(reviewToken)) setMethodReview(reviewData);
       setSavedComparisons(savedComparisonsData);
       setDataVersion((v) => v + 1);
       // A reload that succeeded must not keep showing an earlier load failure.
       setError('');
       setLoadFailure(null);
     } catch (err) {
+      if (refreshSeq.current !== seq) return;
       const status = err instanceof ApiError ? err.status : null;
       if (experiment) {
         // The research is already on screen. A failed refresh keeps the visible
@@ -214,7 +230,7 @@ export default function ExperimentDetailPage() {
       }
       setError('');
     } finally {
-      setLoading(false);
+      if (refreshSeq.current === seq) setLoading(false);
     }
   };
 
@@ -233,13 +249,26 @@ export default function ExperimentDetailPage() {
     setError('');
 
     try {
-      const run = await api.runs.create(experiment.current_version_id);
-      setRuns([run, ...runs]);
-      const [timelineData, notesData] = await Promise.all([
+      await api.runs.create(experiment.current_version_id);
+      // The run changed the run list, the timeline, the notes, and which run
+      // the method review is about — all of it is re-read from the server,
+      // because a spliced-in row cannot say what the review now concludes.
+      const seq = ++refreshSeq.current;
+      const reviewToken = methodReviewRequestGuard.begin();
+      const [runsData, timelineData, notesData, reviewData] = await Promise.all([
+        api.runs.list(experimentId),
         api.timeline.get(experimentId),
         api.notes.list(experimentId),
+        api.experiments.methodReview(experimentId).catch(() => null),
       ]);
+      if (refreshSeq.current !== seq) return;
+      setRuns(runsData);
       setTimeline(timelineData);
+      setNotes(notesData);
+      if (reviewData && methodReviewRequestGuard.isCurrent(reviewToken)) {
+        setMethodReview(reviewData);
+      }
+      setDataVersion((v) => v + 1);
     } catch (err: any) {
       setError(err.message || 'The backtest could not be started.');
     } finally {
@@ -296,26 +325,35 @@ export default function ExperimentDetailPage() {
   const handleAddNote = async () => {
     if (!noteText.trim()) return;
     try {
-      const note = await api.notes.create(experimentId, { content: noteText.trim() });
-      setNotes([note, ...notes]);
+      await api.notes.create(experimentId, { content: noteText.trim() });
       setNoteText('');
-      const timelineData = await api.timeline.get(experimentId);
+      const seq = ++refreshSeq.current;
+      const [notesData, timelineData] = await Promise.all([
+        api.notes.list(experimentId),
+        api.timeline.get(experimentId),
+      ]);
+      if (refreshSeq.current !== seq) return;
+      setNotes(notesData);
       setTimeline(timelineData);
+      setDataVersion((v) => v + 1);
     } catch (err: any) {
       setError(err.message || 'The note could not be added.');
     }
   };
 
   const handleCompare = async (v1Id: string, v2Id: string) => {
+    const token = diffRequestGuard.begin();
     setDiffLoading(true);
     setDiffResult(null);
     try {
       const result = await api.versions.compare(v1Id, v2Id);
+      if (!diffRequestGuard.isCurrent(token)) return;
       setDiffResult(result);
     } catch (err: any) {
+      if (!diffRequestGuard.isCurrent(token)) return;
       setError(err.message || 'The versions could not be compared.');
     } finally {
-      setDiffLoading(false);
+      if (diffRequestGuard.isCurrent(token)) setDiffLoading(false);
     }
   };
 
@@ -335,13 +373,19 @@ export default function ExperimentDetailPage() {
   };
 
   const handleRefreshReview = async () => {
+    const reviewToken = methodReviewRequestGuard.begin();
     setMethodReviewLoading(true);
     try {
       const reviewData = await api.experiments.methodReview(experimentId);
+      if (!methodReviewRequestGuard.isCurrent(reviewToken)) return;
       setMethodReview(reviewData);
     } catch (err: any) {
+      if (!methodReviewRequestGuard.isCurrent(reviewToken)) return;
       setError(err.message || 'The method review could not be loaded.');
     } finally {
+      // Unconditional: this handler is the only one that raises the flag and
+      // its trigger disables itself while it is set, so no newer refresh can be
+      // left spinning if a run's batch takes the review slot over.
       setMethodReviewLoading(false);
     }
   };
@@ -744,7 +788,9 @@ export default function ExperimentDetailPage() {
               <div style={{ marginTop: '16px', padding: '12px', backgroundColor: 'var(--surface-2)', borderRadius: '6px', fontSize: '13px' }}>
                 <strong>Method summary:</strong>
                 <span style={{ marginLeft: '8px', color: 'var(--text-muted)' }}>
-                  Engine v{latestRun.methodology_json.engine_version} |
+                  {latestRun.engine_version
+                    ? `Engine v${latestRun.engine_version}`
+                    : 'Engine version not recorded on this run'} |
                   Template: {latestRun.methodology_json.template_type}
                 </span>
               </div>

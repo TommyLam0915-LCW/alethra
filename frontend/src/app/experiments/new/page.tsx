@@ -4,6 +4,7 @@ import { useState, useEffect, useRef, Suspense } from 'react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
+import { createRequestGuard } from '@/lib/latestRequest';
 import { brand } from '@/lib/brand';
 import { STRATEGY_TEMPLATE_LABELS } from '@/lib/copy';
 import type { DataCoverage } from '@/components/workspace/types';
@@ -136,6 +137,7 @@ function NewExperimentForm() {
   // A picked window is user intent: once the owner edits either date, fetched
   // coverage must stop moving the dates under them.
   const datesEditedRef = useRef(false);
+  const requestGuard = useRef(createRequestGuard()).current;
 
   useEffect(() => {
     api.instruments.list().then((data: any) => {
@@ -177,11 +179,13 @@ function NewExperimentForm() {
   useEffect(() => {
     if (!draftId || requestedFields.length === 0) return;
 
+    const token = requestGuard.begin();
     setDraftLoading(true);
     setDraftError('');
 
     api.researchDrafts.get(draftId)
       .then((data) => {
+        if (!requestGuard.isCurrent(token)) return;
         if (data.status !== 'accepted') {
           setDraftError('Only accepted drafts can transfer fields');
           setDraftLoading(false);
@@ -192,6 +196,7 @@ function NewExperimentForm() {
         setDraftLoading(false);
       })
       .catch((err: any) => {
+        if (!requestGuard.isCurrent(token)) return;
         setDraftError(err.message || 'The draft could not be loaded');
         setDraftLoading(false);
       });

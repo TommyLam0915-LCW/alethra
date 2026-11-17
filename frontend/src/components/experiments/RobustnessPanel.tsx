@@ -1,8 +1,9 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { api, ApiError } from '@/lib/api';
+import { createRequestGuard } from '@/lib/latestRequest';
 import {
   ATTEMPT_STATUS_LABELS,
   ROBUSTNESS_KIND_LABELS,
@@ -240,10 +241,14 @@ export default function RobustnessPanel({
   const [actionError, setActionError] = useState('');
   const [notice, setNotice] = useState('');
 
+  const studiesRequestGuard = useRef(createRequestGuard()).current;
+
   const selected = studies.find((s) => s.id === selectedId) ?? studies[0] ?? null;
 
   const refreshStudies = async (preferId?: string) => {
+    const token = studiesRequestGuard.begin();
     const list: Study[] = await api.robustness.list(experimentId);
+    if (!studiesRequestGuard.isCurrent(token)) return;
     setStudies(list);
     setSelectedId((prev) => {
       const wanted = preferId ?? prev;

@@ -1,11 +1,12 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { api, ApiError } from '@/lib/api';
+import { createRequestGuard } from '@/lib/latestRequest';
 import { statusPillClass } from '@/lib/status-styles';
-import { formatDate } from '@/lib/format';
+import { formatDate, formatMoney } from '@/lib/format';
 
 interface DashboardData {
   funnel: {
@@ -31,7 +32,10 @@ interface DashboardData {
     total_actual: number;
     total_estimate: number;
     cost_per_user: number;
-    cost_per_active_user: number;
+    // None while nobody has activated yet: the per-active-user cost has no
+    // denominator, and 0.00 would read as "active users cost nothing". The API
+    // sends the null, so the cell renders it as absent instead of dividing by it.
+    cost_per_active_user: number | null;
     breakdown_by_type: Record<string, number>;
   };
   disclaimer: string;
@@ -66,6 +70,7 @@ export default function AdminDashboardPage() {
   const [error, setError] = useState('');
   const [errorStatus, setErrorStatus] = useState<number | null>(null);
   const [activeTab, setActiveTab] = useState<'funnel' | 'hypotheses'>('funnel');
+  const requestGuard = useRef(createRequestGuard()).current;
 
   useEffect(() => {
     const token = localStorage.getItem('token');
@@ -77,18 +82,21 @@ export default function AdminDashboardPage() {
   }, [router]);
 
   const loadData = async () => {
+    const token = requestGuard.begin();
     try {
       const [dashData, hypData] = await Promise.all([
         api.pilot.getAdminDashboard(),
         api.pilot.getHypothesesDashboard(),
       ]);
+      if (!requestGuard.isCurrent(token)) return;
       setDashboard(dashData);
       setHypotheses(hypData);
     } catch (err: any) {
+      if (!requestGuard.isCurrent(token)) return;
       setError(err?.message || 'Failed to load dashboard');
       setErrorStatus(err instanceof ApiError ? err.status : null);
     } finally {
-      setLoading(false);
+      if (requestGuard.isCurrent(token)) setLoading(false);
     }
   };
 
@@ -213,7 +221,7 @@ export default function AdminDashboardPage() {
               </div>
               <div>
                 <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>每活躍用戶成本</div>
-                <div style={{ fontSize: '24px', fontWeight: 600 }}>${dashboard.cost_summary.cost_per_active_user.toFixed(2)}</div>
+                <div style={{ fontSize: '24px', fontWeight: 600 }}>{formatMoney(dashboard.cost_summary.cost_per_active_user)}</div>
               </div>
             </div>
 

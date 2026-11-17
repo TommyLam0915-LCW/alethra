@@ -1,7 +1,9 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api } from '@/lib/api';
+import { createRequestGuard } from '@/lib/latestRequest';
+import { formatNumber, formatPercentPoints } from '@/lib/format';
 
 interface PaperTradingRun {
   run_id: string;
@@ -10,36 +12,52 @@ interface PaperTradingRun {
   interval_minutes: number;
   status: string;
   initial_capital: number;
+  // Written only by the completion UPDATE, and nullable in the DDL
+  // (backend/migrations/versions/p4p5t6r7n8g9_add_paper_trading_runs.py:35-38), so
+  // `/history` sends null for a run that has not completed. 0 is a measurement —
+  // "this run broke even" — and cannot stand in for the absence of one.
   final_capital: number | null;
-  total_pnl: number;
+  total_pnl: number | null;
   total_trades: number;
-  win_rate: number;
+  // Percent points (62.5 means 62.5%): the writer stores `percent_ratio(...)`
+  // (backend/app/services/paper_trading.py:966), not a 0-1 fraction.
+  win_rate: number | null;
   start_date: string | null;
   end_date: string | null;
+  run_type: string;
 }
 
 interface DailyReport {
   date: string;
   run_id: string;
   skill: string;
-  instrument: string;
+  instrument_id: string;
   portfolio: {
     starting_capital: number;
     current_value: number;
     daily_pnl: number;
-    total_pnl: number;
+    total_pnl: number | null;
   };
   trades: {
     count: number;
     wins: number;
     losses: number;
-    win_rate: number;
+    // Percent points (62.5 means 62.5%), null when the day had no trades.
+    win_rate: number | null;
   };
   risk: {
-    max_drawdown_pct: number;
-    sharpe_7d: number;
+    // Both are `measured(...)` over nullable columns
+    // (backend/app/services/paper_trading.py:1549-1550). The replay path never
+    // writes `run.max_drawdown_pct`, so it reads back null rather than a
+    // flattering "never drew down" 0.00%. Drawdown is percent points.
+    max_drawdown_pct: number | null;
+    sharpe_7d: number | null;
   };
 }
+
+// The summary cards total the page this component requests, so the window printed
+// in the caption is the same constant the request sends.
+const HISTORY_LIMIT = 50;
 
 export function PaperTradingDashboard() {
   const [runs, setRuns] = useState<PaperTradingRun[]>([]);
@@ -47,6 +65,9 @@ export function PaperTradingDashboard() {
   const [report, setReport] = useState<DailyReport | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  const historyRequestGuard = useRef(createRequestGuard()).current;
+  const dailyReportRequestGuard = useRef(createRequestGuard()).current;
 
   useEffect(() => {
     loadHistory();
@@ -59,30 +80,41 @@ export function PaperTradingDashboard() {
   }, [selectedRun]);
 
   const loadHistory = async () => {
+    const token = historyRequestGuard.begin();
     try {
       setLoading(true);
-      const data = await api.paperTrading.history(50);
+      const data = await api.paperTrading.history(HISTORY_LIMIT);
+      if (!historyRequestGuard.isCurrent(token)) return;
       setRuns(data);
       if (data.length > 0 && !selectedRun) {
         setSelectedRun(data[0].run_id);
       }
     } catch (err) {
+      if (!historyRequestGuard.isCurrent(token)) return;
       setError(err instanceof Error ? err.message : 'Failed to load history');
     } finally {
-      setLoading(false);
+      if (historyRequestGuard.isCurrent(token)) setLoading(false);
     }
   };
 
   const loadDailyReport = async (runId: string) => {
+    const token = dailyReportRequestGuard.begin();
     try {
       const data = await api.paperTrading.dailyReport(runId);
+      if (!dailyReportRequestGuard.isCurrent(token)) return;
       setReport(data);
     } catch (err) {
+      if (!dailyReportRequestGuard.isCurrent(token)) return;
       console.error('Failed to load daily report:', err);
     }
   };
 
-  const formatCurrency = (value: number) => {
+  // A null means nothing was measured, and JavaScript turns it into a number
+  // everywhere it is read: `null / 100` is 0 and `null >= 0` is true, so an
+  // unfinished run would render as a green "$0.00" that broke even and a "0.0%"
+  // win rate that lost every trade. Both are claims the API deliberately withheld.
+  const formatCurrency = (value: number | null | undefined) => {
+    if (value === null || value === undefined || !Number.isFinite(value)) return '—';
     return new Intl.NumberFormat('en-US', {
       style: 'currency',
       currency: 'USD',
@@ -90,9 +122,17 @@ export function PaperTradingDashboard() {
     }).format(value);
   };
 
-  const formatPercent = (value: number) => {
-    return `${(value * 100).toFixed(1)}%`;
+  const pnlColorClass = (value: number | null | undefined) => {
+    if (value === null || value === undefined || !Number.isFinite(value)) return 'text-gray-500';
+    return value >= 0 ? 'text-green-600' : 'text-red-600';
   };
+
+  // Nulls are skipped rather than added as 0, so the card sums the runs that have
+  // a measured P&L; only when none is measured is there no total to report.
+  const measuredTotalPnl = runs.reduce<number | null>(
+    (sum, run) => (run.total_pnl === null ? sum : (sum ?? 0) + run.total_pnl),
+    null,
+  );
 
   if (loading) {
     return (
@@ -127,14 +167,8 @@ export function PaperTradingDashboard() {
         </div>
         <div className="bg-white rounded-lg shadow p-4">
           <div className="text-sm text-gray-500">Total PnL</div>
-          <div
-            className={`text-2xl font-bold mt-1 ${
-              runs.reduce((sum, r) => sum + r.total_pnl, 0) >= 0
-                ? 'text-green-600'
-                : 'text-red-600'
-            }`}
-          >
-            {formatCurrency(runs.reduce((sum, r) => sum + r.total_pnl, 0))}
+          <div className={`text-2xl font-bold mt-1 ${pnlColorClass(measuredTotalPnl)}`}>
+            {formatCurrency(measuredTotalPnl)}
           </div>
         </div>
         <div className="bg-white rounded-lg shadow p-4">
@@ -143,6 +177,10 @@ export function PaperTradingDashboard() {
             {runs.reduce((sum, r) => sum + r.total_trades, 0)}
           </div>
         </div>
+      </div>
+      <div className="text-xs text-gray-500">
+        These cards total only the latest {HISTORY_LIMIT} runs the history endpoint
+        returns, and exclude runs whose P&L has not been measured.
       </div>
 
       {/* Run Selection */}
@@ -167,15 +205,11 @@ export function PaperTradingDashboard() {
                   </div>
                 </div>
                 <div className="text-right">
-                  <div
-                    className={`font-semibold ${
-                      run.total_pnl >= 0 ? 'text-green-600' : 'text-red-600'
-                    }`}
-                  >
+                  <div className={`font-semibold ${pnlColorClass(run.total_pnl)}`}>
                     {formatCurrency(run.total_pnl)}
                   </div>
                   <div className="text-xs text-gray-500">
-                    {run.total_trades} trades · {formatPercent(run.win_rate / 100)} WR
+                    {run.total_trades} trades · {formatPercentPoints(run.win_rate)} WR
                   </div>
                 </div>
               </div>
@@ -236,13 +270,7 @@ export function PaperTradingDashboard() {
               </div>
               <div>
                 <div className="text-xs text-gray-500">Total PnL</div>
-                <div
-                  className={`text-lg font-semibold ${
-                    report.portfolio.total_pnl >= 0
-                      ? 'text-green-600'
-                      : 'text-red-600'
-                  }`}
-                >
+                <div className={`text-lg font-semibold ${pnlColorClass(report.portfolio.total_pnl)}`}>
                   {formatCurrency(report.portfolio.total_pnl)}
                 </div>
               </div>
@@ -274,7 +302,7 @@ export function PaperTradingDashboard() {
               <div>
                 <div className="text-xs text-gray-500">Win Rate</div>
                 <div className="text-lg font-semibold">
-                  {formatPercent(report.trades.win_rate / 100)}
+                  {formatPercentPoints(report.trades.win_rate)}
                 </div>
               </div>
             </div>
@@ -289,13 +317,13 @@ export function PaperTradingDashboard() {
               <div>
                 <div className="text-xs text-gray-500">Max Drawdown</div>
                 <div className="text-lg font-semibold text-red-600">
-                  {formatPercent(report.risk.max_drawdown_pct / 100)}
+                  {formatPercentPoints(report.risk.max_drawdown_pct)}
                 </div>
               </div>
               <div>
                 <div className="text-xs text-gray-500">Sharpe Ratio (7d)</div>
                 <div className="text-lg font-semibold">
-                  {report.risk.sharpe_7d.toFixed(2)}
+                  {formatNumber(report.risk.sharpe_7d, 2)}
                 </div>
               </div>
             </div>
@@ -360,12 +388,12 @@ export function PaperTradingDashboard() {
                     {run.total_trades}
                   </td>
                   <td className="px-4 py-3 text-sm text-right text-gray-900">
-                    {formatPercent(run.win_rate / 100)}
+                    {formatPercentPoints(run.win_rate)}
                   </td>
                   <td
-                    className={`px-4 py-3 text-sm text-right font-semibold ${
-                      run.total_pnl >= 0 ? 'text-green-600' : 'text-red-600'
-                    }`}
+                    className={`px-4 py-3 text-sm text-right font-semibold ${pnlColorClass(
+                      run.total_pnl
+                    )}`}
                   >
                     {formatCurrency(run.total_pnl)}
                   </td>

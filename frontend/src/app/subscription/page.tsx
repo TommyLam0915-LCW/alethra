@@ -1,9 +1,10 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { api, ApiError } from '@/lib/api';
+import { createRequestGuard } from '@/lib/latestRequest';
 import { statusPillClass } from '@/lib/status-styles';
 import { formatDate } from '@/lib/format';
 
@@ -53,6 +54,7 @@ export default function SubscriptionPage() {
   const [error, setError] = useState('');
   const [subscriptionError, setSubscriptionError] = useState('');
   const [entitlementError, setEntitlementError] = useState('');
+  const requestGuard = useRef(createRequestGuard()).current;
 
   useEffect(() => {
     const token = localStorage.getItem('token');
@@ -64,6 +66,7 @@ export default function SubscriptionPage() {
   }, [router]);
 
   const loadData = async () => {
+    const token = requestGuard.begin();
     try {
       setLoading(true);
       setError('');
@@ -74,21 +77,26 @@ export default function SubscriptionPage() {
         api.billing.listPlans(),
         api.billing.getOperationalStatus().catch(() => null),
       ]);
+      if (!requestGuard.isCurrent(token)) return;
       setPlans(plansRes.plans || []);
       setOpStatus(opStatusRes);
 
       try {
         const subRes = await api.billing.getMySubscription();
+        if (!requestGuard.isCurrent(token)) return;
         setSubscription(subRes.subscription || null);
       } catch (err: any) {
+        if (!requestGuard.isCurrent(token)) return;
         setSubscription(null);
         setSubscriptionError(err.message || '無法載入訂閱資訊');
       }
 
       try {
         const ent = await api.pilot.getMyEntitlement();
+        if (!requestGuard.isCurrent(token)) return;
         setEntitlement(ent);
       } catch (err: any) {
+        if (!requestGuard.isCurrent(token)) return;
         if (err instanceof ApiError && err.status === 404) {
           setEntitlement(null);
         } else {
@@ -97,10 +105,11 @@ export default function SubscriptionPage() {
         }
       }
     } catch (err: any) {
+      if (!requestGuard.isCurrent(token)) return;
       console.error('Failed to load subscription data:', err);
       setError(err.message || '載入失敗');
     } finally {
-      setLoading(false);
+      if (requestGuard.isCurrent(token)) setLoading(false);
     }
   };
 

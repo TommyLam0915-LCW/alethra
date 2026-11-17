@@ -1,8 +1,9 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { api } from '@/lib/api';
+import { createRequestGuard } from '@/lib/latestRequest';
 
 interface Capability {
   key: string;
@@ -84,35 +85,35 @@ export default function PersonalizationPanel() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
+  const panelRequestGuard = useRef(createRequestGuard()).current;
+
+  const loadPanel = async () => {
+    const token = panelRequestGuard.begin();
+    try {
+      const [caps, elig, experiments] = await Promise.all([
+        api.ml.capabilities(),
+        api.ml.personalizationEligibility(),
+        api.experiments.list().catch(() => []),
+      ]);
+      if (!panelRequestGuard.isCurrent(token)) return;
+      setCapabilities(caps.capabilities || []);
+      setTrainingPolicy(caps.training_policy || null);
+      setEligibility(elig);
+      const owned: OwnedVersion[] = (Array.isArray(experiments) ? experiments : [])
+        .filter((exp: { current_version_id?: string | null }) => exp.current_version_id)
+        .map((exp: { id: string; title: string; current_version_id: string }) => ({
+          id: exp.current_version_id,
+          title: exp.title,
+        }));
+      setOwnedVersions(owned);
+    } catch (err) {
+      if (!panelRequestGuard.isCurrent(token)) return;
+      setError(err instanceof Error ? err.message : '無法載入個人化資格');
+    }
+  };
+
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const [caps, elig, experiments] = await Promise.all([
-          api.ml.capabilities(),
-          api.ml.personalizationEligibility(),
-          api.experiments.list().catch(() => []),
-        ]);
-        if (cancelled) return;
-        setCapabilities(caps.capabilities || []);
-        setTrainingPolicy(caps.training_policy || null);
-        setEligibility(elig);
-        const owned: OwnedVersion[] = (Array.isArray(experiments) ? experiments : [])
-          .filter((exp: { current_version_id?: string | null }) => exp.current_version_id)
-          .map((exp: { id: string; title: string; current_version_id: string }) => ({
-            id: exp.current_version_id,
-            title: exp.title,
-          }));
-        setOwnedVersions(owned);
-      } catch (err) {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : '無法載入個人化資格');
-        }
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
+    loadPanel();
   }, []);
 
   const activeScope = eligibility?.consent.scope.strategy_version_ids ?? [];
@@ -152,6 +153,7 @@ export default function PersonalizationPanel() {
       setSelected(null);
       setAcknowledged(false);
       setNotice('已記錄個人化訓練同意。資格檢查仍會逐項判斷資料是否足夠。');
+      await loadPanel();
       announceConsentChange();
     } catch (err) {
       setError(err instanceof Error ? err.message : '無法記錄同意');
@@ -171,6 +173,10 @@ export default function PersonalizationPanel() {
       setSelected(null);
       setAcknowledged(false);
       setNotice('已撤銷個人化訓練同意。已撤銷的資料不再計入資格。');
+      // The revoke echo carries the eligibility snapshot of this moment only;
+      // the per-strategy rows and the capability list are separate GETs, and
+      // the panel must not keep showing a granted state after consent is gone.
+      await loadPanel();
       announceConsentChange();
     } catch (err) {
       setError(err instanceof Error ? err.message : '無法撤銷同意');

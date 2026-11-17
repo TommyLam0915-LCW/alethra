@@ -1,9 +1,10 @@
 'use client';
 
-import { useEffect, useState, type CSSProperties } from 'react';
+import { useEffect, useState, useRef, type CSSProperties } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
+import { createRequestGuard } from '@/lib/latestRequest';
 import AppShell from '@/components/shell/AppShell';
 import { statusPillClass } from '@/lib/status-styles';
 import { formatDate, formatDateTime } from '@/lib/format';
@@ -55,6 +56,7 @@ export default function PaperPortfolioListPage() {
   const [journalRows, setJournalRows] = useState<JournalRow[]>([]);
   const [journalLoading, setJournalLoading] = useState(false);
   const [journalError, setJournalError] = useState('');
+  const requestGuard = useRef(createRequestGuard()).current;
 
   useEffect(() => {
     const token = localStorage.getItem('token');
@@ -100,13 +102,16 @@ export default function PaperPortfolioListPage() {
   }, [view]);
 
   const loadPortfolios = async () => {
+    const token = requestGuard.begin();
     try {
       const data = await api.paperPortfolio.list();
+      if (!requestGuard.isCurrent(token)) return;
       setPortfolios(data);
     } catch (err: any) {
+      if (!requestGuard.isCurrent(token)) return;
       setError(err.message || 'The portfolios could not be loaded');
     } finally {
-      setLoading(false);
+      if (requestGuard.isCurrent(token)) setLoading(false);
     }
   };
 

@@ -1,12 +1,13 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import { statusPillClass } from '@/lib/status-styles';
 import { formatDate } from '@/lib/format';
 import { DRAFT_STATUS_LABELS, STRATEGY_TEMPLATE_LABELS, label } from '@/lib/copy';
+import { createRequestGuard } from '@/lib/latestRequest';
 
 interface ResearchDraft {
   id: string;
@@ -36,6 +37,8 @@ export default function ResearchDraftsPage() {
   const [createAsset, setCreateAsset] = useState('');
   const [creating, setCreating] = useState(false);
 
+  const draftsRequestGuard = useRef(createRequestGuard()).current;
+
   useEffect(() => {
     const token = localStorage.getItem('token');
     if (!token) {
@@ -46,13 +49,16 @@ export default function ResearchDraftsPage() {
   }, [router]);
 
   const loadDrafts = async () => {
+    const token = draftsRequestGuard.begin();
     try {
       const data = await api.researchDrafts.list();
+      if (!draftsRequestGuard.isCurrent(token)) return;
       setDrafts(data);
     } catch (err: any) {
+      if (!draftsRequestGuard.isCurrent(token)) return;
       setError(err.message || 'The research drafts could not be loaded');
     } finally {
-      setLoading(false);
+      if (draftsRequestGuard.isCurrent(token)) setLoading(false);
     }
   };
 

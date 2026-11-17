@@ -354,6 +354,15 @@ export default function WorkspaceShell() {
             : api.simulations.resume(replaySession.id);
       const res = await call;
       setReplaySession(res?.session ?? res);
+      // The answer above is this session's row only; the panel copy and the
+      // evidence dock are fed by the session GET and the book revision counter.
+      try {
+        const fresh = await api.simulations.get(replaySession.id);
+        setReplaySession(fresh);
+      } catch {
+        setReplayActionError('The replay action landed, but the session could not be re-read.');
+      }
+      handleBookChanged();
     } catch (err) {
       setReplayActionError(err instanceof Error ? err.message : 'Replay action failed');
     } finally {
@@ -484,8 +493,8 @@ export default function WorkspaceShell() {
   };
 
   const removeWatchlistItem = async (watchlistId: string, itemSymbol: string) => {
-    const data = await api.watchlists.removeItem(watchlistId, itemSymbol);
-    setWatchlists((prev) => prev.map((w) => (w.id === watchlistId ? data.watchlist : w)));
+    await api.watchlists.removeItem(watchlistId, itemSymbol);
+    await loadWatchlists();
   };
 
   const moveWatchlistItem = async (watchlistId: string, itemSymbol: string, direction: -1 | 1) => {
@@ -496,13 +505,13 @@ export default function WorkspaceShell() {
     const target = idx + direction;
     if (idx < 0 || target < 0 || target >= symbols.length) return;
     [symbols[idx], symbols[target]] = [symbols[target], symbols[idx]];
-    const data = await api.watchlists.reorder(watchlistId, symbols);
-    setWatchlists((prev) => prev.map((w) => (w.id === watchlistId ? data.watchlist : w)));
+    await api.watchlists.reorder(watchlistId, symbols);
+    await loadWatchlists();
   };
 
   const deleteWatchlist = async (watchlistId: string) => {
     await api.watchlists.remove(watchlistId);
-    setWatchlists((prev) => prev.filter((w) => w.id !== watchlistId));
+    await loadWatchlists();
   };
 
   const createWatchlist = async () => {

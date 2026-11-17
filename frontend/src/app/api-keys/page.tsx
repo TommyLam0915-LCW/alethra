@@ -1,9 +1,10 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { api, API_BASE_URL } from '@/lib/api';
+import { createRequestGuard } from '@/lib/latestRequest';
 import { formatDate } from '@/lib/format';
 
 interface ApiKey {
@@ -63,6 +64,7 @@ export default function ApiKeysPage() {
   // Revoke confirmation
   const [revokeTarget, setRevokeTarget] = useState<ApiKey | null>(null);
   const [revoking, setRevoking] = useState(false);
+  const requestGuard = useRef(createRequestGuard()).current;
 
   useEffect(() => {
     const token = localStorage.getItem('token');
@@ -74,15 +76,18 @@ export default function ApiKeysPage() {
   }, [router]);
 
   const loadKeys = async () => {
+    const token = requestGuard.begin();
     try {
       setError(null);
       const data = await api.apiKeys.list();
+      if (!requestGuard.isCurrent(token)) return;
       setKeys(data);
     } catch (err: any) {
+      if (!requestGuard.isCurrent(token)) return;
       console.error('Failed to load API keys:', err);
       setError(err.message || '無法載入 API 金鑰');
     } finally {
-      setLoading(false);
+      if (requestGuard.isCurrent(token)) setLoading(false);
     }
   };
 

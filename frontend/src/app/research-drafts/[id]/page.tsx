@@ -1,12 +1,13 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import { statusPillClass } from '@/lib/status-styles';
 import { formatDateTime } from '@/lib/format';
 import { DRAFT_STATUS_LABELS, STRATEGY_TEMPLATE_LABELS, label } from '@/lib/copy';
+import { createRequestGuard } from '@/lib/latestRequest';
 
 interface ResearchDraft {
   id: string;
@@ -109,6 +110,9 @@ export default function ResearchDraftDetailPage() {
   const [selectedFields, setSelectedFields] = useState<Set<string>>(new Set());
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
+  const revisionsRequestGuard = useRef(createRequestGuard()).current;
+  const auditEventsRequestGuard = useRef(createRequestGuard()).current;
+
   const loadDraft = useCallback(async () => {
     try {
       const data = await api.researchDrafts.get(draftId);
@@ -130,21 +134,33 @@ export default function ResearchDraftDetailPage() {
   }, [loadDraft, router]);
 
   const loadRevisions = async () => {
+    const token = revisionsRequestGuard.begin();
     try {
       const data = await api.researchDrafts.revisions(draftId);
+      if (!revisionsRequestGuard.isCurrent(token)) return;
       setRevisions(data);
     } catch (err: any) {
+      if (!revisionsRequestGuard.isCurrent(token)) return;
       setError(err.message || 'The revision history could not be loaded');
     }
   };
 
   const loadAuditEvents = async () => {
+    const token = auditEventsRequestGuard.begin();
     try {
       const data = await api.researchDrafts.auditEvents(draftId);
+      if (!auditEventsRequestGuard.isCurrent(token)) return;
       setAuditEvents(data);
     } catch (err: any) {
+      if (!auditEventsRequestGuard.isCurrent(token)) return;
       setError(err.message || 'The audit events could not be loaded');
     }
+  };
+
+  // Each draft mutation appends a revision row and an audit event on the server, so
+  // the draft, the revision history and the audit panels are re-read together.
+  const refreshDraftPanels = async () => {
+    await Promise.all([loadDraft(), loadRevisions(), loadAuditEvents()]);
   };
 
   const handleGenerateQuestions = async () => {
@@ -154,7 +170,7 @@ export default function ResearchDraftDetailPage() {
       await api.researchDrafts.generateQuestions(draftId);
       setSuccess('Questions generated');
       setShowQuestions(true);
-      await loadDraft();
+      await refreshDraftPanels();
     } catch (err: any) {
       setError(err.message || 'The questions could not be generated');
     }
@@ -176,6 +192,7 @@ export default function ResearchDraftDetailPage() {
       setAnswers({});
       setSuccess('Answers submitted and the draft updated');
       setShowQuestions(false);
+      await refreshDraftPanels();
     } catch (err: any) {
       setError(err.message || 'The answers could not be submitted');
     }
@@ -196,6 +213,7 @@ export default function ResearchDraftDetailPage() {
       setDraft(updated);
       setEditing(false);
       setSuccess('Draft updated');
+      await refreshDraftPanels();
     } catch (err: any) {
       setError(err.message || 'The draft could not be updated');
     }
@@ -210,6 +228,7 @@ export default function ResearchDraftDetailPage() {
       setShowApproveDialog(false);
       setApproveNotes('');
       setSuccess('Draft accepted — this is a research note, not a verified strategy');
+      await refreshDraftPanels();
     } catch (err: any) {
       setError(err.message || 'The draft could not be accepted');
     }
@@ -225,6 +244,7 @@ export default function ResearchDraftDetailPage() {
       setShowApproveDialog(false);
       setApproveNotes('');
       setSuccess('Draft returned');
+      await refreshDraftPanels();
     } catch (err: any) {
       setError(err.message || 'The draft could not be returned');
     }

@@ -1,9 +1,10 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
+import { createRequestGuard } from '@/lib/latestRequest';
 import {
   PREFLIGHT_STATUS_COPY,
   buildDefaultSpec,
@@ -25,6 +26,8 @@ export default function StrategyTemplatesPage() {
   const [localError, setLocalError] = useState('');
   const [requestError, setRequestError] = useState('');
 
+  const catalogRequestGuard = useRef(createRequestGuard()).current;
+
   useEffect(() => {
     const token = localStorage.getItem('token');
     if (!token) {
@@ -35,13 +38,16 @@ export default function StrategyTemplatesPage() {
   }, [router]);
 
   const loadCatalog = async () => {
+    const token = catalogRequestGuard.begin();
     try {
       const data = (await api.strategyTemplates.catalog()) as StrategyTemplateCatalog;
+      if (!catalogRequestGuard.isCurrent(token)) return;
       setCatalog(data);
       const first = data.templates[0]?.name ?? 'buy_and_hold';
       setTemplate(first);
       setSpecText(JSON.stringify(buildDefaultSpec(first), null, 2));
     } catch (err: any) {
+      if (!catalogRequestGuard.isCurrent(token)) return;
       setLoadError(err?.message || 'The template catalogue could not be loaded.');
     }
   };

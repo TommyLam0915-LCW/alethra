@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ApiError, api } from '@/lib/api';
+import { createRequestGuard } from '@/lib/latestRequest';
 
 interface AIStatus {
   provider: string;
@@ -70,6 +71,14 @@ export default function AIPanel({ currentSymbol }: { currentSymbol: string }) {
   const [draftHypothesis, setDraftHypothesis] = useState('');
   const [draftSaved, setDraftSaved] = useState('');
   const threadRef = useRef<HTMLDivElement>(null);
+  // The Context button fetches each option list lazily and is not disabled
+  // while a fetch is in flight, so two clicks can overlap; a rejection from the
+  // older one would otherwise wipe the list the newer one just filled.
+  const draftOptionsRequestGuard = useRef(createRequestGuard()).current;
+  const memoryOptionsRequestGuard = useRef(createRequestGuard()).current;
+  // A send re-reads the thread while the mount effect may still be in flight, so
+  // the older answer must not replace the newer one.
+  const messagesRequestGuard = useRef(createRequestGuard()).current;
 
   const activeConversation = conversations.find((c) => c.id === activeId) || null;
 
@@ -123,23 +132,24 @@ export default function AIPanel({ currentSymbol }: { currentSymbol: string }) {
     loadConversations();
   }, [loadStatus, loadConversations]);
 
+  const loadMessages = async (conversationId: string) => {
+    const token = messagesRequestGuard.begin();
+    try {
+      const data = await api.aiAssistant.getConversation(conversationId);
+      if (!messagesRequestGuard.isCurrent(token)) return;
+      setMessages(data.messages || []);
+    } catch {
+      if (!messagesRequestGuard.isCurrent(token)) return;
+      setMessages([]);
+    }
+  };
+
   useEffect(() => {
     if (!activeId) {
       setMessages([]);
       return;
     }
-    let cancelled = false;
-    (async () => {
-      try {
-        const data = await api.aiAssistant.getConversation(activeId);
-        if (!cancelled) setMessages(data.messages || []);
-      } catch {
-        if (!cancelled) setMessages([]);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
+    loadMessages(activeId);
   }, [activeId]);
 
   useEffect(() => {
@@ -201,25 +211,33 @@ export default function AIPanel({ currentSymbol }: { currentSymbol: string }) {
     }
   };
 
+  const loadDraftOptions = async () => {
+    const token = draftOptionsRequestGuard.begin();
+    try {
+      const drafts = await api.researchDrafts.list();
+      if (!draftOptionsRequestGuard.isCurrent(token)) return;
+      setDraftOptions((Array.isArray(drafts) ? drafts : []).map((d: DraftOption) => ({ id: d.id, title: d.title })));
+    } catch {
+      if (!draftOptionsRequestGuard.isCurrent(token)) return;
+      setDraftOptions([]);
+    }
+  };
+
   const openContextEditor = async () => {
     setCtxOpen((v) => !v);
-    if (draftOptions.length === 0) {
-      try {
-        const drafts = await api.researchDrafts.list();
-        setDraftOptions((Array.isArray(drafts) ? drafts : []).map((d: DraftOption) => ({ id: d.id, title: d.title })));
-      } catch {
-        setDraftOptions([]);
-      }
-    }
+    if (draftOptions.length === 0) await loadDraftOptions();
     if (memoryOptions.length === 0) {
+      const token = memoryOptionsRequestGuard.begin();
       try {
         const memories = await api.personalMemory.list();
+        if (!memoryOptionsRequestGuard.isCurrent(token)) return;
         setMemoryOptions(
           (Array.isArray(memories) ? memories : [])
             .filter((m: MemoryOption) => m.privacy_scope === 'approved_for_personal_ai')
             .map((m: MemoryOption) => ({ id: m.id, content: m.content, privacy_scope: m.privacy_scope }))
         );
       } catch {
+        if (!memoryOptionsRequestGuard.isCurrent(token)) return;
         setMemoryOptions([]);
       }
     }
@@ -264,6 +282,9 @@ export default function AIPanel({ currentSymbol }: { currentSymbol: string }) {
       setMessages((prev) => [...prev, reply]);
       if (typeof reply.quota_used === 'number') setQuotaUsed(reply.quota_used);
       await loadConversations();
+      // The bubbles above are the local echo of this turn; the thread row the
+      // server stored can differ (ids, ordering, persisted status), so re-read it.
+      await loadMessages(activeId);
     } catch (err) {
       // The turn was refused (quota/entitlement/network): drop the optimistic
       // bubble and put the text back so the user does not lose what they typed.
@@ -281,6 +302,7 @@ export default function AIPanel({ currentSymbol }: { currentSymbol: string }) {
     try {
       const result = await api.aiAssistant.testConnection();
       setConnResult(result.ok ? `✓ ${result.detail}` : `✗ ${result.detail}`);
+      await loadStatus();
     } catch (err) {
       setConnResult(err instanceof Error ? `✗ ${err.message}` : '✗ Test failed');
     }
@@ -298,6 +320,7 @@ export default function AIPanel({ currentSymbol }: { currentSymbol: string }) {
       setDraftFormFor(null);
       setDraftTitle('');
       setDraftHypothesis('');
+      await loadDraftOptions();
     } catch (err) {
       setPanelError(err instanceof Error ? err.message : 'Could not save the draft');
     }

@@ -1,12 +1,13 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
+import { createRequestGuard } from '@/lib/latestRequest';
 import { statusPillClass } from '@/lib/status-styles';
 import AppShell from '@/components/shell/AppShell';
-import { formatDate, formatDateTime } from '@/lib/format';
+import { formatDate, formatDateTime, parseApiTimestamp } from '@/lib/format';
 import {
   ACTOR_LABELS,
   CONFIDENCE_LABELS,
@@ -115,6 +116,7 @@ export default function PaperPortfolioDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [activeTab, setActiveTab] = useState<'overview' | 'positions' | 'orders' | 'decisions'>('overview');
+  const requestGuard = useRef(createRequestGuard()).current;
 
   const [orderForm, setOrderForm] = useState({
     // Empty on purpose: this lane only accepts DEMO-* synthetic assets, so the
@@ -149,6 +151,7 @@ export default function PaperPortfolioDetailPage() {
   }, [portfolioId, router]);
 
   const loadData = async () => {
+    const token = requestGuard.begin();
     try {
       const [p, pos, ord, dec] = await Promise.all([
         api.paperPortfolio.get(portfolioId),
@@ -156,6 +159,7 @@ export default function PaperPortfolioDetailPage() {
         api.paperPortfolio.orders(portfolioId),
         api.paperPortfolio.decisions(portfolioId),
       ]);
+      if (!requestGuard.isCurrent(token)) return;
       setPortfolio(p);
       setPositions(pos);
       setOrders(ord);
@@ -166,15 +170,18 @@ export default function PaperPortfolioDetailPage() {
       if (p.simulation_session_id) {
         try {
           const s = await api.simulations.get(p.simulation_session_id);
+          if (!requestGuard.isCurrent(token)) return;
           setLinkedSession({ timeframe: s.timeframe ?? null, provider_id: s.provider_id ?? null });
         } catch {
+          if (!requestGuard.isCurrent(token)) return;
           setLinkedSession(null);
         }
       }
     } catch (err: any) {
+      if (!requestGuard.isCurrent(token)) return;
       setError(err.message || 'The portfolio could not be loaded');
     } finally {
-      setLoading(false);
+      if (requestGuard.isCurrent(token)) setLoading(false);
     }
   };
 
@@ -213,8 +220,8 @@ export default function PaperPortfolioDetailPage() {
 
   const handlePause = async () => {
     try {
-      const p = await api.paperPortfolio.pause(portfolioId);
-      setPortfolio(p);
+      await api.paperPortfolio.pause(portfolioId);
+      await loadData();
     } catch (err: any) {
       setError(err.message);
     }
@@ -222,8 +229,8 @@ export default function PaperPortfolioDetailPage() {
 
   const handleResume = async () => {
     try {
-      const p = await api.paperPortfolio.resume(portfolioId);
-      setPortfolio(p);
+      await api.paperPortfolio.resume(portfolioId);
+      await loadData();
     } catch (err: any) {
       setError(err.message);
     }
@@ -238,8 +245,8 @@ export default function PaperPortfolioDetailPage() {
     )
       return;
     try {
-      const p = await api.paperPortfolio.retire(portfolioId);
-      setPortfolio(p);
+      await api.paperPortfolio.retire(portfolioId);
+      await loadData();
     } catch (err: any) {
       setError(err.message);
     }
@@ -782,7 +789,11 @@ export default function PaperPortfolioDetailPage() {
                 const typeStyle = DECISION_TYPE_STYLES[d.decision_type] || DECISION_TYPE_STYLES.no_action;
                 const linkedOrder = orders
                   .filter((o) => o.decision_id === d.id)
-                  .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))[0] ?? null;
+                  .sort(
+                    (a, b) =>
+                      (parseApiTimestamp(b.created_at)?.getTime() ?? 0) -
+                      (parseApiTimestamp(a.created_at)?.getTime() ?? 0),
+                  )[0] ?? null;
                 return (
                   <div key={d.id} style={{
                     padding: '1rem', background: 'var(--surface-1)', border: '1px solid var(--border-strong)',

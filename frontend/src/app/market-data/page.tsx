@@ -1,9 +1,10 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
+import { createRequestGuard } from '@/lib/latestRequest';
 import AppShell from '@/components/shell/AppShell';
 import { formatDate } from '@/lib/format';
 
@@ -127,6 +128,8 @@ export default function MarketDataPage() {
   const [dataStatus, setDataStatus] = useState<DataServiceStatus | null>(null);
   const [dataLoading, setDataLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const instrumentsRequestGuard = useRef(createRequestGuard()).current;
+  const providerStatusRequestGuard = useRef(createRequestGuard()).current;
 
   useEffect(() => {
     const token = localStorage.getItem('token');
@@ -139,17 +142,22 @@ export default function MarketDataPage() {
   }, [router]);
 
   const loadProviderStatus = async () => {
+    const token = providerStatusRequestGuard.begin();
     try {
       const data = await api.marketData.status();
+      if (!providerStatusRequestGuard.isCurrent(token)) return;
       setProviderStatus(data);
     } catch {
+      if (!providerStatusRequestGuard.isCurrent(token)) return;
       // non-critical
     }
   };
 
   const loadInstruments = async () => {
+    const token = instrumentsRequestGuard.begin();
     try {
       const data = await api.instruments.list();
+      if (!instrumentsRequestGuard.isCurrent(token)) return;
       const items: Instrument[] = data.instruments || [];
       const status: DataServiceStatus | null = data.data_status ?? null;
       setInstruments(items);
@@ -166,6 +174,7 @@ export default function MarketDataPage() {
         setError(null);
       }
     } catch (err) {
+      if (!instrumentsRequestGuard.isCurrent(token)) return;
       console.error('Failed to load instruments:', err);
       setError("Couldn't load the instrument list. Try again.");
     }

@@ -1,11 +1,12 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { api } from '@/lib/api';
+import { createRequestGuard } from '@/lib/latestRequest';
 import { describeRunStatus } from '@/lib/runStatus';
 import AppShell from '@/components/shell/AppShell';
-import { formatDate } from '@/lib/format';
+import { formatDate, parseApiTimestamp } from '@/lib/format';
 import { EXPERIMENT_STATUS_LABELS, label } from '@/lib/copy';
 
 interface LatestRun {
@@ -82,24 +83,28 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
+  const requestGuard = useRef(createRequestGuard()).current;
 
   useEffect(() => {
     loadExperiments();
   }, []);
 
   const loadExperiments = async () => {
+    const token = requestGuard.begin();
     setLoading(true);
     try {
       const data = await api.experiments.list();
+      if (!requestGuard.isCurrent(token)) return;
       setExperiments(data);
       setLoadError(null);
     } catch (err) {
+      if (!requestGuard.isCurrent(token)) return;
       // A failed load previously rendered as "no experiments yet", which read
       // as an empty account instead of a failure.
       console.error('Failed to load experiments:', err);
       setLoadError('Could not load experiments. Check your connection and try again.');
     } finally {
-      setLoading(false);
+      if (requestGuard.isCurrent(token)) setLoading(false);
     }
   };
 
@@ -119,7 +124,11 @@ export default function DashboardPage() {
 
   const getSortedExperiments = () => {
     return [...getFilteredExperiments()]
-      .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
+      .sort(
+        (a, b) =>
+          (parseApiTimestamp(b.updated_at)?.getTime() ?? 0) -
+          (parseApiTimestamp(a.updated_at)?.getTime() ?? 0),
+      );
   };
 
   if (loading) {

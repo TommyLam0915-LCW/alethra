@@ -1,11 +1,12 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { api, ApiError } from '@/lib/api';
 import { statusPillClass } from '@/lib/status-styles';
 import AppShell from '@/components/shell/AppShell';
 import { formatDate } from '@/lib/format';
+import { createRequestGuard } from '@/lib/latestRequest';
 
 interface Application {
   id: string;
@@ -43,6 +44,8 @@ export default function PilotApplicationPage() {
   const [loadError, setLoadError] = useState('');
   const [success, setSuccess] = useState('');
 
+  const existingDataRequestGuard = useRef(createRequestGuard()).current;
+
   const [form, setForm] = useState({
     intended_user_type: 'individual_researcher',
     current_research_workflow: '',
@@ -63,21 +66,26 @@ export default function PilotApplicationPage() {
   }, [router]);
 
   const loadExistingData = async () => {
+    const token = existingDataRequestGuard.begin();
     // 404 is the normal "nothing submitted yet" answer. Any other failure must
     // not be disguised as "no application" — that hid auth/network problems.
     const failures: string[] = [];
     try {
       const app = await api.pilot.getMyApplication();
+      if (!existingDataRequestGuard.isCurrent(token)) return;
       setApplication(app);
     } catch (err) {
+      if (!existingDataRequestGuard.isCurrent(token)) return;
       if (!(err instanceof ApiError && err.status === 404)) {
         failures.push('Pilot 申請狀態');
       }
     }
     try {
       const ent = await api.pilot.getMyEntitlement();
+      if (!existingDataRequestGuard.isCurrent(token)) return;
       setEntitlement(ent);
     } catch (err) {
+      if (!existingDataRequestGuard.isCurrent(token)) return;
       if (!(err instanceof ApiError && err.status === 404)) {
         failures.push('Pilot 權限');
       }
@@ -85,7 +93,7 @@ export default function PilotApplicationPage() {
     setLoadError(
       failures.length > 0 ? `無法載入${failures.join('與')}資料。請檢查連線後重試。` : '',
     );
-    setLoading(false);
+    if (existingDataRequestGuard.isCurrent(token)) setLoading(false);
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -98,6 +106,9 @@ export default function PilotApplicationPage() {
       const result = await api.pilot.submitApplication(form);
       setApplication(result);
       setSuccess('申請已提交！我們會盡快審核。');
+      // The POST answer carries the application only; the entitlement panel below
+      // it is fed by a separate GET and stays stale until this re-read lands.
+      await loadExistingData();
     } catch (err: any) {
       setError(err.message || '提交失敗');
     } finally {

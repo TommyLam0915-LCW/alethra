@@ -1,9 +1,10 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
+import { createRequestGuard } from '@/lib/latestRequest';
 import { statusPillClass } from '@/lib/status-styles';
 import { formatDate } from '@/lib/format';
 
@@ -36,6 +37,7 @@ export default function ModelResearchListPage() {
   const [newTitle, setNewTitle] = useState('');
   const [newPurpose, setNewPurpose] = useState('');
   const [newDescription, setNewDescription] = useState('');
+  const requestGuard = useRef(createRequestGuard()).current;
 
   useEffect(() => {
     const token = localStorage.getItem('token');
@@ -44,18 +46,21 @@ export default function ModelResearchListPage() {
   }, [router]);
 
   const loadRecords = async () => {
+    const token = requestGuard.begin();
     setLoading(true);
     try {
       const data = await api.modelResearch.list();
+      if (!requestGuard.isCurrent(token)) return;
       setRecords(data);
       setError(null);
     } catch (err: any) {
+      if (!requestGuard.isCurrent(token)) return;
       // Console-only handling showed an empty list, which read as "no models"
       // rather than "the request failed".
       console.error('Failed to load model records:', err);
       setError(err?.message || '無法載入模型研究記錄。請稍後重試。');
     } finally {
-      setLoading(false);
+      if (requestGuard.isCurrent(token)) setLoading(false);
     }
   };
 

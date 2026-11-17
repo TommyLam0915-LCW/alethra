@@ -547,6 +547,11 @@ export default function OrderPreviewPanel({
     if (result) {
       setIntent(result as ExecutionIntent);
       setNotice('Intent created; it is submitted only after explicit authorization.');
+      // Same contract as the cancel path below: the intent row is echoed here, but
+      // ⑧'s evidence book and the order/portfolio lists are only correct after a
+      // re-read.
+      onBookChanged?.();
+      await Promise.all([loadSessionOrders(activeSessionId), loadPortfolios(activeSessionId)]);
     }
   };
 
@@ -556,6 +561,10 @@ export default function OrderPreviewPanel({
     if (result) {
       setIntent(result as ExecutionIntent);
       setNotice('Authorized. Confirm again before submitting (subject to the safety switch).');
+      // The echoed row covers this form only; ⑧ lists intents from its own GET,
+      // so an authorized intent stays "pending" there until the book re-reads.
+      // No order exists yet, so the order and portfolio lists do not move.
+      onBookChanged?.();
     }
   };
 
@@ -568,6 +577,12 @@ export default function OrderPreviewPanel({
       const result = (await api.execution.submit(intent.intent_id)) as ExecutionIntent;
       setIntent(result);
       setNotice('Submitted to the controlled executor. Fills appear in the Fills tab.');
+      // Submitting is what creates the order, so three surfaces move at once:
+      // ⑧'s intent book, ⑦'s order list and the portfolio's cash. The echoed
+      // intent covers only this form, and the notice above promises fills the
+      // user cannot see until the lists are re-read.
+      onBookChanged?.();
+      await Promise.all([loadSessionOrders(activeSessionId), loadPortfolios(activeSessionId)]);
     } catch (err) {
       if (err instanceof ApiError) {
         setError(err.message || 'Submission failed');
@@ -599,6 +614,9 @@ export default function OrderPreviewPanel({
     if (result) {
       setIntent(result as ExecutionIntent);
       setNotice('Intent cancelled.');
+      // Same contract as authorizeIntent above: ⑧ keeps its own list of intents,
+      // and only the book signal makes the cancelled state appear there.
+      onBookChanged?.();
     }
   };
 

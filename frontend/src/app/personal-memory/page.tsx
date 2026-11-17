@@ -1,10 +1,11 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import { formatDate } from '@/lib/format';
+import { createRequestGuard } from '@/lib/latestRequest';
 
 interface MemoryRecord {
   id: string;
@@ -52,6 +53,8 @@ export default function PersonalMemoryPage() {
   const [trainingOptInId, setTrainingOptInId] = useState<string | null>(null);
   const [trainingOptInValue, setTrainingOptInValue] = useState(false);
 
+  const memoriesRequestGuard = useRef(createRequestGuard()).current;
+
   useEffect(() => {
     const token = localStorage.getItem('token');
     if (!token) { router.push('/login'); return; }
@@ -59,15 +62,18 @@ export default function PersonalMemoryPage() {
   }, [router]);
 
   const loadMemories = async () => {
+    const token = memoriesRequestGuard.begin();
     try {
       const data = await api.personalMemory.list(typeFilter || undefined);
+      if (!memoriesRequestGuard.isCurrent(token)) return;
       setMemories(data);
       setError(null);
     } catch (err: any) {
+      if (!memoriesRequestGuard.isCurrent(token)) return;
       console.error('Failed to load memories:', err);
       setError(err?.message || '無法載入個人研究記憶。請稍後重試。');
     } finally {
-      setLoading(false);
+      if (memoriesRequestGuard.isCurrent(token)) setLoading(false);
     }
   };
 

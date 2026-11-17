@@ -1,9 +1,10 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
+import { createRequestGuard } from '@/lib/latestRequest';
 import { classifyWriteError } from '@/lib/userErrors';
 import { formatDate, formatDateTime } from '@/lib/format';
 
@@ -145,6 +146,7 @@ export default function ModelDetailPage() {
   const [exportResult, setExportResult] = useState<any>(null);
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState('');
+  const requestGuard = useRef(createRequestGuard()).current;
 
   useEffect(() => {
     const token = localStorage.getItem('token');
@@ -153,21 +155,24 @@ export default function ModelDetailPage() {
   }, [id, router]);
 
   const loadData = async () => {
+    const token = requestGuard.begin();
     try {
       const [rec, vers, evals] = await Promise.all([
         api.modelResearch.get(id),
         api.modelResearch.versions(id),
         api.modelResearch.evaluations(id),
       ]);
+      if (!requestGuard.isCurrent(token)) return;
       setRecord(rec);
       setVersions(vers);
       setEvaluations(evals);
       setCompareA(prev => prev || vers[0]?.id || '');
       setCompareB(prev => prev || (vers.length > 1 ? vers[vers.length - 1].id : ''));
     } catch (err) {
+      if (!requestGuard.isCurrent(token)) return;
       console.error('Failed to load model:', err);
     } finally {
-      setLoading(false);
+      if (requestGuard.isCurrent(token)) setLoading(false);
     }
   };
 
@@ -234,6 +239,8 @@ export default function ModelDetailPage() {
     setVersionActionError('');
     try {
       setRecord(await api.modelResearch.setActiveVersion(id, { version_id: versionId }));
+      // The record echo has no versions[] rows: is_active lives there.
+      await loadData();
     } catch (err: any) {
       setVersionActionError(err.message);
     }
@@ -248,6 +255,7 @@ export default function ModelDetailPage() {
         reason: rollbackReason.trim(),
       });
       setRecord(updated);
+      await loadData();
       setRollbackVersionId(null);
       setRollbackReason('');
     } catch (err: any) {
@@ -275,6 +283,7 @@ export default function ModelDetailPage() {
     try {
       const updated = await api.modelResearch.update(id, { status: newStatus });
       setRecord(updated);
+      await loadData();
       setShowStatusChange(false);
       setNewStatus('');
     } catch (err) {

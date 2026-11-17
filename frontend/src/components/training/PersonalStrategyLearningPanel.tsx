@@ -504,14 +504,6 @@ function shortId(value: string | null | undefined): string {
   return value ? `${value.slice(0, 8)}…` : '—';
 }
 
-function formatWhen(value: string | null | undefined): string {
-  if (!value) return '—';
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime())
-    ? '—'
-    : parsed.toLocaleString('zh-HK', { hour12: false });
-}
-
 function formatScore(value: number | null | undefined): string {
   return typeof value === 'number' ? value.toFixed(3) : '—';
 }
@@ -646,6 +638,7 @@ export default function PersonalStrategyLearningPanel() {
   const [selections, setSelections] = useState<SelectionEntry[]>([]);
   const [activeVersionId, setActiveVersionId] = useState<string | null>(null);
   const [comparisons, setComparisons] = useState<ComparisonSummaryEntry[]>([]);
+
 
   const loadVersions = useCallback(async () => {
     const ticket = ++versionsSeq.current;
@@ -1417,7 +1410,7 @@ export default function PersonalStrategyLearningPanel() {
             </span>
             {journey.worker.last_beat_at && (
               <span style={{ color: 'var(--text-muted)' }}>
-                最後心跳 {formatWhen(journey.worker.last_beat_at)}
+                最後心跳 {formatDateTime(journey.worker.last_beat_at)}
               </span>
             )}
           </div>
