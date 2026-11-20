@@ -102,7 +102,7 @@
 1. `source_event_id` 栏位**不存在**（0 笔）。先前叙述「三条车道省略 source_event_id、内容 fallback 产制 `pf-…` 键」对本 base 不成立；实际身分键是 `sim-{session_id}-{step}`（`services/paper_execution.py:255`）与客户端提供的 `idempotency_key`。真实缺口改列为 §4 的 (1)–(4)。
 2. Admin P0：本 base 5 个端点已用 `require_admin`（本轮 grep 到 file:line），AGENTS.md 的 P0-1 对本工作区不再成立；测试层证据仍属旧版本身分，故状态只到 IMPLEMENTED_NOT_VERIFIED。
 3. Migration head：以正则解析曾误得「两个 head」；以 `alembic heads` 为准＝单 head `e1f2a3b4c5d6`。
-4. `.env.test` 的 32 字元区段是 `${ALETHRA_TEST_RUNTIME_PW}` 间接引用，不是已提交的凭证实值。
+4. `.env.test` 的 32 字元区段是测试执行角色密码的环境变量间接引用（`ALETHRA_TEST_RUNTIME_PW` 变量名，非其值），不是已提交的凭证实值。
 5. 扫描器两代缺陷（永不匹配的锚定问题、以及修正后 1,516 笔噪声）都由正控／负控锁住，不再单靠「0 findings」。
 6. Collection 修复的所以然（以 `importlib.util.find_spec` 实测，非推断）：`tests/__init__.py` 使 pytest 把 `backend/` 放进 `sys.path`，因此 `test_safety_gate` 解析到 **`backend/test_safety_gate.py`**（root 层，4 个 root 测试档之一），而 `acquisition_hook` 在 package 内（`backend/tests/acquisition_hook.py`），裸名 `find_spec` 回 NOT FOUND——所以 `test_acquisition_hook.py:18` 必须写 `from tests.acquisition_hook import …`。两种裸名写法一成一败不是矛盾，而是两个档在不同层；改回裸名会让 42 条测试再度无法收集。
 7. 重播 fixture 家族（本轮，前／后实测）：`test_replay_credibility.py` 与 `test_position_timing_bugs.py` 先前以 `PaperTradingEngine("postgresql://test")`＋`@patch("…SessionLocal")` 运作——patch 的是产品回退分支，引擎仍试图连线 `postgresql://test`，且断言抓的是 `call_args_list[1]` 的位置索引（在产品新增所有权 SELECT 之后已失效），tuple 只有 8 栏而查询有 13 栏。两者对本 base 的真实数据库**没有观察到任何东西**。现状：全部改到真实 SQLite＋`tests/replay_fixture.py` 的具名 bind 记录器，13＋4 条通过。
