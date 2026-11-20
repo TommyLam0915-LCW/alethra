@@ -31,18 +31,36 @@ def _safe_dsn(url_str: str) -> str:
     return "<unparseable DSN>"
 
 
+def _require_pg_target(url_str: str):
+    """Return a skip reason when this lane has no PostgreSQL target at all.
+
+    A missing or non-PostgreSQL ``ALETHRA_TEST_DB`` means the PG lane was never
+    selected, so collecting this module must not abort the rest of the suite. An
+    unsafe target still refuses below — absence is reported, unsafety is not.
+    """
+    if not url_str:
+        return (
+            "PG integration lane not selected: ALETHRA_TEST_DB is unset "
+            "(this module needs a disposable PostgreSQL test database)"
+        )
+    try:
+        if make_url(url_str).drivername not in ("postgresql", "postgresql+psycopg2"):
+            return (
+                f"PG integration lane not selected: ALETHRA_TEST_DB driver is "
+                f"{make_url(url_str).drivername!r}"
+            )
+    except Exception:
+        return f"PG integration lane not selected: ALETHRA_TEST_DB is unparseable: {_safe_dsn(url_str)}"
+    return None
+
+
 # Safety: refuse to run against production database
 _test_db_url = os.environ.get("ALETHRA_TEST_DB", "")
-if _test_db_url:
+_skip_reason = _require_pg_target(_test_db_url)
+if _skip_reason is None:
     _parsed = make_url(_test_db_url)
     _db_name = _parsed.database or ""
     _host = _parsed.host or ""
-
-    # Must be PostgreSQL
-    if _parsed.drivername not in ("postgresql", "postgresql+psycopg2"):
-        raise RuntimeError(
-            f"SAFETY: Integration tests require PostgreSQL, got {_parsed.drivername!r}"
-        )
 
     # Host must be localhost
     if _host and _host not in ("localhost", "127.0.0.1", "::1", "/tmp"):
@@ -64,10 +82,11 @@ if _test_db_url:
             f"SAFETY: Refusing to use production database {_db_name!r}. "
             f"DSN: {_safe_dsn(_test_db_url)}"
         )
-else:
-    raise RuntimeError(
-        "SAFETY: ALETHRA_TEST_DB environment variable is required for integration tests"
-    )
+
+pytestmark = pytest.mark.skipif(
+    _skip_reason is not None,
+    reason=_skip_reason or "PG target accepted",
+)
 
 
 def _make_user(client, email: str, is_admin: bool = False):

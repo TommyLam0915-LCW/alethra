@@ -69,7 +69,8 @@ def test_run_id():
 import sys
 import os
 sys.path.insert(0, os.path.dirname(__file__))
-from test_target_guard import verify_test_target, TargetGuardError, get_test_db_url
+from tests.test_target_guard import verify_test_target, TargetGuardError
+from tests.lanes import pg_test_url_or_skip
 
 
 @pytest.fixture
@@ -88,9 +89,9 @@ def session_factory():
     TARGET GUARD: Verifies actual DB/role/server before any write.
     Stops if target doesn't match approved test environment.
     """
-    from test_target_guard import create_verified_session_factory
+    from tests.test_target_guard import create_verified_session_factory
     
-    db_url = get_test_db_url()
+    db_url = pg_test_url_or_skip()
     
     # P1 C Commit 1: Actually call shared verified factory
     guarded_factory, engine = create_verified_session_factory(db_url)
@@ -1786,7 +1787,7 @@ class TestTargetGuard:
     def test_target_guard_rejects_wrong_db(self):
         """Target guard rejects wrong database name."""
         from unittest.mock import Mock
-        from test_target_guard import verify_test_target, TargetGuardError
+        from tests.test_target_guard import verify_test_target, TargetGuardError
         
         # Mock session that returns wrong DB name
         mock_session = Mock()
@@ -1801,7 +1802,7 @@ class TestTargetGuard:
     def test_target_guard_rejects_wrong_role(self):
         """Target guard rejects wrong database role."""
         from unittest.mock import Mock
-        from test_target_guard import verify_test_target, TargetGuardError
+        from tests.test_target_guard import verify_test_target, TargetGuardError
         
         # Mock session that returns wrong role
         mock_session = Mock()
@@ -1816,7 +1817,7 @@ class TestTargetGuard:
     def test_target_guard_rejects_wrong_address(self):
         """Target guard rejects wrong server IP address."""
         from unittest.mock import Mock
-        from test_target_guard import verify_test_target, TargetGuardError
+        from tests.test_target_guard import verify_test_target, TargetGuardError
         
         # Mock session that returns wrong server IP
         mock_session = Mock()
@@ -1831,7 +1832,7 @@ class TestTargetGuard:
     def test_target_guard_rejects_wrong_port(self):
         """Target guard rejects wrong port."""
         from unittest.mock import Mock
-        from test_target_guard import verify_test_target, TargetGuardError
+        from tests.test_target_guard import verify_test_target, TargetGuardError
         
         # Mock session that returns wrong port
         mock_session = Mock()
@@ -1846,7 +1847,7 @@ class TestTargetGuard:
     def test_target_guard_accepts_correct_target(self):
         """Target guard accepts correct DB/role/server_ip/port."""
         from unittest.mock import Mock
-        from test_target_guard import verify_test_target
+        from tests.test_target_guard import verify_test_target
         
         # P0 FIX: Mock returns realistic data (IP address, not hostname)
         mock_session = Mock()
@@ -1864,7 +1865,7 @@ class TestTargetGuard:
     def test_target_guard_rejects_ipv6_variant(self):
         """Target guard rejects ::1 (IPv6 loopback, only 127.0.0.1 approved)."""
         from unittest.mock import Mock
-        from test_target_guard import verify_test_target, TargetGuardError
+        from tests.test_target_guard import verify_test_target, TargetGuardError
         
         # Mock session that returns ::1 (IPv6 loopback)
         mock_session = Mock()
@@ -1879,7 +1880,7 @@ class TestTargetGuard:
     def test_target_guard_rejects_null_port(self):
         """Target guard rejects NULL port (TCP mode requires explicit port)."""
         from unittest.mock import Mock
-        from test_target_guard import verify_test_target, TargetGuardError
+        from tests.test_target_guard import verify_test_target, TargetGuardError
         
         # Mock session that returns NULL port (Unix socket)
         mock_session = Mock()
@@ -1894,7 +1895,7 @@ class TestTargetGuard:
     def test_target_guard_zero_writes_before_verification(self):
         """No writes happen before guard verification passes."""
         from unittest.mock import Mock, call
-        from test_target_guard import verify_test_target, TargetGuardError
+        from tests.test_target_guard import verify_test_target, TargetGuardError
         
         # Mock session that will fail verification
         mock_session = Mock()
@@ -1914,7 +1915,7 @@ class TestTargetGuard:
 
     def test_get_test_db_url_fails_closed(self):
         """get_test_db_url raises if ALETHRA_PG_TEST_URL not set."""
-        from test_target_guard import get_test_db_url
+        from tests.test_target_guard import get_test_db_url
         
         # Temporarily unset the environment variable
         original = os.environ.pop("ALETHRA_PG_TEST_URL", None)
@@ -2574,7 +2575,7 @@ class TestBatchCGuardPrecision:
     
     def test_guard_with_recording_fake_verifies_identity_query(self):
         """Recording fake verifies guard executes actual identity query statement."""
-        from test_target_guard import verify_test_target, TargetGuardError
+        from tests.test_target_guard import verify_test_target, TargetGuardError
         from unittest.mock import Mock
         
         # Create recording fake that tracks all execute calls
@@ -2615,7 +2616,7 @@ class TestBatchCGuardPrecision:
     
     def test_verified_factory_rejection_asserts_teardown(self):
         """P1 C7-8: No-DB test calls formal entry point with fake engine, asserts teardown on rejection."""
-        from test_target_guard import create_verified_session_factory, TargetGuardError
+        from tests.test_target_guard import create_verified_session_factory, TargetGuardError
         from unittest.mock import Mock, patch
         
         # P1 C7: Inject fake engine/sessionmaker
@@ -2651,7 +2652,7 @@ class TestBatchCGuardPrecision:
     
     def test_verified_factory_success_path_with_teardown(self):
         """P1 C9: Success path verifies can create session, with explicit teardown/dispose."""
-        from test_target_guard import create_verified_session_factory
+        from tests.test_target_guard import create_verified_session_factory
         from unittest.mock import Mock, patch
         
         # Track session creation and closure
@@ -2699,7 +2700,7 @@ class TestBatchCGuardPrecision:
     
     def test_verified_factory_flow_shared_between_fixtures(self):
         """Both test fixtures use the same formal entry point with verified factory flow."""
-        from test_target_guard import verify_test_target, TargetGuardError
+        from tests.test_target_guard import verify_test_target, TargetGuardError
         from unittest.mock import Mock
         
         # Test 1: Guard passes with correct IP
@@ -2842,7 +2843,7 @@ class TestBatchBMinimalIntegration:
             setup_session.execute(
                 text("""
                 INSERT INTO strategy_study_runs (id, user_id, lane, research_version, instrument_id, interval_minutes, provider_id, data_nature, bar_count, first_open_time, last_open_time, settings_json, walk_forward_json, bars_json, trade_count, created_at)
-                VALUES (:id, :user_id, 'strategy_research_simulated', 'v1.0', 'BTC-USD', 60, 'kraken', 'historical', 100, :first_time, :last_time, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, 1, CURRENT_TIMESTAMP)
+                VALUES (:id, :user_id, 'strategy_research_simulated', 'v1.0', 'BTC-USD', 60, 'kraken', 'historical', 100, :first_time, :last_time, '{}', '{}', '{}', 1, CURRENT_TIMESTAMP)
             """),
                 {
                     "id": study_run_id, 

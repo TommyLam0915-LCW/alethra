@@ -15,7 +15,7 @@ import threading
 from unittest.mock import MagicMock, Mock, patch
 from sqlalchemy import text
 
-from acquisition_hook import (
+from tests.acquisition_hook import (
     create_hooked_session_factory,
     SessionLocalState,
     ResultProxy,

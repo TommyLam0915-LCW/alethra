@@ -13,7 +13,7 @@ import threading
 from datetime import datetime, timezone, timedelta
 from sqlalchemy import text
 import pytest
-from test_target_guard import get_test_db_url
+from tests.lanes import pg_test_url_or_skip
 
 
 @pytest.fixture
@@ -24,9 +24,9 @@ def session_factory():
     FAIL CLOSED: No fallback URL. If ALETHRA_PG_TEST_URL not set, test fails.
     TARGET GUARD: Verifies actual DB/role/server before any write.
     """
-    from test_target_guard import create_verified_session_factory
+    from tests.test_target_guard import create_verified_session_factory
     
-    db_url = get_test_db_url()
+    db_url = pg_test_url_or_skip()
     guarded_factory, engine = create_verified_session_factory(db_url)
     
     try:
@@ -298,7 +298,7 @@ class TestSourceQuerySelectsFixture:
                                                bars_json, trade_count, created_at)
                 VALUES (:id, :user_id, 'strategy_research_simulated', 'v1.0', 'BTC-USD', 60,
                         'kraken', 'historical', 100, :first_time, :last_time,
-                        '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, 1, CURRENT_TIMESTAMP)
+                        '{}', '{}', '{}', 1, CURRENT_TIMESTAMP)
             """), {
                 "id": study_run_id,
                 "user_id": user_id,
