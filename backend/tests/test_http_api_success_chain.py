@@ -18,6 +18,7 @@ from uuid import uuid4
 from sqlalchemy import text
 
 from app.database import SessionLocal
+from tests import uuid_identity
 from tests.conftest import TestSession
 
 
@@ -127,16 +128,24 @@ def _seed_fixed_trades(user_id: str):
 
 
 def _cleanup_seed_data(study_run_id: str):
-    """Remove seeded strategy study data."""
+    """Remove seeded strategy study data.
+
+    The study run was written by a raw INSERT below, so its own id carries the
+    dashed spelling while its trades' run_id column carries the same string —
+    but the identity matcher is used anyway, so this cleanup cannot be broken
+    by whichever layer writes the row in a future revision of this file.
+    """
     db = SessionLocal()
     try:
+        run_clause, run_params = uuid_identity.match("run_id", study_run_id, name="seed")
+        run_id_clause, run_id_params = uuid_identity.match("id", study_run_id, name="seed")
         db.execute(
-            text("DELETE FROM strategy_study_trades WHERE run_id = :run_id"),
-            {"run_id": study_run_id},
+            text(f"DELETE FROM strategy_study_trades WHERE {run_clause}"),
+            run_params,
         )
         db.execute(
-            text("DELETE FROM strategy_study_runs WHERE id = :id"),
-            {"id": study_run_id},
+            text(f"DELETE FROM strategy_study_runs WHERE {run_id_clause}"),
+            run_id_params,
         )
         db.commit()
     finally:
@@ -144,66 +153,82 @@ def _cleanup_seed_data(study_run_id: str):
 
 
 def _cleanup_user_data(user_id: str):
-    """Remove all paper trading data for a user in FK-safe order."""
+    """Remove all paper trading data for a user in FK-safe order.
+
+    The user row is written by the ORM and therefore stores the 32-char hex
+    spelling, while every :user_id value here comes from str(user.id) — dashed.
+    Binding the dashed spelling alone deleted nothing from users and said so
+    quietly; measured on this lane, the row survived the whole test.
+    """
+    user_id_clause, user_params = uuid_identity.match("id", user_id, name="uid")
+    owner_clause, owner_params = uuid_identity.match("owner_id", user_id, name="uid")
+    owned_portfolios = f"(SELECT id FROM paper_portfolios WHERE {owner_clause})"
+
     db = SessionLocal()
     try:
         db.execute(
-            text("""
+            text(f"""
                 DELETE FROM paper_fills WHERE paper_order_id IN (
                     SELECT o.id FROM paper_orders o
                     JOIN paper_portfolios p ON o.portfolio_id = p.id
-                    WHERE p.owner_id = :user_id
+                    WHERE {owner_clause}
                 )
             """),
-            {"user_id": user_id},
+            owner_params,
         )
         db.execute(
-            text("""
-                DELETE FROM paper_orders WHERE portfolio_id IN (
-                    SELECT id FROM paper_portfolios WHERE owner_id = :user_id
-                )
+            text(f"""
+                DELETE FROM paper_orders WHERE portfolio_id IN {owned_portfolios}
             """),
-            {"user_id": user_id},
+            owner_params,
         )
         db.execute(
-            text("DELETE FROM decision_records WHERE owner_id = :user_id"),
-            {"user_id": user_id},
+            text(f"DELETE FROM decision_records WHERE {owner_clause}"),
+            owner_params,
         )
         db.execute(
-            text("""
-                DELETE FROM paper_positions WHERE portfolio_id IN (
-                    SELECT id FROM paper_portfolios WHERE owner_id = :user_id
-                )
+            text(f"""
+                DELETE FROM paper_positions WHERE portfolio_id IN {owned_portfolios}
             """),
-            {"user_id": user_id},
+            owner_params,
         )
         db.execute(
-            text("""
+            text(f"""
                 DELETE FROM paper_trading_daily_metrics WHERE run_id IN (
                     SELECT r.id FROM paper_trading_runs r
                     JOIN paper_portfolios p ON r.portfolio_id = p.id
-                    WHERE p.owner_id = :user_id
+                    WHERE {owner_clause}
                 )
             """),
-            {"user_id": user_id},
+            owner_params,
         )
         db.execute(
-            text("""
-                DELETE FROM paper_trading_runs WHERE portfolio_id IN (
-                    SELECT id FROM paper_portfolios WHERE owner_id = :user_id
-                )
+            text(f"""
+                DELETE FROM paper_trading_runs WHERE portfolio_id IN {owned_portfolios}
             """),
-            {"user_id": user_id},
+            owner_params,
         )
         db.execute(
-            text("DELETE FROM paper_portfolios WHERE owner_id = :user_id"),
-            {"user_id": user_id},
+            text(f"DELETE FROM paper_portfolios WHERE {owner_clause}"),
+            owner_params,
         )
         db.execute(
-            text("DELETE FROM users WHERE id = :id"),
-            {"id": user_id},
+            text(f"DELETE FROM users WHERE {user_id_clause}"),
+            user_params,
         )
         db.commit()
+
+        # A cleanup that cannot see its own rows is the failure this function
+        # used to have, so refuse rather than return silently.
+        residual = db.execute(
+            text(f"SELECT COUNT(*) FROM users WHERE {user_id_clause}"),
+            user_params,
+        ).scalar()
+        if residual:
+            raise RuntimeError(
+                f"Cleanup verification failed: user {user_id} still exists "
+                f"({residual} rows, stored form unreadable by one spelling alone)"
+            )
     finally:
         db.close()
 
@@ -290,10 +315,23 @@ class TestHTTPSuccessChain:
             # Step 5: Verify DB ledger matches API responses
             db = SessionLocal()
             try:
+                # The rows below are written by the product's own INSERT path,
+                # so their uuid columns carry the dashed spelling, while the
+                # users row is written by the ORM and carries the hex spelling.
+                # Every identity predicate in this file matches both.
+                run_clause, run_params = uuid_identity.match("id", run_id, name="run")
+                run_ref_clause, run_ref_params = uuid_identity.match("run_id", run_id, name="run")
+                portfolio_clause, portfolio_params = uuid_identity.match(
+                    "id", portfolio_id, name="portfolio"
+                )
+                portfolio_ref_clause, portfolio_ref_params = uuid_identity.match(
+                    "portfolio_id", portfolio_id, name="portfolio"
+                )
+
                 # Check run record
                 run = db.execute(
-                    text("SELECT * FROM paper_trading_runs WHERE id = :id"),
-                    {"id": run_id},
+                    text(f"SELECT * FROM paper_trading_runs WHERE {run_clause}"),
+                    run_params,
                 ).fetchone()
                 assert run.status == "completed"
                 assert run.total_trades == replay_data["total_trades"]
@@ -302,50 +340,50 @@ class TestHTTPSuccessChain:
 
                 # Check portfolio record
                 portfolio = db.execute(
-                    text("SELECT * FROM paper_portfolios WHERE id = :id"),
-                    {"id": portfolio_id},
+                    text(f"SELECT * FROM paper_portfolios WHERE {portfolio_clause}"),
+                    portfolio_params,
                 ).fetchone()
                 assert abs(portfolio.current_virtual_cash - replay_data["final_capital"]) < 0.01
 
                 # Check fills exist
                 fill_count = db.execute(
-                    text("""
+                    text(f"""
                         SELECT COUNT(*) FROM paper_fills f
                         JOIN paper_orders o ON f.paper_order_id = o.id
-                        WHERE o.portfolio_id = :portfolio_id
+                        WHERE o.{portfolio_ref_clause}
                     """),
-                    {"portfolio_id": portfolio_id},
+                    portfolio_ref_params,
                 ).scalar()
                 assert fill_count > 0, "Should have fill records"
 
                 # Check positions all closed
                 open_positions = db.execute(
-                    text("""
+                    text(f"""
                         SELECT COUNT(*) FROM paper_positions
-                        WHERE portfolio_id = :portfolio_id AND status = 'open'
+                        WHERE {portfolio_ref_clause} AND status = 'open'
                     """),
-                    {"portfolio_id": portfolio_id},
+                    portfolio_ref_params,
                 ).scalar()
                 assert open_positions == 0, "All positions should be closed"
 
                 # Check daily metrics exist
                 metric_count = db.execute(
-                    text("""
+                    text(f"""
                         SELECT COUNT(*) FROM paper_trading_daily_metrics
-                        WHERE run_id = :run_id
+                        WHERE {run_ref_clause}
                     """),
-                    {"run_id": run_id},
+                    run_ref_params,
                 ).scalar()
                 assert metric_count > 0, "Should have daily metrics"
 
                 # Verify cash reconciliation from DB
                 fills = db.execute(
-                    text("""
+                    text(f"""
                         SELECT f.net_cash_change FROM paper_fills f
                         JOIN paper_orders o ON f.paper_order_id = o.id
-                        WHERE o.portfolio_id = :portfolio_id
+                        WHERE o.{portfolio_ref_clause}
                     """),
-                    {"portfolio_id": portfolio_id},
+                    portfolio_ref_params,
                 ).fetchall()
 
                 total_net_flows = sum(Decimal(str(f.net_cash_change)) for f in fills)

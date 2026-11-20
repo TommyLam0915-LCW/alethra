@@ -12,17 +12,25 @@ import pytest
 from unittest.mock import patch
 from uuid import uuid4
 from sqlalchemy import text
+from tests import uuid_identity
 from tests.api_test_fixtures import api_test_fixtures
 from app.database import SessionLocal
 
 
 def _count_user(user_id: str) -> int:
-    """Count user in database using independent connection."""
+    """Count user in database using independent connection.
+
+    The user row is written by the ORM, which on this lane stores the uuid
+    without dashes; the fixtures that create study runs write them by hand and
+    keep the dashes. Matching one spelling would report a surviving row as
+    absent, which is the failure this whole file exists to catch.
+    """
     db = SessionLocal()
     try:
+        clause, params = uuid_identity.match("id", user_id, name="uid")
         result = db.execute(
-            text("SELECT COUNT(*) FROM users WHERE id = :id"),
-            {"id": user_id}
+            text(f"SELECT COUNT(*) FROM users WHERE {clause}"),
+            params,
         )
         return result.scalar()
     finally:
@@ -33,9 +41,10 @@ def _count_run(run_id: str) -> int:
     """Count run in database using independent connection."""
     db = SessionLocal()
     try:
+        clause, params = uuid_identity.match("id", run_id, name="rid")
         result = db.execute(
-            text("SELECT COUNT(*) FROM strategy_study_runs WHERE id = :id"),
-            {"id": run_id}
+            text(f"SELECT COUNT(*) FROM strategy_study_runs WHERE {clause}"),
+            params,
         )
         return result.scalar()
     finally:
@@ -112,7 +121,8 @@ def test_cleanup_delete_fails_test_fails():
         # Manual cleanup for this test
         db = SessionLocal()
         try:
-            db.execute(text("DELETE FROM users WHERE id = :id"), {"id": captured_user_id})
+            clause, params = uuid_identity.match("id", captured_user_id, name="uid")
+            db.execute(text(f"DELETE FROM users WHERE {clause}"), params)
             db.commit()
         finally:
             db.close()

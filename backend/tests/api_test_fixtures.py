@@ -9,6 +9,7 @@ Cleanup errors propagate:
 """
 from contextlib import contextmanager
 from sqlalchemy import text
+from tests import uuid_identity
 from tests.conftest import TestSession
 
 
@@ -173,13 +174,15 @@ def api_test_fixtures(email: str):
                 elif resource_type == "run":
                     db = TestSession()
                     try:
+                        run_clause, run_params = uuid_identity.match("run_id", resource_id, name="run")
+                        run_id_clause, run_id_params = uuid_identity.match("id", resource_id, name="run")
                         db.execute(
-                            text("DELETE FROM strategy_study_trades WHERE run_id = :run_id"),
-                            {"run_id": str(resource_id)},
+                            text(f"DELETE FROM strategy_study_trades WHERE {run_clause}"),
+                            run_params,
                         )
                         db.execute(
-                            text("DELETE FROM strategy_study_runs WHERE id = :id"),
-                            {"id": str(resource_id)},
+                            text(f"DELETE FROM strategy_study_runs WHERE {run_id_clause}"),
+                            run_id_params,
                         )
                         db.commit()
                     finally:
@@ -228,89 +231,93 @@ def _cleanup_user_data(user_id: str):
     3. Delete in FK-safe order using collected ID sets
     4. Verify per-table zero residuals with independent new connection
     """
+    # Every predicate below goes through uuid_identity. Which spelling a row
+    # carries depends on which layer wrote it, so a single-spelling probe here
+    # answers "this user has nothing to clean" for a user that does.
+    # All three clauses bind the same value under the same keys, so uid_params
+    # serves every statement in this function.
+    user_id_clause, uid_params = uuid_identity.match("id", user_id, name="uid")
+    owner_clause, _ = uuid_identity.match("owner_id", user_id, name="uid")
+    study_user_clause, _ = uuid_identity.match("user_id", user_id, name="uid")
+    not_owner_clause, _ = uuid_identity.match("owner_id", user_id, name="uid", negate=True)
+    owned_portfolios = f"(SELECT id FROM paper_portfolios WHERE {owner_clause})"
+
     # Phase 1: Collect all IDs with ownership verification
     db = TestSession()
     try:
         # Verify user exists
         user_check = db.execute(
-            text("SELECT id FROM users WHERE id = :user_id"),
-            {"user_id": user_id}
+            text(f"SELECT id FROM users WHERE {user_id_clause}"),
+            uid_params,
         ).fetchone()
         if not user_check:
             return  # User already deleted, nothing to clean
         
         # Collect portfolio IDs
         portfolio_ids = [row[0] for row in db.execute(
-            text("SELECT id FROM paper_portfolios WHERE owner_id = :user_id"),
-            {"user_id": user_id}
+            text(f"SELECT id FROM paper_portfolios WHERE {owner_clause}"),
+            uid_params,
         ).fetchall()]
         
         # Verify all portfolios belong to this user
         if portfolio_ids:
             stray = db.execute(
-                text(f"SELECT COUNT(*) FROM paper_portfolios WHERE id IN ({','.join([':p' + str(i) for i in range(len(portfolio_ids))])}) AND owner_id != :user_id"),
-                {f'p{i}': pid for i, pid in enumerate(portfolio_ids)} | {"user_id": user_id}
+                text(f"SELECT COUNT(*) FROM paper_portfolios WHERE id IN ({','.join([':p' + str(i) for i in range(len(portfolio_ids))])}) AND {not_owner_clause}"),
+                {f'p{i}': pid for i, pid in enumerate(portfolio_ids)} | uid_params
             ).scalar()
             if stray > 0:
                 raise RuntimeError(f"Cleanup aborted: {stray} portfolios found belonging to other users")
         
         # Collect paper_trading_run IDs
         run_ids = [row[0] for row in db.execute(
-            text("SELECT id FROM paper_trading_runs WHERE portfolio_id IN "
-                 "(SELECT id FROM paper_portfolios WHERE owner_id = :user_id)"),
-            {"user_id": user_id}
+            text(f"SELECT id FROM paper_trading_runs WHERE portfolio_id IN {owned_portfolios}"),
+            uid_params,
         ).fetchall()] if portfolio_ids else []
         
         # Collect paper_order IDs (both portfolio-based and decision-based)
         order_ids_by_portfolio = [row[0] for row in db.execute(
-            text("SELECT id FROM paper_orders WHERE portfolio_id IN "
-                 "(SELECT id FROM paper_portfolios WHERE owner_id = :user_id)"),
-            {"user_id": user_id}
+            text(f"SELECT id FROM paper_orders WHERE portfolio_id IN {owned_portfolios}"),
+            uid_params,
         ).fetchall()] if portfolio_ids else []
         
         order_ids_by_decision = [row[0] for row in db.execute(
-            text("SELECT id FROM paper_orders WHERE decision_id IN "
-                 "(SELECT id FROM decision_records WHERE paper_portfolio_id IN "
-                 "(SELECT id FROM paper_portfolios WHERE owner_id = :user_id))"),
-            {"user_id": user_id}
+            text(f"SELECT id FROM paper_orders WHERE decision_id IN "
+                 f"(SELECT id FROM decision_records WHERE paper_portfolio_id IN {owned_portfolios})"),
+            uid_params,
         ).fetchall()] if portfolio_ids else []
         
         order_ids = list(set(order_ids_by_portfolio + order_ids_by_decision))
         
         # Collect paper_fill IDs
         fill_ids = [row[0] for row in db.execute(
-            text("SELECT id FROM paper_fills WHERE paper_order_id IN "
-                 "(SELECT id FROM paper_orders WHERE portfolio_id IN "
-                 "(SELECT id FROM paper_portfolios WHERE owner_id = :user_id))"),
-            {"user_id": user_id}
+            text(f"SELECT id FROM paper_fills WHERE paper_order_id IN "
+                 f"(SELECT id FROM paper_orders WHERE portfolio_id IN {owned_portfolios})"),
+            uid_params,
         ).fetchall()] if portfolio_ids else []
         
         # Collect decision IDs
         decision_ids = [row[0] for row in db.execute(
-            text("SELECT id FROM decision_records WHERE paper_portfolio_id IN "
-                 "(SELECT id FROM paper_portfolios WHERE owner_id = :user_id)"),
-            {"user_id": user_id}
+            text(f"SELECT id FROM decision_records WHERE paper_portfolio_id IN {owned_portfolios}"),
+            uid_params,
         ).fetchall()] if portfolio_ids else []
         
         # Collect position IDs
         position_ids = [row[0] for row in db.execute(
-            text("SELECT id FROM paper_positions WHERE portfolio_id IN "
-                 "(SELECT id FROM paper_portfolios WHERE owner_id = :user_id)"),
-            {"user_id": user_id}
+            text(f"SELECT id FROM paper_positions WHERE portfolio_id IN {owned_portfolios}"),
+            uid_params,
         ).fetchall()] if portfolio_ids else []
         
         # Collect metric IDs
         metric_ids = [row[0] for row in db.execute(
-            text("SELECT id FROM paper_trading_daily_metrics WHERE run_id IN "
-                 "(SELECT id FROM paper_trading_runs WHERE portfolio_id IN "
-                 "(SELECT id FROM paper_portfolios WHERE owner_id = :user_id))"),
-            {"user_id": user_id}
+            text(f"SELECT id FROM paper_trading_daily_metrics WHERE run_id IN "
+                 f"(SELECT id FROM paper_trading_runs WHERE portfolio_id IN {owned_portfolios})"),
+            uid_params,
         ).fetchall()] if portfolio_ids else []
         
         # Collect strategy_study IDs
         study_run_ids = [row[0] for row in db.execute(
-            text("SELECT id FROM strategy_study_runs WHERE user_id = :user_id"),
-            {"user_id": user_id}
+            text(f"SELECT id FROM strategy_study_runs WHERE {study_user_clause}"),
+            uid_params,
         ).fetchall()]
         
     finally:
@@ -391,8 +398,8 @@ def _cleanup_user_data(user_id: str):
         
         # Delete user (last)
         db.execute(
-            text("DELETE FROM users WHERE id = :user_id"),
-            {"user_id": user_id}
+            text(f"DELETE FROM users WHERE {user_id_clause}"),
+            uid_params,
         )
         
         db.commit()
@@ -404,11 +411,33 @@ def _cleanup_user_data(user_id: str):
     try:
         # Verify user deleted
         user_count = verify_db.execute(
-            text("SELECT COUNT(*) FROM users WHERE id = :user_id"),
-            {"user_id": user_id}
+            text(f"SELECT COUNT(*) FROM users WHERE {user_id_clause}"),
+            uid_params,
         ).scalar()
         if user_count != 0:
             raise RuntimeError(f"Cleanup verification failed: user {user_id} still exists (count={user_count})")
+        
+        # Owner-scoped residuals, independently of what Phase 1 collected. The
+        # per-id checks below can only report on ids that were found; these two
+        # report on the ownership predicate itself, so a Phase 1 that found
+        # nothing is a failure here instead of a silent pass.
+        owner_residual = verify_db.execute(
+            text(f"SELECT COUNT(*) FROM paper_portfolios WHERE {owner_clause}"),
+            uid_params,
+        ).scalar()
+        if owner_residual != 0:
+            raise RuntimeError(
+                f"Cleanup verification failed: {owner_residual} portfolios still owned by {user_id}"
+            )
+        
+        study_residual = verify_db.execute(
+            text(f"SELECT COUNT(*) FROM strategy_study_runs WHERE {study_user_clause}"),
+            uid_params,
+        ).scalar()
+        if study_residual != 0:
+            raise RuntimeError(
+                f"Cleanup verification failed: {study_residual} study runs still owned by {user_id}"
+            )
         
         # Verify all portfolios deleted
         if portfolio_ids:
