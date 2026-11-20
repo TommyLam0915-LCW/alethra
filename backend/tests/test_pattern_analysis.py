@@ -162,7 +162,10 @@ class TestAnalyzeSkillPatterns:
     def test_generates_recommendations_for_poor_sharpe(self):
         user_id = _make_user("rec-poor@alethra.io")
         # Create trades with low win rate to trigger negative Sharpe recommendation
-        _make_run_with_trades(user_id, trade_count=10, win_rate=0.2)
+        # 40, not 10: _generate_recommendations refuses to propose below 30 trades
+        # per exit-config bucket (pattern_analysis.py:279), so 10 asked for a
+        # recommendation the product is designed to withhold.
+        _make_run_with_trades(user_id, trade_count=40, win_rate=0.2)
 
         db = TestSession()
         try:
@@ -203,7 +206,7 @@ class TestProposeParameterAdjustment:
         result = propose_parameter_adjustment(
             current_exit=exit_config,
             performance_data={
-                "trade_count": 10,
+                "trade_count": 40,
                 "win_rate": 0.6,
                 "avg_pnl": -5.0,
                 "sharpe": -0.3,
@@ -226,7 +229,7 @@ class TestProposeParameterAdjustment:
         result = propose_parameter_adjustment(
             current_exit=exit_config,
             performance_data={
-                "trade_count": 10,
+                "trade_count": 40,
                 "win_rate": 0.3,
                 "avg_pnl": -10.0,
                 "sharpe": -0.8,
