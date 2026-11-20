@@ -22,6 +22,7 @@ from uuid import uuid4
 
 from sqlalchemy import text
 
+from tests import sql_membership, uuid_identity
 from tests.api_test_fixtures import api_test_fixtures
 from tests.conftest import TestSession
 
@@ -124,9 +125,12 @@ def _capture_all_ids(portfolio_id, run_id):
         ).fetchall()]
 
         fill_ids = [r[0] for r in db.execute(
-            text("SELECT id FROM paper_fills WHERE paper_order_id = ANY(:oids)"),
-            {"oids": order_ids},
-        ).fetchall()] if order_ids else []
+            sql_membership.list_sql(
+                "SELECT id FROM paper_fills WHERE paper_order_id IN :oids",
+                name="oids",
+                values=order_ids,
+            )
+        ).fetchall()]
 
         decision_ids = [r[0] for r in db.execute(
             text("SELECT id FROM decision_records WHERE paper_portfolio_id = :pid"),
@@ -157,67 +161,113 @@ def _capture_all_ids(portfolio_id, run_id):
 
 
 def _verify_zero_residual_by_ids(saved_ids, user_email, user_id):
-    """Verify zero residuals using saved IDs directly (not parent subqueries)."""
+    """Verify zero residuals using saved IDs directly (not parent subqueries).
+
+    Every predicate here runs unconditionally. The saved collections can be
+    empty — and when they are, an ``if saved_ids[...]`` guard makes the check
+    pass without reading a row, so the guard is dropped rather than inherited:
+    an empty list under ``IN`` matches nothing and reports zero, which is the
+    same verdict but is one the database actually gave. The owner-scoped count
+    at the end is the falsifiable half: it asks the database for anything this
+    user still owns, whether or not the snapshots captured a single id.
+    """
     verify_db = TestSession()
     try:
+        uid_clause, uid_params = uuid_identity.match("id", user_id, name="uid")
+        owner_clause, owner_params = uuid_identity.match("owner_id", user_id, name="uid")
+        study_clause, _ = uuid_identity.match("user_id", user_id, name="uid")
+
         user_count = verify_db.execute(
-            text("SELECT COUNT(*) FROM users WHERE id = :uid"),
-            {"uid": user_id},
+            text(f"SELECT COUNT(*) FROM users WHERE {uid_clause}"), uid_params
         ).scalar()
         assert user_count == 0, f"User {user_id} still exists"
 
+        pf_clause, pf_params = uuid_identity.match(
+            "id", saved_ids["portfolio_id"], name="pid"
+        )
         pf_count = verify_db.execute(
-            text("SELECT COUNT(*) FROM paper_portfolios WHERE id = :pid"),
-            {"pid": saved_ids["portfolio_id"]},
+            text(f"SELECT COUNT(*) FROM paper_portfolios WHERE {pf_clause}"), pf_params
         ).scalar()
         assert pf_count == 0, f"Portfolio {saved_ids['portfolio_id']} still exists"
 
+        run_clause, run_params = uuid_identity.match(
+            "id", saved_ids["run_id"], name="rid"
+        )
         run_count = verify_db.execute(
-            text("SELECT COUNT(*) FROM paper_trading_runs WHERE id = :rid"),
-            {"rid": saved_ids["run_id"]},
+            text(f"SELECT COUNT(*) FROM paper_trading_runs WHERE {run_clause}"), run_params
         ).scalar()
         assert run_count == 0, f"Run {saved_ids['run_id']} still exists"
 
-        if saved_ids["order_ids"]:
-            ord_count = verify_db.execute(
-                text("SELECT COUNT(*) FROM paper_orders WHERE id = ANY(:oids)"),
-                {"oids": saved_ids["order_ids"]},
-            ).scalar()
-            assert ord_count == 0, f"{ord_count} orders still exist"
+        ord_count = verify_db.execute(
+            sql_membership.list_sql(
+                "SELECT COUNT(*) FROM paper_orders WHERE id IN :oids",
+                name="oids",
+                values=saved_ids["order_ids"],
+            )
+        ).scalar()
+        assert ord_count == 0, f"{ord_count} orders still exist"
 
-        if saved_ids["fill_ids"]:
-            fill_count = verify_db.execute(
-                text("SELECT COUNT(*) FROM paper_fills WHERE id = ANY(:fids)"),
-                {"fids": saved_ids["fill_ids"]},
-            ).scalar()
-            assert fill_count == 0, f"{fill_count} fills still exist"
+        fill_count = verify_db.execute(
+            sql_membership.list_sql(
+                "SELECT COUNT(*) FROM paper_fills WHERE id IN :fids",
+                name="fids",
+                values=saved_ids["fill_ids"],
+            )
+        ).scalar()
+        assert fill_count == 0, f"{fill_count} fills still exist"
 
-        if saved_ids["decision_ids"]:
-            dec_count = verify_db.execute(
-                text("SELECT COUNT(*) FROM decision_records WHERE id = ANY(:dids)"),
-                {"dids": saved_ids["decision_ids"]},
-            ).scalar()
-            assert dec_count == 0, f"{dec_count} decisions still exist"
+        dec_count = verify_db.execute(
+            sql_membership.list_sql(
+                "SELECT COUNT(*) FROM decision_records WHERE id IN :dids",
+                name="dids",
+                values=saved_ids["decision_ids"],
+            )
+        ).scalar()
+        assert dec_count == 0, f"{dec_count} decisions still exist"
 
-        if saved_ids["position_ids"]:
-            pos_count = verify_db.execute(
-                text("SELECT COUNT(*) FROM paper_positions WHERE id = ANY(:pids)"),
-                {"pids": saved_ids["position_ids"]},
-            ).scalar()
-            assert pos_count == 0, f"{pos_count} positions still exist"
+        pos_count = verify_db.execute(
+            sql_membership.list_sql(
+                "SELECT COUNT(*) FROM paper_positions WHERE id IN :pids",
+                name="pids",
+                values=saved_ids["position_ids"],
+            )
+        ).scalar()
+        assert pos_count == 0, f"{pos_count} positions still exist"
 
-        if saved_ids["metric_ids"]:
-            met_count = verify_db.execute(
-                text("SELECT COUNT(*) FROM paper_trading_daily_metrics WHERE id = ANY(:mids)"),
-                {"mids": saved_ids["metric_ids"]},
-            ).scalar()
-            assert met_count == 0, f"{met_count} metrics still exist"
+        met_count = verify_db.execute(
+            sql_membership.list_sql(
+                "SELECT COUNT(*) FROM paper_trading_daily_metrics WHERE id IN :mids",
+                name="mids",
+                values=saved_ids["metric_ids"],
+            )
+        ).scalar()
+        assert met_count == 0, f"{met_count} metrics still exist"
 
         study_count = verify_db.execute(
-            text("SELECT COUNT(*) FROM strategy_study_runs WHERE user_id = :uid"),
-            {"uid": user_id},
+            text(f"SELECT COUNT(*) FROM strategy_study_runs WHERE {study_clause}"),
+            uid_params,
         ).scalar()
         assert study_count == 0, f"{study_count} study runs still exist"
+
+        for table, column in (
+            ("paper_orders", "portfolio_id"),
+            ("paper_fills", "paper_order_id"),
+            ("decision_records", "paper_portfolio_id"),
+            ("paper_positions", "portfolio_id"),
+            ("paper_trading_runs", "portfolio_id"),
+        ):
+            left = verify_db.execute(
+                text(
+                    f"SELECT COUNT(*) FROM {table} "
+                    f"WHERE {column} IN (SELECT id FROM paper_portfolios "
+                    f"WHERE {owner_clause})"
+                ),
+                owner_params,
+            ).scalar()
+            assert left == 0, (
+                f"{left} {table} rows still reference this user's portfolios, "
+                f"whether or not the id snapshot captured them"
+            )
     finally:
         verify_db.close()
 
@@ -373,8 +423,11 @@ class TestRealAPILoginWithFixture:
 
                 assert len(saved_ids["fill_ids"]) == 4
                 fills = db.execute(
-                    text("SELECT * FROM paper_fills WHERE id = ANY(:fids)"),
-                    {"fids": saved_ids["fill_ids"]},
+                    sql_membership.list_sql(
+                        "SELECT * FROM paper_fills WHERE id IN :fids",
+                        name="fids",
+                        values=saved_ids["fill_ids"],
+                    )
                 ).fetchall()
                 assert len(fills) == 4
 
@@ -401,8 +454,11 @@ class TestRealAPILoginWithFixture:
 
                 assert len(saved_ids["position_ids"]) == 2
                 positions = db.execute(
-                    text("SELECT * FROM paper_positions WHERE id = ANY(:pids)"),
-                    {"pids": saved_ids["position_ids"]},
+                    sql_membership.list_sql(
+                        "SELECT * FROM paper_positions WHERE id IN :pids",
+                        name="pids",
+                        values=saved_ids["position_ids"],
+                    )
                 ).fetchall()
                 assert len(positions) == 2
                 for pos in positions:
@@ -416,23 +472,32 @@ class TestRealAPILoginWithFixture:
 
                 assert len(saved_ids["metric_ids"]) >= 1
                 metrics = db.execute(
-                    text("SELECT * FROM paper_trading_daily_metrics WHERE id = ANY(:mids)"),
-                    {"mids": saved_ids["metric_ids"]},
+                    sql_membership.list_sql(
+                        "SELECT * FROM paper_trading_daily_metrics WHERE id IN :mids",
+                        name="mids",
+                        values=saved_ids["metric_ids"],
+                    )
                 ).fetchall()
                 total_metrics_trades = sum(m.trades_count for m in metrics)
                 assert total_metrics_trades == expected["total_trades"]
 
                 assert len(saved_ids["decision_ids"]) == 4
                 decisions = db.execute(
-                    text("SELECT COUNT(*) FROM decision_records WHERE id = ANY(:dids)"),
-                    {"dids": saved_ids["decision_ids"]},
+                    sql_membership.list_sql(
+                        "SELECT COUNT(*) FROM decision_records WHERE id IN :dids",
+                        name="dids",
+                        values=saved_ids["decision_ids"],
+                    )
                 ).scalar()
                 assert decisions == 4
 
                 assert len(saved_ids["order_ids"]) == 4
                 orders = db.execute(
-                    text("SELECT COUNT(*) FROM paper_orders WHERE id = ANY(:oids)"),
-                    {"oids": saved_ids["order_ids"]},
+                    sql_membership.list_sql(
+                        "SELECT COUNT(*) FROM paper_orders WHERE id IN :oids",
+                        name="oids",
+                        values=saved_ids["order_ids"],
+                    )
                 ).scalar()
                 assert orders == 4
             finally:
