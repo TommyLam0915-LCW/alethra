@@ -65,7 +65,7 @@ def precision_5_trades(precision_test_user):
                 ) VALUES (
                     :id, :user_id, 'strategy_research_simulated', 'v1.0', 'CRYPTO:KRAKEN:TEST/USD', 60,
                     'test_provider', 'simulated', 100, :now, :now,
-                    '{}'::jsonb, '{}'::jsonb, '[]'::jsonb, 5, :now
+                    '{}', '{}', '[]', 5, :now
                 )
             """),
             {"id": study_run_id, "user_id": precision_test_user, "now": now},
@@ -134,9 +134,12 @@ class TestDecimalPrecisionRegression:
         """
         study_run_id = precision_5_trades
 
-        # Create portfolio
-        portfolio_db_url = "postgresql://postgres@localhost:5432/ai_investment_lab"
-        engine = PaperTradingEngine(portfolio_db_url)
+        # Create portfolio.  This used to hardcode
+        # "postgresql://postgres@localhost:5432/ai_investment_lab" — the real
+        # production database, reachable straight from a test and bypassing
+        # conftest's production-name guard.  The engine takes its sessions from
+        # the fixture-bound factory instead.
+        engine = PaperTradingEngine(session_factory=SessionLocal)
 
         result = engine.create_portfolio(
             user_id=precision_test_user,
@@ -253,26 +256,57 @@ class TestDecimalPrecisionRegression:
             # Trade 3: -$478.64 (95.73 qty × -$5 loss)
             # Trade 4: +$935.12 (93.51 qty × $10 profit)
             # Expected final: ~$101,922.88 (with some rounding tolerance)
+            # paper_portfolios carries no equity column in any migration, so the
+            # previous SELECT current_equity failed on both dialects.  With zero
+            # open positions (asserted above) equity is cash by definition; the
+            # check that the schema can actually answer is that the replay's two
+            # writers agree.
             portfolio = db.execute(
                 text("""
-                    SELECT current_virtual_cash, current_equity
-                    FROM paper_portfolios
-                    WHERE id = :portfolio_id
+                    SELECT p.current_virtual_cash, r.final_capital
+                    FROM paper_portfolios p
+                    JOIN paper_trading_runs r ON r.portfolio_id = p.id
+                    WHERE p.id = :portfolio_id
                 """),
                 {"portfolio_id": portfolio_id},
             ).fetchone()
 
             final_cash = float(portfolio.current_virtual_cash)
-            final_equity = float(portfolio.current_equity)
+            final_capital = float(portfolio.final_capital)
 
-            # All positions closed, so cash should equal equity
-            assert abs(final_cash - final_equity) < 0.01, (
-                f"All positions closed: cash ({final_cash}) should equal equity ({final_equity})"
+            assert abs(final_cash - final_capital) < 0.01, (
+                f"Portfolio cash ({final_cash}) and run final_capital "
+                f"({final_capital}) disagree"
             )
 
-            # Verify cash is in expected range (allowing for rounding)
-            assert 101900 < final_cash < 101950, (
-                f"Final cash {final_cash} outside expected range [101900, 101950]"
+            # The hand calculation above prices the five round trips at their
+            # gross P&L only, with the replay's position quantities rounded to
+            # two decimals.  The replay also charges commission and slippage on
+            # both legs, so the costs the ledger actually recorded belong in the
+            # expected figure — the old fixed [101900, 101950] band assumed zero
+            # costs and was ~$154 high.  The $5 tolerance is the rounding the
+            # quoted quantities carry (≤ $0.005 × ~$100 per trade × 5 trades);
+            # the exact cash identity is covered by test_ledger_reconciliation's
+            # fill-based reconciliation node, not re-derived here.
+            cost_total = db.execute(
+                text("""
+                    SELECT COALESCE(SUM(f.commission_amount + f.slippage_amount), 0)
+                    FROM paper_fills f
+                    JOIN paper_orders o ON f.paper_order_id = o.id
+                    WHERE o.portfolio_id = :portfolio_id
+                """),
+                {"portfolio_id": portfolio_id},
+            ).scalar()
+            expected_cash = Decimal("101922.88") - Decimal(str(cost_total))
+
+            assert cost_total and Decimal(str(cost_total)) > 0, (
+                "Ledger recorded no commission or slippage, so this run did not "
+                "exercise the cost path the band above depends on"
+            )
+
+            assert abs(Decimal(str(final_cash)) - expected_cash) < Decimal("5.00"), (
+                f"Final cash {final_cash} != hand P&L 101922.88 less recorded "
+                f"costs {cost_total} = {expected_cash}"
             )
 
         finally:
