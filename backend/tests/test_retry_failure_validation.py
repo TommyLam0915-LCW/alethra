@@ -10,12 +10,12 @@ import pytest
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 from uuid import uuid4
-from unittest.mock import patch
 
 from sqlalchemy import text
 
 from app.database import SessionLocal, engine as db_engine
 from app.services.paper_trading import PaperTradingEngine
+from app.services.paper_trading_exceptions import InvalidStateError
 
 
 @pytest.fixture
@@ -109,7 +109,7 @@ def seed_retry_trades(test_user_id):
                 ) VALUES (
                     :id, :user_id, 'strategy_research_simulated', 'v1.0', 'TEST/USD', 60,
                     'test_provider', 'simulated', 100, :now, :now,
-                    '{}'::jsonb, '{}'::jsonb, '[]'::jsonb, 2, :now
+                    '{}', '{}', '[]', 2, :now
                 )
             """),
             {"id": study_run_id, "user_id": test_user_id, "now": now},
@@ -246,7 +246,7 @@ class TestRetryAndFailure:
         snapshot_after_first = _snapshot_db_state(portfolio_id, run_id)
 
         # Second replay: should be rejected
-        with pytest.raises(ValueError, match="already completed"):
+        with pytest.raises(InvalidStateError, match="is in state 'completed'"):
             engine.execute_historical_replay(
                 run_id=run_id,
                 user_id=test_user_id,
@@ -254,7 +254,7 @@ class TestRetryAndFailure:
             )
 
         # Third replay: should also be rejected
-        with pytest.raises(ValueError, match="already completed"):
+        with pytest.raises(InvalidStateError, match="is in state 'completed'"):
             engine.execute_historical_replay(
                 run_id=run_id,
                 user_id=test_user_id,
@@ -319,7 +319,28 @@ class TestRetryAndFailure:
         study_run_id = seed_retry_trades
         initial_capital = Decimal("100000.00")
 
-        engine = PaperTradingEngine(database_url=str(db_engine.url))
+        # The engine takes sessions from session_factory, so the failure has to
+        # be injected there. Patching the module-level SessionLocal left the
+        # engine on its own sessionmaker and the replay ran to completion.
+        state = {"armed": False, "inserts": 0}
+
+        def failing_session_factory():
+            db = SessionLocal()
+            original_execute = db.execute
+
+            def failing_execute(*args, **kwargs):
+                if state["armed"] and str(args[0]).lstrip().upper().startswith("INSERT"):
+                    state["inserts"] += 1
+                    # Fail on the second ledger write so the first one is still
+                    # sitting uncommitted in the transaction rollback must undo.
+                    if state["inserts"] == 2:
+                        raise RuntimeError("Injected failure for testing")
+                return original_execute(*args, **kwargs)
+
+            db.execute = failing_execute
+            return db
+
+        engine = PaperTradingEngine(session_factory=failing_session_factory)
         result = engine.create_portfolio(
             user_id=test_user_id,
             skill="test_rule",
@@ -331,37 +352,15 @@ class TestRetryAndFailure:
         portfolio_id = result["portfolio_id"]
         run_id = result["run_id"]
 
-        # Inject a failure by mocking db.execute to raise an error
-        original_execute = None
-        failure_injected = False
-        
-        def failing_execute(*args, **kwargs):
-            # Let the first few calls succeed (status UPDATE, trade SELECT)
-            # Then fail on a later call (e.g., when writing fills)
-            nonlocal failure_injected
-            failing_execute.call_count = getattr(failing_execute, 'call_count', 0) + 1
-            
-            # Only fail once, on the 6th call (after atomic UPDATE succeeds)
-            if failing_execute.call_count == 6 and not failure_injected:
-                failure_injected = True
-                raise RuntimeError("Injected failure for testing")
-            
-            return original_execute(*args, **kwargs)
-
-        # Patch SessionLocal to inject failure
-        with patch('app.services.paper_trading.SessionLocal') as mock_session_local:
-            mock_db = SessionLocal()
-            original_execute = mock_db.execute
-            mock_db.execute = failing_execute
-            mock_session_local.return_value = mock_db
-
-            # Attempt replay: should fail
-            with pytest.raises(RuntimeError, match="Injected failure"):
-                engine.execute_historical_replay(
-                    run_id=run_id,
-                    user_id=test_user_id,
-                    days_back=30,
-                )
+        state["armed"] = True
+        # Attempt replay: should fail
+        with pytest.raises(RuntimeError, match="Injected failure"):
+            engine.execute_historical_replay(
+                run_id=run_id,
+                user_id=test_user_id,
+                days_back=30,
+            )
+        state["armed"] = False
 
         # Verify run status is 'failed'
         db = SessionLocal()
@@ -382,6 +381,19 @@ class TestRetryAndFailure:
                 {"portfolio_id": portfolio_id},
             ).scalar()
             assert fill_count == 0, f"Should have 0 fills after rollback, got {fill_count}"
+
+            # The first ledger write executed before the injected failure, so a
+            # rollback that only discarded the second statement would leave it.
+            decision_count = db.execute(
+                text("""
+                    SELECT COUNT(*) FROM decision_records
+                    WHERE paper_portfolio_id = :portfolio_id
+                """),
+                {"portfolio_id": portfolio_id},
+            ).scalar()
+            assert decision_count == 0, (
+                f"Rollback left {decision_count} uncommitted decision records"
+            )
 
         finally:
             db.close()
