@@ -222,8 +222,10 @@ cmd_lint() {
   else
     (cd "$ROOT/frontend" && "$node20" ./node_modules/typescript/bin/tsc --noEmit) || rc=1
     # report coverage so a silent step cannot be mistaken for a no-op
-    n=$( (cd "$ROOT/frontend" && "$node20" ./node_modules/typescript/bin/tsc --noEmit --listFiles 2>/dev/null) | grep -cv '/node_modules/' )
-    say "  typechecked $n first-party file(s) (strict)"
+    files=$( (cd "$ROOT/frontend" && "$node20" ./node_modules/typescript/bin/tsc --noEmit --listFiles 2>/dev/null) )
+    n=$(printf '%s\n' "$files" | grep -v '/node_modules/' | grep -vc '/\.next/')
+    g=$(printf '%s\n' "$files" | grep -c '/\.next/types/')
+    say "  typechecked $n first-party file(s) (strict; $g generated .next/types stub(s) counted separately)"
   fi
   return $rc
 }
@@ -322,7 +324,7 @@ from app.main import app
 routes = [r.path for r in app.routes]
 print(f"  app imported        : {app.title!r}")
 print(f"  routes registered   : {len(routes)}")
-missing = [p for p in ("/health", "/api/v1/auth/login") if p not in routes]
+missing = [p for p in ("/health", "/api/auth/login") if p not in routes]
 if missing:
     print(f"  FAIL missing routes  : {missing}")
     raise SystemExit(1)
