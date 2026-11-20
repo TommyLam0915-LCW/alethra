@@ -21,6 +21,10 @@ out/
 # Databases
 *.db
 *.sqlite3
+# SQLite sidecar files a live transaction leaves in the worktree
+*.db-journal
+*.db-wal
+*.db-shm
 # Local DB snapshots (never commit real data backups)
 *.db.backup-*
 
