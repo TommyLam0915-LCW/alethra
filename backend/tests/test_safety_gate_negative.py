@@ -15,6 +15,7 @@ import os
 import sys
 import subprocess
 import pytest
+from sqlalchemy.engine import make_url
 from unittest.mock import patch, MagicMock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -26,37 +27,93 @@ from test_safety_gate import (
     FORBIDDEN_DATABASES,
 )
 from tests.conftest import _is_postgres_url
+from tests.lanes import lane_db_url
+
+BACKEND_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# The children below import tests.conftest, and conftest chooses the lane from
+# ALETHRA_TEST_DB. They used to bake a PostgreSQL DSN into that choice, so a
+# run launched the way scripts/dev.sh launches it — ALETHRA_TEST_DB unset,
+# lane default SQLite — sent the child to a socket that does not exist on this
+# host, and the node died inside the connection gate instead of testing the
+# aliasing rule it names. The lane now comes from what the parent actually
+# resolved, reaches the child through its environment rather than through the
+# `-c` source, and is bound back by a password-free fingerprint.
+_LANE_BIND = """
+from sqlalchemy.engine import make_url
+print("LANE=" + make_url(os.environ["DATABASE_URL"]).render_as_string(hide_password=True))
+"""
+
+
+def _lane():
+    lane = lane_db_url()
+    if not lane:
+        raise AssertionError("conftest resolved no DATABASE_URL, so no lane can be inherited")
+    return lane
+
+
+def _mask(url: str) -> str:
+    return make_url(url).render_as_string(hide_password=True)
+
+
+def _child_env(**overrides):
+    """Environment for a process that imports tests.conftest.
+
+    DATABASE_URL and ALETHRA_PG_TEST_URL are stripped so the child resolves
+    its lane from the lane variable alone, and overrides then set exactly the
+    variable combination each node is about.
+    """
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in ("DATABASE_URL", "ALETHRA_PG_TEST_URL")
+    }
+    env["ALETHRA_TEST_DB"] = _lane()
+    env["TEST_MODE"] = "true"
+    env.update(overrides)
+    return env
+
+
+def _run_child(source, **env_overrides):
+    return subprocess.run(
+        [sys.executable, "-c", source],
+        capture_output=True,
+        text=True,
+        cwd=BACKEND_ROOT,
+        env=_child_env(**env_overrides),
+    )
 
 
 class TestCredentialLeakage:
     """Verify passwords never leak in error messages or output."""
 
     def test_fake_password_not_in_conflict_error(self):
-        """Env var conflict error must not contain password."""
+        """Env var conflict error must not contain password.
+
+        The credential reaches the child through its environment, not through
+        the `-c` source: a command line is readable in `ps` on a shared host,
+        so interpolating it would leak it on the very channel this node polices.
+        """
         fake_password = "SuperSecret123!"
-        url_with_password = f"postgresql://user:{fake_password}@localhost:5432/test_db"
-        
+
         # Run conftest import in subprocess to capture all output
-        result = subprocess.run(
-            [sys.executable, "-c", f"""
-import os
-os.environ['ALETHRA_TEST_DB'] = '{url_with_password}'
-os.environ['ALETHRA_PG_TEST_URL'] = 'postgresql://user@localhost:5432/other_db'
+        result = _run_child(
+            """
 try:
-    import sys
-    sys.path.insert(0, '{os.path.dirname(os.path.dirname(os.path.abspath(__file__)))}')
     import tests.conftest
 except RuntimeError as e:
     print(str(e))
     raise
-"""],
-            capture_output=True,
-            text=True,
-            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+""",
+            ALETHRA_TEST_DB=f"postgresql://user:{fake_password}@localhost:5432/test_db",
+            ALETHRA_PG_TEST_URL="postgresql://user@localhost:5432/other_db",
         )
-        
+
         # Check stdout, stderr, and exception message
         combined_output = result.stdout + result.stderr
+        assert result.returncode != 0, (
+            f"Conflicting env vars must be refused. stdout:\n{combined_output}"
+        )
         assert fake_password not in combined_output, (
             f"FAKE PASSWORD LEAKED in output:\n{combined_output}"
         )
@@ -71,52 +128,44 @@ class TestEnvVarConflict:
     def test_conftest_rejects_conflicting_env_vars(self):
         """If ALETHRA_TEST_DB and ALETHRA_PG_TEST_URL both set and differ, refuse."""
         # Use subprocess to test startup rejection (don't reload running conftest)
-        result = subprocess.run(
-            [sys.executable, "-c", """
-import os
-os.environ['ALETHRA_TEST_DB'] = 'postgresql://user@localhost:5432/test_a'
-os.environ['ALETHRA_PG_TEST_URL'] = 'postgresql://user@localhost:5432/test_b'
-import sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath('__file__'))))
-import tests.conftest
-"""],
-            capture_output=True,
-            text=True,
-            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        result = _run_child(
+            "import tests.conftest",
+            ALETHRA_TEST_DB="postgresql://user@localhost:5432/test_a",
+            ALETHRA_PG_TEST_URL="postgresql://user@localhost:5432/test_b",
         )
-        
+
         assert result.returncode != 0, "Should fail with conflicting env vars"
         assert "both set but differ" in result.stderr or "both set but differ" in result.stdout, (
             f"Should report conflict error. stderr: {result.stderr}"
         )
 
     def test_conftest_accepts_matching_env_vars(self):
-        """If both env vars set to same value, no conflict."""
-        # Use the actual test DB URL from environment
-        test_db_url = os.environ.get("ALETHRA_TEST_DB", "postgresql://alethra_test_runtime@localhost:5432/ai_investment_lab_test?host=/tmp")
-        
+        """If both env vars set to same value, no conflict.
+
+        Both variables carry the lane the parent actually resolved, so this
+        node tests the aliasing rule on whatever lane the run was launched
+        with instead of requiring a PostgreSQL server to exist.
+        """
+        lane = _lane()
+
         # Use subprocess to verify actual parsing
-        result = subprocess.run(
-            [sys.executable, "-c", f"""
+        result = _run_child(
+            """
 import os
-os.environ['ALETHRA_TEST_DB'] = '{test_db_url}'
-os.environ['ALETHRA_PG_TEST_URL'] = '{test_db_url}'
-os.environ['TEST_MODE'] = 'true'
-import sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath('__file__'))))
 import tests.conftest
 # Verify both are still set to the same value
 assert os.environ.get('ALETHRA_TEST_DB') == os.environ.get('ALETHRA_PG_TEST_URL')
 print("MATCHING_OK")
-"""],
-            capture_output=True,
-            text=True,
-            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            env={**os.environ, "TEST_MODE": "true"}
+"""
+            + _LANE_BIND,
+            ALETHRA_PG_TEST_URL=lane,
         )
-        
+
         assert result.returncode == 0, f"Should accept matching env vars. stderr: {result.stderr}"
         assert "MATCHING_OK" in result.stdout, "Should verify aliasing succeeded"
+        assert f"LANE={_mask(lane)}" in result.stdout, (
+            f"Child must run on the parent's lane. stdout: {result.stdout}"
+        )
 
     def test_conftest_aliases_single_env_var(self):
         """Only a PostgreSQL ALETHRA_TEST_DB is mirrored into ALETHRA_PG_TEST_URL.
@@ -125,34 +174,28 @@ print("MATCHING_OK")
         SQLite URL in the PG variable and PG-only gates opened on it. Now the
         expectation follows the lane that was actually requested.
         """
-        # Use the actual test DB URL from environment
-        test_db_url = os.environ.get("ALETHRA_TEST_DB", "postgresql://alethra_test_runtime@localhost:5432/ai_investment_lab_test?host=/tmp")
+        lane = _lane()
 
         # Use subprocess to verify actual aliasing behavior
-        result = subprocess.run(
-            [sys.executable, "-c", f"""
+        result = _run_child(
+            """
 import os
-os.environ['ALETHRA_TEST_DB'] = '{test_db_url}'
-os.environ.pop('ALETHRA_PG_TEST_URL', None)
-os.environ['TEST_MODE'] = 'true'
-import sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath('__file__'))))
 import tests.conftest
 # Only PostgreSQL values are mirrored; a SQLite lane must leave the PG
 # variable unset so PG-only gates stay closed.
 print("ALIAS=" + (os.environ.get('ALETHRA_PG_TEST_URL') or "NONE"))
-"""],
-            capture_output=True,
-            text=True,
-            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            env={**os.environ, "TEST_MODE": "true"}
+"""
+            + _LANE_BIND,
         )
 
         assert result.returncode == 0, f"Should accept single env var. stderr: {result.stderr}"
-        expected = test_db_url if _is_postgres_url(test_db_url) else "NONE"
+        expected = lane if _is_postgres_url(lane) else "NONE"
         assert f"ALIAS={expected}" in result.stdout, (
             f"Expected ALETHRA_PG_TEST_URL to be {expected!r} for lane "
-            f"{test_db_url!r}. stdout: {result.stdout} stderr: {result.stderr}"
+            f"{_mask(lane)!r}. stdout: {result.stdout} stderr: {result.stderr}"
+        )
+        assert f"LANE={_mask(lane)}" in result.stdout, (
+            f"Child must run on the parent's lane. stdout: {result.stdout}"
         )
 
     def test_sqlite_lane_leaves_pg_gates_closed(self):
@@ -164,31 +207,27 @@ print("ALIAS=" + (os.environ.get('ALETHRA_PG_TEST_URL') or "NONE"))
         makes the PG-only nodes skip instead of dying in PG-only SQL.
         """
         sqlite_url = "sqlite:////tmp/alias-gate-control.db"
-        result = subprocess.run(
-            [sys.executable, "-c", f"""
+        result = _run_child(
+            """
 import os
-os.environ['ALETHRA_TEST_DB'] = '{sqlite_url}'
-os.environ.pop('ALETHRA_PG_TEST_URL', None)
-os.environ['TEST_MODE'] = 'true'
-import sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath('__file__'))))
 import tests.conftest
 from tests.lanes import has_pg_target
 assert os.environ.get('ALETHRA_PG_TEST_URL') is None, os.environ.get('ALETHRA_PG_TEST_URL')
 assert has_pg_target() is False
-assert os.environ['DATABASE_URL'] == '{sqlite_url}'
+assert os.environ['DATABASE_URL'] == os.environ['ALETHRA_TEST_DB']
 print("SQLITE_LANE_PG_GATES_CLOSED")
-"""],
-            capture_output=True,
-            text=True,
-            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            env={**os.environ, "TEST_MODE": "true"}
+"""
+            + _LANE_BIND,
+            ALETHRA_TEST_DB=sqlite_url,
         )
 
         assert result.returncode == 0, (
             f"SQLite lane must not open PG gates. stderr: {result.stderr}"
         )
         assert "SQLITE_LANE_PG_GATES_CLOSED" in result.stdout
+        assert f"LANE={_mask(sqlite_url)}" in result.stdout, (
+            f"Expected the child on {sqlite_url!r}. stdout: {result.stdout}"
+        )
 
     def test_postgres_url_detection_classifies_both_lanes(self):
         """The alias decision is scheme-based, so neither lane is misread."""
