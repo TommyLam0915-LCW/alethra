@@ -15,6 +15,12 @@ from fastapi.testclient import TestClient
 from app.database import SessionLocal, get_db
 from app.main import app
 from tests.conftest import TestSession
+from tests.lanes import pg_only
+
+# The judgement these nodes make is `SELECT current_user, current_database()`,
+# which SQLite has no notion of; on SQLite they fail on a missing column and say
+# nothing about the role, so they report the absent environment instead.
+pytestmark = pg_only
 
 
 def test_testsession_uses_runtime_role():

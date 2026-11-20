@@ -13,6 +13,13 @@ from sqlalchemy import text
 from sqlalchemy.exc import ProgrammingError
 from app.database import get_db
 
+from tests.lanes import pg_only
+
+# Every node here asks PostgreSQL to refuse DDL from the limited runtime role;
+# SQLite has no role model, so running them there is an OperationalError that
+# reads like product breakage rather than a named environment gap.
+pytestmark = pg_only
+
 
 @pytest.fixture
 def fixture_data():
