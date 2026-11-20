@@ -12,7 +12,7 @@ Two-Phase Cancel Contract:
   * Worker atomically sets status='cancelled'
   * Only now is run truly cancelled
 
-Test Coverage (12 methods implemented):
+Test Coverage (categories implemented in this file):
 - Valid UUID user with complete FK chain (users → portfolios → runs)
 - Running state: two-phase contract with worker polling (5 tests)
 - Queued/pending/failed: immediate completion without worker (3 tests)
@@ -22,12 +22,27 @@ Test Coverage (12 methods implemented):
 - Comprehensive FK-safe cleanup (fills → orders → positions → decisions → metrics → runs → portfolios → users)
 
 Additional tests needed (not yet implemented):
-- Actual execute_historical_replay (requires historical trades setup)
+- Cancel arriving from a second real connection while a worker holds the run
+  (SQLite shares one connection across the suite, so this is a PostgreSQL-lane
+  item; ``dev.sh pg`` has no server here)
 - <100 events, polling boundary, pre-final-commit cancel
 - Worker interruption recovery policy
 - Complete ledger and cash consistency verification
 
-Status: 12 tests WRITTEN, NOT YET EXECUTED (requires PostgreSQL test DB migration)
+Status: 53 nodes collected; measured on the SQLite lane as 23 passed / 30
+skipped in 9.57s (``dev.sh test tests/test_paper_trading_cancel_atomic.py``).
+Every skip carries a readable reason (``-rs`` prints
+``BLOCKED_ENV_NOT_AVAILABLE: no PostgreSQL test target configured`` for all 30),
+so none of them is folded into a pass. The skipped 30 are the PostgreSQL-lane
+contracts in this file — two real connections, row-lock contention, and the
+durability of ``cancel_requested`` across a second session — which the SQLite
+lane cannot produce because ``conftest.py`` binds the whole suite to one
+``StaticPool`` connection.
+Counting ``def test_`` in this file gives 56, not 53: three of them
+(``test_user_id``、``test_portfolio_id``、``test_run_id``) are
+``@pytest.fixture`` definitions that happen to carry a ``test_`` prefix, so a
+grep-derived node count here is wrong by construction — collect-only is the
+authority.
 """
 
 import pytest
@@ -46,6 +61,19 @@ from app.services.paper_trading_exceptions import (
     InvalidStateError,
 )
 from tests.lifecycle_helper import WorkerLifecycle, WorkerNotStoppedError, CleanupRefusedError
+
+from app.database import SessionLocal
+from tests.replay_fixture import (  # noqa: F401  (fixture registered by import)
+    calls_mentioning,
+    capture_statements,
+    replay_case,
+)
+
+# One long round trip, sized so the replay writes a ledger row it can die on:
+# hours are offsets from the seeded base time (30 h ago), so both the entry and
+# the exit sit inside days_back=30 and behind as_of.
+ONE_LONG_TRADE = (0, 1, Decimal("50000"), Decimal("51000"))
+ZERO_COSTS = {"commission_rate": Decimal(0), "slippage_rate": Decimal(0)}
 
 
 @pytest.fixture
@@ -1570,124 +1598,208 @@ class TestCleanupSafety:
         cleanup()
 
 
+class InjectedWorkerDeath(RuntimeError):
+    """The worker died after taking ownership of the run.
+
+    The handler under test catches every exception, so which class dies is not
+    what is being verified — the terminal state it forces is.  It is still a
+    dedicated class so a node cannot pass by consuming some unrelated service
+    error in place of the injection.
+
+    ``execute_historical_replay`` opens its sessions through ``session_factory``,
+    which is the only seam that reaches the worker's own transaction; patching
+    the module-level ``SessionLocal`` leaves the engine on its own sessionmaker
+    and the replay runs to completion (``test_retry_failure_validation.py``
+    records that mistake).
+    """
+
+
+def _crash_after_acquisition(on_acquired=None):
+    """Session factory plus progress state for a worker that dies mid-replay.
+
+    The injected death is armed for the first ledger ``INSERT`` after the
+    execution-acquisition ``UPDATE`` has been seen, so the failure lands inside
+    the loop rather than in setup.  ``on_acquired`` runs once, in the window
+    after that UPDATE committed and before any ledger row exists — the window a
+    real cancel can arrive in.
+    """
+    state = {"acquired": False, "hook_ran": False, "crashed": False}
+
+    def factory():
+        db = SessionLocal()
+        real_execute, real_commit = db.execute, db.commit
+
+        def execute(*args, **kwargs):
+            sql = " ".join(str(args[0]).split()).lower() if args else ""
+            if "update paper_trading_runs" in sql and "'queued', 'pending', 'failed'" in sql:
+                state["acquired"] = True
+            elif state["acquired"] and not state["crashed"] and sql.startswith("insert"):
+                state["crashed"] = True
+                raise InjectedWorkerDeath("injected: ledger write refused after acquisition")
+            return real_execute(*args, **kwargs)
+
+        def commit(*args, **kwargs):
+            result = real_commit(*args, **kwargs)
+            if on_acquired is not None and state["acquired"] and not state["hook_ran"]:
+                state["hook_ran"] = True
+                on_acquired()
+            return result
+
+        db.execute, db.commit = execute, commit
+        return db
+
+    return factory, state
+
+
+def _terminal_decision(calls):
+    """The one terminal-state CASE statement the service's handler emitted."""
+    found = calls_mentioning(calls, "update paper_trading_runs", "else 'failed'")
+    assert len(found) == 1, (
+        "expected the service itself to emit exactly one terminal-state decision, "
+        f"got {len(found)}: {[c.statement[:70] for c in found]}"
+    )
+    assert "and status = 'running'" in found[0].normalized, (
+        "the decision lost its worker-ownership guard, so a terminal run "
+        "could be overwritten by a late handler"
+    )
+    return found[0]
+
+
+def _committed_ledger_rows(db, portfolio_id):
+    """(decisions, orders, fills) committed for this portfolio."""
+    counts = [
+        db.execute(
+            text(f"SELECT COUNT(*) FROM {table} WHERE {column} = :pid"),
+            {"pid": portfolio_id},
+        ).scalar()
+        for table, column in (
+            ("decision_records", "paper_portfolio_id"),
+            ("paper_orders", "portfolio_id"),
+        )
+    ]
+    counts.append(db.execute(
+        text("SELECT COUNT(*) FROM paper_fills f "
+             "JOIN paper_orders o ON f.paper_order_id = o.id "
+             "WHERE o.portfolio_id = :pid"),
+        {"pid": portfolio_id},
+    ).scalar())
+    return tuple(counts)
+
+
 class TestWorkerAtomicTerminalState:
     """Test worker exception handler atomic terminal state decisions via execute_historical_replay."""
 
-    def test_cancel_committed_before_exception_sets_cancelled(self, complete_fk_setup, session_factory, monkeypatch):
-        """Cancel committed, then exception in replay: terminal state = cancelled."""
-        user_id, portfolio_id, run_id = complete_fk_setup
-        
-        # Set up run in queued state (required for execute_historical_replay)
-        setup_session = session_factory()
-        try:
-            setup_session.execute(
-                text("UPDATE paper_trading_runs SET status = 'queued', skill = 'test_skill', instrument_id = 'BTC-USD', interval_minutes = 60 WHERE id = :id"),
-                {"id": run_id}
-            )
-            setup_session.commit()
-        finally:
-            setup_session.close()
-        
-        # Request cancel (Phase 1) - sets cancel_requested=TRUE
-        engine = PaperTradingEngine(session_factory=session_factory)
-        cancel_result = engine.cancel_run(run_id, user_id)
-        assert cancel_result["cancel_requested"] is True
-        
-        # Monkey patch to inject exception after acquired_execution=True
-        original_execute = engine.execute_historical_replay
-        
-        def patched_execute(*args, **kwargs):
-            # Call original but inject exception during trade processing
-            # We'll patch the db.execute to throw after the acquisition UPDATE
-            call_count = [0]
-            original_db_execute = None
-            
-            def throwing_execute(self_db, *exec_args, **exec_kwargs):
-                call_count[0] += 1
-                # Let the first few calls succeed (run lookup, portfolio lookup, trades query, acquisition UPDATE)
-                # Throw on a later call (during event processing)
-                if call_count[0] > 10:  # After acquisition
-                    raise RuntimeError("Injected exception during replay")
-                return original_db_execute(*exec_args, **exec_kwargs)
-            
-            # Patch the session's execute method
-            db = engine.session_factory()
-            original_db_execute = db.execute
-            db.execute = lambda *args, **kwargs: throwing_execute(db, *args, **kwargs)
-            
-            try:
-                # Manually run the replay logic with patched db
-                # This is complex, so instead we'll just verify the SQL pattern
-                # For full integration test, we'd need historical trades setup
-                raise RuntimeError("Full integration test requires historical trades - see test_cancel_via_sql_pattern")
-            finally:
-                db.close()
-        
-        # For now, verify the SQL pattern that the exception handler uses
-        # Full integration test would call patched_execute and verify terminal state
-        worker_session = session_factory()
-        try:
-            # This is the exact SQL from the exception handler in execute_historical_replay
-            result = worker_session.execute(
-                text("""
-                UPDATE paper_trading_runs
-                SET status = CASE
-                        WHEN cancel_requested = TRUE THEN 'cancelled'
-                        ELSE 'failed'
-                    END,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = :id AND status = 'running'
-                RETURNING id, status, cancel_requested
-            """),
-                {"id": run_id}
-            )
-            row = result.fetchone()
-            worker_session.commit()
-            
-            # Note: row will be None because status is 'queued' not 'running'
-            # This verifies the SQL pattern is correct
-        finally:
-            worker_session.close()
+    def test_cancel_committed_before_exception_sets_cancelled(self, replay_case):
+        """A cancel that lands after ownership, then a dead worker, ends 'cancelled'.
 
-    def test_failure_committed_before_cancel_sets_failed(self, complete_fk_setup, session_factory):
-        """Exception without cancel: terminal state = failed."""
-        user_id, portfolio_id, run_id = complete_fk_setup
-        
-        # Set running state and ensure cancel_requested=FALSE
-        setup_session = session_factory()
+        What this node used to do: build an engine, patch a session it never
+        handed to that engine, raise inside the patch, and then run its own copy
+        of the service's CASE statement — whose result it did not assert.  The
+        note left in the file ("row will be None because status is 'queued'")
+        was the tell: the product path was never reached, so the node could not
+        fail for any reason at all.
+
+        Now the real service acquires the run, the real cancel service sets the
+        flag, the real handler chooses the state, and the row is read back.
+        What this does NOT claim: the cancel is scheduled into the window rather
+        than raced against it.  The concurrent forms are the barrier nodes in
+        ``TestReplayBarrierIntegration``, and the two-real-connection form
+        remains UNVERIFIED until ``dev.sh pg`` has a server — with SQLite the
+        whole suite shares one connection (``StaticPool``), so a second writer
+        is not a second connection.
+        """
+        case = replay_case([ONE_LONG_TRADE])
+        canceller = PaperTradingEngine(session_factory=SessionLocal)
+        factory, state = _crash_after_acquisition(
+            lambda: canceller.cancel_run(case.run_id, case.user_id)
+        )
+        engine = PaperTradingEngine(session_factory=factory)
+
+        with capture_statements() as calls:
+            with pytest.raises(InjectedWorkerDeath):
+                engine.execute_historical_replay(
+                    run_id=case.run_id,
+                    user_id=case.user_id,
+                    days_back=30,
+                    **ZERO_COSTS,
+                )
+
+        assert state == {"acquired": True, "hook_ran": True, "crashed": True}, (
+            f"the worker never passed through the window under test: {state}"
+        )
+
+        decision = _terminal_decision(calls)
+        assert str(decision.parameters["id"]) == str(case.run_id)
+
+        db = SessionLocal()
         try:
-            setup_session.execute(
-                text("UPDATE paper_trading_runs SET status = 'running', cancel_requested = FALSE WHERE id = :id"),
-                {"id": run_id}
+            row = db.execute(
+                text("SELECT status, cancel_requested FROM paper_trading_runs WHERE id = :id"),
+                {"id": case.run_id},
+            ).fetchone()
+            assert row is not None, "the replay's own row disappeared"
+            assert row.status == "cancelled", (
+                "the finalizer chose "
+                f"{row.status!r} although cancel_requested was already committed"
             )
-            setup_session.commit()
+            assert bool(row.cancel_requested), (
+                "the committed cancel flag vanished before the handler read it"
+            )
+            assert _committed_ledger_rows(db, case.portfolio_id) == (0, 0, 0), (
+                "a rolled-back replay left ledger rows behind"
+            )
         finally:
-            setup_session.close()
-        
-        # Simulate worker exception handler SQL (from execute_historical_replay line 1014-1026)
-        worker_session = session_factory()
+            db.close()
+
+    def test_failure_committed_before_cancel_sets_failed(self, replay_case):
+        """A dead worker with no cancel committed ends 'failed', not 'running'.
+
+        Same seam as the node above, minus the cancel.  This branch is what
+        keeps an interrupted replay reportable: a run left in 'running' by a
+        crashed worker reads back as "still working" to every consumer, and the
+        transcription version could not show that difference because it wrote
+        the state it then read.
+        """
+        case = replay_case([ONE_LONG_TRADE])
+        factory, state = _crash_after_acquisition()
+        engine = PaperTradingEngine(session_factory=factory)
+
+        with capture_statements() as calls:
+            with pytest.raises(InjectedWorkerDeath):
+                engine.execute_historical_replay(
+                    run_id=case.run_id,
+                    user_id=case.user_id,
+                    days_back=30,
+                    **ZERO_COSTS,
+                )
+
+        assert state == {"acquired": True, "hook_ran": False, "crashed": True}, (
+            f"the worker never passed through the window under test: {state}"
+        )
+
+        decision = _terminal_decision(calls)
+        assert str(decision.parameters["id"]) == str(case.run_id)
+
+        db = SessionLocal()
         try:
-            result = worker_session.execute(
-                text("""
-                UPDATE paper_trading_runs
-                SET status = CASE
-                        WHEN cancel_requested = TRUE THEN 'cancelled'
-                        ELSE 'failed'
-                    END,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = :id AND status = 'running'
-                RETURNING id, status, cancel_requested
-            """),
-                {"id": run_id}
+            row = db.execute(
+                text("SELECT status, cancel_requested FROM paper_trading_runs WHERE id = :id"),
+                {"id": case.run_id},
+            ).fetchone()
+            assert row is not None, "the replay's own row disappeared"
+            assert row.status == "failed", (
+                f"a crashed worker left the run in {row.status!r}; 'running' here "
+                "means the finalizer never ran or its UPDATE lost its guard"
             )
-            row = result.fetchone()
-            worker_session.commit()
-            
-            assert row is not None, "Should update row"
-            assert row[1] == "failed", "Status should be failed"
-            assert row[2] is False, "cancel_requested should be False"
+            assert not bool(row.cancel_requested), (
+                "CASE picked 'failed' on a row whose cancel flag is set — the "
+                "decision no longer reads the flag it claims to read"
+            )
+            assert _committed_ledger_rows(db, case.portfolio_id) == (0, 0, 0), (
+                "a rolled-back replay left ledger rows behind"
+            )
         finally:
-            worker_session.close()
+            db.close()
 
     def test_zero_row_update_when_not_running(self, complete_fk_setup, session_factory):
         """Atomic UPDATE returns zero rows if status != 'running'."""
