@@ -1,0 +1,213 @@
+# Alethra 完成矩陣 — deliver-20261120（2026-11-20）
+
+唯一一份。取代聊天中的分散狀態回報；其他報告檔只作歷史證據，不再新增第二份矩陣。
+
+## 0. 版本身分（本矩陣所有結論只適用於這一個版本）
+
+| 項目 | 值 |
+|---|---|
+| 工作區 | `deliver-20261120/`（獨立交付工作區，非共享 dirty checkout） |
+| 分支 | `deliver/complete-20261120`（**無 upstream**：`git rev-parse @{u}` → `fatal: no upstream configured`；本輪一律 `LOCAL COMMITTED / NOT PUSHED`） |
+| 基底 | `b0aca5fbce1d`（未含本輪修改） |
+| HEAD | 寫本节時為 `8feb18c`，其上另有本文件所屬的交付提交（見 §10）。**HEAD／提交數不在此手抄**：以 `git rev-parse --short HEAD`、`git rev-list --count b0aca5f..HEAD` 為準——手抄這兩個值會在下一筆提交立刻變錯 |
+| Migration head | `e1f2a3b4c5d6`（`alembic heads` 實測輸出，53 個 revision，單一头） |
+| `origin` | `https://github.com/TommyLam0915-LCW/alethra.git`（fetch 與 push 同一 URL，本輪每輪復核） |
+| 本輪已修改 | `backend/app/services/paper_trading.py`、`backend/app/models/paper_trading_run.py`、`backend/tests/{replay_credibility,position_timing_bugs,replay_status_management,real_concurrency,source_dedup_scope,decimal_precision_regression,retry_failure_validation,ownership_integration,acquisition_hook,regression_contracts,paper_trading_cancel_atomic,http_api_success_chain,ledger_reconciliation,owner_verification}.py`、`backend/tests/{conftest,api_test_fixtures}.py`、`backend/tests/{formal_path_integration,privilege_enforcement,connection_role_verification}.py`、`scripts/audit_secrets.py`、`backend/tests/test_secret_scan_gate.py`、`.gitignore`、`README.md`、本文件 |
+| 本輪新增 | `backend/tests/replay_fixture.py`、`backend/tests/lanes.py`、`backend/tests/schema_parity.py`、`backend/tests/test_schema_parity.py`、`scripts/audit_secrets.py`、`backend/tests/test_secret_scan_gate.py`、`scripts/dev.sh`、本文件 |
+| Python | 3.12 venv（離線重建；23/24 依 pin，1 項偏差見 §7「依賴重建」列） |
+| Node | 18（預設，不可用）／20.20.2（build）／22.23.5（`node --test`） |
+| DB | SQLite（本機測試）；PostgreSQL 未啟動，未使用 5432 cluster |
+
+状态词只有四个：`IMPLEMENTING`／`IMPLEMENTED_NOT_VERIFIED`／`VERIFIED`／`BLOCKED`。
+`VERIFIED` 一律写明层级（unit／SQLite／PG／API／browser／deployment），**不跨层推定**：API 通过不等于 browser 通过，SQLite 不等于 PG，本机构建不等于远端部署。
+其他分支/工作区（`live1-impl`、Gate A 的 `b08418f2`、int-accept 的 `5a34e3fe`）取得的证据属于**别的版本身分**，在下表只作参照，不计入本行状态。
+
+## 1. A 帳號、權限、資產
+
+| 功能 | 实际入口 | 資料與版本身分 | 所需改動 | 證據（单元／整合／UI） | 狀態 | 外部依賴 |
+|---|---|---|---|---|---|---|
+| 註冊／登入／会话 | `/login`；`backend/app/api/auth.py:11` → `/api/auth` | `users`（email、user_type）；JWT 由 `JWT_SECRET_KEY` 签署 | 无 | 单元：本轮 SQLite 全量含 auth 测试；整合／UI：无本轮证据 | IMPLEMENTED_NOT_VERIFIED | — |
+| Admin 排程 5 端点授权 | `/api/v1/admin/collection/*` | — | 已修（历史轮） | 程式码层：`api/admin.py:60,68,91,102,119` 均 `Depends(require_admin)`（本轮 grep 复核）；测试层证据属 `live1-impl` 版本身分 | IMPLEMENTED_NOT_VERIFIED | — |
+| 秘密不进日志／导出 | `scripts/dev.sh lint` 步骤 2；`scripts/audit_secrets.py` | 扫描对象＝`git ls-files`，非人工清单 | 无 | unit：`backend/tests/test_secret_scan_gate.py` **28/28 通过**（8.98s；正控：opaque 值必判 HIGH、锚定回归、退出码语义、探针字面量不得與已部署值相同、hex 正控、prose 負控、TS 萃取、lane 判定、R6 兩形狀正控／OFF 回報／lane 分級）；本輪實測本樹 HIGH 0／WEAK_LITERAL **9**／FIXTURE 5、rc=0（`--strict` rc=1）。此計數在本輪曾一度為 HIGH 6——成因見 §8.12；20→24 與 4→5 的成因見 §8.18；24→28、7→9 與「產品自己拒絕的預設原本不可見」見 §8.22 | VERIFIED（unit） | 9 项 runtime 字面量改用间接引用需 owner 决定（会使既有 token 失效）；已發布於 `origin/live1-impl` 的 JWT 值見 §9；測試通路以被拒預設簽 token 且 token 落在本機日誌見 §8.23 |
+| 密码重置／账号恢复 | 无产品内路径 | — | 需要：正式重置端点＋审计日志 | 无 | BLOCKED | 需 owner 授权（TTY 输入新密码；正式重置未批准） |
+
+## 2. B 資料與來源
+
+| 功能 | 实际入口 | 資料與版本身分 | 所需改動 | 證據 | 狀態 | 外部依賴 |
+|---|---|---|---|---|---|---|
+| 数据选择（标的／grain／期间） | `/market-data`、`/market-data/crypto`、`/market-data/intraday`；`api/instruments.py:42`、`api/crypto_market.py:41` | `market_data_bars.provider_id:26`＋`interval_minutes:47`（grain 已存在） | 无 | unit：本轮全量含 grain 测试；PG 层：无 | IMPLEMENTED_NOT_VERIFIED | — |
+| stored-only：缺资料即停 | 研究／replay 建立路径 | `strategy_study_runs.lane:40`、`research_version:41`、`provider_id:44`、`data_nature:45`、`dataset_fingerprint:51`、`dataset_gap_count:53`、`dataset_missing_intervals:54` | 无 | 属其他版本身分的实测；本行只到程式码存在 | IMPLEMENTED_NOT_VERIFIED | 不下发 provider、不下载、不写回——本轮未触碰 |
+| 纸上一笔交易的资料血缘 | `/paper-portfolio` | **`paper_trading_runs` 无 provider／snapshot／fingerprint 栏位**（`models/paper_trading_run.py:16-40` 本轮读证；仅有 `interval_minutes`、`run_type`） | 需要：新 migration 加血缘栏位＋写入点；UI 需显示缺口而非伪造交易所 ID | 无 | IMPLEMENTING | migration 只能在抛弃式或明确批准的 DB 执行 |
+
+## 3. C 策略、實驗、研究任務
+
+| 功能 | 实际入口 | 資料與版本身分 | 所需改動 | 證據 | 狀態 | 外部依賴 |
+|---|---|---|---|---|---|---|
+| 实验建立／锁定 | `/experiments`、`/experiments/new`；`api/experiments.py:44` | `experiment_versions`；`ResearchRun.experiment_version_id:21`、`dataset_snapshot_id:22` | 无 | unit：本轮全量 | IMPLEMENTED_NOT_VERIFIED | — |
+| 研究任务：幂等／取消／重试 | `/api/v1/strategy-lab`、`/api/v1/research-drafts` | `strategy_study_runs.lane`＋`research_version` | 需要：把取消／重试契约写成可测服务层并对照现有分支行为 | 无本轮证据；**不得把局部 PASS 当完整** | IMPLEMENTING | 真实行情下载／回填需单独授权 |
+| 策略编辑（规则／退出） | `/strategy-templates`、`/agent-strategy` | `rule_id`／`exit_id`（`strategy_study.py:91,93`） | 需要：`strategies.py` 动量／均值回归误标更正（历史 P1） | 无 | IMPLEMENTING | — |
+
+## 4. D 績效、比較、帳本
+
+| 功能 | 实际入口 | 資料與版本身分 | 所需改動 | 證據 | 狀態 | 外部依賴 |
+|---|---|---|---|---|---|---|
+| 逐笔交易稽核 | `/journal`（`page.tsx` → `JournalDashboard.tsx`）；9 个端点 `api/journal.py:64,112,151,164,200,291,320,351,504` | 每端点均有前端呼叫者（`api.ts:1068-1122` 本轮 grep 复核） | 无 | unit：本轮全量；UI：本轮无 browser 证据 | IMPLEMENTED_NOT_VERIFIED | browser 层需本机栈或 CI |
+| 累计 P&L／权益曲线 | `/journal` → `CumulativePnlChart.tsx:94`、`EquityCurveChart.tsx:101` | 同上 `cumulative-pnl:164`、`equity-curve:200` | 无 | 同列 | IMPLEMENTED_NOT_VERIFIED | — |
+| 逐技能归因 | `/journal` → `SkillAttributionPanel.tsx:75`、`SkillHeatmap.tsx:97` | `skill-attribution:291`、`skill-heatmap:320` | 无 | 同列 | IMPLEMENTED_NOT_VERIFIED | — |
+| 跨 run 比较可保存重开 | `/experiments/[id]/runs/compare`；`api/saved_comparisons.py:139,182,208,222` | `saved_comparisons`：`run_a_id:16`、`run_b_id:17`、`purpose:18`、`notes:19`（PIN 到 research_runs，可重开）；**无 DELETE 端点** | 需要：删除／重命名路径（若 owner 要清理） | 无本轮证据 | IMPLEMENTED_NOT_VERIFIED | — |
+| 事件身分契约（同 ID 重送不双计） | 写入口：`api/simulations.py:1875`、`api/paper_portfolio.py:638`、`services/crypto_paper.py:655`、`services/paper_execution.py:260` | **`PaperOrder.idempotency_key`**（`models/paper_portfolio.py:163`）＋部分唯一索引 `uq_paper_order_portfolio_idempotency (portfolio_id, idempotency_key) WHERE idempotency_key IS NOT NULL`（同档 `:168-174`）。`source_event_id` 栏位全 repo **ABSENT**（`grep app` 0 笔） | 需要：(1) 四条车道各自手写同一条 SELECT，应集中到 `services/order_lifecycle.py:222 find_existing_by_key`（目前只有 `api/simulations.py:1875` 一个生产呼叫者）；(2) 内容比对有三套实作（`_matches_request`、`crypto_paper` 的 `same`、`paper_execution` 直接回传）；(3) key 为 `Optional` 的车道（`api/crypto_paper.py:131`、`api/execution.py:40`）没带 key 时索引不保护→重送无防护；(4) `api/human_decisions.py:292` 用 `correction-{key}-{时间戳}` 造 key，重试会产生不同 key | unit：本轮全量含幂等测试；契约层：上述四条为本轮读证 | IMPLEMENTING | — |
+| 成本／滑点不重复扣除 | 入帐服务层 | — | 待本轮全量结果判定 | unit：待 §7 | IMPLEMENTED_NOT_VERIFIED | PG 层未跑 |
+
+## 5. E 歷史重播與即時紙上
+
+| 功能 | 实际入口 | 資料與版本身分 | 所需改動 | 證據 | 狀態 | 外部依賴 |
+|---|---|---|---|---|---|---|
+| 逐根重播（bar-by-bar） | `/experiments/[id]/simulation`、`/paper-portfolio/[id]`、`WorkspaceShell.tsx`；`api/simulations.py:488,508,1327,1582,1645,1674,1703,2056,2404` | 只可用该时点可见资料；`SimulationSession.experiment_version_id:23`、`provider_id:39` | 无 | UI：本轮无 browser 证据 | IMPLEMENTED_NOT_VERIFIED | browser 层 |
+| `/paper-trading/replay/{run_id}` | `api/paper_trading.py:263`；`api.ts:1142` 附近有 wrapper | — | 需要：接到 UI（现有 wrapper 无人呼叫，同组 `create:147`、`status:174`、`stop:313` 亦无呼叫者） | 无 | IMPLEMENTING | — |
+| 中断／重试／并发下的 session/step/leg 身分 | 同上 | step 身分＝`sim-{session_id}-step-{step_number}`（`services/paper_execution.py:255`）；leg 身分：多腿无独立 ID | 需要：leg 身分契约（不自行发明 ID 格式，先定义再实作） | 无 | BLOCKED（多腿无 leg 身分） | — |
+| 重播狀態機與帳本不變式（服務層，非 UI、非 PG） | `services/paper_trading.py:218` `execute_historical_replay` | 真實 SQLite DB＋`tests/replay_fixture.py` 記錄具名 bind；13 條 `test_replay_credibility.py`＋4 條 `test_position_timing_bugs.py`＋6 條 `test_replay_status_management.py` | 本轮已把三份檔案從 `MagicMock`＋`postgresql://test` 假連線改到真實資料庫；產品側另修 `exit_time` 誤用 `trade[1]`（＝entry_time）與 SQLite 回傳 ISO 字串的 `_as_utc`／`_as_date` 正規化，最後一筆 row lock 改 `with_for_update()` 以移除 PG-only `FOR UPDATE` 語法（提交 `bfac1ae`） | SQLite 服務層：23 passed（3.94s）；六個單一缺陷變異各自造成 1–13 條失敗（見 §8.7）；領域名 12 檔合跑 79 passed／15 skipped／0 failed（16.40s） | VERIFIED（僅 SQLite・服務層；PG 層與 UI 層無證據，不跨層推定） | PG 抛弃式測試 DB（§9） |
+| 研究交易→重播帳本（formal path，非 mock 整合路徑） | `services/paper_trading.py:218` 由 `strategy_study_trades` 讀來源；UI 端無呼叫者（見上列 `/replay/{run_id}`） | 同一 `study_run_id`＋`rule_id='range_fade'`＋`instrument_id`／`interval_minutes` 決定哪些來源交易會被重播；血緣由 `decision_records.source_*` 五欄寫入 | 本輪修：fixture 不再用模型未宣告的 `updated_at`、id 改以服務讀取的虛線形式種子、日期由固定 2026-01-01 改為視窗相對、兩個對帳節點改以帳本自身收帳＋獨立手算錨點（詳見 §8.20） | SQLite 服務層：`tests/test_formal_path_integration.py` 5 passed（1.05s）；前＝8 個 setup error；同領域 9 檔 40 節點正序與逆序皆 rc=0／40 passed（8.36s／8.04s） | VERIFIED（僅 SQLite・服務層；PG 層與 UI 層無證據，不跨層推定） | PG 抛弃式測試 DB（§9） |
+| 即时纸上（live paper） | `api/paper_trading.py:434,461,546`（`live/status`、`live/start`、`live/stop`）；**前端无 wrapper** | — | 需要：UI 入口＋服务启动授权 | 无 | BLOCKED | 真实连线／服务启动需独立授权；本轮未启动任何常驻服务 |
+| raw INSERT 绕过帐务风险规则 | worker／daemon 写入路径 | — | 待本轮全量＋§4 事件身分修复后判定 | 无 | IMPLEMENTING | — |
+
+## 6. F 模型訓練與受控比較
+
+| 功能 | 实际入口 | 資料與版本身分 | 所需改動 | 證據 | 狀態 | 外部依賴 |
+|---|---|---|---|---|---|---|
+| 模型训练 | `/training`；`api/ml_training.py:79` → `/api/v1/ml/train`、`api/training.py:29`、`api/personal_models.py:346` | `LearningJob` **无版本／身分栏位**（`models/learning_job.py:30-45`，仅 `job_type`、`config_json`）；`PersonalModelComparisonRun.operation_key:59` | 需要：job 身分（请求模式经 API→job→worker→reclaim 全程保留） | unit：本轮全量；其余无 | IMPLEMENTED_NOT_VERIFIED | — |
+| 模型比较 | `/models/[id]`、`PersonalStrategyLearningPanel.tsx`；`api/model_research.py:384`、`api/personal_models.py:795,809,899,972` | `personal_model_comparison_runs`：`version_a_id:52`、`version_b_id:55`、`record_id:47` | 无 | unit：本轮全量 | IMPLEMENTED_NOT_VERIFIED | 冻结测试集／前处理只拟合训练段：本轮未取证 |
+| 学习提案（受控比较→部署） | **`/api/v1/learning` 整个 router 无前端使用者**：`api/learning.py:112,136,236,260,365`；`grep frontend/src` 对 `/learning` 0 笔 | `learning_proposals`：`learning_job_id:69`、`rule_id:76`、`exit_id:77`、`instrument_id:78`、`interval_minutes:79` | 需要：UI 消费端（提案在 UI 不可达＝历史 P1 仍未闭）；approve 端点 **ABSENT**（仅 deploy）；deploy 无审计日志（历史 P2） | 无 | IMPLEMENTING | 部署由 owner 决定 |
+| 排程自动收集 | `/admin` → `api/admin.py:100` `collection/start` | `require_admin` 已核验（§1） | 无 | 无本轮证据 | BLOCKED | 排程启用需明确授权；本轮未启用任何排程 |
+
+## 7. 工程能力（【4】要求的交付，本轮实测）
+
+| 层 | 命令（唯一入口） | 本轮实测 | 状态 |
+|---|---|---|---|
+| 环境检查 | `scripts/dev.sh env` | 报告 worktree／分支／HEAD／dirty、工具存在性、Python 3.12、依赖对照、PG lane 判定（**不连线**）、node_modules；不静默安装 | VERIFIED（本机执行） |
+| 依赖重建 | `scripts/dev.sh install` | 离线依 pin 安装 23/24；`DEVIATION psycopg2-binary: pinned 2.9.10, installed 2.9.11`（pinned 版只有 x86_64 wheel，本机 arm64 无 `pg_config`） | VERIFIED（含一项已揭露偏差） |
+| lint／typecheck | `scripts/dev.sh lint` | rc=0：compileall rc=0；秘密扫描 HIGH 0／WEAK_LITERAL 9／FIXTURE 5、R6 落点 2（默认 rc=0、`--strict` rc=1）；**python linter 步骤 BLOCKED**（`requirements.txt` 无 ruff／flake8／mypy，CI 也无 lint 步骤）；前端 tsc `--noEmit` 覆盖 **156 个第一方档**、另列 46 个 `.next/types` 生成桩（正控：植入类型错误 → rc=2 TS2322，移除后 rc=0）。对账：本工具此前把两者混计印成 202，而本格写 156——202＝156＋46，差的 46 全是框架生成桩；标签与对象不符已修（§8.26），156 亦可由磁盘独立复现（`find` 排除 node_modules／`.next` ＝ 156；其中 `src/` 107） | VERIFIED（含一个已声明的 BLOCKED 步骤） |
+| 前端单元 | `scripts/dev.sh web-unit` | 125/125 通过，rc=0（`node:test`，需 Node ≥22；本机 v22.23.5） | VERIFIED（unit） |
+| 后端收集 | `scripts/dev.sh test --collect-only` | rc=0、**3448 collected、0 errors**（2.74s；预設 scope＝不帶路徑參數；同樹改下 `pytest tests/` 為 3441，差 7 筆來自 `backend/` 根層三個檔，見 §8.19——計數必須綁 scope）。本輪鏈上移動：3357（collection error 中止全套）→ 3428（提交扫描门前）→ 3444（+16，逐檔对账见 §8.19）→ **3448**（R6 掃描門 +4，見 §8.22(f)）。本輪 #333 那兩節點改寫前後實測仍 3448（2 條換 2 條），該檔本身收集 53 條＝23 passed＋30 skipped，逐檔對帳闭合 | VERIFIED（collection，非执行） |
+| 后端单元＋SQLite | `scripts/dev.sh test` | **全量已跑完並對帳**（唯一權威一跑：HEAD `7835f73`、日誌 `.dev-runs/sqlite-20261120T142030Z.log`、1902.36s＝31:42、`pytest rc=1`）：**38 failed／3264 passed／150 skipped／0 errors／11128 warnings**，xfailed＝0、xpassed＝0（分列，不折算）。對帳：收集 **3448**＝进度条 3448 格（`.`3264＋`s`146＋`F`38，一字不差）；摘要 150 skipped 比条上的 146 多 **4**，那 4 格不是藏起來的節點而是**模組級收集跳過**（一檔一格、不進收集清單），已由定向 `-rs` 實測逐一指名：`tests/test_crypto_bar_harvest_pg.py:16`、`tests/test_strategy_study_timestamps_pg.py:21`、`tests/test_crypto_paper_pg.py:26`（三者判据均 `ALETHRA_TEST_DB` 不以 `postgresql` 開頭）、`tests/test_quota_concurrency.py:38`（實連 PG 失敗才跳），跑該四檔＝`4 skipped, 0 tests run`。38 條失敗依檔分解後總數恰好闭合（ml_pipeline 19、pattern_analysis 3、data_isolation 3、safety_gate_negative 2、fixture_failure_injection 2、cleanup_verification 2、api_login_with_fixture 2、vertical_path／registration_risk_acknowledgement／learning_api／journey_b_model_training／api_fixture_lifecycle 各 1），分類屬 §8.21／任務 #329 尚未完成。與基線對照：`8feb18c`＝44 failed／14 errors → 本跑＝38／**0 errors**（`773c24e` 把權限／角色兩檔改標 PG-only、`918af33` 修正式路徑 seed），skipped 138→150 的 +12 屬改標而非新增跳過。**身份告別**：本跑的收集發生在 #333 那兩節點改寫之前（改寫前後收集數皆 3448，2 換 2），所以「38／3264／150」是**改寫前樹**的數字；改寫後只重跑過該檔（23 passed／30 skipped）與該兩節點，未重跑全量。另有一跑已被作廢（`134449Z`，66F／67E），作廢理由與機制見 §8.24——SQLite 通路跑兩套會互删表，同一時間只准一跑。本轮另测得「纸上交易／重播」领域集（12 档合跑）79 passed／15 skipped／0 failed（16.40s；`-rs` 显示 15 条跳过理由全为 PG lane 未选取，不折算通过） | **VERIFIED（SQLite・该领域集・收集对帐）**／全量＝**IMPLEMENTED_NOT_VERIFIED**：數字已測量並對帳，但 38 條失敗尚未逐條判定產品／fixture／環境，故不得寫成 VERIFIED |
+| PostgreSQL 整合 | `scripts/dev.sh pg` | 明确拒绝并输出 `BLOCKED_ENV_NOT_AVAILABLE`；本机无监听中的 PostgreSQL（未启动 5432 cluster，未使用他人 checkout） | BLOCKED |
+| 前端 production build | `scripts/dev.sh web` | **已執行、rc=0**（日誌 `/tmp/web-build-20261120.log`、144 行）：`tsc --noEmit` 通過 → Next.js 14.2.18 `✓ Compiled successfully` → 29 頁靜態產生 `✓ Generating static pages (29/29)` → route 表 35 列（含 `/journal` 19 kB／First Load 178 kB）；`BUILD_ID 3xMoczaiCawv3XG7TQdqD`。**這格只證明「能建置且型別通過」，不證明任何頁面在瀏覽器裡可用**；依賴來源先前已測 `npm ci --offline` 可行（337 套件、rc=0）；build 過程有 29 條 ESLint `react-hooks/exhaustive-deps` 警告未清零（不阻斷 build，屬下一輪決定） | VERIFIED（build＋typecheck，非 UI 旅程） |
+| API 契约＋浏览器 E2E | `scripts/dev.sh e2e` | CI 用 `docker-compose.acceptance.yml`；本机无 docker → 该 CI 路径无法在此重现；本地栈路径需服务启动 | BLOCKED |
+| Release smoke | `scripts/dev.sh smoke` | **已執行**，而且是本輪唯一由「失敗」開始的一格：前＝**rc=1**、輸出 `FAIL missing routes : ['/api/v1/auth/login']`（`app imported: 'Alethra'`、`routes registered: 323`）。查產品實際路由表後確認這是**我寫的腳本檢查了不存在的路徑**：登入路由真實身分是 `/api/auth/login`，`/api/v1/` 前綴下有 310 條路由但不含 auth。修法是把期待值改對（`scripts/dev.sh:325`），不是刪掉檢查；後＝**rc=0**、`GET /health : 200 {"status":"healthy"}`。前／後兩次都是實測，所以這條檢查「能失敗」已被本次失敗證明過，不需另做正控。smoke 用 `DATABASE_URL=sqlite:///./smoke.db` 側車（實跑後未留下該檔，無副作用殘留）；**它只證明 app 可匯入、路由已註冊、`/health` 有回應**，不證明任何需要 DB 或登入的流程 | VERIFIED（smoke 三項，层级＝app 啟動煙霧，非服務验收） |
+| CI 对等 | `.github/workflows/{backend-tests,frontend-build,browser-acceptance}.yml` | 本地命令直接照这三个 runner 的指令组成（不再靠聊天拼接指令）；远端 CI 启用／上传依确认流程，本轮未触碰 | VERIFIED（指令对等，非 CI 绿） |
+
+**跳過不得折算通過（本輪已對帳完成）**：全量一跑的四類計數各自列出——passed 3264／failed 38／skipped 150／xfail 0／xpass 0，errors 0；收集 3448 與進度條 3448 格逐字相符，摘要比条上多出的 4 條 skip 已逐檔指名為**模組級收集跳過**（不在收集數裡，因此兩者的差是定義差而非遺失）。沒有任何一格被併入「通過」，也沒有把 skipped 當成綠。条上那 146 條節點級跳過的理由樣本可由定向 `-rs` 逐條讀出，例：`test_paper_trading_cancel_atomic.py` 單檔 53 收集＝23 passed＋30 skipped，30 條理由一律 `BLOCKED_ENV_NOT_AVAILABLE: no PostgreSQL test target configured`。
+
+## 8. 本轮修正的既有说法（不保留错误结论）
+
+1. `source_event_id` 栏位**不存在**（0 笔）。先前叙述「三条车道省略 source_event_id、内容 fallback 产制 `pf-…` 键」对本 base 不成立；实际身分键是 `sim-{session_id}-{step}`（`services/paper_execution.py:255`）与客户端提供的 `idempotency_key`。真实缺口改列为 §4 的 (1)–(4)。
+2. Admin P0：本 base 5 个端点已用 `require_admin`（本轮 grep 到 file:line），AGENTS.md 的 P0-1 对本工作区不再成立；测试层证据仍属旧版本身分，故状态只到 IMPLEMENTED_NOT_VERIFIED。
+3. Migration head：以正则解析曾误得「两个 head」；以 `alembic heads` 为准＝单 head `e1f2a3b4c5d6`。
+4. `.env.test` 的 32 字元区段是 `${ALETHRA_TEST_RUNTIME_PW}` 间接引用，不是已提交的凭证实值。
+5. 扫描器两代缺陷（永不匹配的锚定问题、以及修正后 1,516 笔噪声）都由正控／负控锁住，不再单靠「0 findings」。
+6. Collection 修复的所以然（以 `importlib.util.find_spec` 实测，非推断）：`tests/__init__.py` 使 pytest 把 `backend/` 放进 `sys.path`，因此 `test_safety_gate` 解析到 **`backend/test_safety_gate.py`**（root 层，4 个 root 测试档之一），而 `acquisition_hook` 在 package 内（`backend/tests/acquisition_hook.py`），裸名 `find_spec` 回 NOT FOUND——所以 `test_acquisition_hook.py:18` 必须写 `from tests.acquisition_hook import …`。两种裸名写法一成一败不是矛盾，而是两个档在不同层；改回裸名会让 42 条测试再度无法收集。
+7. 重播 fixture 家族（本轮，前／后实测）：`test_replay_credibility.py` 与 `test_position_timing_bugs.py` 先前以 `PaperTradingEngine("postgresql://test")`＋`@patch("…SessionLocal")` 运作——patch 的是产品回退分支，引擎仍试图连线 `postgresql://test`，且断言抓的是 `call_args_list[1]` 的位置索引（在产品新增所有权 SELECT 之后已失效），tuple 只有 8 栏而查询有 13 栏。两者对本 base 的真实数据库**没有观察到任何东西**。现状：全部改到真实 SQLite＋`tests/replay_fixture.py` 的具名 bind 记录器，13＋4 条通过。
+8. 同一轮修的假通过风险（可辨识前／后案例）：`test_replay_status_management.py` 前＝3 failed／2 passed，后＝6 passed。根因不是产品缺陷，而是 fixture 仍捕 `ValueError`＋旧讯息（"already completed"／"cannot be executed"），产品在异常层级引入后改抛 `InvalidStateError`（非 `ValueError` 子类，`paper_trading_exceptions.py:34`）；并发节点因此把合法拒绝计成 0，异常还逃出工作线程。新增节点 `test_cancel_requested_blocks_replay_acquisition` 补上「排队中已申请停止→不得取得执行权」的服务层契约。
+9. 变异敏感度实测（每个只改一处，改后由字节相同的 md5 还原 `paper_trading.py`）：M1 去掉取得条件 `status IN ('queued','pending','failed')` → 2 条失败（含屏障并发节点）；M2 去掉 `AND cancel_requested = FALSE` → 1 条失败（新节点）；M3 从允许清单删 `'failed'` → 1 条失败；M4 删掉 `completed`／`cancelled` 短路（:275）→ 0 条失败。M4 是**故意揭露的覆盖边界**：短路删除后仍由取得 UPDATE 抛出同一 `InvalidStateError`、同一讯息，现有节点无法区分两层防御，不宣称已覆盖。
+10. 假覆盖缺陷（发现→本輪已修，前後皆實測）：`test_paper_trading_cancel_atomic.py` 的兩條節點原把產品的 SQL **重打一遍**在測試自己 session 上執行，註釋寫「simulating execute_historical_replay」「the exact SQL from the exception handler」；前＝把服務裡的取消條件刪掉，那兩條仍 rc=0（它們验的是自己抄的那段 SQL，不是產品）。現況（同一檔 `:1588`－`:1789`，收集數 2 換 2、全樹仍 3448）：
+    (a) 兩條都改成**真的呼叫 `execute_historical_replay`**，用 `test_retry_failure_validation.py:317` 已證過的注入縫（包住引擎真正使用的 session factory），在「已取得執行權（取得 UPDATE 命中 `status IN ('queued','pending','failed') AND cancel_requested = FALSE`）之後、第一筆 ledger INSERT 之前」讓 worker 死掉——死亡本身由 `InjectedWorkerDeath` 抛出並在測試外頭由 `pytest.raises` 接住，因此**不是**「假裝失敗」。
+    (b) 節點一在 `db.commit()` 之後由 hook 呼叫**另一個真實 `PaperTradingEngine` 的 `cancel_run()`**（產品自己的取消路徑，不是手寫 UPDATE）；節點二不呼叫它，作為對照。兩者判據皆為四層：注入確實到達（`acquired／hook_ran／crashed` 三個旗標逐值斷言）、**產品自己发出的**那條 CASE UPDATE 由 `capture_statements()` 記錄並锁定（`_terminal_decision()` 斷言全樹只有一條含 `else 'failed'` 的 `UPDATE paper_trading_runs`，且帶有 `and status = 'running'` 所有權守衛）、持久狀態由獨立連線讀回（`cancelled`／`failed`＋`cancel_requested` 旗標）、以及 `_committed_ledger_rows()` 斷言 decision／order／fill **皆為 0**（回滾不只是「沒報錯」，而是不留帳務）。
+    (c) 後＝實測變異控制：僅把 `app/services/paper_trading.py:1077` 的 `WHEN cancel_requested = TRUE` 改成 `WHEN FALSE`（其他一動未動），節點一 FAILED——`AssertionError: the finalizer chose 'failed' although cancel_requested was already committed`／`assert 'failed' == 'cancelled'`（`test_paper_trading_cancel_atomic.py:1728`），節點二仍 passed（它本來就期望 `failed`，所以差異化的是判別點而非運氣）。還原後 `git status --porcelain backend/app/services/paper_trading.py` 回空（位元組相同，非靠記憶重建），兩節點 2 passed／0.42s；該檔整檔 23 passed／30 skipped／9.57s，30 條跳過理由由 `-rs` 實測全部為 `no PostgreSQL test target configured`。
+    (d) **沒有宣稱的事**：這條線程是「排定的交錯」，不是競態；SQLite 通路因 `conftest.py:143-150` 用 `StaticPool` 讓全套共用同一條 DBAPI 連線（見 §8.24(c)），所以「第二條真正的連線在 worker 交易未提交期間寫入 `cancel_requested`」這種形态在本層 **UNVERIFIED**，該檔 docstring 已就地改寫並把它列為 PostgreSQL 層項目（`dev.sh pg` 本機無服務）。契约的另一層服務層證據仍在 `test_replay_status_management.py`（§8.8）。
+11. `test_source_dedup_scope.py` 模块 docstring 原写 migration 006 把 decision_records 改成 `UNIQUE(paper_run_id, source_trade_id)`——`paper_run_id` 在整个 `app/models/` 0 笔，实际约束是 `uq_decision_records_source_per_portfolio (paper_portfolio_id, source_trade_id, decision_type)`（`app/models/paper_portfolio.py:239`、`migrations/versions/006_fix_source_dedup_scope.py:43-47`）。docstring 已就地更正；其断言原只看 PG 的索引名，在 SQLite 层永远失败，现按方言分别锁定（PG 锁索引名、SQLite 锁被违反的三个栏位名），两方言各保自己的强度。
+12. **我自己写进提交信息的数字是错的**：提交 `76bc9da` 的信息称 ownership 模組「removed that module's 16 nodes from the run」，實測 `--collect-only tests/test_ownership_integration.py` ＝ **10** 條。該提交已存在、不 amend（規則：一律新提交，除非 owner 明確要求），以本节作为更正记录。同一原因导致 §7 的收集计数在链上移动：3357（collection error 中止全套）→ 3428（提交扫描门前）→ **3444（现行树）**。3428→3444 的 **+16 已逐檔对账闭合**，见 §8.19；先前写在本节的「3439」是中途值，其未解释的 +5 缺口即 §8.19 的选取范围问题，不是树上多了东西。
+13. **扫描门自己的探针就是一个已部署的秘密值（本轮最严重的自造缺陷）**：`test_secret_scan_gate.py` 原本的 `WORD_SECRET` 字面量等于一个真实的 JWT 签名密钥。后果有两层——(a) 提交该测试档等于把同一个秘密的第 9 个落地位置写进会交付的档案里，而且它读起来像占位符，不会再有人把它当凭证书；(b) 扫描器的 `runtime ∩ test lanes → HIGH` 分级因此对 6 个真实站点生效，门从 19 passed 变成 2 failed／17 passed。先前那句「19/19 通过」只对**提交前的工作树**为真。修法不是放宽门：换成一条 44 字元、逐字元合成的 word-literal，新增正控节点 `test_probe_literals_are_not_deployed_values`（对每个探针常量扫全树，断言它**只**出现在定义它的那一个档），并把门自己的站点写进 `FIXTURE_BASELINE`；工具 docstring 里会腐烂的「0 HIGH／6 WEAK_LITERAL」计数一并删除。修后实测 20 passed／6.06s、HIGH 0／WEAK_LITERAL 7／FIXTURE 4、rc=0（提交 `d724743`）。没有删 assertion、没有降门槛，门多了一条节点。
+14. 测试档里有一条**可执行的生产数据库连线**：`test_decimal_precision_regression.py` 直接 `PaperTradingEngine("postgresql://postgres@localhost:5432/ai_investment_lab")`，绕过 conftest 的生产名称防护；该档同时读一个没有任何 migration 建立的 `paper_portfolios.current_equity`，并把结果区间硬写成 `[101900, 101950]`（假设零成本，实测偏高约 $154）。现状：改用注入的 `SessionLocal`、改读 `current_virtual_cash`／`final_capital` 的 join、期望值改为 `Decimal("101922.88") - SUM(commission_amount + slippage_amount)` 并加 `cost_total > 0` 防护（提交 `072c1b4`）；grep 复查全树已无可执行的生产 DSN。
+15. 「失败回滚」那组节点原先注入在错误的对象上：`test_retry_failure_validation.py` patch `app.services.paper_trading.SessionLocal`，但引擎并不经由它取 session，所以注入从未触发，两条节点只是在确认成功路径；同时它们捕 `ValueError`＋旧讯息（"already completed"），产品改抛 `InvalidStateError`（非 `ValueError` 子类）后这两条的判据已失效。现状：注入点搬到第二个 ledger INSERT 的真实 session factory，失败后另外断言 `decision_records` ＝ 0（回滚不只是没报错，而是不留帐务），异常判据改为 `InvalidStateError, match="is in state 'completed'"`（提交 `92b1943`）。
+16. Git 身分缺失（阻斷已解除，但未破規則）：本工作区与全局 config 都没有 `user.name`／`user.email`，`git commit` 回 rc=128「Author identity unknown」。AGENTS.md 与既定规则都禁止修改 git config，因此改用**逐命令一次性覆写** `git -c user.name=… -c user.email=…`（值取自本仓库既有提交的作者），不写入任何 config 档。
+17. `.gitignore` 的 `*.db` 不含 SQLite 侧车档：实跑期间 `backend/test.db-journal` 以 untracked 出现（本次跑测即会产出），单靠 `*.db` 会把交易回滚日志暴露在 `git status` 里、增加误提风险；已补 `*.db-journal`（及 wal／shm）。
+18. 掃描器的第三代缺陷是**看不見**，不是報太多。前後測於同一棵樹：R1 命中 11 → 12、**流失 0**，新增的一站正是原本完全不可見的那一類。三處修：
+    (a) `is_secretish` 要求 ≥3 字元類型，於是由字母＋數字構成的 **hex／base36 key 全數漏掉**——這是最常見的真實 API key 形狀。現放寬為「恰好 2 類、整串皆字母數字、且含至少一個數字」；界線由兩處既有約束守住：`KEY_ASSIGN_RE` 只認憑證類鍵名（所以 checksum／image digest 欄位進不來），負控則用一個 57 字元的 prose 預設（小寫＋分隔符、無數字）證明它仍然不進門。
+    (b) `_assign_value` 對 `jwt_secret_key: 'aa..',` 這種 TypeScript／YAML flow-map 語法把**引號外的逗號留在值裡**，於是整串通不過字元集檢查→R1 無感。前端 e2e spec 全用這個語法，等同該寫法下的憑證字面值一律不可見；修後 `frontend/e2e/personal-strategy-learning.spec.ts:73`（32 字元）被看見，落在 FIXTURE 層。
+    (c) `lane()` 不認識 `*.spec.ts`／`e2e/` 目錄，把 Playwright 測試檔當成 runtime 路徑→值只出現在 spec 時會誤計為債務。現判為 test；「同一值也出現在 runtime 檔」仍由 `runtime ∩ test → HIGH` 升級，所以放寬的是誤報，不是偵測能力。
+    控制節點：hex 正控、prose 負控、TS 萃取正控＋負控、lane 判定四節點入 `test_secret_scan_gate.py`，探針唯一性正控同時納入新探針 `HEX_PROBE`（命名刻意不含憑證詞，否則本檔會自己變成一個 HIGH 落地點——§8.13 的機制重演）。
+    **本節原先那句「仍未覆蓋的邊界」的两个數字都是錯的，且缺口本輪已修（§8.22）**：原寫 `backend/app/config.py`「56 字元」與 `docker-compose.yml`「48 字元」是「兩個不同預設」。實測（同一棵樹、同一支萃取器）：兩站點的**字面值是同一個**，len **48**、sha256[:8] `bb71696a`，且**兩站點的 `is_secretish` 與 `is_placeholder` 都是 False**（小寫＋分隔符、無數字，(a) 放寬後仍看不見）。那個「56」不是預設的長度，而是**萃取缺陷的長度**：`KEY_ASSIGN_RE` 對 `jwt_secret_key: str = "…"` 這種带型別註記的賦值，先把 `:` 當成 `[:=]` 吃掉，再 capture 剩餘全部，於是交給你所有規則判斷的值是 `str = "<48 字元>"`（6＋50＝56）。同理，全樹追蹤檔有 **34** 處 typed 賦值的萃取值 ≠ 字面值。
+    「34 處萃取缺陷目前藏了幾個發現？」是量出來的，不是推的：以乾淨字面值重跑 `is_secretish`／`is_placeholder` 後**判定會翻轉的只有 2 處**（`config.py:65`、`:66`），且方向相反——翻成「空字串屬佔位符、依法免報」，所以 R1–R5 今日**因這個缺陷少報 0 個**。但 R6 必須用兩種萃取，否則 `config.py:37` 永遠比對不上 refuses 清單（清單裡是 48 字元的真字面值，不是 56 字元的 `str = "…"`），`docker-compose.yml:28` 又走不到 typed 分支（那裡 `typed_assign_value` 回傳 `None`）。實測歸屬：`(plain, typed) ∈ set` 在 config.py 是 `(False, True)`、在 docker-compose.yml 是 `(True, False)`——**兩個站點因兩個不同原因看不見，各由一種萃取才看得見**。
+19. **計數缺口是「選了哪些檔」，不是「樹變了」**（本輪最後一個未對帳的數字，現已闭合）：我曾記録全樹收集 3444，隨後在同一工作樹以 `pytest --collect-only -q tests/` 只得 **3437**，兩者差 7，而預期值是 3439＋4＝3443——三個數字互不相容。逐檔分解的答案：`--collect-only` **不帶路徑參數**（＝ `scripts/dev.sh test` 實際下的指令，也是 §7 那顆 3428 日誌下的指令）實測 **3444 collected、0 errors**；同樹改下 `pytest tests/` 實測 **3437**。差的那 7 條，節點 ID 不開頭 `tests/`，全部來自 `backend/` 根層的三個被預設 `test_*.py` 模式收到的檔：`test_explicit_provider_selection.py`（5）、`test_provider_isolation.py`（1）、`test_provider_isolation_sql.py`（1）。所以「以 `tests/` 為參數的計數」會**靜默少掉 7 條**；本矩陣的收集計數一律以預設 scope 為準，並在此写明兩者差異。同一機制也解釋了歸檔日誌看起來的內部矛盾：`sqlite-20261120T105608Z.log` 摘要寫 3428、而對同一檔 `grep -c "^tests/"` 只得 3421——少的正是這 7 條，不是漏印。
+    3428 → 3444 的 **+16 逐檔对账**（以預設 scope、現行樹實測）：`test_schema_parity.py`（本輪新檔）+7、`test_secret_scan_gate.py` 19→24 +5、`test_replay_credibility.py` +3、`test_replay_status_management.py` +5→6 +1；7+5+3+1＝16 ＝ 3444−3428，**無殘差**。掃描門 19→24 的兩個來源是分開的：提交 `d724743` 加探針唯一性正控（19→20，所以 §7 舊行寫「19 條」對當時為真），本輪未提交的代碼單位再加 4（hex 正控、prose 負控、TS 萃取、lane 判定），`git show HEAD:backend/tests/test_secret_scan_gate.py` ＝ 20 個 `^def test_`、工作樹 ＝ 24。
+    另記一個**命名／配置缺陷（發現，未修）**：根層第四個 `test_` 檔 `backend/test_safety_gate.py` 符合收集模式卻**零 test 函式**（它是 `main()`＋`sys.exit()` 的腳本，實測 `no tests collected in 0.01s`），因此貢獻 0 節點、也不報 collection error，等於套件裡一個不會響的幽靈模組；把 4 個根層檔遷入 `tests/` 屬下一輪範圍（遷動會動 `sys.path` 解析，見 §8.6，不能順手做）。
+
+20. `test_formal_path_integration.py`：這是【4】要求的「核心領域至少一條非 mock 整合路徑」（研究來源交易 → 重播 → 訂單／fill／部位／現金／日記帳），但它在本 base 已經**從任何一層都沒有觀察到東西**——5 條節點全在 fixture 就死掉。三層缺陷逐層測得，前／後案例為 **8 個 setup error → 5 passed**：
+    (a) fixture 對 `paper_portfolios` 寫了一個模型沒有宣告的 `updated_at` 欄位（`models/paper_portfolio.py:96-99` 無此欄），SQLite 直接拒絕；移除後才露出下一層。
+    (b) **UUID 的「形式」而不是「類型」才是根因**（本輪實測，非推斷）：同一棵 SQLite 樹以 `postgresql.UUID(as_uuid=True)` 建表後——ORM 寫入存成 **32 字元無虛線 hex**、raw `text()` 綁 `uuid.UUID` 物件拋 `Error binding parameter 1: type 'UUID' is not supported`、綁**虛線字串**到**有型別的欄位**則在 `sqltypes.py:3631` 拋 `AttributeError: 'str' object has no attribute 'hex'`；而 `WHERE id = :id` 用虛線字串查 hex 存的列＝**0 列**。產品讀取的形式由 API 決定：`api/paper_trading.py:263-277` 把路徑參數（虛線字串）直接交給 `paper_trading.py:257` 的 raw bind，且所有權比對是 `str(portfolio.owner_id) != user_id`（:270）這種**字串比對**。因此我把 seed 改成**與服務讀取相同的虛線形式**（先前一度改成 `.hex`，那會讓測試呼叫一種生產呼叫端不會給出的形式——已由上述量測否決）。seed 全部改走 raw SQL 同一形式，否則 `strategy_study_runs.user_id`（ORM→hex）永遠比不上服務傳入的虛線 user_id。
+    (c) **固定日曆錨點＋相對視窗**：`ANCHOR = 2026-01-01` 搭配 `days_back=30`（自呼叫時的 `datetime.now()` 回推），來源交易早已整批落在視窗外，重播找到 0 筆是**產品行為正確**；把日期「推遠以避開過期」不修根因，因此改為視窗相對（`now − 5 天`，仍全部 `exit_time <= as_of`，不引入未來資訊），窗口排除本身仍由 `test_replay_credibility.py` 守著。
+    (d) 兩個對帳節點原先宣稱 `100000 + 50 − 40 = 100010` 與 `+10`，那是拿**來源交易自己的 `net_pnl` 欄位**當作預期；但引擎每腿以 `equity × position_size_pct` 決定規模（`paper_trading.py:664`，來源的 `quantity=0.1` 根本不參與），再依呼叫端的 `commission_rate=0.001`／`slippage_rate=0.0005` 另行計費。實測 final＝`99960.2117181275`、daily pnl＝`−39.78828187250996`；我用一支**不讀資料庫**的獨立 Decimal 算式依上述規則重算，得 `99960.21171812749003984063745`（與產品輸出相差約 1e-10）——所以這兩個數字是產品的，不是測試想要的。現行斷言改為四條：fill 入帳總額對帳現金閉合、回傳值等於 DB 值、daily／fills／已平部位 realized 三種獨立寫入表徵互等，以及**獨立的絕對錨點** `99960.21171812749003984063745`；少了錨點，一個「把成本整批刪掉但仍然自洽」的產品會照常綠燈。
+    (e) 順帶清掉因此失效的 `StrategyStudyRun`／`StrategyStudyTrade` import。领域集 9 檔 40 節點正序（8.36s）與逆序（8.04s）皆 rc=0／40 passed，證明本檔新 seed 不污染同領域其他節點。
+21. **權限與角色兩檔：把「環境缺失」報成環境缺失，不報成產品壞**：`test_privilege_enforcement.py`（7 條）與 `test_connection_role_verification.py`（5 條）的每一條都要求 PostgreSQL 以受限 runtime role **拒絕** DDL；SQLite 沒有角色模型，於是在本樹產生 1 failed＋11 errors（`OperationalError`），在計數裡讀起來像產品缺陷。兩檔改加 `pytestmark = pg_only`（`backend/tests/lanes.py`），實測 **12 skipped、rc=0**，理由字串一律 `BLOCKED_ENV_NOT_AVAILABLE: no PostgreSQL test target configured`，可由 `-rs` 逐條讀出；**assertion 一條沒刪**，且按【4】「skip 不折算通過」——PG 層現在仍是 UNVERIFIED／BLOCKED（見 §7 與 §9），本輪沒有取得任何 PG 證據。
+22. **R6：把「產品自己列為拒絕值的預設」變成一條可執行規則（§8.18 缺口本輪閉合）**：
+    (a) **規則**：值若逐字出現在 `backend/app/config.py` 的 `_INSECURE_JWT_DEFAULTS`（`app/config.py:9-15`，實讀 4 條）集合裡，且鍵名是憑證類鍵名、且不是佔位符，就報 **WEAK_LITERAL**。判據來自產品自己的拒絕清單，不是我另起一套字元規則——這正是 R1–R5 做不到的：該值 `is_secretish=False`、`is_placeholder=False`（量測見 §8.18），換任何字元閥值都會重蹈「要嘛全綠、要嘛 1,516 條」那一族失敗（§8.13）。
+    (b) **前／後（同一棵樹 `918af33`）**：前＝HIGH 0／WEAK_LITERAL 7／FIXTURE 5（**12 findings**），`backend/app/config.py:37` 與 `docker-compose.yml:28` **完全不在輸出裡**；後＝HIGH 0／WEAK_LITERAL 9／FIXTURE 5（**14 findings**）＋新增一行 `R6 known-default landing points: 2`，且 `./scripts/dev.sh lint` **rc=0**、`--strict` **rc=1**（實測退出碼，非推斷）。R1 命中數一條未動，**沒有把既有發現擠掉**。
+    (c) **分級為 WEAK_LITERAL 而非 HIGH 的理由（這不是把閘門放寬）**：HIGH 在門的語意裡是「看起來像生成的憑證、必須立刻擋」；R6 的兩站點是**產品在 production／staging 自己會拒絕啟動的值**（`_validate_production_safety`，`app/config.py:168-181`），屬已知債務而非洩漏。若昇為 HIGH，本樹會長期長紅、`--strict` 與預設退出碼失去區分債務／緊急的用途，實際上等於逼人關門。留 Debt 的代價寫在 §9：7→9 條 runtime 字面量都要間接引用才是解，且會使既有 token 失效＝owner 決定。
+    (d) **兩種萃取都要判**（根因見 §8.18）：`scan()` 對每一行同時取 `_assign_value` 與 `typed_assign_value`，實測 `(plain∈set, typed∈set)` 在 config.py 是 `(False, True)`、在 docker-compose.yml 是 `(True, False)`——只用其中一種，就仍有一站不可見。
+    (e) **退化模式不冒充乾淨**：讀不到 `_INSECURE_JWT_DEFAULTS` 時回 `(set(), False)`，`main()` 印 `R6 OFF: no _INSECURE_JWT_DEFAULTS read from … — known defaults were not checked in this scan`；閘門本身有一條節點斷言「R6 關掉時必須說它關掉，而不是說它查過且乾淨」，並拒絕在 OFF 狀態下對基線做任何宣稱。清單**只在掃描時從來源檔讀**，不写進掃描器也不写進測試——硬編碼一份會腐敗，而且會自己變成一個新的落地點（§8.13 的機制）。
+    (f) **控制**：`test_secret_scan_gate.py` 由 24 → **28 節點**（實測 `--collect-only`＝28、28 passed／8.98s／rc=0；跑在 `ALETHRA_TEST_DB` 指向 `/tmp` 的隔離檔，避免與進行中的全量跑共用 `backend/test.db`）。新增 4 條：產品拒絕清單自身的判據（證明 R1 結構上看不到它）、正控對兩種賦值形狀**各自**點火且**全樹只有這 2 站**、OFF 回報、**lane 分級**。`WEAK_BASELINE` 凍結這 2 條（檔、鍵、len），第三者落地會失敗。輸出**不印值**（正控同時斷言 findings 內不含該字串）。
+    (g) **新規則自己也被控節點抓到一個分級缺陷（本輪自我校驗的實例）**：R6 初版把每條命中硬寫成 `WEAK_LITERAL`，無視 `lane()`。我用一支臨時小樹探測自己的規則，實測 `backend/tests/test_known_default_contract.py:1` 這種「測試檔钉住被拒預設」被分成了 **WEAK_LITERAL（runtime 債務）**——於是我剛寫的那行代碼讓 `--strict` 因腳手架而紅，並讓「runtime 債務」這個詞停止意指「會配置服務的站點」。修法與 §8.18(c) 同形：tier 取 `lane(rel)`（runtime→WEAK_LITERAL、test→FIXTURE），**仍不昇 HIGH**（理由見 (c)）。修後實測真樹不變：HIGH 0／WEAK_LITERAL 9／FIXTURE 5、`R6 known-default landing points: 2`——因為現行 2 站都是 runtime，分級變更今日**不動任何既有數字**；它動的是「未來加一條測試錨點時會不會算錯」。前／後都由 `test_r6_tiers_a_test_path_as_fixture_not_runtime_debt` 固定。
+23. **測試通路用「產品自己拒絕的值」簽 JWT，而簽出來的 token 會落進本機日誌**（本輪由一支 traceback 順藤量到，非假設）：
+    (a) **生效金鑰＝類別預設**，四步實測：shell 環境**無** `JWT_SECRET_KEY`；`backend/.env` **不存在**（只有 `.env.test`，且其中**無** JWT 行，`model_config env_file=".env"` 見 `app/config.py:428`）；因此 `get_settings().jwt_secret_key` 逐字等於 `Settings()` 的類別預設（len 48、sha256[:8] `bb71696a`）；而那正是 `_INSECURE_JWT_DEFAULTS` 拒絕的值。`is_production_like` 只認 `app_env ∈ ("production","staging")`（`app/config.py:153-154`），`_validate_production_safety` 在此之前**直接 return**（`:168-169`）——所以本機／CI 這條線沒有任何東西會拒它。後果不只是「測試不夠真」：任何「token 驗證成功」的斷言，驗證的是**產品在正式環境拒絕使用的那個金鑰**；而 R6 之前這件事在掃描輸出裡不存在（§8.22b）。
+    (b) **日誌落地點**：pytest 失敗 traceback 會印本地變數，因此**已簽名的完整 token 被寫進 `.dev-runs/*.log`**。精確計數（本輪以 `grep -ho "auth_token = 'eyJ[^']*'" .dev-runs/*.log | sort -u | wc -l` 量得，不印值）：**4 份全量日誌各含 22 行**（`sqlite-full-1.log`、`sqlite-full-2.log`、`sqlite-20261120T124707Z.log`、`sqlite-20261120T134449Z.log`），合計 **88 行、32 個不同 token**（單檔去重 10／11 個）。此數隨新一輪日誌增加而變，因此**不寫進任何斷言**，只作「存在且可數」的證據；本輪先前寫下的「20／47」是未去重的手抄殘值，已在本格改掉。這些檔由 `.gitignore:14:.dev-runs/` 整目錄排除，所以**不會被提交**——但「被 gitignore」不等於「不存在」：檔仍在磁盤上，內容是**用一個已公開發布的值（§9）簽名的可用憑證**。本輪**未探任何 live 服務**，因此「部署中的服務是否還接受這個簽名」＝UNVERIFIED；已證明的只有三件事：值已公開發布（§9）、本機測試通路確實用它簽（上面 (a)）、token 以明文存在於工作區檔案（上面 (b)）。
+    (c) **本輪沒做的事（不擅自擴大）**：輪換該值＝正式憑證操作，未批准（§9）；清掉 `.dev-runs/*.log`、把 `dev.sh test` 的 `--tb=full` 改成不印本地變數的模式、或加一步跑完即刪——都是**執行環境行為的變更**，屬下一輪決定，且不能順手在別的交流裡改啟動腳本。我在此只把它寫成紀錄＋可執行選項，不用「HIGH 0」冒充「token 未外洩」。
+24. **本輪自己造成的全量污染——機制已定位，不記成「環境神秘失靈」**：
+    (a) **事件**：`21:44:49Z` 啟動的全量跑在 `22:13` 仍未結束時，我為了驗證 `dev.sh test` 的退出碼，另外起了**一次單節點探針**（`tests/test_zz_rc_probe.py`，0.27s；跑完即刪、未提交）。兩套 pytest 共用同一個 `backend/test.db`。
+    (b) **實測差異**：乾淨基線 `sqlite-20261120T124707Z.log`（HEAD `8feb18c`，32:36）＝ **44 failed／3251 passed／138 skipped／14 errors**；被污染的 `…T134449Z.log`（HEAD `918af33`，30:57）＝ 66 failed／3165 passed／150 skipped／**67 errors**。多出的 53 條 error 全落在字母序**最後**的檔（watchlists 17、training 17、strategy_research 8、target_guard 5、strategy_spec_contract 4……）＝`22:13` 之後才執行到的那批；error 訊息實測 `no such table` 66 次，其中 **44 次是 `users`**、10 次是 `_test_sacrificial_`。skipped 138→150 與污染無關，來自 `773c24e` 把權限／角色兩檔改標 PG-only。
+    (c) **機制（讀代碼定位，非推測）**：`backend/tests/conftest.py:143-150` 的 SQLite `TEST_ENGINE` 用 **`StaticPool`**（整套 suite 共用一條連線），autouse 的 `setup_db` 在**每個測試之前** `create_all(checkfirst=True)`（`:213-222`）、在**每個測試之後**把 `Base.metadata.sorted_tables` 全部 `DROP TABLE IF EXISTS`（`:288-295`）。所以任何第二個並行 session 只要跑完它的一條測試，就會把第一個 session 正在使用的表全刪掉——這不是偶發，是結構性：**SQLite 通路不支援並行跑兩套測試**。
+    (d) **處置**：該輪數字作廢，只引用乾淨基線與 `7835f73` 之後的那一輪（§7），每輪都標 HEAD＋日誌檔名；規則寫成一句：**同一時間只允許一個 SQLite 全量跑，啟動前先 `ps` 確認無其他 pytest**。尚未做的事：把互斥鎖加進 `dev.sh test`（可行，但那是入口行為變更，要帶自己的前後案例，不在本輪順手改腳本）。
+    (e) **收回一個本輪曾寫錯的判定**：我先前依 4 KB 的中途檔案判定 `134449Z` 那輪「被 timeout 殺掉、`FULL_RC=0` 不是判定」；檔案寫完後實測為 1,243,384 bytes、結尾有完整 verdict 行、背景任務回報 `dev.sh test rc 1`。**「被殺」是讀了尚未寫完的檔得來的，已收回**；真正讓該輪不可用的是 (a) 的並行污染。
+    (f) **順帶量到的正面控制**：探針那一輪（`sqlite-20261120T141301Z.log`）輸出 `1 failed`＋`dev.sh test rc 1`，證明 §7 的 rc 是 pytest 的判定而不是 `tee` 的判定（`cmd_test()` 取 `${PIPESTATUS[0]}`，`scripts/dev.sh:256-270`；本機 bash 3.2 支援）。
+25. **release smoke 從寫下那天起就一直紅，而且錯在我這邊**（本輪才執行它，之前 §7 那格是「尚未執行」）：
+    (a) **前＝rc=1**：`scripts/dev.sh:325` 那條期待路徑寫成 `/api/v1/auth/login`，而產品路由表（實測 `app.routes`，323 條）裡auth 的真实前綴是 **`/api/auth/`**：`/api/auth/register`、`/api/auth/login`、`/api/auth/me`、`/api/auth/candidate-session`、`/api/auth/trial-login`。`/api/v1/` 之下確實有 310 條路由，但**不含 auth**。所以「smoke 失敗」從來不是產品缺陷，是我在 `8feb18c` 寫工具時把 AGENTS.md 寫的客戶端基準 `http://127.0.0.1:8100/api/v1/` 当成了全部路由的前綴。
+    (b) **修法是改期待值，不是放寬檢查**：`scripts/dev.sh:325` 的清單改成 `("/health", "/api/auth/login")`；`raise SystemExit(1)`、TestClient 打 `/health`、`rc = 0 if 200 else 1` 三處一字未動。**後＝rc=0**、`GET /health : 200 {"status":"healthy"}`。这条检查「能點火」不需要另做正控——(a) 那次 rc=1 就是它點火的記錄。
+    (c) **順带量到的產品事實（本輪未修，屬 owner／下一輪）**：登入路由不在 `/api/v1` 命名空間，而 AGENTS.md 對 customer research agent 的基準寫的是 `http://127.0.0.1:8100/api/v1/`；兩者對 auth 不一致。把 auth 移進 `/api/v1` 是**破壞性變更**，依【5】要有版本／遷移／相容說明與對外路徑影響評估（前端目前用哪條字串、已交付文件怎麼寫、有無外部使用者），不順手在文件交流裡改。本輪只把它記成事實：`/api/auth/*` 為現行真實路徑，`/api/v1/auth/*` 404。兩條都用 TestClient 打過（POST、同一組假憑證、`DATABASE_URL` 指側車檔）：`/api/v1/auth/login` → **404**、`/api/auth/login` → **503**；後者證明路由存在，而 503 在該環境下代表什麼（依賴不可用／維護閘）本輪未追，不拿它當「登入可用」的證據。
+    (d) **代價的歸屬**：這一格在 §7 先前寫「尚未執行」是正確的；它沒有被當成已通过，也沒有被刪掉。發現的缺陷是我自己的工具，因此修正屬已授權範圍（可逆、不碰正式環境）。
+26. **coverage 計數器的標籤與對象不符**（同類缺陷：數字真實、名字錯——見 §8.22(g) 分級、§8.12 提交資訊計數）：`scripts/dev.sh lint` 第 4 步原以 `tsc --noEmit --listFiles | grep -cv '/node_modules/'` 報「first-party file(s)」，實測印 **202**。把清單拆开後 202 ＝ **156 第一方**＋**46 框架生成**（`frontend/.next/types/**`，Next.js 在 build 時產生、不在版控裡，實測 `find frontend -name '*.ts|*.tsx'` 排除 `node_modules`／`.next` ＝ 156，其中 `src/` ＝ 107）。也就是說舊標籤讓「我型別檢查了 202 個我自己的檔」變成一句不真的話——那 46 個檔是機器的產物，且只在跑過 build 之後才存在，**换一台乾淨機器上這個數會變**，拿它當覆蓋率基準不可重現（`git check-ignore -v frontend/.next/types` → `.gitignore:10:.next/`，即那 46 個檔不在版控裡，只在跑過 build 之後存在）。修法：計數時一併排除 `/.next/`，並把生成樞紐的數另列（`scripts/dev.sh:225-228`）；修後同命令實測 `typechecked 156 first-party file(s) (strict; 46 generated .next/types stub(s) counted separately)`、`lint` rc=0。沒有把 46 顆掉不報——它們仍在輸出裡，只是不再被叫作第一方。§7 第 4 列已就地改成 156＋46，並寫明對帳式。
+27. **同一檔裡「函式數≠節點數」的陷阱**（做 #333 對帳時量到，非假設）：`test_paper_trading_cancel_atomic.py` 的 docstring 原寫「Test Coverage (12 methods implemented)」，而 `grep -c "def test_"` 得 **56**、`--collect-only` 得 **53**。差 3 的原因是三個 **fixture 掛了 `test_` 前綴**（`:74-87` 的 `@pytest.fixture def test_user_id／test_portfolio_id／test_run_id`）——它们不是節點，pytest 把它們當 fixture，所以任何由 grep 推得的節點數在这一檔**天生多 3**。已把該行改成不帶數字的類別清單，並在 docstring 末尾留下「56 vs 53、以 collect-only 為準」的實測說明（改後重跑仍 53 collected／23 passed／30 skipped）。這類缺陷與 §8.12（我自己提交資訊裡的 16→10）同形：**名子像什麼不等於它是什麼**，計數物件必須先指名。
+
+
+## 9. 外部依賴與尚未取得的授權
+
+- PostgreSQL 抛弃式测试 DB（PG 层全部证据）——未批准，未启动。
+- docker／CI acceptance 栈——本机无 docker。
+- 服务启动、常驻排程、实盘、broker、真实行情下载与回填、凭证书写／轮换——各自确认机制，本轮一律未执行。
+- 9 项 runtime 可读凭证字面量改间接引用（7 條 R1 既存值＋2 條 R6 硬編碼類別預設，見 §8.22）——会使以现有 key 签发的 token 失效，属 owner 决定；兩類影響不同：R1 那 7 條是**值本身**要換掉（立刻使既有 token 全部失效），R6 那 2 條是把**類別預設拿掉、改為必要環境變數**（只在重新部署後，使仍用舊預設簽發的 token 失效，且會讓未給 env 的啟動直接失敗——那正是期望行為）。因此扫描默认退出码 0、`--strict` 退出码 1（本輪在 `918af33`＋R6 後實測 rc=0／rc=1），把债务留在记录里而不是静默或长红。
+- RD-02 维持 `DESIGNED_NOT_RUN`。
+- **已發布的 JWT 簽金值（owner 決定，非本輪可修）**：以掃描器自身的分級標準（`is_secretish`）實測，全樹只有 **1 個**具憑證形狀的 `JWT_SECRET_KEY` 字面值（44 字元、word-literal），落在 **6 個 runtime 追蹤檔**：`NORMAL_RUNTIME_EVIDENCE.md`、`docker-compose.acceptance.yml`、`execute_journey_b_worker.sh`、`start_acceptance_env.sh`、`verify_data_persistence.sh`、`verify_quota_persistence.sh`。這些檔全部存在於基底提交 `b0aca5f` 及其祖先。**「已發布」由內容比對證明，不是由祖先關係推定**：本輪實測 `git merge-base --is-ancestor b0aca5f origin/live1-impl` → **False**（base 提交不在那條已發布線上；含它的只有本地 `deliver/complete-20261120` 與 `integrate/live1-5a34e3fe`），但對 6 個檔逐一做 `git show origin/live1-impl:<檔>` 再萃取，**6/6 都是同一個值（摘要 `6edfc671`、len 44）**，且 `origin/live1-impl` ＝ `5a34e3f` 與 `git ls-remote --heads origin` 讀回的一致（38 條分支中無任何 `deliver/*`）。所以這個值確實已在他人可讀的遠端分支上；本機所有 env 檔都不含這個值，所以「部署中的服務是否仍接受它」＝UNVERIFIED（本輪未探任何 live 服務，也不該探）。要縮小影響只有兩條：輪換（正式輪換未批准）＋從遠端歷史移除（需 force push，規則禁止）。**改檔不等於取消發布**：把值從工作樹刪掉不會把它從已推送的提交裡拿掉。另外 **2 條**硬編碼預設（`backend/app/config.py:37`、`docker-compose.yml:28`）**是同一個值**（len 48、摘要 `bb71696a`，並非先前誤記的「56／48 兩個不同預設」，更正見 §8.18），且正是產品 `_INSECURE_JWT_DEFAULTS` 自己拒絕的那個；R6 本輪把它們變成可見的 WEAK_LITERAL（§8.22），而「測試通路用這個值簽 token、token 落在 `.dev-runs/*.log`」見 §8.23——**那 6 個 runtime 檔的 len-44 值（`6edfc671`）與這兩個 len-48 值是三個不同的字串**，本輪未混計。
+- **GitHub 寫入**：本分支 `deliver/complete-20261120` **沒有 upstream**，第一次 push 等於建立新遠端分支（不是更新既有分支），依【1】「GitHub 寫入…不視為本提示的無條件授權」，本輪全部交付為 `LOCAL COMMITTED / NOT PUSHED`；§10 的 SHA 清單即為可直接交付的推送包。
+- **Git 身分**：工作區／全域 config 均無 `user.name`／`user.email`（實測两条 `git config` 皆回空）。規則禁止修改 git config，因此每筆提交用一次性 `git -c user.name=… -c user.email=…`（值 ＝ 基底提交作者 `tommylam0915 <tommylam0915@gmail.com>`）。永久解法是 owner 在本工作區下一個 `git config user.email …`，那不是我能代為決定的。
+
+## 10. 本輪提交清單（＝可直接交付的推送包，全部 LOCAL ONLY）
+
+順序由 `git log --reverse b0aca5f..HEAD` 讀取，SHA 以 `git log --format=%h` 為準；本節所在的那一筆（文件提交）不在下表自填，避免手抄一個當時還不存在的值。
+
+| # | SHA | 單位（一個提交＝一個可測單位） | 該單位的實測 |
+|---|---|---|---|
+| 1 | `2d740cb` | 重播狀態機／帳本不變式 6 檔改到真實 SQLite（＋`replay_fixture.py`） | 23 passed；6 個變異各自 1–13 條失敗 |
+| 2 | `bfac1ae` | 產品：forced close 用 exit_time、SQLite 時間正規化、row lock 去 PG-only | 上記 23 條通過；變異仍敏感 |
+| 3 | `072c1b4` | 精度回歸測試不再連生產 DB、期望值改為含成本 | 該檔單獨通過；成本>0 有防呆 |
+| 4 | `76bc9da` | PG-only 節點帶理由跳過，不再於收集期中止全套（`lanes.py`） | 收集 rc 2→0；跳過理由可由 `-rs` 读出 |
+| 5 | `0c0e7b9` | 共用 fixture 不再產出 PG-only SQL 與無法綁定的 Decimal | 受影響檔集合單獨通過 |
+| 6 | `92b1943` | 失敗注入改接在重播真正使用的 session 上 | 前＝注入永不觸發；後＝第二筆 ledger INSERT 觸發＋回滾零帳務 |
+| 7 | `aa44ddb` | 秘密掃描器（R1–R5＋分層）＋ 掃描門測試 | 19 條通過（當時）；HIGH 0 |
+| 8 | `4afa84f` | model↔migration 欄位集合比對，免資料庫 | 該集合通過；兩種收集器缺陷由正控鎖住 |
+| 9 | `d724743` | 修正「門的探針本身就是已部署憑證」 | 19→2 failed／17 passed→20 passed；HIGH 回到 0 |
+| 10 | `8feb18c` | `scripts/dev.sh` 單一入口（env/install/lint/test/pg/web-unit/web/e2e/smoke/up/down/all）＋ `.gitignore` | 各層實測見 §7；rc 語意 0/1/2/3 |
+| 11 | `054d9eb` | 掃描器三代不可見缺陷（hex／base36 key、TS 尾逗號、e2e lane）＋ 4 條新控制節點 | 24 passed／12 skipped、rc=0；R1 命中 11→12、流失 0；HIGH 0／WEAK_LITERAL 7／FIXTURE 5 |
+| 12 | `773c24e` | 權限／角色兩檔改標為 PG-only（`pytestmark = pg_only`），assertion 一條未刪 | 前＝1 failed＋11 errors；後＝12 skipped、rc=0，理由可由 `-rs` 逐條讀出 |
+| 13 | `1331daf` | `.gitignore` 補 SQLite 側車檔（`*.db-journal`／wal／shm） | `git check-ignore -v backend/test.db-journal` → `.gitignore:25` |
+| 14 | `918af33` | 正式路徑整合測試的 seed 改用「服務讀取的形式」並落在視窗內，期望值改為帳本不變式＋獨立算式錨點 | 前＝8 setup error（5 條從未觀察）；後＝5 passed（1.05s）；同領域 9 檔 40 節點正序／逆序皆 rc=0 |
+| 15 | `7835f73` | 掃描器 R6：把「產品自己在 `_INSECURE_JWT_DEFAULTS` 裡拒絕的值」變成可判定的規則，兩種指派形狀都讀，分級沿用 `lane()`；讀不到該集合時回報 R6 OFF 而不是乾淨 | HIGH 0 不變、總命中 12→14、WEAK_LITERAL 7→9、R6 落點 2；`lint` rc=0／`lint --strict` rc=1；門測試 24→28 節點全通過（`ALETHRA_TEST_DB=/tmp` 隔離下跑，不碰共享 `backend/test.db`）；分級缺陷由自建探針在本輪內抓到並修掉（§8.22(g)） |
+| 16 | `3b1e632` | `test_paper_trading_cancel_atomic.py` 的取消／失敗兩節點改經服務執行路徑（#333，§8.10）；同檔 docstring 的「12 tests WRITTEN, NOT YET EXECUTED」换成实跑数字＋fixture 前綴計數陷阱說明（§8.27） | 前＝删掉服務取消條件後這雨條仍 rc=0；後＝只把 `paper_trading.py:1077` 改成 `WHEN FALSE` → node1 FAILED（`assert 'failed' == 'cancelled'`）、node2 仍 passed；還原後 `git status` 對該產品檔回空、2 passed／0.42s；整檔 53 collected／23 passed／30 skipped／9.59s；全樹收集仍 3448 |
+| 17 | `819870d` | `scripts/dev.sh` 兩處工具精確度：smoke 的期待路徑由 `/api/v1/auth/login` 改為產品真實的 `/api/auth/login`；lint 的 coverage 計數把 46 個 `.next/types` 生成樞紐從「first-party」裡拆出（§8.25、§8.26） | smoke 前＝rc=1（`FAIL missing routes`）、後＝rc=0＋`GET /health 200`；`lint` rc=0→rc=0、`202` → `156 first-party ＋ 46 generated`；156 另由 `find` 獨立復現（`src/` 107）；檢查的失敗能力由「前」那次 rc=1 記錄，未另造假路徑 |
+| 18 | （本節所在提交） | 唯一矩陣＋README 入口 | §7（收集／全量對帳、web、smoke）、§8.10／25／26／27、§10、§11 |
+
+**§10 的勘誤（不 amend，規則：一律新提交）**：提交 `819870d` 的內文把 smoke 的前／後實測寫成「smoke 141301Z-style before rc=1」，那個日誌檔名屬 §8.24(f) 的 rc 探針，與 smoke 無關——smoke 的兩次 rc 是同一輪直接在終端跑的，未另存日誌。該提交已存在且未推送，更正記在本節而不是改寫歷史。
+
+## 11. 四欄獨立總結（【8】：不得以一欄代替另一欄）
+
+| 功能完成 | 工程驗證完成 | 部署驗收完成 | 研究績效已證明 |
+|---|---|---|---|
+| **未完成。** A–F 七列仍為 `IMPLEMENTING`／`BLOCKED`：密碼重設無產品內路徑（§1）、紙上交易無資料血緣欄位（§2）、研究任務取消／重試契約未集中（§3）、四條車道各自手寫冪等查詢且可選 key 車道無防護（§4）、多腿無 leg 身分、`/paper-trading/replay` 與 live paper 未接 UI（§5）、`/api/v1/learning` 無前端使用者、LearningJob 無身分（§6） | **未完成，且只到部分層級。** VERIFIED 有六處：SQLite・服務層重播家族（含本輪把 2 條 SQL 重打節點改經服務呼叫、變異控制實測前後，§8.10）、SQLite・掃描門（28 節點）、unit・schema parity、unit・前端 125 條、**build・前端 production build rc=0（typecheck 156＋46 生成樞紐，§7）**、**smoke・app 匯入／路由註冊／`/health` 200 rc=0（本輪由 rc=1 修到 rc=0，§8.25）**。全量 SQLite 已跑完並對帳：38 failed／3264 passed／150 skipped／0 errors、收集 3448 與實跑逐格相符（§7）；但 **38 條失敗尚未逐條判定產品／fixture／環境**，所以「全量绿」这件事不存在，該層仍為 IMPLEMENTED_NOT_VERIFIED。PG 整合＝BLOCKED（本機無 PG，30＋4 條 PG-gated 跳過有理由可讀），API 契約＋瀏覽器 E2E＝BLOCKED（無 docker，且未啟動服務） | **未開始。** 本分支無 upstream、本輪零推送；未啟動任何服務、未啟用排程、未部署、無瀏覽器旅程證據。「可部署」在本輪沒有任何一欄的支撐 | **未證明。** 本輪全部證據屬 `ENGINEERING_ONLY`；無 `SERVICE_REAL_HISTORY` 實測（PG／真實行情下載／排程皆未獲授權），RD-02 維持 `DESIGNED_NOT_RUN`。1,001 筆合成平倉只證明帳本契約與容量，不證明策略盈利能力 |
+
+一句話：**本輪交付的是「工程驗證能力的增加」與「既有假通過的清除」，不是版本完成，也不是任何績效宣稱。**

@@ -12,6 +12,9 @@
 - 使用示範資料，非真實市場資料
 - 引擎版本：1.1.0
 
+完整度、證據層級與阻斷項，以唯一一份矩陣為準：[docs/completion-matrix-2026-11-20.md](docs/completion-matrix-2026-11-20.md)。
+開發與驗證的唯一入口：`./scripts/dev.sh env | lint | test | pg | web-unit | web | e2e | smoke`。
+
 ## 重要聲明
 
 **Alethra 是研究工具，非投資建議。**
