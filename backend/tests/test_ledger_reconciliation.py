@@ -121,7 +121,7 @@ def seed_strategy_study_data(test_user_id):
                 ) VALUES (
                     :id, :user_id, 'strategy_research_simulated', 'v1.0', 'TEST/USD', 60,
                     'test_provider', 'simulated', 100, :now, :now,
-                    '{}'::jsonb, '{}'::jsonb, '[]'::jsonb, 2, :now
+                    '{}', '{}', '[]', 2, :now
                 )
             """),
             {

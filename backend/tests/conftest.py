@@ -131,6 +131,14 @@ def _compile_uuid_sqlite(element, compiler, **kw):
 
 
 if _IS_SQLITE:
+    # sqlite3 refuses an unadapted Decimal, and raw text() binds carry no column
+    # type for SQLAlchemy to process. These fixtures insert Decimal into Float /
+    # double-precision columns, which is the same float() PG already applies —
+    # the adapter matches the production column type rather than excusing it.
+    import sqlite3
+    from decimal import Decimal as _Decimal
+    sqlite3.register_adapter(_Decimal, float)
+
     TEST_ENGINE = create_engine(
         _TEST_DB_PATH,
         connect_args={"check_same_thread": False},
