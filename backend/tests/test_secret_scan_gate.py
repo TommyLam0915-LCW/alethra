@@ -29,7 +29,12 @@ REF = "${ALETHRA_TEST_RUNTIME_PW}"            # indirection, must stay quiet
 # 40 chars, one unbroken run: the shape a generated key has. Invent-only — this
 # is not a credential anywhere, it is a pattern probe.
 OPAQUE = "aB3dE6fG9hJ2kL5mN8pQ1rS4tU7vW0xYz2C5eG8h"
-WORD_SECRET = "acceptance-test-secret-minimum-32-chars-long"
+# 44 chars, readable words: the shape a hand-picked credential has. Invent-only
+# and uniqueness-gated by test_probe_literals_are_not_deployed_values below —
+# this constant's whole job is to collide with a runtime file inside tmp_path,
+# and if it ever matches a real one the fixture becomes a ninth landing point for
+# a deployed secret while still reading as a placeholder.
+WORD_SECRET = "synthetic-probe-word-literal-not-a-cred-aa12"
 
 HIGH_BASELINE = set()
 WEAK_BASELINE = {
@@ -45,6 +50,9 @@ FIXTURE_BASELINE = {
     ("R1", "backend/tests/test_ai_assistant.py", "SECRET_KEY", 30),
     ("R1", "backend/tests/test_db_env_contract.py", "PASSWORD", 25),
     ("R1", "backend/tests/test_execution_containment.py", "secret_marker", 29),
+    # This gate's own probe: word-literal-shaped, on a test path, and now
+    # provably not a deployed value (test_probe_literals_are_not_deployed_values).
+    ("R1", "backend/tests/test_secret_scan_gate.py", "WORD_SECRET", 44),
 }
 
 
@@ -142,6 +150,29 @@ def test_shape_separates_generated_from_readable_literals():
     assert aus.shape(LITERAL) == "word-literal"
     assert aus.shape(WORD_SECRET) == "word-literal"
     assert aus.shape("Zm9vYmFy" * 6) == "opaque"
+
+
+def test_probe_literals_are_not_deployed_values():
+    """Each probe must exist in this file and nowhere else in the tree.
+
+    The first version of WORD_SECRET was copied from the acceptance scripts and
+    read like a placeholder, but it *was* the deployed JWT signing key. Landing
+    it on a test path made the same value appear in both lanes, which is exactly
+    the condition the promotion rule below treats as a deployed credential, so
+    the fixture silently reclassified six real sites from WEAK_LITERAL to HIGH
+    and added a ninth copy of the key to a file the delivery ships. Shape is
+    checked here too: a probe that stopped being word-literal would exercise a
+    different rule than the one its test names.
+    """
+    here = os.path.relpath(os.path.abspath(__file__), REPO)
+    for name, value in (("OPAQUE", OPAQUE), ("WORD_SECRET", WORD_SECRET),
+                        ("LITERAL", LITERAL), ("REF", REF)):
+        carriers = [rel for rel in aus.tracked_files(REPO)
+                    if value in "".join(aus.read(rel, REPO))]
+        assert carriers == [here], f"{name} also appears in {carriers}"
+        if name != "REF":
+            assert aus.is_secretish(value), f"{name} no longer trips the literal rule"
+    assert aus.shape(WORD_SECRET) == "word-literal"
 
 
 def test_word_literal_on_a_runtime_path_is_debt_not_an_emergency(tmp_path):

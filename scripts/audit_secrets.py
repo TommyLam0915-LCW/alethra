@@ -29,9 +29,11 @@ value, because the two require different answers:
 
 So the gate is red for the shape that means "rotate it now", and states the
 other shape as counted debt instead of either hiding it or making the build
-permanently red until someone switches the gate off. This tree currently
-carries 0 HIGH and 6 WEAK_LITERAL; ``--strict`` promotes WEAK_LITERAL to exit 1
-for release smoke, where the debt is meant to be zero.
+permanently red until someone switches the gate off. The per-tier counts for
+this tree are not restated here because they rot on the next commit; they are
+pinned as measured sets in backend/tests/test_secret_scan_gate.py, which fails
+when the tree and the recorded sets disagree. ``--strict`` promotes
+WEAK_LITERAL to exit 1 for release smoke, where the debt is meant to be zero.
 
 Keys that name an ``http``-scheme endpoint (``*_URL``) are exempt from R1 — the
 value is a public URL, not a credential. An inline password in such a value is
