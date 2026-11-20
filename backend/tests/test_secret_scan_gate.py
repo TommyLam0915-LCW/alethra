@@ -11,6 +11,15 @@ made the whole scanner a no-op and reported "0 findings", then the fix reported
 1,516 findings and was just as useless. Both failures are covered by a control
 here, because neither was visible from the pass column alone.
 
+The third failure of that family went the other way — not a rule that fired too
+much, but two that fired too little plus one path classifier that misread a
+whole directory. Each has a control below, and each was measured against the
+real tree before the rule changed, so the added sensitivity is one new finding
+rather than a new wave of noise: a letters+digits key (two classes, the shape of
+every hex secret), a TypeScript ``key: 'value',`` entry whose trailing comma
+blocked the charset test, and ``frontend/e2e/*.spec.ts`` counted as a runtime
+path.
+
 No database, no network.
 """
 import importlib.util
@@ -35,6 +44,12 @@ OPAQUE = "aB3dE6fG9hJ2kL5mN8pQ1rS4tU7vW0xYz2C5eG8h"
 # and if it ever matches a real one the fixture becomes a ninth landing point for
 # a deployed secret while still reading as a placeholder.
 WORD_SECRET = "synthetic-probe-word-literal-not-a-cred-aa12"
+# 32 hex chars: letters+digits, so exactly two character classes. The classifier
+# used to demand three, which made every generated hex key invisible — the most
+# common shape a real API secret has. Named without a credential word on
+# purpose: a constant called ``*_SECRET`` here would be read by R1 itself, the
+# shape is opaque, and the file would become a HIGH landing point.
+HEX_PROBE = "a1b2c3d4e5f60718293a4b5c6d7e8f90"
 
 HIGH_BASELINE = set()
 WEAK_BASELINE = {
@@ -53,6 +68,10 @@ FIXTURE_BASELINE = {
     # This gate's own probe: word-literal-shaped, on a test path, and now
     # provably not a deployed value (test_probe_literals_are_not_deployed_values).
     ("R1", "backend/tests/test_secret_scan_gate.py", "WORD_SECRET", 44),
+    # Visible since the value extractor stopped keeping the TypeScript flow-map
+    # comma: the literal is test scaffolding, but until the fix R1 could not see
+    # it at all, which is the opposite failure from a false positive.
+    ("R1", "frontend/e2e/personal-strategy-learning.spec.ts", "JWT_SECRET_KEY", 32),
 }
 
 
@@ -131,6 +150,58 @@ def test_r1_fires_on_a_bare_credential_assignment(tmp_path):
     assert "R1" in _rules(findings), findings
 
 
+def test_positive_control_a_generated_hex_key_is_not_invisible(tmp_path):
+    """Letters+digits is two classes, and it is what a real key looks like.
+
+    The classifier demanded three character classes, so every hex secret the
+    tree could carry was silently passed over — a miss that reads as a clean
+    scan, the same failure mode as the dead-regex round one level up.
+    """
+    assert aus.is_secretish(HEX_PROBE) is True
+    _write(tmp_path, "start_stack.sh", f"export API_SECRET_KEY=\"{HEX_PROBE}\"\n")
+    findings = aus.scan(str(tmp_path))
+    assert _tiers(findings, "HIGH") == [("R1", "start_stack.sh", "API_SECRET_KEY", 32)], findings
+
+
+def test_negative_control_a_digits_free_default_stays_quiet(tmp_path):
+    """The relaxation stops at the separator: prose defaults are not keys."""
+    prose = "change-me-in-production-before-deploying-this-default-key"
+    assert aus.is_secretish(prose) is False
+    _write(tmp_path, "start_stack.sh", f'export JWT_SECRET_KEY="{prose}"\n')
+    assert aus.scan(str(tmp_path)) == []
+
+
+def test_value_extraction_keeps_no_type_script_separator(tmp_path):
+    """``jwt_secret_key: 'aa..',`` used to arrive with its comma attached.
+
+    The comma sits outside the quotes, so unquoting never ran and the value
+    failed the charset test: R1 was blind to every literal written in this
+    syntax, which is how frontend tests declare config.
+    """
+    key, value = aus._assign_value(f"  JWT_SECRET_KEY: '{WORD_SECRET}',")
+    assert (key, value) == ("JWT_SECRET_KEY", WORD_SECRET)
+    assert aus._assign_value("JWT_SECRET_KEY = 'plain'")[1] == "plain"
+    _write(tmp_path, "frontend/e2e/probe.spec.ts",
+           f"  JWT_SECRET_KEY: '{WORD_SECRET}',\n")
+    findings = aus.scan(str(tmp_path))
+    assert _tiers(findings, "FIXTURE") == [
+        ("R1", "frontend/e2e/probe.spec.ts", "JWT_SECRET_KEY", 44)], findings
+    assert _tiers(findings, "HIGH") == []
+
+
+def test_lane_treats_a_playwright_spec_as_a_test_path():
+    """A spec drives a stack someone else started; it is not what a service reads.
+
+    The promotion rule still covers the dangerous case: if the same value is
+    also in a runtime file, ``runtime ∩ test`` makes it HIGH.
+    """
+    assert aus.lane("frontend/e2e/personal-strategy-learning.spec.ts") == "test"
+    assert aus.lane("frontend/e2e/helpers/login.ts") == "test"
+    assert aus.lane("backend/tests/test_login.py") == "test"
+    assert aus.lane("start_acceptance_env.sh") == "runtime"
+    assert aus.lane("verify_data_persistence.sh") == "runtime"
+
+
 def test_the_scanner_is_not_a_no_op():
     """Regression for the dead-regex round.
 
@@ -166,13 +237,14 @@ def test_probe_literals_are_not_deployed_values():
     """
     here = os.path.relpath(os.path.abspath(__file__), REPO)
     for name, value in (("OPAQUE", OPAQUE), ("WORD_SECRET", WORD_SECRET),
-                        ("LITERAL", LITERAL), ("REF", REF)):
+                        ("HEX_PROBE", HEX_PROBE), ("LITERAL", LITERAL), ("REF", REF)):
         carriers = [rel for rel in aus.tracked_files(REPO)
                     if value in "".join(aus.read(rel, REPO))]
         assert carriers == [here], f"{name} also appears in {carriers}"
         if name != "REF":
             assert aus.is_secretish(value), f"{name} no longer trips the literal rule"
     assert aus.shape(WORD_SECRET) == "word-literal"
+    assert aus.shape(HEX_PROBE) == "opaque"
 
 
 def test_word_literal_on_a_runtime_path_is_debt_not_an_emergency(tmp_path):

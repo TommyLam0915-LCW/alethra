@@ -35,6 +35,17 @@ pinned as measured sets in backend/tests/test_secret_scan_gate.py, which fails
 when the tree and the recorded sets disagree. ``--strict`` promotes
 WEAK_LITERAL to exit 1 for release smoke, where the debt is meant to be zero.
 
+The word "hex" above promised more than the first version delivered: a key
+built from letters and digits has exactly two character classes, and the class
+count used to be a floor of three, so every hex-shaped secret was passed over
+in silence. Two classes are accepted now when the whole run is alphanumeric and
+carries a digit, which is what separates a generated key from a prose default;
+``KEY_ASSIGN_RE`` already limits R1 to credential-named keys, so a checksum or
+image-digest field cannot reach this branch. What still is not detected, and is
+stated rather than implied, is a hardcoded default whose literal has no digit at
+all (lowercase words around separators) — that shape needs its own rule about
+credential keys in product config, not a looser entropy test.
+
 Keys that name an ``http``-scheme endpoint (``*_URL``) are exempt from R1 — the
 value is a public URL, not a credential. An inline password in such a value is
 still caught by R2, so the exemption costs no coverage.
@@ -87,6 +98,7 @@ PROVIDER_RE = re.compile(r"\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{16,}\b"
 OPTOUT_RE = re.compile(r"#\s*secret-scan:\s*fixture\s*$")
 
 CHARSET_RE = re.compile(r"[A-Za-z0-9+/=_.:\-]{20,}")
+ALNUM_RE = re.compile(r"[A-Za-z0-9]{20,}")
 CLASS_RES = (re.compile(r"[a-z]"), re.compile(r"[A-Z]"), re.compile(r"[0-9]"),
              re.compile(r"[^A-Za-z0-9]"))
 
@@ -141,7 +153,16 @@ def is_secretish(value):
         return False
     if len(value) < 20:
         return False
-    return sum(bool(r.search(value)) for r in CLASS_RES) >= 3
+    classes = sum(bool(r.search(value)) for r in CLASS_RES)
+    if classes >= 3:
+        return True
+    # A hex or base36 key is letters+digits, so a rule that insists on three
+    # classes skips every one of them. Requiring a digit keeps prose defaults
+    # (lowercase words around separators) out, and KEY_ASSIGN_RE only ever
+    # matches credential-named keys, so a checksum or image-digest field cannot
+    # reach this branch. Both halves are positive controls in
+    # backend/tests/test_secret_scan_gate.py.
+    return classes == 2 and bool(ALNUM_RE.fullmatch(value)) and bool(re.search(r"\d", value))
 
 
 BASE64_RE = re.compile(r"[A-Za-z0-9+/]{32,}={0,2}")
@@ -172,13 +193,18 @@ def lane(rel):
     Deliberately narrow. ``verify_data_persistence.sh`` exports a key and then
     starts a stack, so it is a runtime path, not scaffolding — only files under
     a ``tests`` directory or named ``test_*.py`` get fixture benefit of the
-    doubt.
+    doubt, plus Playwright specs, which run against a stack someone else started
+    and cannot be the thing a deployed service reads. A credential that really
+    is deployed still shows up as HIGH, because the same value appears in a
+    runtime file too and ``runtime ∩ test`` promotes it.
     """
     parts = rel.split("/")
     base = parts[-1].lower()
-    if "tests" in parts or "test" in parts:
+    if "tests" in parts or "test" in parts or "e2e" in parts:
         return "test"
     if base.startswith("test_") and base.endswith(".py"):
+        return "test"
+    if base.endswith((".spec.ts", ".spec.js", ".test.ts", ".test.tsx", ".test.js")):
         return "test"
     return "runtime"
 
@@ -224,11 +250,18 @@ def inline_passwords(line):
 
 
 def _assign_value(raw):
-    """The value part of a KEY=value line, quotes stripped."""
+    """The value part of a KEY=value line, quotes stripped.
+
+    A TypeScript / YAML flow-map entry ends with a separator
+    (``jwt_secret_key: 'ab..cd',``), and that trailing comma sits *outside* the
+    quotes, so unquoting never runs and the value fails the charset test — the
+    literal is then invisible to R1. The separator is dropped before the quote
+    check for that reason.
+    """
     m = KEY_ASSIGN_RE.match(raw.rstrip("\n"))
     if not m:
         return None, None
-    value = m.group(2).strip()
+    value = m.group(2).strip().rstrip(",;")
     if value[:1] in "\"'" and value[:1] == value[-1:]:
         value = value[1:-1]
     return m.group(1), value
