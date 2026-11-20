@@ -1,9 +1,11 @@
 """Learning API routes.
 
 Exposes the auto-learning loop to the owner: list jobs, trigger research,
-review proposals, and deploy validated parameter adjustments.
+review proposals, approve a proposal that passed validation, and deploy an
+approved one.
 
-NEVER auto-deploys. Every deploy requires an explicit POST from the owner.
+NEVER auto-approves and NEVER auto-deploys. Both decisions are separate
+explicit POSTs from the owner.
 """
 
 from __future__ import annotations
@@ -12,16 +14,18 @@ import logging
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.auth.jwt import get_current_user
+from app.auth.provenance import request_actor_provenance
 from app.database import get_db
 from app.lib.timeutil import utcnow_aware
 from app.models.learning_job import LearningJob, LearningProposal
 from app.models.user import User
+from app.services import emit_event
 from app.services.pattern_analysis import analyze_skill_patterns
 
 router = APIRouter(prefix="/learning", tags=["learning"])
@@ -254,6 +258,131 @@ def list_proposals(
     return {
         "proposals": [_serialize_proposal(p) for p in proposals],
         "total": len(proposals),
+    }
+
+
+@router.post("/proposals/{proposal_id}/approve")
+def approve_proposal(
+    proposal_id: UUID,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    """Owner decision: approve a proposal that passed validation.
+
+    This is the only rung that writes ``evidence_status="validated_candidate"``,
+    which is the value ``deploy_proposal`` requires. Without it the ladder had
+    no producer at all: pattern analysis emits only ``hypothesis`` /
+    ``descriptive`` / ``insufficient``, the scheduler stores every proposal as
+    ``status="pending"``, and deploy refused everything else — so nothing the
+    product created could ever legally reach deploy.
+
+    NEVER auto-approves. Always requires an explicit POST from the owner.
+    """
+    proposal = db.scalars(
+        select(LearningProposal).where(
+            LearningProposal.id == proposal_id,
+            LearningProposal.user_id == current_user.id,
+        )
+    ).first()
+
+    if proposal is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"reason": "proposal_not_found", "proposal_id": str(proposal_id)},
+        )
+
+    validation_result = proposal.validation_result or {}
+    if not validation_result.get("passed", False):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "reason": "validation_not_passed",
+                "current_status": proposal.status,
+                "validation_result": validation_result,
+                "message": (
+                    "Only a proposal whose validation_result.passed is true can be "
+                    "approved. Run the backtest validation first."
+                ),
+            },
+        )
+
+    new_rationale = dict(proposal.rationale_json or {})
+    evidence_status_before = new_rationale.get("evidence_status", "unknown")
+    new_rationale["evidence_status"] = "validated_candidate"
+
+    # The status predicate is what makes a second concurrent approve lose, so
+    # an approval can never be counted twice; the whole rationale is reassigned
+    # because a JSON column is not tracked on in-place mutation.
+    approved = db.execute(
+        update(LearningProposal)
+        .where(
+            LearningProposal.id == proposal_id,
+            LearningProposal.user_id == current_user.id,
+            LearningProposal.status == "pending",
+        )
+        .values(
+            status="validated",
+            validated_at=utcnow_aware(),
+            rationale_json=new_rationale,
+        )
+    ).rowcount
+
+    if approved != 1:
+        db.rollback()
+        current = db.scalars(
+            select(LearningProposal).where(LearningProposal.id == proposal_id)
+        ).first()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "reason": "proposal_not_approvable",
+                "current_status": current.status if current else None,
+                "message": (
+                    "Only proposals with status 'pending' can be approved. "
+                    "An already validated, deployed, or rejected proposal keeps "
+                    "its recorded decision instead of being re-approved."
+                ),
+            },
+        )
+
+    emit_event(
+        db,
+        entity_type="learning_proposal",
+        entity_id=str(proposal_id),
+        event_type="proposal_approved",
+        actor_id=current_user.id,
+        actor_type=request_actor_provenance(request),
+        payload={
+            "rule_id": proposal.rule_id,
+            "exit_id": proposal.exit_id,
+            "instrument_id": proposal.instrument_id,
+            "interval_minutes": proposal.interval_minutes,
+            "status_before": "pending",
+            "status_after": "validated",
+            "evidence_status_before": evidence_status_before,
+            "evidence_status_after": "validated_candidate",
+        },
+    )
+    db.commit()
+    db.refresh(proposal)
+
+    logger.info(
+        "Proposal %s approved by user %s: %s/%s %s@%dm",
+        proposal.id,
+        current_user.id,
+        proposal.rule_id,
+        proposal.exit_id,
+        proposal.instrument_id,
+        proposal.interval_minutes,
+    )
+
+    return {
+        "proposal": _serialize_proposal(proposal),
+        "message": (
+            "Proposal approved. It is now deployable through "
+            "POST /learning/proposals/{id}/deploy."
+        ),
     }
 
 
