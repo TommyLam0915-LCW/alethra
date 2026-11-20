@@ -13,6 +13,19 @@ Rules:
       is nearby to trigger R1.
   R4  a JWT literal.
   R5  a provider key with a recognisable live/test prefix (Stripe, GitHub, AWS).
+  R6  a credential-named key whose literal is one of the product's own
+      ``_INSECURE_JWT_DEFAULTS``. That set is read from backend/app/config.py
+      instead of copied here, so the rule follows the list the product already
+      refuses rather than a snapshot of this file's prose. Two extraction forms
+      are needed: ``KEY=value`` (already R1's shape) and a typed field default
+      ``jwt_secret_key: str = "..."``, where R1's capture lands on the type
+      annotation rather than the value. R6 never promotes to HIGH: the value is
+      public by construction — it is the list the product itself refuses — so
+      the answer is a product change, not a rotation, and the ``runtime ∩ test``
+      promotion that R1 gets would call a documented default a deployed
+      credential. What it does share with R1 is the lane split: runtime path →
+      WEAK_LITERAL, test path → FIXTURE, so a test that pins the refused default
+      does not inflate the runtime-debt count.
 
 Each R1/R2/R3 hit is then sorted into one of two tiers by the *shape* of the
 value, because the two require different answers:
@@ -41,10 +54,12 @@ count used to be a floor of three, so every hex-shaped secret was passed over
 in silence. Two classes are accepted now when the whole run is alphanumeric and
 carries a digit, which is what separates a generated key from a prose default;
 ``KEY_ASSIGN_RE`` already limits R1 to credential-named keys, so a checksum or
-image-digest field cannot reach this branch. What still is not detected, and is
-stated rather than implied, is a hardcoded default whose literal has no digit at
-all (lowercase words around separators) — that shape needs its own rule about
-credential keys in product config, not a looser entropy test.
+image-digest field cannot reach this branch. A hardcoded default whose literal
+has no digit at all (lowercase words around separators) stays invisible to that
+entropy test by design, so it is not judged on entropy: R6 reports it when the
+product itself already names the value as a default it refuses. What still is
+not detected is a prose default that is *not* in that set — closing that would
+mean growing the product's refuse-list, not loosening a rule here.
 
 Keys that name an ``http``-scheme endpoint (``*_URL``) are exempt from R1 — the
 value is a public URL, not a credential. An inline password in such a value is
@@ -96,6 +111,52 @@ PROVIDER_RE = re.compile(r"\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{16,}\b"
                          r"|\bAKIA[0-9A-Z]{16}\b")
 
 OPTOUT_RE = re.compile(r"#\s*secret-scan:\s*fixture\s*$")
+
+# R6's second extraction form. ``jwt_secret_key: str = "…"`` is a credential key
+# followed by a type annotation, so KEY_ASSIGN_RE stops at the first colon and
+# captures "str = \"…\"" — prose to every later test, and the site invisible.
+TYPED_ASSIGN_RE = re.compile(
+    r"""(?ix)
+    ^\s*
+    ([A-Za-z0-9_]*(?:SECRET|PASSWORD|PASSWD|TOKEN|API_KEY|ACCESS_KEY|
+                    PRIVATE_KEY|CREDENTIAL|SALT|DSN)[A-Za-z0-9_]*)
+    \s*:\s*[A-Za-z_][\w.\[\]]*\s*=\s*(.+?)\s*,?$"""
+)
+
+# The product's own refuse-list, read from source so this file never carries a
+# copy of it that can rot.
+INSECURE_SET_RE = re.compile(r"_INSECURE_JWT_DEFAULTS\s*=\s*\{(.*?)\n\}", re.S)
+QUOTED_RE = re.compile(r'"([^"]*)"|\'([^\']*)\'')
+CONFIG_REL = os.path.join("backend", "app", "config.py")
+
+
+def load_insecure_defaults(root=None):
+    """(values, loaded) — ``loaded`` is False when the set could not be read.
+
+    R6 stays off rather than reporting "no known defaults": an empty set read
+    from an unreadable file would look exactly like a clean tree.
+    """
+    path = os.path.join(root or ROOT, CONFIG_REL)
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError:
+        return set(), False
+    match = INSECURE_SET_RE.search(text)
+    if not match:
+        return set(), False
+    values = {a or b for a, b in QUOTED_RE.findall(match.group(1))}
+    return {v for v in values if v}, True
+
+
+def typed_assign_value(line):
+    m = TYPED_ASSIGN_RE.match(line.rstrip("\n"))
+    if not m:
+        return None, None
+    value = m.group(2).strip().rstrip(",;")
+    if value[:1] in "\"'" and value[:1] == value[-1:]:
+        value = value[1:-1]
+    return m.group(1), value
 
 CHARSET_RE = re.compile(r"[A-Za-z0-9+/=_.:\-]{20,}")
 ALNUM_RE = re.compile(r"[A-Za-z0-9]{20,}")
@@ -272,6 +333,7 @@ def scan(root=None, collect_optouts=False):
     optouts = []
     harvested = {}
     files = tracked_files(root)
+    known_defaults = load_insecure_defaults(root)[0]
     # rule hits that carry a literal value are tiered after the walk, because
     # the tier depends on every lane a value appears in, not on one line.
     literal_hits = []
@@ -292,6 +354,18 @@ def scan(root=None, collect_optouts=False):
                 continue
 
             key, value = _assign_value(line)
+            if known_defaults:
+                # Both assignment shapes, because the typed form is the one that
+                # hides the product's own default from every other rule here.
+                for k6, v6 in ((key, value), typed_assign_value(line)):
+                    if (k6 and v6 and v6 in known_defaults
+                            and not METRIC_KEY_RE.search(k6)
+                            and not is_placeholder(v6)):
+                        # Tiered by lane like R1, because "runtime debt" has to
+                        # keep meaning "a site that configures a service": a test
+                        # that pins the refused default is scaffolding, not debt.
+                        tier = "FIXTURE" if lane(rel) == "test" else "WEAK_LITERAL"
+                        findings.append(("R6", rel, lineno, k6, len(v6), tier))
             if key and value and not METRIC_KEY_RE.search(key):
                 bare = value.split("#", 1)[0].strip()
                 excluded = (ENDPOINT_KEY_RE.search(key) and HTTP_SCHEME_RE.match(bare))
@@ -352,10 +426,18 @@ def main(argv=None):
     tiers = {}
     for hit in findings:
         tiers[hit[5]] = tiers.get(hit[5], 0) + 1
+    r6 = sum(1 for hit in findings if hit[0] == "R6")
     print(f"secret scan: {len(findings)} finding(s) — "
           f"HIGH {tiers.get('HIGH', 0)}, WEAK_LITERAL {tiers.get('WEAK_LITERAL', 0)}, "
           f"FIXTURE {tiers.get('FIXTURE', 0)}; "
           f"{len(set(optouts))} line(s) opted out as fixtures")
+    if load_insecure_defaults(args.root)[1]:
+        print(f"  R6 known-default landing points: {r6}")
+    else:
+        # Stated, not silent: an empty refuse-list and a clean tree look the
+        # same in the finding count, which is the failure mode R6 exists to stop.
+        print(f"  R6 OFF: no _INSECURE_JWT_DEFAULTS read from {CONFIG_REL} — "
+              "known defaults were not checked in this scan")
     if args.list_optouts:
         for where in sorted(set(optouts)):
             print(f"  OPTOUT {where}")

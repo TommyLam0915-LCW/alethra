@@ -20,6 +20,13 @@ every hex secret), a TypeScript ``key: 'value',`` entry whose trailing comma
 blocked the charset test, and ``frontend/e2e/*.spec.ts`` counted as a runtime
 path.
 
+The fourth is a rule that did not exist: two sites hardcode the value the
+product itself lists in ``_INSECURE_JWT_DEFAULTS``, and no entropy test can see
+them because the value is lowercase words around separators. R6 judges that
+shape against the product's own refuse-list instead of against character classes.
+Its first version forced one tier for every hit, which a control then caught: a
+test that pins the refused default was being counted as runtime debt.
+
 No database, no network.
 """
 import importlib.util
@@ -60,6 +67,12 @@ WEAK_BASELINE = {
     ("R1", "start_acceptance_env.sh", "JWT_SECRET_KEY", 44),
     ("R1", "verify_data_persistence.sh", "JWT_SECRET_KEY", 44),
     ("R1", "verify_quota_persistence.sh", "JWT_SECRET_KEY", 44),
+    # Visible only since R6: a prose default with no digit is invisible to every
+    # entropy rule, and the typed field default hides it from KEY_ASSIGN_RE too.
+    # The two sites are the product's own refused value being handed out as the
+    # default signing key, so the tier is debt, not an emergency.
+    ("R6", "backend/app/config.py", "jwt_secret_key", 48),
+    ("R6", "docker-compose.yml", "JWT_SECRET_KEY", 48),
 }
 FIXTURE_BASELINE = {
     ("R1", "backend/tests/test_ai_assistant.py", "SECRET_KEY", 30),
@@ -164,7 +177,13 @@ def test_positive_control_a_generated_hex_key_is_not_invisible(tmp_path):
 
 
 def test_negative_control_a_digits_free_default_stays_quiet(tmp_path):
-    """The relaxation stops at the separator: prose defaults are not keys."""
+    """The relaxation stops at the separator: prose defaults are not keys.
+
+    This proves only the entropy rules stay quiet. A prose default is not
+    innocent — R6 judges it by whether the product already refuses the value,
+    which the controls below cover; in a tree with no refuse-list to read, like
+    this tmp_path, R6 is off rather than clean.
+    """
     prose = "change-me-in-production-before-deploying-this-default-key"
     assert aus.is_secretish(prose) is False
     _write(tmp_path, "start_stack.sh", f'export JWT_SECRET_KEY="{prose}"\n')
@@ -187,6 +206,84 @@ def test_value_extraction_keeps_no_type_script_separator(tmp_path):
     assert _tiers(findings, "FIXTURE") == [
         ("R1", "frontend/e2e/probe.spec.ts", "JWT_SECRET_KEY", 44)], findings
     assert _tiers(findings, "HIGH") == []
+
+
+def _known_default_from_the_product():
+    """The value the product assigns to ``jwt_secret_key`` *and* refuses.
+
+    Read from the source rather than written here, because a literal copy of a
+    credential-shaped string in this file would be another landing point — the
+    mistake this gate already records once in its own history.
+    """
+    values, loaded = aus.load_insecure_defaults(REPO)
+    assert loaded, (
+        "the product's _INSECURE_JWT_DEFAULTS could not be read — R6 is off, "
+        "and a gate cannot assert about a rule it switched off")
+    for line in aus.read(aus.CONFIG_REL, REPO):
+        key, value = aus.typed_assign_value(line)
+        if key == "jwt_secret_key" and value in values:
+            return value
+    raise AssertionError(
+        "backend/app/config.py no longer defaults jwt_secret_key to a refused "
+        "value: R6's two recorded sites are gone, so regenerate WEAK_BASELINE "
+        "deliberately instead of leaving a stale set behind")
+
+
+def test_r6_judges_the_products_own_refuse_list():
+    """The rule is wired to the list the product already enforces, not a copy.
+
+    The value passes the two gates that kept it invisible: it is not secretish
+    (no digit, so no entropy rule reaches it) and it sits behind a type
+    annotation, so KEY_ASSIGN_RE captured the annotation instead of the value.
+    """
+    known = _known_default_from_the_product()
+    assert aus.is_secretish(known) is False
+    assert aus.is_placeholder(known) is False
+    assert aus.typed_assign_value(f'    jwt_secret_key: str = "{known}"\n') == (
+        "jwt_secret_key", known)
+    assert aus._assign_value(f'    jwt_secret_key: str = "{known}"')[1] != known
+
+
+def test_positive_control_r6_fires_on_both_assignment_shapes(tmp_path):
+    known = _known_default_from_the_product()
+    _write(tmp_path, aus.CONFIG_REL,
+           '_INSECURE_JWT_DEFAULTS = {\n    "%s",\n    "secret",\n}\n'
+           'class Settings:\n    jwt_secret_key: str = "%s"\n' % (known, known))
+    _write(tmp_path, "docker-compose.yml", "      JWT_SECRET_KEY: %s\n" % known)
+    findings = aus.scan(str(tmp_path))
+    assert _tiers(findings, "WEAK_LITERAL") == [
+        ("R6", "backend/app/config.py", "jwt_secret_key", len(known)),
+        ("R6", "docker-compose.yml", "JWT_SECRET_KEY", len(known))], findings
+    assert _tiers(findings, "HIGH") == []
+    assert not any(known in str(f) for f in findings), "the scanner must not echo the value"
+
+
+def test_r6_tiers_a_test_path_as_fixture_not_runtime_debt(tmp_path):
+    """A test that pins the refused default is scaffolding; ``--strict`` must not call it debt.
+
+    R6 was first written to force WEAK_LITERAL unconditionally, which made the
+    runtime-debt count stop meaning "a site that configures a service".
+    """
+    known = _known_default_from_the_product()
+    _write(tmp_path, aus.CONFIG_REL,
+           '_INSECURE_JWT_DEFAULTS = {\n    "%s",\n}\n'
+           'class Settings:\n    jwt_secret_key: str = "%s"\n' % (known, known))
+    _write(tmp_path, "backend/tests/test_known_default_contract.py",
+           'JWT_SECRET_KEY = "%s"\n' % known)
+    findings = aus.scan(str(tmp_path))
+    assert _tiers(findings, "WEAK_LITERAL") == [
+        ("R6", "backend/app/config.py", "jwt_secret_key", len(known))], findings
+    assert _tiers(findings, "FIXTURE") == [
+        ("R6", "backend/tests/test_known_default_contract.py", "JWT_SECRET_KEY", len(known))], findings
+
+
+def test_r6_reports_off_instead_of_clean_when_the_list_cannot_be_read(tmp_path, capsys):
+    known = _known_default_from_the_product()
+    _write(tmp_path, "docker-compose.yml", "      JWT_SECRET_KEY: %s\n" % known)
+    assert aus.scan(str(tmp_path)) == []
+    aus.main(["--root", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert "R6 OFF" in out, out
 
 
 def test_lane_treats_a_playwright_spec_as_a_test_path():
