@@ -86,7 +86,10 @@ def test_an_acknowledged_registration_records_one_audit_event(client):
     assert len(events) == 1
     event = events[0]
     assert event.event_type == "risk_disclosure_acknowledged"
-    assert event.actor_type == "human"
+    # /register is pre-auth: no credential was verified, so the channel label is
+    # unknown by contract (app/auth/provenance.py) and is never upgraded to human
+    # by inference. The consent is attributed through actor_id, asserted next.
+    assert event.actor_type == "unknown"
     assert str(event.actor_id) == str(user.id)
     assert event.payload_json == {
         "disclosure_path": RISK_DISCLOSURE_PATH,
