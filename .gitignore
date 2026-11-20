@@ -10,6 +10,9 @@ node_modules/
 .next/
 out/
 
+# Local run logs written by scripts/dev.sh
+.dev-runs/
+
 # Environment
 .env
 .env.local
