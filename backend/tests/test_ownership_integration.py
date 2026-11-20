@@ -19,16 +19,7 @@ from decimal import Decimal
 
 from sqlalchemy.engine import make_url
 
-
-def _safe_dsn(url_str: str) -> str:
-    """Return a loggable DSN with password redacted."""
-    try:
-        u = make_url(url_str)
-        if u.password:
-            return str(u.set(password="***"))
-    except Exception:
-        pass
-    return "<unparseable DSN>"
+from tests.lanes import mask_dsn
 
 
 def _require_pg_target(url_str: str):
@@ -50,7 +41,7 @@ def _require_pg_target(url_str: str):
                 f"{make_url(url_str).drivername!r}"
             )
     except Exception:
-        return f"PG integration lane not selected: ALETHRA_TEST_DB is unparseable: {_safe_dsn(url_str)}"
+        return f"PG integration lane not selected: ALETHRA_TEST_DB is unparseable: {mask_dsn(url_str)}"
     return None
 
 
@@ -66,21 +57,21 @@ if _skip_reason is None:
     if _host and _host not in ("localhost", "127.0.0.1", "::1", "/tmp"):
         raise RuntimeError(
             f"SAFETY: Integration tests require localhost, got host={_host!r}. "
-            f"DSN: {_safe_dsn(_test_db_url)}"
+            f"DSN: {mask_dsn(_test_db_url)}"
         )
 
     # Database name must contain 'test'
     if "test" not in _db_name.lower():
         raise RuntimeError(
             f"SAFETY: Test DB name must contain 'test', got {_db_name!r}. "
-            f"DSN: {_safe_dsn(_test_db_url)}"
+            f"DSN: {mask_dsn(_test_db_url)}"
         )
 
     # Must not be production
     if _db_name in ("ai_investment_lab", "alethra_production", "alethra_prod"):
         raise RuntimeError(
             f"SAFETY: Refusing to use production database {_db_name!r}. "
-            f"DSN: {_safe_dsn(_test_db_url)}"
+            f"DSN: {mask_dsn(_test_db_url)}"
         )
 
 pytestmark = pytest.mark.skipif(

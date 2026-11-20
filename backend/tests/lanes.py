@@ -7,6 +7,10 @@ the pass count.
 
 This does not soften the safety rule: a PG-lane node never falls back to SQLite.
 It skips.
+
+``mask_dsn`` lives here too because "how a DSN is reported" and "which lane a
+node runs on" are the same question told to different audiences, and the
+masking rule had already been hand-copied three times with three outcomes.
 """
 import os
 
@@ -14,6 +18,28 @@ import pytest
 from sqlalchemy.engine import make_url
 
 PG_REASON = "BLOCKED_ENV_NOT_AVAILABLE: no PostgreSQL test target configured"
+UNPARSEABLE = "<unparseable DSN>"
+
+
+def mask_dsn(url: str) -> str:
+    """Render a DSN so it can be printed or logged without carrying a password.
+
+    The whole message is the password-free rendering SQLAlchemy itself produces
+    for a URL, so the string an operator reads is the string the engine will
+    connect with, minus the credential. The previous copies diverged in ways
+    that mattered: one rebuilt a ``ParseResult`` with a field it did not have
+    and therefore returned the fallback for *every* input, another treated
+    "URL has no password" as "URL is unparseable", which is the most common
+    input and the one where the name of the database is the whole diagnostic.
+
+    The fallback is only for a string SQLAlchemy cannot parse at all. It is not
+    a redaction — a caller that prints it has lost the database identity, which
+    is why the gate nodes assert for ``***`` rather than accepting either.
+    """
+    try:
+        return make_url(url).render_as_string(hide_password=True)
+    except Exception:
+        return UNPARSEABLE
 
 
 def lane_db_url():

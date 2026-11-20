@@ -1,15 +1,7 @@
 import os
 from urllib.parse import urlparse
 
-def _safe_db_diagnostic(url: str) -> str:
-    """Extract password-free diagnostic info from database URL."""
-    try:
-        parsed = urlparse(url)
-        # Return scheme://user@host:port/database (no password)
-        password_masked = parsed._replace(password='***')
-        return password_masked.geturl()
-    except Exception:
-        return "<unparseable URL>"
+from tests.lanes import mask_dsn
 
 # === 一、對齊執行基線：unify env vars ===
 # ALETHRA_TEST_DB selects the lane this run executes against (SQLite or
@@ -38,8 +30,8 @@ _env_b = os.environ.get("ALETHRA_PG_TEST_URL")
 if _env_a and _env_b and _env_a != _env_b:
     raise RuntimeError(
         f"SAFETY: ALETHRA_TEST_DB and ALETHRA_PG_TEST_URL are both set but differ.\n"
-        f"  ALETHRA_TEST_DB    = {_safe_db_diagnostic(_env_a)}\n"
-        f"  ALETHRA_PG_TEST_URL = {_safe_db_diagnostic(_env_b)}\n"
+        f"  ALETHRA_TEST_DB    = {mask_dsn(_env_a)}\n"
+        f"  ALETHRA_PG_TEST_URL = {mask_dsn(_env_b)}\n"
         f"Unify to a single value before running tests."
     )
 if _env_a and not _env_b and _is_postgres_url(_env_a):
@@ -74,17 +66,6 @@ from app.models import *
 from app.main import app as _app
 
 
-def _safe_dsn(url_str: str) -> str:
-    """Return a loggable DSN with password redacted."""
-    try:
-        u = make_url(url_str)
-        if u.password:
-            return str(u.set(password="***"))
-    except Exception:
-        pass
-    return "<unparseable DSN>"
-
-
 def _validate_pg_test_target(url_str: str) -> None:
     """Fail closed: PostgreSQL test URLs must target a disposable database.
 
@@ -98,21 +79,21 @@ def _validate_pg_test_target(url_str: str) -> None:
     if host and host not in ("localhost", "127.0.0.1", "::1", "/tmp"):
         raise RuntimeError(
             f"SAFETY: PostgreSQL test DB must be on localhost, got host={host!r}. "
-            f"DSN: {_safe_dsn(url_str)}"
+            f"DSN: {mask_dsn(url_str)}"
         )
 
     db_name = u.database or ""
     if "test" not in db_name.lower():
         raise RuntimeError(
             f"SAFETY: PostgreSQL test DB name must contain 'test', got {db_name!r}. "
-            f"DSN: {_safe_dsn(url_str)}"
+            f"DSN: {mask_dsn(url_str)}"
         )
 
     _PRODUCTION_DB_NAMES = {"ai_investment_lab", "alethra_production", "alethra_prod"}
     if db_name in _PRODUCTION_DB_NAMES:
         raise RuntimeError(
             f"SAFETY: Refusing to use production database {db_name!r} for testing. "
-            f"DSN: {_safe_dsn(url_str)}"
+            f"DSN: {mask_dsn(url_str)}"
         )
 
 
@@ -134,7 +115,7 @@ if not _IS_SQLITE:
         raise RuntimeError(
             f"SAFETY: Test database safety gate rejected connection.\n"
             f"Error: {e}\n"
-            f"DSN: {_safe_dsn(_TEST_DB_PATH)}\n"
+            f"DSN: {mask_dsn(_TEST_DB_PATH)}\n"
             f"Ensure TEST_MODE=true and DATABASE_URL targets an allowed test database."
         ) from e
 

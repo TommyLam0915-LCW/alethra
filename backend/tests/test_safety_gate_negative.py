@@ -27,7 +27,7 @@ from test_safety_gate import (
     FORBIDDEN_DATABASES,
 )
 from tests.conftest import _is_postgres_url
-from tests.lanes import lane_db_url
+from tests.lanes import lane_db_url, mask_dsn
 
 BACKEND_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -117,9 +117,61 @@ except RuntimeError as e:
         assert fake_password not in combined_output, (
             f"FAKE PASSWORD LEAKED in output:\n{combined_output}"
         )
-        assert "***" in combined_output or "unparseable" in combined_output.lower(), (
-            "Password should be masked with *** or marked as unparseable"
+        assert "***" in combined_output, (
+            "The conflict message must show a masked credential. Passing on the "
+            f"fallback string would hide the defect this node names: output:\n{combined_output}"
         )
+        assert "unparseable" not in combined_output.lower(), (
+            "A parseable DSN must be reported as itself minus the password, not "
+            f"as the unparseable fallback: {combined_output}"
+        )
+        assert "postgresql://user:***@localhost:5432/test_db" in combined_output, (
+            "The masked DSN must still identify which variable pointed at which "
+            f"database: {combined_output}"
+        )
+
+    def test_mask_dsn_keeps_identity_and_drops_credential(self):
+        """The one masking rule, measured on the shapes the harness actually uses.
+
+        Before this unit each of these inputs returned the fallback from at
+        least one of the two copies of the rule, so the operator's conflict
+        message named no database at all.
+        """
+        assert mask_dsn("postgresql://user:pw123@localhost:5432/test_db") == (
+            "postgresql://user:***@localhost:5432/test_db"
+        )
+        assert mask_dsn("postgresql://alethra:pw@localhost:5432/db?host=%2Ftmp") == (
+            "postgresql://alethra:***@localhost:5432/db?host=%2Ftmp"
+        )
+        assert mask_dsn("postgresql://user@localhost:5432/other_db") == (
+            "postgresql://user@localhost:5432/other_db"
+        )
+        assert mask_dsn("sqlite:///./test.db") == "sqlite:///./test.db"
+        assert mask_dsn("sqlite:////tmp/x.db") == "sqlite:////tmp/x.db"
+
+    def test_mask_dsn_fallback_is_for_unparseable_only(self):
+        """The fallback is reserved for a string that is not a DSN at all.
+
+        It must not be the answer for a passwordless DSN, and it must not leak
+        either: an empty string and a non-string are the two shapes that reach
+        it, and neither can carry a credential.
+        """
+        from tests.lanes import UNPARSEABLE
+
+        assert mask_dsn("") == UNPARSEABLE
+        assert mask_dsn(None) == UNPARSEABLE
+        assert mask_dsn("not a url at all") == UNPARSEABLE
+
+    def test_mask_dsn_never_returns_a_password(self):
+        """Negative control: no credential shape survives masking."""
+        for url, secret in (
+            ("postgresql://user:SuperSecret123!@localhost:5432/test_db", "SuperSecret123!"),
+            ("postgresql+psycopg2://u:p%40ss@127.0.0.1:5433/db", "p%40ss"),
+            ("mysql://root:hunter2@localhost/x", "hunter2"),
+        ):
+            masked = mask_dsn(url)
+            assert secret not in masked, f"{secret!r} survived masking as {masked!r}"
+            assert "***" in masked, f"{url!r} masked to {masked!r} with no marker"
 
 
 class TestEnvVarConflict:
