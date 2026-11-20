@@ -10,11 +10,20 @@ Single self-contained test that:
 7. Entire test passes (no failed test left in suite)
 
 This proves cleanup relies on explicit DELETE, not outer transaction rollback.
+
+PostgreSQL-only: both nodes write _test_sacrificial_, which exists only via
+migration 008 and therefore only on a migrated PostgreSQL database. On the
+SQLite lane they die on "no such table" before reaching the mechanism under
+test, so they report a named environment skip instead.
 """
 import pytest
 from sqlalchemy import create_engine, text
 from uuid import uuid4
 import os
+
+from tests import lanes
+
+pytestmark = lanes.pg_only
 
 
 def test_explicit_cleanup_after_commit_and_failure():

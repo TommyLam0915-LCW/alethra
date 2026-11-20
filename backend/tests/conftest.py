@@ -12,8 +12,27 @@ def _safe_db_diagnostic(url: str) -> str:
         return "<unparseable URL>"
 
 # === 一、對齊執行基線：unify env vars ===
-# ALETHRA_TEST_DB and ALETHRA_PG_TEST_URL are aliases for the same PG test URL.
-# If both are set and differ, refuse to proceed before any connection.
+# ALETHRA_TEST_DB selects the lane this run executes against (SQLite or
+# PostgreSQL). ALETHRA_PG_TEST_URL names the PostgreSQL target that PG-only
+# nodes may connect to. They are interchangeable ONLY for PostgreSQL values.
+#
+# Mirroring unconditionally was a defect: launching the SQLite lane with
+# ALETHRA_TEST_DB=sqlite:////tmp/x.db populated ALETHRA_PG_TEST_URL with that
+# SQLite URL, so every gate keyed on "is the PG variable set" opened, PG-only
+# nodes ran, and died in PostgreSQL-only SQL (current_database(), the
+# _test_sacrificial_ table that exists only in PG migration 008) or, worse,
+# rewrote the URL into an invalid DSN and created a stray backend/postgres file.
+def _is_postgres_url(url: str) -> bool:
+    """Scheme-only test for a PostgreSQL URL: no engine, no connection."""
+    if not url:
+        return False
+    try:
+        scheme = urlparse(url).scheme
+    except Exception:
+        return False
+    return scheme == "postgresql" or scheme.startswith("postgresql+")
+
+
 _env_a = os.environ.get("ALETHRA_TEST_DB")
 _env_b = os.environ.get("ALETHRA_PG_TEST_URL")
 if _env_a and _env_b and _env_a != _env_b:
@@ -23,9 +42,9 @@ if _env_a and _env_b and _env_a != _env_b:
         f"  ALETHRA_PG_TEST_URL = {_safe_db_diagnostic(_env_b)}\n"
         f"Unify to a single value before running tests."
     )
-if _env_a and not _env_b:
+if _env_a and not _env_b and _is_postgres_url(_env_a):
     os.environ["ALETHRA_PG_TEST_URL"] = _env_a
-elif _env_b and not _env_a:
+elif _env_b and not _env_a and _is_postgres_url(_env_b):
     os.environ["ALETHRA_TEST_DB"] = _env_b
 
 _TEST_DB_PATH = os.environ.get("ALETHRA_TEST_DB", "sqlite:///./test.db")

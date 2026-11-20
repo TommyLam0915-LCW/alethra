@@ -7,10 +7,20 @@ For PostgreSQL with limited-permission runtime role, we cannot drop/recreate tab
 between tests (no DDL permission). Instead, we rely on transaction rollback.
 
 This test suite proves the isolation mechanism works correctly.
+
+PostgreSQL-only: _test_sacrificial_ is created by migration 008 and has no ORM
+model, so it does not exist in the SQLite lane's create_all schema. Running these
+nodes there proves nothing about isolation — they would die on "no such table",
+and creating the table by hand would let step 2 pass because conftest drops the
+SQLite schema between tests rather than because the PG rollback worked. They are
+reported as a named environment skip instead.
 """
 import pytest
 from sqlalchemy import text
 import app.database
+from tests import lanes
+
+pytestmark = lanes.pg_only
 
 
 # Shared state to track data across tests

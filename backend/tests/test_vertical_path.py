@@ -11,9 +11,17 @@ import os
 import pytest
 from sqlalchemy import text
 
+from tests import lanes
 
+
+@lanes.pg_only
 def test_safety_gate_enforced(test_db_session):
-    """Prove safety gate was called and passed."""
+    """Prove safety gate was called and passed.
+
+    PostgreSQL-only: the assertions read current_database()/current_user and
+    expect DDL to be refused by the limited runtime role. SQLite has neither
+    function, so the node errors on the SQLite lane and proves nothing.
+    """
     # If we reach here, safety gate passed during conftest initialization
     # Verify we're using the test database
     result = test_db_session.execute(text("SELECT current_database(), current_user"))

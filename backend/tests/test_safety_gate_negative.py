@@ -25,6 +25,7 @@ from test_safety_gate import (
     ALLOWED_TEST_DATABASES,
     FORBIDDEN_DATABASES,
 )
+from tests.conftest import _is_postgres_url
 
 
 class TestCredentialLeakage:
@@ -118,10 +119,15 @@ print("MATCHING_OK")
         assert "MATCHING_OK" in result.stdout, "Should verify aliasing succeeded"
 
     def test_conftest_aliases_single_env_var(self):
-        """If only one env var set, the other should be aliased."""
+        """Only a PostgreSQL ALETHRA_TEST_DB is mirrored into ALETHRA_PG_TEST_URL.
+
+        The pre-fix rule mirrored any value, so a SQLite lane ended up with a
+        SQLite URL in the PG variable and PG-only gates opened on it. Now the
+        expectation follows the lane that was actually requested.
+        """
         # Use the actual test DB URL from environment
         test_db_url = os.environ.get("ALETHRA_TEST_DB", "postgresql://alethra_test_runtime@localhost:5432/ai_investment_lab_test?host=/tmp")
-        
+
         # Use subprocess to verify actual aliasing behavior
         result = subprocess.run(
             [sys.executable, "-c", f"""
@@ -132,19 +138,66 @@ os.environ['TEST_MODE'] = 'true'
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath('__file__'))))
 import tests.conftest
-# Verify ALETHRA_PG_TEST_URL was aliased from ALETHRA_TEST_DB
-aliased = os.environ.get('ALETHRA_PG_TEST_URL')
-assert aliased == '{test_db_url}', f"Expected alias to be set, got {{aliased}}"
-print("ALIAS_OK")
+# Only PostgreSQL values are mirrored; a SQLite lane must leave the PG
+# variable unset so PG-only gates stay closed.
+print("ALIAS=" + (os.environ.get('ALETHRA_PG_TEST_URL') or "NONE"))
 """],
             capture_output=True,
             text=True,
             cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             env={**os.environ, "TEST_MODE": "true"}
         )
-        
-        assert result.returncode == 0, f"Should alias single env var. stderr: {result.stderr}"
-        assert "ALIAS_OK" in result.stdout, "Should verify aliasing succeeded"
+
+        assert result.returncode == 0, f"Should accept single env var. stderr: {result.stderr}"
+        expected = test_db_url if _is_postgres_url(test_db_url) else "NONE"
+        assert f"ALIAS={expected}" in result.stdout, (
+            f"Expected ALETHRA_PG_TEST_URL to be {expected!r} for lane "
+            f"{test_db_url!r}. stdout: {result.stdout} stderr: {result.stderr}"
+        )
+
+    def test_sqlite_lane_leaves_pg_gates_closed(self):
+        """A SQLite ALETHRA_TEST_DB must not unlock the PostgreSQL lane.
+
+        Positive control for the alias defect: in a child process launched the
+        way the SQLite suite is launched, conftest must (a) not populate
+        ALETHRA_PG_TEST_URL and (b) report has_pg_target() False, which is what
+        makes the PG-only nodes skip instead of dying in PG-only SQL.
+        """
+        sqlite_url = "sqlite:////tmp/alias-gate-control.db"
+        result = subprocess.run(
+            [sys.executable, "-c", f"""
+import os
+os.environ['ALETHRA_TEST_DB'] = '{sqlite_url}'
+os.environ.pop('ALETHRA_PG_TEST_URL', None)
+os.environ['TEST_MODE'] = 'true'
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath('__file__'))))
+import tests.conftest
+from tests.lanes import has_pg_target
+assert os.environ.get('ALETHRA_PG_TEST_URL') is None, os.environ.get('ALETHRA_PG_TEST_URL')
+assert has_pg_target() is False
+assert os.environ['DATABASE_URL'] == '{sqlite_url}'
+print("SQLITE_LANE_PG_GATES_CLOSED")
+"""],
+            capture_output=True,
+            text=True,
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            env={**os.environ, "TEST_MODE": "true"}
+        )
+
+        assert result.returncode == 0, (
+            f"SQLite lane must not open PG gates. stderr: {result.stderr}"
+        )
+        assert "SQLITE_LANE_PG_GATES_CLOSED" in result.stdout
+
+    def test_postgres_url_detection_classifies_both_lanes(self):
+        """The alias decision is scheme-based, so neither lane is misread."""
+        assert _is_postgres_url("postgresql://u@localhost:5432/db_test")
+        assert _is_postgres_url("postgresql+psycopg2://u@localhost:5432/db_test")
+        assert not _is_postgres_url("sqlite:////tmp/x.db")
+        assert not _is_postgres_url("sqlite+pysqlite:///./test.db")
+        assert not _is_postgres_url("")
+        assert not _is_postgres_url("not a url at all")
 
 
 class TestSafetyGateRejection:
