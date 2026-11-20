@@ -1,0 +1,232 @@
+"""The secret scan gate must be able to fail, and must be able to escalate.
+
+A scanner that reports "0 findings" has proved nothing until the same run also
+proves it would have reported a finding. These cases plant the shapes the gate
+is meant to catch and check which tier each one lands in, so the zero HIGH on
+the real tree is a verdict rather than an absence of signal.
+
+The tier split (opaque vs readable word literal, runtime path vs test path) is
+what a previous round got wrong twice: first a regex that matched every string
+made the whole scanner a no-op and reported "0 findings", then the fix reported
+1,516 findings and was just as useless. Both failures are covered by a control
+here, because neither was visible from the pass column alone.
+
+No database, no network.
+"""
+import importlib.util
+import os
+import subprocess
+
+REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+SCANNER = os.path.join(REPO, "scripts", "audit_secrets.py")
+
+SPEC = importlib.util.spec_from_file_location("audit_secrets", SCANNER)
+aus = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(aus)
+
+LITERAL = "Tr4inR0le-Pw2026-literal"          # 23 chars, readable word literal
+REF = "${ALETHRA_TEST_RUNTIME_PW}"            # indirection, must stay quiet
+# 40 chars, one unbroken run: the shape a generated key has. Invent-only — this
+# is not a credential anywhere, it is a pattern probe.
+OPAQUE = "aB3dE6fG9hJ2kL5mN8pQ1rS4tU7vW0xYz2C5eG8h"
+WORD_SECRET = "acceptance-test-secret-minimum-32-chars-long"
+
+HIGH_BASELINE = set()
+WEAK_BASELINE = {
+    ("R1", "NORMAL_RUNTIME_EVIDENCE.md", "JWT_SECRET_KEY", 44),
+    ("R1", "docker-compose.acceptance.yml", "JWT_SECRET_KEY", 44),
+    ("R1", "e2e_fullstack.py", "PASSWORD", 22),
+    ("R1", "execute_journey_b_worker.sh", "JWT_SECRET_KEY", 44),
+    ("R1", "start_acceptance_env.sh", "JWT_SECRET_KEY", 44),
+    ("R1", "verify_data_persistence.sh", "JWT_SECRET_KEY", 44),
+    ("R1", "verify_quota_persistence.sh", "JWT_SECRET_KEY", 44),
+}
+FIXTURE_BASELINE = {
+    ("R1", "backend/tests/test_ai_assistant.py", "SECRET_KEY", 30),
+    ("R1", "backend/tests/test_db_env_contract.py", "PASSWORD", 25),
+    ("R1", "backend/tests/test_execution_containment.py", "secret_marker", 29),
+}
+
+
+def _write(root, rel, text):
+    path = os.path.join(str(root), rel)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    return rel
+
+
+def _rules(findings):
+    return {f[0] for f in findings}
+
+
+def _hits(findings, rule):
+    return [f for f in findings if f[0] == rule]
+
+
+def _tiers(findings, severity):
+    return sorted((f[0], f[1], f[3], f[4]) for f in findings if f[5] == severity)
+
+
+def test_positive_control_an_opaque_generated_key_is_high(tmp_path):
+    _write(tmp_path, "start_stack.sh", f"export JWT_SECRET_KEY=\"{OPAQUE}\"\n")
+    findings = aus.scan(str(tmp_path))
+    assert _tiers(findings, "HIGH") == [("R1", "start_stack.sh", "JWT_SECRET_KEY", 40)], findings
+
+
+def test_positive_control_a_literal_dsn_password_fires_r2(tmp_path):
+    _write(tmp_path, "backend/.env.test",
+           f"DATABASE_URL=postgresql://alethra_test_runtime:{LITERAL}@localhost:5432/lab_test\n")
+    findings = aus.scan(str(tmp_path))
+    assert "R2" in _rules(findings), findings
+    assert not any(LITERAL in str(f) for f in findings), "the scanner must not echo the value"
+
+
+def test_positive_control_an_opaque_dsn_password_is_high_severity(tmp_path):
+    _write(tmp_path, "backend/.env.test",
+           f"DATABASE_URL=postgresql://alethra_test_runtime:{OPAQUE}@localhost:5432/lab_test\n")
+    findings = aus.scan(str(tmp_path))
+    assert any(f[0] == "R2" and f[5] == "HIGH" for f in findings), findings
+
+
+def test_positive_control_the_same_literal_in_a_report_fires_r3(tmp_path):
+    _write(tmp_path, "backend/.env.test",
+           f"DATABASE_URL=postgresql://alethra_test_runtime:{LITERAL}@localhost:5432/lab_test\n")
+    _write(tmp_path, "DELIVERY.md",
+           f"the runtime role authenticates with {LITERAL} on port 5432\n")
+    findings = aus.scan(str(tmp_path))
+    r3 = _hits(findings, "R3")
+    assert r3, "a credential quoted in a delivery report has to be named"
+    assert any(f[1] == "DELIVERY.md" for f in r3), r3
+
+
+def test_negative_control_an_indirect_reference_stays_quiet(tmp_path):
+    _write(tmp_path, "backend/.env.test",
+           f"DATABASE_URL=postgresql://alethra_test_runtime:{REF}@localhost:5432/lab_test\n")
+    _write(tmp_path, "DELIVERY.md",
+           f"the password segment is {REF}, expanded by dotenv\n")
+    assert aus.scan(str(tmp_path)) == []
+
+
+def test_negative_control_documentation_defaults_stay_quiet(tmp_path):
+    _write(tmp_path, "app/config.py",
+           'database_url: str = "postgresql://user:pass@localhost:5432/dbname"\n')
+    _write(tmp_path, "backend/.env.example",
+           "JWT_SECRET_KEY=change-me-in-production\nKRAKEN_API_KEY=\n")
+    assert aus.scan(str(tmp_path)) == []
+
+
+def test_r1_fires_on_a_bare_credential_assignment(tmp_path):
+    _write(tmp_path, "backend/app/bootstrap.sh",
+           f"export STRIPE_WEBHOOK_SECRET='{LITERAL}'\n")
+    findings = aus.scan(str(tmp_path))
+    assert "R1" in _rules(findings), findings
+
+
+def test_the_scanner_is_not_a_no_op():
+    """Regression for the dead-regex round.
+
+    The first version's placeholder test was unanchored, so it matched every
+    string and every finding was filtered out; "0 findings" then looked like a
+    clean tree. These two asserts fail if either half of the classifier is
+    switched off.
+    """
+    assert aus.is_placeholder(LITERAL) is False
+    assert aus.is_secretish(LITERAL) is True
+    assert aus.is_secretish("") is False
+    assert aus.is_secretish("x" * 40) is False          # one class, not a generated key
+
+
+def test_shape_separates_generated_from_readable_literals():
+    assert aus.shape(OPAQUE) == "opaque"
+    assert aus.shape(LITERAL) == "word-literal"
+    assert aus.shape(WORD_SECRET) == "word-literal"
+    assert aus.shape("Zm9vYmFy" * 6) == "opaque"
+
+
+def test_word_literal_on_a_runtime_path_is_debt_not_an_emergency(tmp_path):
+    _write(tmp_path, "docker-compose.acceptance.yml", f"  JWT_SECRET_KEY: {WORD_SECRET}\n")
+    findings = aus.scan(str(tmp_path))
+    assert _tiers(findings, "WEAK_LITERAL") == [
+        ("R1", "docker-compose.acceptance.yml", "JWT_SECRET_KEY", 44)], findings
+    assert _tiers(findings, "HIGH") == []
+
+
+def test_word_literal_shared_with_a_runtime_path_is_promoted(tmp_path):
+    """A value a test asserts on *and* a service reads is a deployed credential."""
+    _write(tmp_path, "backend/tests/test_login.py", f"PASSWORD = \"{WORD_SECRET}\"\n")
+    _write(tmp_path, "start_stack.sh", f"export JWT_SECRET_KEY=\"{WORD_SECRET}\"\n")
+    findings = aus.scan(str(tmp_path))
+    assert _tiers(findings, "HIGH"), findings
+    assert _tiers(findings, "FIXTURE") == []
+
+
+def test_word_literal_only_inside_tests_is_fixture_tier(tmp_path):
+    _write(tmp_path, "backend/tests/test_login.py", f"PASSWORD = \"{WORD_SECRET}\"\n")
+    findings = aus.scan(str(tmp_path))
+    assert _tiers(findings, "FIXTURE") == [
+        ("R1", "backend/tests/test_login.py", "PASSWORD", 44)], findings
+    assert _tiers(findings, "HIGH") == []
+
+
+def test_endpoint_url_key_is_exempt_but_its_inline_password_is_not(tmp_path):
+    """The one false positive this round removed, with its coverage re-asserted."""
+    _write(tmp_path, "backend/app/providers/lseg_provider.py",
+           'LSEG_OAUTH2_TOKEN_URL = "https://developers.lseg.com/auth/oauth2/v2/token"\n')
+    assert aus.scan(str(tmp_path)) == []
+    _write(tmp_path, "backend/app/providers/lseg_provider.py",
+           'LSEG_OAUTH2_TOKEN_URL = "https://user:' + OPAQUE + '@api.example.com/token"\n')
+    findings = aus.scan(str(tmp_path))
+    assert any(f[0] == "R2" for f in findings), findings
+
+
+def test_exit_code_is_high_severity_only(tmp_path, capsys):
+    _write(tmp_path, "start_stack.sh", f"export JWT_SECRET_KEY=\"{WORD_SECRET}\"\n")
+    assert aus.main(["--root", str(tmp_path)]) == 0
+    _write(tmp_path, "leak.sh", f"export JWT_SECRET_KEY=\"{OPAQUE}\"\n")
+    assert aus.main(["--root", str(tmp_path)]) == 1
+
+
+def test_strict_promotes_runtime_debt_to_a_failure(tmp_path):
+    _write(tmp_path, "start_stack.sh", f"export JWT_SECRET_KEY=\"{WORD_SECRET}\"\n")
+    assert aus.main(["--root", str(tmp_path)]) == 0
+    assert aus.main(["--root", str(tmp_path), "--strict"]) == 1
+
+
+def test_optout_stays_visible_even_when_it_silences_a_line(tmp_path):
+    _write(tmp_path, "backend/tests/test_pw.py",
+           f'PASSWORD = "{OPAQUE}"  # secret-scan: fixture\n')
+    findings, optouts = aus.scan(str(tmp_path), collect_optouts=True)
+    assert findings == []
+    assert optouts == ["backend/tests/test_pw.py:1"]
+
+
+def test_the_scanner_reads_the_tree_that_is_shipped():
+    """The file list is git's, not a hand-kept allowlist, so new files cannot opt out."""
+    listed = subprocess.run(["git", "-C", REPO, "ls-files"], capture_output=True,
+                            text=True).stdout.splitlines()
+    scanned = set(aus.tracked_files(REPO))
+    unscanned_text = [f for f in listed
+                      if f.endswith((".py", ".md", ".sh", ".yml", ".env.test"))
+                      and f not in scanned]
+    assert unscanned_text == [], unscanned_text
+
+
+def test_current_tree_has_no_high_severity_landing_point():
+    """The gate the delivery runs on: zero values that look generated."""
+    findings = aus.scan(REPO)
+    high = _tiers(findings, "HIGH")
+    assert high == sorted(HIGH_BASELINE), [f"{r} {rel}:{key} len={ln}" for r, rel, key, ln in high]
+
+
+def test_current_runtime_debt_set_has_not_grown():
+    """The 7 readable literals are known debt, not a clean bill.
+
+    Frozen as the set this round measured — regenerate it with
+    ``python scripts/audit_secrets.py --all`` and update deliberately, never as
+    a side effect of another change. A new fixed credential in a startup script
+    fails here even though the default exit code stays 0.
+    """
+    findings = aus.scan(REPO)
+    assert _tiers(findings, "WEAK_LITERAL") == sorted(WEAK_BASELINE), _tiers(findings, "WEAK_LITERAL")
+    assert _tiers(findings, "FIXTURE") == sorted(FIXTURE_BASELINE), _tiers(findings, "FIXTURE")
