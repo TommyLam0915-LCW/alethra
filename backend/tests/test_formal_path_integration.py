@@ -16,14 +16,16 @@ from decimal import Decimal
 from sqlalchemy import text
 
 from app.database import SessionLocal
-from app.models.strategy_study import StrategyStudyRun, StrategyStudyTrade
 from app.models.user import User
 from app.services.paper_trading import PaperTradingEngine
 
 
 INSTRUMENT = "XBT/USD"
 INTERVAL = 1  # 1-minute bars
-ANCHOR = datetime(2026, 1, 1, 10, 0, 0, tzinfo=timezone.utc)
+# The replay window is relative (days_back=30 counted from the service call), so
+# the fixture's trades must be relative too; a frozen calendar anchor silently
+# aged out of the window and made the seed invisible.
+ANCHOR = datetime.now(timezone.utc) - timedelta(days=5)
 
 
 @pytest.fixture
@@ -31,9 +33,13 @@ def formal_path_setup():
     """Create complete formal path test data: user, study run, trades, portfolio."""
     db = SessionLocal()
     user_id = uuid.uuid4()
-    study_run_id = uuid.uuid4()
-    portfolio_id = uuid.uuid4()
-    run_id = uuid.uuid4()
+    # Ids that the service reads through raw text() binds are seeded in the same
+    # textual form the API hands over (str(UUID) with dashes); SQLAlchemy's UUID
+    # column type writes dashless hex on SQLite, so an ORM-seeded row and a
+    # dashed bind never match there.
+    study_run_id = str(uuid.uuid4())
+    portfolio_id = str(uuid.uuid4())
+    run_id = str(uuid.uuid4())
     
     try:
         # Create user
@@ -49,101 +55,90 @@ def formal_path_setup():
         db.flush()
 
         # Create strategy study run
-        study_run = StrategyStudyRun(
-            id=study_run_id,
-            user_id=user_id,
-            lane="formal_path_test",
-            research_version="test-v1",
-            instrument_id=INSTRUMENT,
-            interval_minutes=INTERVAL,
-            provider_id="kraken",
-            data_nature="live",
-            bar_count=100,
-            first_open_time=ANCHOR,
-            last_open_time=ANCHOR + timedelta(minutes=100),
-            fetched_at=ANCHOR,
-            dataset_integrity_ok=True,
-            trade_count=2,  # We'll create 2 trades
-            settings_json={"test": True},
-            walk_forward_json={"folds": [1, 2, 3]},
-            bars_json=[],  # Empty bars for test
+        db.execute(
+            text("""
+            INSERT INTO strategy_study_runs (
+                id, user_id, lane, research_version, instrument_id, interval_minutes,
+                provider_id, data_nature, bar_count, first_open_time, last_open_time,
+                fetched_at, settings_json, walk_forward_json, bars_json, trade_count,
+                created_at
+            ) VALUES (
+                :id, :user_id, 'formal_path_test', 'test-v1', :instrument, :interval,
+                'kraken', 'live', 100, :first, :last, :last,
+                '{}', '{"folds": [1, 2, 3]}', '[]', 2, CURRENT_TIMESTAMP
+            )
+        """),
+            {
+                "id": study_run_id,
+                "user_id": str(user_id),
+                "instrument": INSTRUMENT,
+                "interval": INTERVAL,
+                "first": ANCHOR,
+                "last": ANCHOR + timedelta(minutes=100),
+            },
         )
-        db.add(study_run)
-        db.flush()
 
-        # Create 2 synthetic trades with known PnL
-        # Trade 1: Long entry at $50,000, exit at $50,500 → $500 profit
-        trade1 = StrategyStudyTrade(
-            run_id=study_run_id,
-            trade_index=0,
-            fold=1,
-            rule_id="range_fade",
-            rule_label_zh="區間 fade",
-            exit_id="default",
-            exit_label_zh="預設",
-            direction="long",
-            exit_reason="signal_flip",
-            outcome="win",
-            signal_time=ANCHOR + timedelta(minutes=10),
-            entry_time=ANCHOR + timedelta(minutes=10),
-            exit_time=ANCHOR + timedelta(minutes=20),
-            entry_price=Decimal("50000"),
-            exit_price=Decimal("50500"),
-            quantity=Decimal("0.1"),
-            gross_pnl=Decimal("50"),
-            commission=Decimal("0"),
-            slippage_cost=Decimal("0"),
-            total_cost=Decimal("0"),
-            net_pnl=Decimal("50"),
-            cash_after=Decimal("100050"),
-            bars_held=10,
-            pnl_reason_zh="測試獲利",
-            pnl_reason_en="test profit",
+        # Create 2 synthetic trades with known prices
+        # Trade 1: Long entry at $50,000, exit at $50,500 → +1% price move
+        db.execute(
+            text("""
+            INSERT INTO strategy_study_trades (
+                id, run_id, trade_index, fold, rule_id, rule_label_zh, exit_id,
+                exit_label_zh, direction, exit_reason, outcome, signal_time,
+                entry_time, exit_time, entry_price, exit_price, quantity,
+                gross_pnl, commission, slippage_cost, total_cost, net_pnl,
+                cash_after, bars_held, pnl_reason_zh, pnl_reason_en, created_at
+            ) VALUES (
+                :id, :run_id, 0, 1, 'range_fade', '區間 fade', 'default', '預設',
+                'long', 'signal_flip', 'win', :entry_time, :entry_time, :exit_time,
+                50000, 50500, 0.1, 50, 0, 0, 0, 50, 100050, 10,
+                '測試獲利', 'test profit', CURRENT_TIMESTAMP
+            )
+        """),
+            {
+                "id": str(uuid.uuid4()),
+                "run_id": study_run_id,
+                "entry_time": ANCHOR + timedelta(minutes=10),
+                "exit_time": ANCHOR + timedelta(minutes=20),
+            },
         )
-        db.add(trade1)
 
-        # Trade 2: Long entry at $50,200, exit at $49,800 → -$40 loss
-        trade2 = StrategyStudyTrade(
-            run_id=study_run_id,
-            trade_index=1,
-            fold=1,
-            rule_id="range_fade",
-            rule_label_zh="區間 fade",
-            exit_id="default",
-            exit_label_zh="預設",
-            direction="long",
-            exit_reason="stop_loss",
-            outcome="loss",
-            signal_time=ANCHOR + timedelta(minutes=30),
-            entry_time=ANCHOR + timedelta(minutes=30),
-            exit_time=ANCHOR + timedelta(minutes=40),
-            entry_price=Decimal("50200"),
-            exit_price=Decimal("49800"),
-            quantity=Decimal("0.1"),
-            gross_pnl=Decimal("-40"),
-            commission=Decimal("0"),
-            slippage_cost=Decimal("0"),
-            total_cost=Decimal("0"),
-            net_pnl=Decimal("-40"),
-            cash_after=Decimal("100010"),
-            bars_held=10,
-            pnl_reason_zh="測試虧損",
-            pnl_reason_en="test loss",
+        # Trade 2: Long entry at $50,200, exit at $49,800 → -0.8% price move
+        db.execute(
+            text("""
+            INSERT INTO strategy_study_trades (
+                id, run_id, trade_index, fold, rule_id, rule_label_zh, exit_id,
+                exit_label_zh, direction, exit_reason, outcome, signal_time,
+                entry_time, exit_time, entry_price, exit_price, quantity,
+                gross_pnl, commission, slippage_cost, total_cost, net_pnl,
+                cash_after, bars_held, pnl_reason_zh, pnl_reason_en, created_at
+            ) VALUES (
+                :id, :run_id, 1, 1, 'range_fade', '區間 fade', 'default', '預設',
+                'long', 'stop_loss', 'loss', :entry_time, :entry_time, :exit_time,
+                50200, 49800, 0.1, -40, 0, 0, 0, -40, 100010, 10,
+                '測試虧損', 'test loss', CURRENT_TIMESTAMP
+            )
+        """),
+            {
+                "id": str(uuid.uuid4()),
+                "run_id": study_run_id,
+                "entry_time": ANCHOR + timedelta(minutes=30),
+                "exit_time": ANCHOR + timedelta(minutes=40),
+            },
         )
-        db.add(trade2)
 
         # Create paper portfolio
         db.execute(
             text("""
             INSERT INTO paper_portfolios (
                 id, owner_id, currency, initial_virtual_cash, current_virtual_cash,
-                status, created_at, updated_at
+                status, created_at
             ) VALUES (
                 :id, :owner_id, 'USD', 100000.0, 100000.0, 'active',
-                CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                CURRENT_TIMESTAMP
             )
         """),
-            {"id": portfolio_id, "owner_id": user_id},
+            {"id": portfolio_id, "owner_id": str(user_id)},
         )
 
         # Create paper trading run
@@ -170,7 +165,7 @@ def formal_path_setup():
         db.commit()
 
         yield {
-            "user_id": user_id,
+            "user_id": str(user_id),
             "study_run_id": study_run_id,
             "portfolio_id": portfolio_id,
             "run_id": run_id,
@@ -187,7 +182,7 @@ def formal_path_setup():
         db.execute(text("DELETE FROM decision_records WHERE paper_portfolio_id = :pid"), {"pid": portfolio_id})
         db.execute(text("DELETE FROM strategy_study_trades WHERE run_id = :sid"), {"sid": study_run_id})
         db.execute(text("DELETE FROM strategy_study_runs WHERE id = :sid"), {"sid": study_run_id})
-        db.execute(text("DELETE FROM users WHERE id = :uid"), {"uid": user_id})
+        db.execute(text("DELETE FROM users WHERE id = :uid"), {"uid": user_id.hex})
         db.commit()
         db.close()
 
@@ -201,8 +196,8 @@ class TestFormalPathIntegration:
         engine = PaperTradingEngine(database_url=None)
 
         result = engine.execute_historical_replay(
-            run_id=str(setup["run_id"]),
-            user_id=str(setup["user_id"]),
+            run_id=setup["run_id"],
+            user_id=setup["user_id"],
             days_back=30,
             position_size_pct=0.10,
             max_positions=3,
@@ -235,8 +230,8 @@ class TestFormalPathIntegration:
         engine = PaperTradingEngine(database_url=None)
 
         result = engine.execute_historical_replay(
-            run_id=str(setup["run_id"]),
-            user_id=str(setup["user_id"]),
+            run_id=setup["run_id"],
+            user_id=setup["user_id"],
             days_back=30,
         )
 
@@ -269,8 +264,8 @@ class TestFormalPathIntegration:
         engine = PaperTradingEngine(database_url=None)
 
         result = engine.execute_historical_replay(
-            run_id=str(setup["run_id"]),
-            user_id=str(setup["user_id"]),
+            run_id=setup["run_id"],
+            user_id=setup["user_id"],
             days_back=30,
         )
 
@@ -299,8 +294,8 @@ class TestFormalPathIntegration:
         engine = PaperTradingEngine(database_url=None)
 
         result = engine.execute_historical_replay(
-            run_id=str(setup["run_id"]),
-            user_id=str(setup["user_id"]),
+            run_id=setup["run_id"],
+            user_id=setup["user_id"],
             days_back=30,
         )
 
@@ -315,11 +310,36 @@ class TestFormalPathIntegration:
             final_capital = Decimal(str(portfolio._mapping["current_virtual_cash"]))
             initial_capital = setup["initial_capital"]
 
-            # Expected: 100000 + 50 (trade1 profit) - 40 (trade2 loss) = 100010
-            expected_final = initial_capital + Decimal("50") - Decimal("40")
+            fills = db.execute(
+                text("""
+                SELECT f.net_cash_change FROM paper_fills f
+                JOIN paper_orders o ON f.paper_order_id = o.id
+                WHERE o.portfolio_id = :pid
+            """),
+                {"pid": setup["portfolio_id"]},
+            ).fetchall()
+            assert len(fills) == 4, f"Expected 2 entry + 2 exit fills, got {len(fills)}"
+
+            # The replay sizes each leg from equity × position_size_pct and charges
+            # its own commission and slippage, so the source trade's P&L columns are
+            # inputs, not the expected ledger result. Closure is checked against the
+            # fill postings themselves: entry rows are negative, exit rows positive.
+            net_flows = sum(Decimal(str(f._mapping["net_cash_change"])) for f in fills)
+            expected_final = initial_capital + net_flows
 
             assert abs(final_capital - expected_final) < Decimal("0.01"), (
                 f"Cash flow mismatch: expected {expected_final}, got {final_capital}"
+            )
+            # Anchored outside the ledger: each leg risks 10% of the equity then
+            # open, at the seeded prices, less 0.1% commission and 0.05% slippage
+            # on both sides — 100000 → 100069.85 → 99960.21171812749003984063745.
+            # Without this, a product change that drops or duplicates a cost still
+            # reconciles with itself.
+            assert abs(final_capital - Decimal("99960.21171812749003984063745")) < Decimal("0.01"), (
+                f"Final capital {final_capital} does not match the hand-computed round trip"
+            )
+            assert abs(Decimal(str(result["final_capital"])) - final_capital) < Decimal("0.01"), (
+                f"Returned capital {result['final_capital']} diverges from ledger {final_capital}"
             )
         finally:
             db.close()
@@ -330,8 +350,8 @@ class TestFormalPathIntegration:
         engine = PaperTradingEngine(database_url=None)
 
         result = engine.execute_historical_replay(
-            run_id=str(setup["run_id"]),
-            user_id=str(setup["user_id"]),
+            run_id=setup["run_id"],
+            user_id=setup["user_id"],
             days_back=30,
         )
 
@@ -342,15 +362,39 @@ class TestFormalPathIntegration:
                 text("SELECT * FROM paper_trading_daily_metrics WHERE run_id = :rid"),
                 {"rid": setup["run_id"]},
             ).fetchall()
+            assert len(metrics) > 0, "Replay must write daily metrics"
 
             # Sum daily PnL
             total_daily_pnl = sum(Decimal(str(m._mapping["daily_pnl"])) for m in metrics)
 
-            # Expected total: 50 - 40 = 10
-            expected_total = Decimal("10")
+            # Three representations are written by separate statements: the daily
+            # summary, the fill postings, and each closed position's realized P&L.
+            fills = db.execute(
+                text("""
+                SELECT f.net_cash_change FROM paper_fills f
+                JOIN paper_orders o ON f.paper_order_id = o.id
+                WHERE o.portfolio_id = :pid
+            """),
+                {"pid": setup["portfolio_id"]},
+            ).fetchall()
+            net_flows = sum(Decimal(str(f._mapping["net_cash_change"])) for f in fills)
 
-            assert abs(total_daily_pnl - expected_total) < Decimal("0.01"), (
-                f"Daily PnL mismatch: expected {expected_total}, got {total_daily_pnl}"
+            positions = db.execute(
+                text("SELECT realized_pnl FROM paper_positions WHERE portfolio_id = :pid"),
+                {"pid": setup["portfolio_id"]},
+            ).fetchall()
+            realized_total = sum(
+                Decimal(str(p._mapping["realized_pnl"])) for p in positions
+            )
+
+            assert abs(total_daily_pnl - net_flows) < Decimal("0.01"), (
+                f"Daily PnL {total_daily_pnl} does not reconcile to fill flows {net_flows}"
+            )
+            assert abs(total_daily_pnl - realized_total) < Decimal("0.01"), (
+                f"Daily PnL {total_daily_pnl} does not reconcile to realized {realized_total}"
+            )
+            assert abs(Decimal(str(result["total_pnl"])) - total_daily_pnl) < Decimal("0.01"), (
+                f"Returned PnL {result['total_pnl']} diverges from daily summary {total_daily_pnl}"
             )
         finally:
             db.close()
