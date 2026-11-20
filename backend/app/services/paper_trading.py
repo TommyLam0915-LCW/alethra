@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, date, timezone
 from decimal import Decimal
 from typing import Optional, Callable
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import bindparam, column, create_engine, select, table, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import SessionLocal
@@ -43,6 +43,38 @@ def _require_long_only_side(direction, source_trade_id) -> str:
             f"with direction={direction!r}. Paper trading currently supports long positions only."
         )
     return direction.lower()
+
+
+def _as_utc(value):
+    """Normalise a timestamp read out of a raw text() SELECT.
+
+    psycopg2 hands back an aware datetime for a timestamptz column; the SQLite
+    driver hands back the stored ISO text with the offset dropped. Everything
+    downstream compares these against datetime.now(timezone.utc), so the SQLite
+    branch is read back as UTC rather than left naive.
+    """
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, str):
+        dt = datetime.fromisoformat(value)
+    else:
+        return value
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+
+
+def _as_date(value):
+    """Normalise a calendar date read out of a raw text() SELECT.
+
+    Same driver split as _as_utc: psycopg2 returns datetime.date for a DATE
+    column, SQLite returns the stored ISO text.
+    """
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, str):
+        # SQLite keeps whatever text the producer bound, so a DATE column can
+        # come back with a time suffix; datetime.fromisoformat accepts both.
+        return datetime.fromisoformat(value).date()
+    return value
 
 
 class PaperTradingEngine:
@@ -337,8 +369,8 @@ class PaperTradingEngine:
                 # trade tuple: (source_trade_id, entry_time, exit_time, entry_price, exit_price,
                 #               net_pnl, direction, quantity, exit_reason, source_run_id,
                 #               source_rule_id, source_exit_id, source_data_version)
-                entry_time = trade.entry_time
-                exit_time = trade.exit_time
+                entry_time = _as_utc(trade.entry_time)
+                exit_time = _as_utc(trade.exit_time)
                 events.append((entry_time, ENTRY, idx))
                 events.append((exit_time, EXIT, idx))
 
@@ -392,6 +424,8 @@ class PaperTradingEngine:
                 (source_trade_id, entry_time, exit_time, entry_price, exit_price,
                  orig_net_pnl, direction, quantity, exit_reason, source_run_id,
                  source_rule_id, source_exit_id, source_data_version) = trade
+                entry_time = _as_utc(entry_time)
+                exit_time = _as_utc(exit_time)
 
                 # Convert prices and quantity to Decimal for precision
                 entry_price_dec = Decimal(str(entry_price))
@@ -836,7 +870,9 @@ class PaperTradingEngine:
             for idx, pos in list(active_positions.items()):
                 logger.warning(f"Position {idx} still open at end of replay — forcing close")
                 trade = trades[idx]
-                exit_time = trade[1]
+                # pos["exit_time"] is the trade's own exit timestamp; trade[1] is
+                # entry_time and would mis-stamp the forced-close cash flow.
+                exit_time = pos["exit_time"]
                 exit_price = Decimal(str(pos["exit_price"]))
                 trade_quantity = Decimal(str(pos["quantity"]))
                 entry_price = Decimal(str(pos["entry_price"]))
@@ -888,14 +924,16 @@ class PaperTradingEngine:
             logger.info(f"✓ Cash reconciliation passed: equity={total_equity}, diff={reconciliation_diff}")
 
             # Final commit protection: lock the run row to prevent cancel interference
-            # SELECT FOR UPDATE ensures no concurrent cancel can change status during commit
+            # with_for_update() renders "FOR UPDATE" on PostgreSQL and omits it on
+            # SQLite, which serialises writers at the database level instead.
+            runs = table(
+                "paper_trading_runs",
+                column("id"), column("status"), column("cancel_requested"),
+            )
             locked_run = db.execute(
-                text("""
-                SELECT id, status, cancel_requested
-                FROM paper_trading_runs
-                WHERE id = :id
-                FOR UPDATE
-            """),
+                select(runs.c.id, runs.c.status, runs.c.cancel_requested)
+                .where(runs.c.id == bindparam("id"))
+                .with_for_update(),
                 {"id": run_id},
             ).fetchone()
 
@@ -1583,8 +1621,8 @@ class PaperTradingEngine:
                 "total_pnl": measured(run.total_pnl),
                 "total_trades": run.total_trades,
                 "win_rate": measured(run.win_rate),
-                "start_date": run.start_date.isoformat() if run.start_date else None,
-                "end_date": run.end_date.isoformat() if run.end_date else None,
+                "start_date": _as_date(run.start_date).isoformat() if run.start_date else None,
+                "end_date": _as_date(run.end_date).isoformat() if run.end_date else None,
             }
 
         finally:

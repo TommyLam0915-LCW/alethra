@@ -5,7 +5,7 @@ which track individual replay/execution runs and their daily performance aggrega
 """
 import uuid
 from datetime import datetime, date
-from sqlalchemy import Column, String, Integer, DateTime, Date, Numeric, ForeignKey, Index, UniqueConstraint
+from sqlalchemy import Column, String, Integer, DateTime, Date, Numeric, ForeignKey, Index, UniqueConstraint, Boolean, false
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 from app.database import Base
@@ -34,6 +34,9 @@ class PaperTradingRun(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     run_type = Column(String(50), default="historical_simulation")
+    # Added by migration c9d0e1f2a3b4; declared here so create_all (SQLite) and
+    # the migrated schema (PostgreSQL) expose the same column set.
+    cancel_requested = Column(Boolean, nullable=False, server_default=false())
 
     __table_args__ = (
         Index("idx_paper_trading_runs_portfolio", "portfolio_id"),
