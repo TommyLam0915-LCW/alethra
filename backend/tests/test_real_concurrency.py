@@ -21,6 +21,7 @@ from sqlalchemy import text
 
 from app.database import SessionLocal, engine as db_engine
 from app.services.paper_trading import PaperTradingEngine
+from app.services.paper_trading_exceptions import InvalidStateError
 
 
 @pytest.fixture
@@ -114,7 +115,7 @@ def seed_concurrent_trades(test_user_id):
                 ) VALUES (
                     :id, :user_id, 'strategy_research_simulated', 'v1.0', 'TEST/USD', 60,
                     'test_provider', 'simulated', 100, :now, :now,
-                    '{}'::jsonb, '{}'::jsonb, '[]'::jsonb, 5, :now
+                    '{}', '{}', '[]', 5, :now
                 )
             """),
             {"id": study_run_id, "user_id": test_user_id, "now": now},
@@ -225,8 +226,12 @@ class TestRealConcurrency:
                 with lock:
                     results["success"] += 1
                     
-            except ValueError as e:
-                # Expected rejection
+            except InvalidStateError:
+                # Expected rejection.  The acquisition guard (paper_trading.py:352-357)
+                # and the terminal-state short-circuit (:275) both raise InvalidStateError,
+                # which is a PaperTradingError and NOT a ValueError — so this used to fall
+                # through to the unexpected bucket and fail the node with the race outcome
+                # it was written to prove.
                 with lock:
                     results["rejected"] += 1
             except Exception as e:

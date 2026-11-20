@@ -4,9 +4,14 @@ Verifies that:
 1. Same paper run cannot duplicate the same source trade (prevents double-counting)
 2. Different paper runs can each use the same source trade (correct behavior)
 
-This tests the fix in migration 006 that changed UNIQUE(source_trade_id) to
-UNIQUE(paper_run_id, source_trade_id) for decision_records and
-UNIQUE(portfolio_id, source_trade_id) for paper_positions.
+This tests migration 006, which replaced the pre-006 constraints from 005
+(uq_decision_records_source_trade_type = source_trade_id + decision_type,
+uq_paper_positions_source_trade = source_trade_id alone) with per-portfolio
+scope: UNIQUE(paper_portfolio_id, source_trade_id, decision_type) for
+decision_records (app/models/paper_portfolio.py:239) and
+UNIQUE(portfolio_id, source_trade_id) for paper_positions (:139).
+The old docstring's "UNIQUE(paper_run_id, source_trade_id)" described a rule
+no migration ever created; decision_records has no paper_run_id column.
 """
 
 import pytest
@@ -46,7 +51,7 @@ def seed_source_trade():
                 ) VALUES (
                     :id, :user_id, 'strategy_research_simulated', 'v1.0', 'TEST/USD', 60,
                     'test_provider', 'simulated', 100, :now, :now,
-                    '{}'::jsonb, '{}'::jsonb, '[]'::jsonb, 1, :now
+                    '{}', '{}', '[]', 1, :now
                 )
             """),
             {"id": study_run_id, "user_id": user_id, "now": now}
@@ -164,8 +169,17 @@ class TestSourceDedupScope:
                 )
                 db.commit()
             
-            # Verify it's the expected constraint violation
-            assert "uq_decision_records_source_per_portfolio" in str(exc_info.value)
+            # Verify it's the expected constraint violation.  PostgreSQL names the
+            # index; SQLite names the columns that make it up.  Both lanes must pin
+            # the same dedup rule, so each branch asserts its own dialect's identity
+            # instead of accepting any IntegrityError.
+            message = str(exc_info.value)
+            if db_engine.dialect.name == "sqlite":
+                violated = message.split("UNIQUE constraint failed:")[-1]
+                for column in ("paper_portfolio_id", "source_trade_id", "decision_type"):
+                    assert f"decision_records.{column}" in violated, message
+            else:
+                assert "uq_decision_records_source_per_portfolio" in message, message
         finally:
             # Cleanup - rollback first to clear transaction state, then use fresh session
             try:
