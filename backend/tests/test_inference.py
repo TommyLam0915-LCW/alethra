@@ -137,6 +137,35 @@ class TestFutureModelReference:
         assert data["error_details"] is not None
         assert "not yet executable" in data["error_details"].lower()
 
+    def test_listed_run_carries_the_recorded_failure_reason(self, client, auth_headers):
+        # /inference builds its cards from GET /runs, not from the POST response, so the
+        # reason has to survive the list path as well or the page has nothing to show.
+        record = _create_model_record(client, auth_headers)
+        version = _create_model_version(
+            client, auth_headers, record["id"],
+            model_type="future_external_model_reference",
+            spec={"reference": "some_external_model"},
+        )
+
+        created = client.post("/api/v1/inference/runs", headers=auth_headers, json={
+            "model_version_id": version["id"],
+            "input_spec": {
+                "symbol": "DEMO-ALPHA",
+                "start_date": "2024-01-02",
+                "end_date": "2024-01-31",
+            },
+        })
+        assert created.status_code == 201
+
+        listed = client.get("/api/v1/inference/runs", headers=auth_headers)
+        assert listed.status_code == 200
+        rows = [row for row in listed.json() if row["id"] == created.json()["id"]]
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["status"] == "failed"
+        assert row["error_details"] is not None
+        assert "not yet executable" in row["error_details"].lower()
+
 
 class TestInferenceRunLifecycle:
     """Inference run lifecycle: pending -> completed."""

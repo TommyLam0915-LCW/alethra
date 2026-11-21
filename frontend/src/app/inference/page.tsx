@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { api, ApiError } from '@/lib/api';
 import { createRequestGuard } from '@/lib/latestRequest';
+import { describeStoredJobFailure } from '@/lib/mlFailureMessages';
 import { formatDateTime } from '@/lib/format';
 import { statusPillClass } from '@/lib/status-styles';
 
@@ -12,6 +13,7 @@ interface InferenceRun {
   id: string;
   model_version_id: string;
   status: string;
+  error_details: string | null;
   created_at: string;
   completed_at: string | null;
   input_spec: { symbol?: string; start_date?: string; end_date?: string; [key: string]: unknown };
@@ -440,6 +442,34 @@ export default function InferencePage() {
                     {RUN_STATUS_LABELS[run.status] ?? run.status}
                   </span>
                 </button>
+
+                {run.status === 'failed' && (() => {
+                  // The reason is already in this row's payload; only strings the backend
+                  // writes itself are safe to repeat to a customer verbatim.
+                  const stored = describeStoredJobFailure(run.error_details);
+                  return (
+                    <div
+                      data-testid="inference-run-failure"
+                      style={{
+                        marginTop: '12px',
+                        border: '1px solid var(--negative)',
+                        borderRadius: '4px',
+                        padding: '12px',
+                        fontSize: '13px',
+                        lineHeight: 1.7,
+                      }}
+                    >
+                      <strong style={{ color: 'var(--negative)' }}>失敗原因：</strong>
+                      {stored ? (
+                        <span style={{ whiteSpace: 'pre-wrap' }}>{stored.detail}</span>
+                      ) : run.error_details ? (
+                        <span>任務失敗時平台記錄了一段文字，但它不是已核對的系統訊息，因此不顯示原始錯誤內容。</span>
+                      ) : (
+                        <span>任務標記為失敗，但後端尚未記錄失敗原因。</span>
+                      )}
+                    </div>
+                  );
+                })()}
 
                 {expandedRunId === run.id && (
                   <div style={{ marginTop: '16px', borderTop: '1px solid var(--border)', paddingTop: '16px' }}>

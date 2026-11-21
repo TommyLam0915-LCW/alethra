@@ -34,6 +34,9 @@ export function explainMlFailure(message: string): string | null {
 const CONTROLLED_JOB_MESSAGES = [
   'No valid backtest results: all parameter combinations failed or produced errors',
   'Job cancelled by user',
+  // app/services/inference.py writes this literal when a run asks for a
+  // future_external_model_reference version.
+  'External model references are not yet executable',
 ];
 
 export interface StoredJobFailure {
