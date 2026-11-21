@@ -4,15 +4,19 @@ services:
   db:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: ai_investment_lab
+      # Required, never defaulted. This file used to ship `postgres:postgres`,
+      # and the account name reused as its own password is exactly what a
+      # reachable database then authenticates with - the same shape R6 refuses
+      # for the signing key. Match the prod and unified-dev profiles.
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required; generate one with openssl rand -hex 32}
+      POSTGRES_DB: ${POSTGRES_DB:-ai_investment_lab}
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -24,7 +28,7 @@ services:
     ports:
       - "8000:8000"
     environment:
-      DATABASE_URL: postgresql://postgres:postgres@db:5432/ai_investment_lab
+      DATABASE_URL: postgresql://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@db:5432/${POSTGRES_DB:-ai_investment_lab}
       # Required, never defaulted: this file used to hand every stack it
       # started the same signing key, and that key was also the product's
       # field default. Generate one with `openssl rand -hex 32`.

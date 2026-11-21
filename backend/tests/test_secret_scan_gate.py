@@ -30,6 +30,15 @@ runtime sites are gone as of §8.35 — the field default is empty and compose
 takes a required variable — but the rule and its controls stay, because the
 shape R6 covers is one a future default can walk straight back into.
 
+The fifth is a rule that did not exist either: the database half of the same
+"public value a fresh install authenticates with" class. Both compose profiles
+shipped it in a client-side connection URL, while this host's own reachable
+cluster uses that exact credential, and R1/R2/R6 cannot see it — ``postgres`` is
+8 characters, one character class, a readable phrase. R7 judges identity against
+a registry instead, and its controls keep it narrower than it could be: ``${VAR}``
+in the userinfo segment and a non-default inline value are the shapes the fix
+produces, and both stay silent.
+
 No database, no network.
 """
 import importlib.util
@@ -60,9 +69,18 @@ WORD_SECRET = "synthetic-probe-word-literal-not-a-cred-aa12"
 # purpose: a constant called ``*_SECRET`` here would be read by R1 itself, the
 # shape is opaque, and the file would become a HIGH landing point.
 HEX_PROBE = "a1b2c3d4e5f60718293a4b5c6d7e8f90"
+# R7's probe: a vendor default, so a public word rather than an invented one.
+# It is in aus.INSECURE_DB_DEFAULTS by definition and appears throughout the
+# tree in prose, which is why it is not in the uniqueness loop below -- the URL
+# *shape* built from it is what must stay out of this file, and
+# test_this_file_carries_no_r7_landing_point is the gate for that.
+DB_VENDOR_DEFAULT = "postgres"
 
-HIGH_BASELINE = set()
-WEAK_BASELINE = {
+HIGH_BASELINE = []
+# A list, not a set: ``e2e_legacy_upgrade.py`` carries the same literal on two
+# lines, and a set collapses them into one entry, which would let a third copy
+# of the same credential land without failing the count assert below.
+WEAK_BASELINE = [
     ("R1", "NORMAL_RUNTIME_EVIDENCE.md", "JWT_SECRET_KEY", 44),
     ("R1", "docker-compose.acceptance.yml", "JWT_SECRET_KEY", 44),
     ("R1", "e2e_fullstack.py", "PASSWORD", 22),
@@ -77,8 +95,31 @@ WEAK_BASELINE = {
     # left on the real tree (measured: 12 findings, WEAK 9 -> 7, "R6 known-default
     # landing points: 0"). The rule itself stays, and the controls below keep
     # proving it fires on both assignment shapes in a synthetic tree.
-}
-FIXTURE_BASELINE = {
+    #
+    # These five R7 entries are new *visibility*, not new debt: R6 saw the JWT
+    # half of the "public value the product still accepts" class and nothing saw
+    # the database half, because ``postgres`` is 8 characters, one class, and a
+    # readable phrase — every entropy test in the file passes it. Each is the
+    # account name spelled again in a URL, and each is a lane this round either
+    # fixed or deliberately left under the standing "維持原樣並披露" ruling:
+    # the two compose sites a start-up script actually reads are gone (the
+    # quickstart now requires the variables, the CI-only acceptance profile uses
+    # a non-default value), while a historical execution record, a spec example
+    # and the two local e2e harnesses stay quoted as written. Editing the
+    # execution record to remove it would rewrite the evidence, and the e2e
+    # scripts hold the only credential path their isolated 5434 instance has.
+    ("R7", "EXECUTION_RECORD_20261109.md",
+     "database account name reused as its own password", 8),
+    ("R7", "docs/minimal-ci-spec.md",
+     "database account name reused as its own password", 8),
+    ("R7", "e2e_fullstack.py",
+     "database account name reused as its own password", 8),
+    ("R7", "e2e_legacy_upgrade.py",
+     "database account name reused as its own password", 8),
+    ("R7", "e2e_legacy_upgrade.py",
+     "database account name reused as its own password", 8),
+]
+FIXTURE_BASELINE = [
     ("R1", "backend/tests/test_ai_assistant.py", "SECRET_KEY", 30),
     ("R1", "backend/tests/test_db_env_contract.py", "PASSWORD", 25),
     ("R1", "backend/tests/test_execution_containment.py", "secret_marker", 29),
@@ -89,7 +130,7 @@ FIXTURE_BASELINE = {
     # comma: the literal is test scaffolding, but until the fix R1 could not see
     # it at all, which is the opposite failure from a false positive.
     ("R1", "frontend/e2e/personal-strategy-learning.spec.ts", "JWT_SECRET_KEY", 32),
-}
+]
 
 
 def _write(root, rel, text):
@@ -98,6 +139,22 @@ def _write(root, rel, text):
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(text)
     return rel
+
+
+def _db_url(password=None, host="db", database="lab"):
+    """A connection URL that logs in as the vendor default account.
+
+    Assembled rather than written out, for the reason ``_known_default_from_the_product``
+    exists for R6: a ``user:password@`` literal in this file is another landing
+    point for the scanner to triage, and a test path is not where a credential
+    shape belongs. The word itself stays public — it is in every install guide,
+    which is the whole reason R7 exists — so unlike the invented probes above it
+    cannot be uniqueness-gated; ``test_this_file_carries_no_r7_landing_point``
+    asserts the shape never reaches the file instead.
+    """
+    return "postgresql://%s:%s@%s:%d/%s" % (DB_VENDOR_DEFAULT,
+                                            password or DB_VENDOR_DEFAULT,
+                                            host, 5432, database)
 
 
 def _rules(findings):
@@ -296,6 +353,116 @@ def test_r6_reports_off_instead_of_clean_when_the_list_cannot_be_read(tmp_path, 
     assert "R6 OFF" in out, out
 
 
+# ------------------------------------------------------------------ R7 controls
+# R6 covers the signing key the product refuses; nothing covered the database
+# half of the same class, because ``postgres`` is 8 characters, one character
+# class and a readable phrase, so R1/R2/R6's shape tests all pass it. A rule
+# added to catch one known pair of sites is worth nothing unless it also proves
+# it does not fire on the two shapes that *look* alike and are not debt.
+
+def test_positive_control_r7_flags_a_default_db_credential_in_deployment_material(tmp_path, capsys):
+    _write(tmp_path, "docker-compose.yml", "      DATABASE_URL: %s\n" % _db_url())
+    _write(tmp_path, "deploy/up.sh", 'psql "%s"\n' % _db_url(host="localhost", database="lab"))
+    findings = aus.scan(str(tmp_path))
+    assert _tiers(findings, "HIGH") == [
+        ("R7", "deploy/up.sh", "database account name reused as its own password", 8),
+        ("R7", "docker-compose.yml", "database account name reused as its own password", 8)], findings
+    assert aus.main(["--root", str(tmp_path)]) == 1
+    out = capsys.readouterr().out
+    assert "R7 vendor-default database landing points: 2" in out, out
+
+
+def test_positive_control_r7_judges_identity_where_entropy_cannot(tmp_path):
+    """The same URL shape, twice: the opaque key is R2, the default is R7.
+
+    One path, one length difference, so the assert below is about the classifier
+    rather than about which file was chosen. Without R7 the default half produces
+    no finding at all, which is exactly how the shipped compose files read as
+    clean for five rounds.
+    """
+    _write(tmp_path, "start_stack.sh", 'export DATABASE_URL="%s"\n' % _db_url(password=OPAQUE))
+    opaque_only = aus.scan(str(tmp_path))
+    assert [f[0] for f in opaque_only] == ["R2"], opaque_only
+    _write(tmp_path, "start_stack.sh", 'export DATABASE_URL="%s"\n' % _db_url())
+    default_only = aus.scan(str(tmp_path))
+    assert [f[0] for f in default_only] == ["R7"], default_only
+    assert aus.is_secretish(DB_VENDOR_DEFAULT) is False, "the gap R7 exists to close"
+
+
+def test_r7_tiers_the_container_init_form_as_debt_not_an_alarm(tmp_path):
+    """``POSTGRES_PASSWORD=<vendor default>`` sets a fresh volume's password.
+
+    It is the same word, and a rule that screamed at it would have flagged the
+    official Postgres quickstart; it is not what a running service authenticates
+    with, so it stays WEAK_LITERAL while the client-side URL above is HIGH.
+    """
+    _write(tmp_path, "docker-compose.yml", "      POSTGRES_PASSWORD: %s\n" % DB_VENDOR_DEFAULT)
+    findings = aus.scan(str(tmp_path))
+    assert _tiers(findings, "WEAK_LITERAL") == [
+        ("R7", "docker-compose.yml",
+         "vendor default database password on the container-init side",
+         len(DB_VENDOR_DEFAULT))], findings
+    assert _tiers(findings, "HIGH") == []
+
+
+def test_r7_stays_quiet_on_indirection_and_on_a_non_default_password(tmp_path):
+    """The three shapes the fix produces, none of which is a finding.
+
+    ``${VAR}`` in the userinfo segment is the whole point of the compose change,
+    and a placeholder test applied only to the full ``DATABASE_URL`` would have
+    missed it — a 32-char variable reference reads as a generated password to
+    every length test. ``test:test`` is a local e2e fixture, and broadening the
+    rule to "password repeats the username" measured six promotions of it to
+    HIGH on this tree.
+    """
+    _write(tmp_path, "start_stack.sh", "\n".join([
+        'export FIRST_URL="%s"' % _db_url(password="${POSTGRES_PASSWORD}"),
+        'export SECOND_URL="%s"' % _db_url(password="alethra-acceptance-ephemeral-not-a-secret"),
+        'export THIRD_URL="postgresql://test:test@127.0.0.1:5434/alethra_e2e"',
+        'POSTGRES_PASSWORD="${POSTGRES_PASSWORD:?required}"',
+        "",
+    ]))
+    assert [f for f in aus.scan(str(tmp_path)) if f[0] == "R7"] == []
+
+
+def test_r7_reads_the_registry_as_public_defaults_not_as_secrets():
+    """The registry is a list of what vendors ship, so it can live in the scanner.
+
+    Unlike a deployed credential, this word is in every install guide, and the
+    scanner's contract is to name the *class* without printing values it cannot
+    already be assumed to know.
+    """
+    assert DB_VENDOR_DEFAULT in aus.INSECURE_DB_DEFAULTS
+    assert aus.is_placeholder(DB_VENDOR_DEFAULT) is False
+    assert aus.is_secretish(DB_VENDOR_DEFAULT) is False, "the gap R7 exists to close"
+
+
+def test_this_file_carries_no_r7_landing_point():
+    """The gate's own file is scanned, so its probes are assembled, not written.
+
+    Spelling the ``user:password@`` shape here twice added two FIXTURE entries of
+    its own, which is how a gate ends up asserting about its own scaffolding
+    instead of about the tree it is supposed to protect.
+    """
+    here = os.path.relpath(os.path.abspath(__file__), REPO)
+    for lineno, line in enumerate(aus.read(here, REPO), 1):
+        hits = [pair for pair in aus.inline_credentials(line)
+                if aus.default_db_credential_reason(*pair)]
+        assert not hits, "%s:%d carries a default database credential" % (here, lineno)
+
+
+def test_deployment_material_separates_a_recipe_from_a_record():
+    """The HIGH/WEAK boundary is a path decision, and this file got a path
+    classifier wrong before (``frontend/e2e/*.spec.ts`` counted as runtime)."""
+    for rel in ("docker-compose.yml", "docker-compose.prod.yml", "deploy/up.sh",
+                ".github/workflows/browser-acceptance.yml", "backend/Dockerfile",
+                "start_acceptance_env.sh"):
+        assert aus.is_deployment_material(rel) is True, rel
+    for rel in ("docs/minimal-ci-spec.md", "EXECUTION_RECORD_20261109.md",
+                "e2e_fullstack.py", "backend/app/config.py", "README.md"):
+        assert aus.is_deployment_material(rel) is False, rel
+
+
 def test_lane_treats_a_playwright_spec_as_a_test_path():
     """A spec drives a stack someone else started; it is not what a service reads.
 
@@ -430,12 +597,14 @@ def test_current_tree_has_no_high_severity_landing_point():
 
 
 def test_current_runtime_debt_set_has_not_grown():
-    """The 7 readable literals are known debt, not a clean bill.
+    """The 12 runtime literals this round measured are known debt, not a clean bill.
 
-    Frozen as the set this round measured — regenerate it with
+    Seven R1 signing-key/DB-password strings, five R7 vendor-default database
+    logins. Frozen as the list this round measured — regenerate it with
     ``python scripts/audit_secrets.py --all`` and update deliberately, never as
     a side effect of another change. A new fixed credential in a startup script
-    fails here even though the default exit code stays 0.
+    fails here even though the default exit code stays 0, and a second copy of a
+    literal already on the list fails too, because the baseline is a list.
     """
     findings = aus.scan(REPO)
     assert _tiers(findings, "WEAK_LITERAL") == sorted(WEAK_BASELINE), _tiers(findings, "WEAK_LITERAL")

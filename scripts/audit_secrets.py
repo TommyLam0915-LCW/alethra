@@ -26,6 +26,22 @@ Rules:
       credential. What it does share with R1 is the lane split: runtime path →
       WEAK_LITERAL, test path → FIXTURE, so a test that pins the refused default
       does not inflate the runtime-debt count.
+  R7  a *database* credential judged by identity rather than by entropy: the
+      userinfo password of a connection URL that is a vendor default
+      (``INSECURE_DB_DEFAULTS``) or is simply the account name spelled again,
+      plus the container-init key form (``POSTGRES_PASSWORD=…``). R1 and R2
+      cannot see this class at all — ``postgres`` is 8 characters, one
+      character class, and a readable phrase, so every entropy and shape test
+      in this file passes it. That is the gap the landing-point review was
+      asked to close rather than re-confirm: a default that is readable is not
+      a default that is inert, because it is exactly what a fresh install
+      authenticates with. Tiers: a client-side URL in deployment material
+      (compose file, ``deploy/``, workflow, ``*.sh``) → HIGH, because that is
+      the credential a started service connects with; the container-init form →
+      WEAK_LITERAL, because that value only sets a volume's own password; a
+      test path → FIXTURE. A ``${VAR}`` userinfo segment is an indirection and
+      is not reported — that is the shape the fix takes, and the positive
+      controls below keep both halves honest.
 
 Each R1/R2/R3 hit is then sorted into one of two tiers by the *shape* of the
 value, because the two require different answers:
@@ -57,9 +73,10 @@ carries a digit, which is what separates a generated key from a prose default;
 image-digest field cannot reach this branch. A hardcoded default whose literal
 has no digit at all (lowercase words around separators) stays invisible to that
 entropy test by design, so it is not judged on entropy: R6 reports it when the
-product itself already names the value as a default it refuses. What still is
-not detected is a prose default that is *not* in that set — closing that would
-mean growing the product's refuse-list, not loosening a rule here.
+product itself already names the value as a default it refuses, and R7 reports
+the database half of the same class from its own registry. What still is not
+detected is a prose default in *neither* registry — closing that means growing
+a refuse-list, not loosening a rule here.
 
 Keys that name an ``http``-scheme endpoint (``*_URL``) are exempt from R1 — the
 value is a public URL, not a credential. An inline password in such a value is
@@ -105,6 +122,23 @@ URL_RE = re.compile(
 )
 
 JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\b")
+
+# R7's registries. R1/R2 judge a literal by length and character class, so the
+# one credential class that is always short and always readable — the vendor
+# default database password — cannot be seen by them: `postgres` is 8 chars and
+# a password that is simply the account name has one character class. Being
+# readable is not evidence of being inert, so R7 judges identity, the way R6
+# judges the product's own JWT refuse-list. A `${VAR}` userinfo segment is an
+# indirection and stays out (is_placeholder), which is what distinguishes the
+# fixed shape from the shipped one.
+INSECURE_DB_DEFAULTS = frozenset({
+    "postgres", "postgrespw", "password123", "123456", "oracle", "mysql",
+    "admin", "root", "sa", "tiger", "db2inst1", "sybase", "informix",
+})
+# Keys that initialise a database password rather than connect with one.
+DB_PW_KEY_RE = re.compile(r"(?i)(?:POSTGRES|MYSQL|MARIADB|MSSQL|ORACLE|DB|"
+                          r"DATABASE|REDIS)_?(?:PASSWORD|PASSWD)$")
+
 PROVIDER_RE = re.compile(r"\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{16,}\b"
                          r"|\bwhsec_[A-Za-z0-9]{16,}\b"
                          r"|\bgh[pousr]_[A-Za-z0-9]{20,}\b"
@@ -206,6 +240,25 @@ def is_placeholder(value):
     return False
 
 
+def default_db_credential_reason(user, password):
+    """Why this literal is a vendor default, or None when it is not one.
+
+    The username only changes the *reason*, never the verdict: a password equal
+    to the account name is the worst shape in the registry, because the login a
+    fresh install documents is then guessable from the account list alone. Not
+    extended to "any user, as long as the password repeats it" — measured on
+    this tree, that would have promoted six ``test:test`` e2e fixtures to HIGH,
+    which is the fires-too-much failure this gate already records.
+    """
+    if not password or is_placeholder(password):
+        return None
+    if password.lower() not in INSECURE_DB_DEFAULTS:
+        return None
+    if user and password == user:
+        return "database account name reused as its own password"
+    return "vendor default database password"
+
+
 def is_secretish(value):
     """A generated-looking secret: long, credential charset, mixed classes."""
     if not value or is_placeholder(value):
@@ -270,6 +323,18 @@ def lane(rel):
     return "runtime"
 
 
+def is_deployment_material(rel):
+    """A file whose contents *are* the configuration a stack starts with.
+
+    A test path gets fixture benefit of the doubt; a compose file, a deploy
+    script or a workflow does not, because nothing rewrites what it ships.
+    """
+    base = os.path.basename(rel)
+    return (rel.startswith("docker-compose") or rel.startswith("deploy/")
+            or rel.startswith(".github/workflows") or base.startswith("Dockerfile")
+            or base.endswith(".sh"))
+
+
 def tracked_files(root=None):
     root = root or ROOT
     try:
@@ -298,7 +363,12 @@ def read(rel, root=None):
         return []
 
 
-def inline_passwords(line):
+def inline_credentials(line):
+    """``(user, password)`` for every URL in the line that carries userinfo.
+
+    Both halves are needed: the shape this rule exists for is the account name
+    reused as its own password, and a password-only view cannot see it.
+    """
     out = []
     for m in URL_RE.finditer(line):
         try:
@@ -306,8 +376,12 @@ def inline_passwords(line):
         except ValueError:
             continue
         if parsed.password:
-            out.append(parsed.password)
+            out.append((parsed.username or "", parsed.password))
     return out
+
+
+def inline_passwords(line):
+    return [pw for _user, pw in inline_credentials(line)]
 
 
 def _assign_value(raw):
@@ -378,6 +452,32 @@ def scan(root=None, collect_optouts=False):
                                          "connection URL", pw))
                     harvested.setdefault(pw, f"{rel}:{lineno}")
 
+            # R7: judged by identity, not by entropy, so it cannot be tiered by
+            # the shape walk below — `postgres` reads as "opaque" there and would
+            # be promoted in a test file and demoted nowhere.
+            for user, pw in inline_credentials(line):
+                reason = default_db_credential_reason(user, pw)
+                if not reason:
+                    continue
+                if lane(rel) == "test":
+                    tier = "FIXTURE"
+                elif is_deployment_material(rel):
+                    tier = "HIGH"
+                else:
+                    tier = "WEAK_LITERAL"
+                findings.append(("R7", rel, lineno, reason, len(pw), tier))
+
+            if key and DB_PW_KEY_RE.search(key) and not METRIC_KEY_RE.search(key):
+                # Container-init side of the same word: this value *creates* a
+                # fresh volume's password rather than authenticating to something
+                # that already exists, so it is debt to point at, not an alarm.
+                reason = default_db_credential_reason(None, value)
+                if reason:
+                    tier = "FIXTURE" if lane(rel) == "test" else "WEAK_LITERAL"
+                    findings.append(("R7", rel, lineno,
+                                     reason + " on the container-init side",
+                                     len(value), tier))
+
     for pw, origin in harvested.items():
         for rel in files:
             if is_template(rel):
@@ -438,6 +538,11 @@ def main(argv=None):
         # same in the finding count, which is the failure mode R6 exists to stop.
         print(f"  R6 OFF: no _INSECURE_JWT_DEFAULTS read from {CONFIG_REL} — "
               "known defaults were not checked in this scan")
+    # R7's own line, because "HIGH 0" is what a round reported while two compose
+    # files were handing out the vendor default DB password. A count the operator
+    # has to go looking for is a count that gets read as zero.
+    print(f"  R7 vendor-default database landing points: "
+          f"{sum(1 for hit in findings if hit[0] == 'R7')}")
     if args.list_optouts:
         for where in sorted(set(optouts)):
             print(f"  OPTOUT {where}")

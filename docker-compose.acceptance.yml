@@ -7,7 +7,12 @@ services:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      # This profile starts a volume that `down -v` destroys on every CI run, and
+      # the workflow passes no environment, so the value has to be inline. It is
+      # deliberately not the vendor default: a fixed string that is also what a
+      # real local install uses is the one credential shape that turns a throwaway
+      # recipe into a guessable login on the host's own cluster (R7).
+      POSTGRES_PASSWORD: alethra-acceptance-ephemeral-not-a-secret
       POSTGRES_DB: ai_investment_lab_acceptance
     ports:
       - "5433:5432"
@@ -26,7 +31,7 @@ services:
     ports:
       - "8001:8000"
     environment:
-      DATABASE_URL: postgresql://postgres:postgres@db:5432/ai_investment_lab_acceptance
+      DATABASE_URL: postgresql://postgres:alethra-acceptance-ephemeral-not-a-secret@db:5432/ai_investment_lab_acceptance
       JWT_SECRET_KEY: acceptance-test-secret-minimum-32-chars-long
       JWT_ALGORITHM: HS256
       JWT_ACCESS_TOKEN_EXPIRE_MINUTES: 1440
