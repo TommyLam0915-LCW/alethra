@@ -374,6 +374,33 @@ def _kill_switch_active(db: Session) -> Optional[bool]:
         return None
 
 
+def _stored_failure_parts(raw: Optional[str]) -> tuple:
+    """Split a job's ``error_details`` into the text a customer may read and its code.
+
+    Producers write either a bare (already scrubbed) message or
+    ``json.dumps({"code", "message_zh", "details"})`` — see
+    ``app/services/personal_training.py``. Only the former is prose; embedding
+    the refusal blob makes ``text_zh`` quote JSON, and ``details`` carries
+    internal parameters. ``details`` is dropped here, never shown, and the code
+    is returned separately so the UI can label it as a code.
+    """
+    if not raw:
+        return (None, None)
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return (None, raw)
+    if not isinstance(parsed, dict):
+        return (None, raw)
+    code = parsed.get("code")
+    message = parsed.get("message_zh")
+    if not isinstance(code, str) or not code:
+        return (None, raw)
+    if not isinstance(message, str) or not message:
+        return (None, raw)
+    return (code, message)
+
+
 def _humanize_reason(reason: Dict[str, Any]) -> Dict[str, Any]:
     code = reason.get("code")
     measured = reason.get("measured")
@@ -561,17 +588,27 @@ def build_journey(
     kill_active = _kill_switch_active(db)
 
     if latest_job is not None and latest_job.status is TrainingJobStatus.failed:
+        refusal_code, failure_text = _stored_failure_parts(latest_job.error_details)
+        if failure_text:
+            failure_reason_zh = (
+                f"：{failure_text}"
+                + (f"（代碼 {refusal_code}）" if refusal_code else "")
+                + "。"
+            )
+        else:
+            failure_reason_zh = "；可重新提交訓練。"
         missing.append(
             {
                 "code": "TRAINING_JOB_FAILED",
                 "text_zh": (
                     "最近一次訓練工作失敗"
-                    + (f"：{latest_job.error_details}。" if latest_job.error_details else "；可重新提交訓練。")
+                    + failure_reason_zh
                     + " 已建立的快照與版本不受影響。"
                 ),
                 "measured": None,
                 "requirement": None,
                 "raw_message_zh": latest_job.error_details,
+                "refusal_code": refusal_code,
             }
         )
     reclaimed_jobs = [

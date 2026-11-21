@@ -256,6 +256,61 @@ def test_failed_and_reclaimed_jobs_are_reported_without_losing_data(
     assert "沒有遺失資料" in reclaimed["text_zh"]
 
 
+def test_a_refusal_shaped_failure_is_quoted_as_text_not_as_json(
+    client, auth_headers
+):
+    """``personal_training.py`` stores refusals as a JSON payload.
+
+    The journey sentence used to embed that payload, so a customer reading
+    ``text_zh`` saw ``{"code": ... "details": {...}}`` — internal ids and
+    counts — instead of the Chinese the backend had already written for them.
+    """
+    owner_id = _user_id()
+    experiment_id, version_id = _create_experiment(client, auth_headers)
+
+    refusal = json.dumps(
+        {
+            "code": "PERSONAL_TRAINING_INSUFFICIENT_CONFIRMED_DECISIONS",
+            "message_zh": "已確認決策還不足，無法訓練個人模型。",
+            "details": {"have": 7, "need": 20, "user_id": str(owner_id)},
+        },
+        ensure_ascii=False,
+    )
+    db = TestSession()
+    try:
+        db.add(
+            TrainingJob(
+                user_id=owner_id,
+                experiment_id=uuid.UUID(experiment_id),
+                status=TrainingJobStatus.failed,
+                parameter_grid={},
+                strategy_spec_snapshot={
+                    "training_type": PERSONAL_TRAINING_TYPE,
+                    "strategy_version_id": str(version_id),
+                    "snapshot_id": str(uuid.uuid4()),
+                },
+                error_details=refusal,
+                created_at=utcnow() - timedelta(minutes=5),
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    body = _journey(client, auth_headers, version_id)
+    codes = [item["code"] for item in body["missing"]]
+    item = body["missing"][codes.index("TRAINING_JOB_FAILED")]
+    assert "已確認決策還不足" in item["text_zh"]
+    assert item["refusal_code"] == "PERSONAL_TRAINING_INSUFFICIENT_CONFIRMED_DECISIONS"
+    assert "PERSONAL_TRAINING_INSUFFICIENT_CONFIRMED_DECISIONS" in item["text_zh"]
+    # The reason stays readable without turning the sentence into a payload.
+    assert '"details"' not in item["text_zh"]
+    assert '"have"' not in item["text_zh"]
+    assert str(owner_id) not in item["text_zh"]
+    # The stored value itself is untouched for whoever needs the raw record.
+    assert item["raw_message_zh"] == refusal
+
+
 def test_journey_is_owner_scoped(client, auth_headers):
     _, version_id = _create_experiment(client, auth_headers)
     payload = {

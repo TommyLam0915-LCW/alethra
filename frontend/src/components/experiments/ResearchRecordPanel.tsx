@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { api } from '@/lib/api';
+import { renderStoredFailure } from '@/lib/mlFailureMessages';
 import {
   ACTION_LABELS,
   ATTEMPT_STATUS_LABELS,
@@ -439,7 +440,7 @@ export default function ResearchRecordPanel({ experimentId, refreshToken = 0 }: 
                   )}
                   {study.error_details && (
                     <div style={{ color: 'var(--warning)', fontSize: '12px', marginTop: '4px' }}>
-                      {study.error_details}
+                      {renderStoredFailure(study.error_details)}
                     </div>
                   )}
                 </div>

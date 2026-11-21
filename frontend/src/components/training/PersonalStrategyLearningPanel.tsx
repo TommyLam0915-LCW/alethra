@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { api, ApiError } from '@/lib/api';
 import { formatDateTime } from '@/lib/format';
+import { parseStructuredRefusal, renderStoredFailure } from '@/lib/mlFailureMessages';
 
 interface OwnedVersion {
   id: string;
@@ -2032,11 +2033,19 @@ export default function PersonalStrategyLearningPanel() {
                     </button>
                   )}
                 </div>
-                {job.error_details && (
-                  <div style={{ marginTop: '8px', color: 'var(--warning)' }}>
-                    拒絕原因：{job.error_details}
-                  </div>
-                )}
+                {job.error_details && (() => {
+                  const refusal = parseStructuredRefusal(job.error_details);
+                  return (
+                    <div
+                      style={{ marginTop: '8px', color: 'var(--warning)' }}
+                      data-testid="pl-job-failure"
+                    >
+                      {refusal
+                        ? `拒絕原因：${refusal.messageZh}（代碼 ${refusal.code}）`
+                        : `失敗原因：${renderStoredFailure(job.error_details)}`}
+                    </div>
+                  );
+                })()}
                 {!jobTerminal && (
                   <div style={{ marginTop: '6px', color: 'var(--text-muted)' }}>
                     等待 worker 執行；若長時間停留在排隊中，表示此環境沒有常駐 worker。

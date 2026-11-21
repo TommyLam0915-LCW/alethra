@@ -8,6 +8,7 @@ import { BENCHMARK_METRIC_KEYS, describeBenchmark, describeRecordedBenchmark } f
 import { describeRunStatus } from '@/lib/runStatus';
 import { formatDateTime, formatParamMap, formatRatePercent } from '@/lib/format';
 import { ACTOR_LABELS, EXIT_REASON_LABELS, SIDE_LABELS, label } from '@/lib/copy';
+import { renderStoredFailure } from '@/lib/mlFailureMessages';
 
 interface RunDetail {
   id: string;
@@ -673,8 +674,11 @@ export default function RunDetailPage() {
         <div className="dash-panel" style={{ marginBottom: '16px' }}>
           <div className="dash-panel-body" style={{ padding: '20px' }}>
             <h3 style={{ margin: '0 0 12px', fontSize: '15px' }}>Error details</h3>
-            <div style={{ fontSize: '13px', color: 'var(--text-secondary)', whiteSpace: 'pre-wrap' }}>
-              {fmt(run.error_details)}
+            <div
+              style={{ fontSize: '13px', color: 'var(--text-secondary)', whiteSpace: 'pre-wrap' }}
+              data-testid="run-error-details"
+            >
+              {renderStoredFailure(run.error_details)}
             </div>
           </div>
         </div>

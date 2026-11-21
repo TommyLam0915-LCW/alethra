@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { api, ApiError } from '@/lib/api';
 import { createRequestGuard } from '@/lib/latestRequest';
+import { renderStoredFailure } from '@/lib/mlFailureMessages';
 import {
   ATTEMPT_STATUS_LABELS,
   ROBUSTNESS_KIND_LABELS,
@@ -661,7 +662,7 @@ export default function RobustnessPanel({
               <strong>{KIND_LABEL[selected.kind] ?? selected.kind}</strong> · v
               {selected.plan.version_number} · Status: {STATUS_LABEL[selected.status] ?? selected.status}
               {selected.error_details && (
-                <span style={{ color: 'var(--negative)' }}> · {selected.error_details}</span>
+                <span style={{ color: 'var(--negative)' }}> · {renderStoredFailure(selected.error_details)}</span>
               )}
             </div>
             <div style={{ display: 'flex', gap: '8px' }}>
@@ -777,7 +778,7 @@ export default function RobustnessPanel({
                         </td>
                         <td style={td}>
                           {label(ATTEMPT_STATUS_LABELS, a.status)}
-                          {a.error_details ? `: ${a.error_details}` : ''}
+                          {a.error_details ? `: ${renderStoredFailure(a.error_details)}` : ''}
                         </td>
                         <td style={td}>{pct(a.metrics?.total_return_pct)}</td>
                         <td style={td}>{pct(a.metrics?.max_drawdown_pct)}</td>
