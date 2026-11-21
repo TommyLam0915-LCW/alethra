@@ -520,6 +520,24 @@ class TestCsvExport:
         # Header + 2 ETH trades
         assert len(rows) == 3
 
+    def test_csv_export_matching_nothing_is_header_only(self, client, seeded_user_id):
+        """An empty filter is a 200 whose body carries the header line and nothing else.
+
+        The exporter cannot treat ``status == 200`` as "there was something to
+        export": the number of records in the body is the only signal the client
+        gets, and a header-only file opens as a spreadsheet with no rows.
+        """
+        headers = _auth_headers(client, seeded_user_id)
+        resp = client.get(
+            "/api/v1/journal/trades.csv",
+            params={"date_from": (ANCHOR + timedelta(days=365)).isoformat()},
+            headers=headers,
+        )
+        assert resp.status_code == 200
+        rows = list(csv.reader(io.StringIO(resp.text)))
+        assert len(rows) == 1, f"expected the header line only, got {len(rows)} records"
+        assert "net_pnl" in rows[0]
+
 
 class TestFilterOptions:
     """GET /v1/journal/filters"""

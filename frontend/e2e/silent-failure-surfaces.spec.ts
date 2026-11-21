@@ -10,6 +10,9 @@ import { test, expect, type Page, type Route } from '@playwright/test';
  *               untouched application form.
  *   /training   a failed instruments/models/entitlement load left the picker,
  *               model list and quota card looking like a new account.
+ *   /journal    a failed CSV export request was swallowed by `catch {}`, so the
+ *               button looked dead, and a filter with no trades downloaded a
+ *               header-only file that read as a successful export.
  *
  * Also covers the two paths that must stay quiet: the Pilot 404 ("nothing
  * submitted yet") and the tools-menu entry that makes /models reachable.
@@ -45,6 +48,10 @@ const ROUTE = {
   mlModels: /\/api\/v1\/ml\/models\/?(\?.*)?$/,
   mlEntitlement: /\/api\/v1\/ml\/entitlement\/?(\?.*)?$/,
   trainingJobs: /\/api\/v1\/training\/jobs\/?(\?.*)?$/,
+  journalTrades: /\/api\/v1\/journal\/trades(\?.*)?$/,
+  journalSkillAttribution: /\/api\/v1\/journal\/skill-attribution(\?.*)?$/,
+  journalFilters: /\/api\/v1\/journal\/filters(\?.*)?$/,
+  journalCsv: /\/api\/v1\/journal\/trades\.csv(\?.*)?$/,
 };
 
 async function open(page: Page, path: string): Promise<void> {
@@ -169,5 +176,85 @@ test.describe('load failures are visible, not empty states', () => {
     const entry = page.getByTestId('nav-models');
     await expect(entry).toBeVisible();
     await expect(entry).toHaveAttribute('href', '/models');
+  });
+});
+
+test.describe('journal CSV export says what happened', () => {
+  test.skip(!READY, SKIP_REASON);
+
+  // The export button reads only the body it is handed, so the table behind it is
+  // served empty on purpose: none of these cases may pass because of the list.
+  async function openJournal(page: Page) {
+    await page.route(ROUTE.journalFilters, (route) =>
+      json(route, { instruments: [], rule_families: [], exit_reasons: [] }),
+    );
+    await page.route(ROUTE.journalTrades, (route) =>
+      json(route, {
+        trades: [],
+        total_count: 0,
+        summary: { total_trades: 0, total_pnl: '0', win_rate: null },
+      }),
+    );
+    await page.route(ROUTE.journalSkillAttribution, (route) => json(route, { skills: [] }));
+    await open(page, '/journal');
+    return page.getByRole('button', { name: 'Export trades to CSV' });
+  }
+
+  const CSV_HEADER = 'run_id,trade_id,instrument_id,net_pnl,pnl_reason_zh\r\n';
+  const csv = (route: Route, body: string) =>
+    route.fulfill({ status: 200, contentType: 'text/csv; charset=utf-8', body });
+
+  test('a failed export names the server reason instead of doing nothing', async ({ page }) => {
+    const button = await openJournal(page);
+    await page.route(ROUTE.journalCsv, serverError);
+
+    await button.click();
+
+    const notice = page.getByTestId('journal-export-error');
+    await expect(notice).toBeVisible();
+    // The detail the backend sent, not a generic "download failed".
+    await expect(notice).toContainText('模擬的伺服器錯誤（回歸測試）');
+    await expect(page.getByTestId('journal-export-notice')).toHaveCount(0);
+  });
+
+  test('a header-only export is reported as nothing to export', async ({ page }) => {
+    const button = await openJournal(page);
+    // Exactly what /journal/trades.csv returns for a filter with no trades.
+    await page.route(ROUTE.journalCsv, (route) => csv(route, CSV_HEADER));
+
+    await button.click();
+
+    const notice = page.getByTestId('journal-export-notice');
+    await expect(notice).toBeVisible();
+    await expect(notice).toContainText('nothing to export');
+    await expect(page.getByTestId('journal-export-error')).toHaveCount(0);
+  });
+
+  test('a real export states the record count, not just that it succeeded', async ({ page }) => {
+    const button = await openJournal(page);
+    await page.route(ROUTE.journalCsv, (route) =>
+      csv(
+        route,
+        `${CSV_HEADER}run-1,t-1,BTC-USD,10.5,目標價達成\r\nrun-1,t-2,ETH-USD,-3.25,訊號反轉\r\n`,
+      ),
+    );
+
+    await button.click();
+
+    await expect(page.getByTestId('journal-export-notice')).toContainText('Exported 2 trades');
+    await expect(page.getByTestId('journal-export-error')).toHaveCount(0);
+  });
+
+  test('a reason cell holding a line break is still one trade', async ({ page }) => {
+    const button = await openJournal(page);
+    // csv.QUOTE_MINIMAL quotes such a field, so counting physical lines would
+    // announce two trades from a file that holds one.
+    await page.route(ROUTE.journalCsv, (route) =>
+      csv(route, `${CSV_HEADER}run-1,t-1,BTC-USD,10.5,"前半段持有\r\n後半段提前出場"\r\n`),
+    );
+
+    await button.click();
+
+    await expect(page.getByTestId('journal-export-notice')).toContainText('Exported 1 trade');
   });
 });

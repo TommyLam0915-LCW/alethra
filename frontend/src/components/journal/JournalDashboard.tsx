@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { api, formatErrorDetail, ApiError } from '@/lib/api';
+import { csvDataRowCount } from '@/lib/csvRecords';
 import { classifySummaryStatus } from '@/lib/journalSummaryStatus';
 import AppShell from '@/components/shell/AppShell';
 import JournalFilterBar from './JournalFilterBar';
@@ -555,6 +556,9 @@ export default function JournalDashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [skills, setSkills] = useState<SkillRow[]>([]);
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+  const [exportNotice, setExportNotice] = useState<string | null>(null);
 
   // Load filter options on mount
   useEffect(() => {
@@ -621,8 +625,18 @@ export default function JournalDashboard() {
   };
 
   const handleDownloadCsv = async () => {
+    setExporting(true);
+    setExportError(null);
+    setExportNotice(null);
     try {
       const text = await api.journal.tradesCsv(appliedFilters);
+      const rows = csvDataRowCount(text);
+      if (rows === 0) {
+        // A filter that matches nothing is a 200 whose body is only the header line,
+        // so the download would open as an empty spreadsheet and read as a success.
+        setExportNotice('No trades match these filters, so there is nothing to export.');
+        return;
+      }
       const blob = new Blob([text], { type: 'text/csv;charset=utf-8' });
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement('a');
@@ -630,8 +644,11 @@ export default function JournalDashboard() {
       anchor.download = 'journal-trades.csv';
       anchor.click();
       URL.revokeObjectURL(url);
-    } catch {
-      // Silently fail for CSV download
+      setExportNotice(`Exported ${rows} trade${rows === 1 ? '' : 's'} to journal-trades.csv.`);
+    } catch (err) {
+      setExportError(refusalFrom(err));
+    } finally {
+      setExporting(false);
     }
   };
 
@@ -660,11 +677,44 @@ export default function JournalDashboard() {
             type="button"
             className="ws-range-btn"
             aria-label="Export trades to CSV"
+            disabled={exporting}
             onClick={() => void handleDownloadCsv()}
           >
-            Export CSV
+            {exporting ? 'Exporting…' : 'Export CSV'}
           </button>
         </div>
+
+        {exportError && (
+          <div
+            role="alert"
+            data-testid="journal-export-error"
+            style={{
+              border: '1px solid var(--negative)',
+              backgroundColor: 'rgba(226,99,110,0.1)',
+              borderRadius: 6,
+              padding: 12,
+              marginBottom: 16,
+              fontSize: 13,
+            }}
+          >
+            {exportError}
+          </div>
+        )}
+
+        {exportNotice && (
+          <div
+            role="status"
+            aria-live="polite"
+            data-testid="journal-export-notice"
+            style={{
+              color: 'var(--text-secondary)',
+              fontSize: 13,
+              marginBottom: 16,
+            }}
+          >
+            {exportNotice}
+          </div>
+        )}
 
         {/* Filter Bar */}
         <JournalFilterBar
