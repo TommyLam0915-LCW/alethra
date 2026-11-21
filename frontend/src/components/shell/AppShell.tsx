@@ -47,6 +47,9 @@ const TOOL_LINKS = [
   { href: '/strategy-templates', label: 'Strategy templates' },
   { href: '/training', label: 'Training jobs' },
   { href: '/inference', label: 'Inference runs' },
+  // The learning API had no frontend consumer at all, so the two owner
+  // decisions it exists to collect were unreachable from the UI.
+  { href: '/learning', label: 'Learning proposals' },
   { href: '/agent-strategy', label: 'Agent screening' },
   { href: '/research-drafts', label: 'Research drafts' },
   { href: '/execution', label: 'Execution intents' },

@@ -1152,6 +1152,38 @@ export const api = {
     collectionStop: () => apiFetch('/api/v1/admin/collection/stop', { method: 'POST' }),
     collectionHistory: (limit: number = 20) => apiFetch(`/api/v1/admin/collection/history?limit=${limit}`),
   },
+  // The auto-learning loop's owner-facing surface. These are the only five
+  // routes `app/api/learning.py` exposes that a page can act on; there is no
+  // endpoint that runs a backtest validation on demand, so nothing here offers
+  // one. Approve and deploy are separate calls because the server treats them
+  // as two owner decisions (`approve` at `:264`, `deploy` at `:389`).
+  learning: {
+    jobs: (limit = 20, status?: string) => {
+      const params = new URLSearchParams({ limit: String(limit) });
+      if (status) params.set('status', status);
+      return apiFetch(`/api/v1/learning/jobs?${params.toString()}`);
+    },
+    proposals: (limit = 50, status?: string) => {
+      const params = new URLSearchParams({ limit: String(limit) });
+      if (status) params.set('status', status);
+      return apiFetch(`/api/v1/learning/proposals?${params.toString()}`);
+    },
+    // POST /jobs/trigger creates the request record and, when the scheduler is
+    // up, dispatches real research work for the grid it names
+    // (`app/api/learning.py:203-232`). Omitting both fields takes the
+    // scheduled default set; sending `[]` is refused with 400 rather than
+    // silently expanded to the full workload.
+    triggerJob: (data: {
+      job_type: 'scheduled_study' | 'pattern_analysis';
+      instruments?: string[];
+      intervals?: number[];
+    }) =>
+      apiFetch('/api/v1/learning/jobs/trigger', { method: 'POST', body: JSON.stringify(data) }),
+    approveProposal: (proposalId: string) =>
+      apiFetch(`/api/v1/learning/proposals/${proposalId}/approve`, { method: 'POST' }),
+    deployProposal: (proposalId: string) =>
+      apiFetch(`/api/v1/learning/proposals/${proposalId}/deploy`, { method: 'POST' }),
+  },
   paperTrading: {
     history: (limit: number = 50) => apiFetch(`/api/v1/paper-trading/history?limit=${limit}`),
     status: (runId: string) => apiFetch(`/api/v1/paper-trading/status/${runId}`),
