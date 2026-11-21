@@ -23,30 +23,181 @@ from uuid import uuid4
 from sqlalchemy import text
 
 from tests import sql_membership, uuid_identity
-from tests.api_test_fixtures import api_test_fixtures
+from tests.api_test_fixtures import api_test_fixtures, seed_schedule
 from tests.conftest import TestSession
 
 
 FIXED_NOW = datetime(2026, 11, 7, 12, 0, 0, tzinfo=timezone.utc)
-FIXED_5_DAYS_AGO = FIXED_NOW - timedelta(days=5)
-FIXED_3_DAYS_AGO = FIXED_NOW - timedelta(days=3)
-FIXED_5_DAYS_AGO_1H = FIXED_5_DAYS_AGO + timedelta(hours=1)
-FIXED_3_DAYS_AGO_1H = FIXED_3_DAYS_AGO + timedelta(hours=1)
+
+# The two dates the fixture's seeded trades exit on, read off the same clock
+# the fixture is seeded with. Previously the fixture wrote rows at the wall
+# clock while this file asserted a bucket derived from FIXED_NOW, so the
+# reported count for the asserted date was whatever the calendar happened to
+# say — 0 since 2026-11-09, and the assertion absorbed it.
+SEED = seed_schedule(FIXED_NOW)
+TRADE1_BUCKET = SEED[0]["exit_date"]
+TRADE2_BUCKET = SEED[1]["exit_date"]
+# A date inside the replayed range with no exit on it, so a zero here is the
+# filter working rather than a window that selected nothing at all.
+EMPTY_BUCKET = TRADE1_BUCKET + timedelta(days=1)
+
+# days_back choices, derived from the seeded ages. Entries sit on whole days
+# behind FIXED_NOW, so the cutoff lands exactly on an entry instead of near it:
+#   TRADE1_AGE + 1  both trades strictly inside
+#   TRADE1_AGE      cutoff == trade1's entry, the inclusive edge
+#   TRADE1_AGE - 1  trade1 outside, trade2 inside
+#   TRADE2_AGE - 1  both outside
+TRADE1_AGE = (FIXED_NOW - SEED[0]["entry"]).days
+TRADE2_AGE = (FIXED_NOW - SEED[1]["entry"]).days
+IN_WINDOW_DAYS = TRADE1_AGE + 1
+AT_CUTOFF_DAYS = TRADE1_AGE
+ONE_SHORT_DAYS = TRADE1_AGE - 1
+ALL_OUT_DAYS = TRADE2_AGE - 1
 
 CENT_TOL = 0.01
 DECIMAL_TOL = 0.00001
 
 
-def _calculate_expected_replay():
+class _PlainDatetimeChecks(type):
+    """Make a datetime subclass answer isinstance() like datetime itself."""
+
+    def __instancecheck__(cls, obj):
+        return isinstance(obj, datetime)
+
+    def __subclasscheck__(cls, obj):
+        return issubclass(obj, datetime)
+
+
+class _FrozenDatetime(datetime, metaclass=_PlainDatetimeChecks):
+    """datetime, except that ``now()`` returns the declared clock.
+
+    Subclassing rather than substituting a duck-typed stand-in matters here:
+    ``app/services/paper_trading.py`` calls ``isinstance(x, datetime)`` and
+    ``datetime.fromisoformat()`` on the way in, and a replacement that only
+    implemented ``now`` would flip those checks and change which timestamps
+    get normalised. The metaclass keeps a plain datetime passing the check.
+    """
+
+    @classmethod
+    def now(cls, tz=None):
+        return FIXED_NOW
+
+    @classmethod
+    def fromisoformat(cls, value):
+        """Parse with the real class, so nothing downstream gets this subclass.
+
+        ``_as_utc`` rebuilds the ISO text SQLite hands back for a timestamp
+        column through ``datetime.fromisoformat``, and the result is later
+        bound into another statement. sqlite3's default adapter matches the
+        exact type, so a subclass instance raises
+        ``type '_FrozenDatetime' is not supported`` — the clock is pinned, the
+        type of the values is not.
+        """
+        return datetime.fromisoformat(value)
+
+
+class frozen_replay_clock:
+    """Pin the replay window to ``FIXED_NOW`` for the duration of a block.
+
+    ``execute_historical_replay`` derives both edges of its window from the
+    wall clock (``cutoff = now - days_back``, ``as_of = now``) while the rows it
+    selects are seeded from this file's declared clock. Two clocks is what made
+    "which trades are in the window" unanswerable, which is U8. Only the
+    module that cuts the window is pinned; every other timestamp in the
+    request still comes from the real clock.
+    """
+
+    def __enter__(self):
+        from app.services import paper_trading as service
+
+        self._service = service
+        self._original = service.datetime
+        service.datetime = _FrozenDatetime
+        return _FrozenDatetime
+
+    def __exit__(self, *exc_info):
+        self._service.datetime = self._original
+        return False
+
+
+def _login_and_create(client, email):
+    """Real login + portfolio create; returns (headers, portfolio_id, run_id)."""
+    login_resp = client.post(
+        "/api/auth/login", json={"email": email, "password": "testpass123"}
+    )
+    assert login_resp.status_code == 200, f"Login failed: {login_resp.json()}"
+    headers = {"Authorization": f"Bearer {login_resp.json()['access_token']}"}
+
+    create_resp = client.post(
+        "/api/v1/paper-trading/create",
+        headers=headers,
+        json={
+            "skill": "test_rule",
+            "instrument_id": "TEST/USD",
+            "interval_minutes": 60,
+            "exit_config": "default",
+            "initial_capital": 100000.0,
+        },
+    )
+    assert create_resp.status_code == 200, f"Create failed: {create_resp.json()}"
+    create_data = create_resp.json()
+    assert create_data["status"] == "queued"
+    return headers, create_data["portfolio_id"], create_data["run_id"]
+
+
+def _replay(client, headers, run_id, days_back):
+    resp = client.post(
+        f"/api/v1/paper-trading/replay/{run_id}",
+        headers=headers,
+        json={
+            "days_back": days_back,
+            "position_size_pct": 0.10,
+            "max_positions": 3,
+        },
+    )
+    assert resp.status_code == 200, f"Replay failed: {resp.json()}"
+    return resp.json()
+
+
+def _report(client, headers, run_id, on_date):
+    resp = client.get(
+        f"/api/v1/paper-trading/daily-report/{run_id}?report_date={on_date.isoformat()}",
+        headers=headers,
+    )
+    assert resp.status_code == 200, f"Daily report failed: {resp.json()}"
+    return resp.json()
+
+
+def _seeded_trade_count(study_run_id):
+    """How many source trades the fixture really wrote for this study run.
+
+    An out-of-window verdict is only evidence if the rows were there to be
+    excluded; asking the database keeps that from being an assumption.
+    """
+    clause, params = uuid_identity.match("run_id", study_run_id, name="srid")
+    db = TestSession()
+    try:
+        return db.execute(
+            text(f"SELECT COUNT(*) FROM strategy_study_trades WHERE {clause}"), params
+        ).scalar()
+    finally:
+        db.close()
+
+
+def _calculate_expected_replay(kept=(0, 1)):
     """Independently calculate expected replay results from fixture source data.
 
     Uses the same formulas as PaperTradingEngine.execute_historical_replay()
     but implemented separately to avoid coupling to production code.
     All arithmetic uses Decimal to match engine precision.
 
+    ``kept`` selects which of the two seeded trades the replay window is
+    expected to admit; the window tests assert against the same arithmetic with
+    a different subset instead of re-deriving it inline.
+
     Source data (from api_test_fixtures):
-    - Trade 1: entry_price=100, exit_price=110, direction=long
-    - Trade 2: entry_price=100, exit_price=90, direction=long
+    - Trade 0: entry_price=100, exit_price=110, direction=long
+    - Trade 1: entry_price=100, exit_price=90, direction=long
 
     Replay parameters:
     - initial_capital=100000, position_size_pct=0.10, max_positions=3
@@ -57,10 +208,11 @@ def _calculate_expected_replay():
     commission_rate = Decimal("0.001")
     slippage_rate = Decimal("0.0005")
 
-    source_trades = [
+    all_source_trades = [
         {"entry_price": Decimal("100"), "exit_price": Decimal("110")},
         {"entry_price": Decimal("100"), "exit_price": Decimal("90")},
     ]
+    source_trades = [all_source_trades[i] for i in kept]
 
     available_cash = initial_capital
     position_value = Decimal("0")
@@ -283,7 +435,7 @@ class TestRealAPILoginWithFixture:
         """
         test_email = f"login_test_{uuid4().hex[:8]}@example.com"
 
-        with api_test_fixtures(test_email) as (auth_headers, user_id, run_id):
+        with api_test_fixtures(test_email, now=FIXED_NOW) as (auth_headers, user_id, run_id):
             login_resp = client.post(
                 "/api/auth/login",
                 json={"email": test_email, "password": "testpass123"}
@@ -329,43 +481,15 @@ class TestRealAPILoginWithFixture:
         test_email = f"full_chain_{uuid4().hex[:8]}@example.com"
         expected = _calculate_expected_replay()
 
-        with api_test_fixtures(test_email) as (auth_headers, user_id, study_run_id):
-            login_resp = client.post(
-                "/api/auth/login",
-                json={"email": test_email, "password": "testpass123"}
-            )
-            assert login_resp.status_code == 200, f"Login failed: {login_resp.json()}"
-            real_token = login_resp.json()["access_token"]
-            real_headers = {"Authorization": f"Bearer {real_token}"}
+        with api_test_fixtures(test_email, now=FIXED_NOW) as (auth_headers, user_id, study_run_id), frozen_replay_clock():
+            real_headers, portfolio_id, run_id = _login_and_create(client, test_email)
 
-            create_resp = client.post(
-                "/api/v1/paper-trading/create",
-                headers=real_headers,
-                json={
-                    "skill": "test_rule",
-                    "instrument_id": "TEST/USD",
-                    "interval_minutes": 60,
-                    "exit_config": "default",
-                    "initial_capital": 100000.0,
-                },
-            )
-            assert create_resp.status_code == 200, f"Create failed: {create_resp.json()}"
-            create_data = create_resp.json()
-            assert create_data["status"] == "queued"
-            portfolio_id = create_data["portfolio_id"]
-            run_id = create_data["run_id"]
-
-            replay_resp = client.post(
-                f"/api/v1/paper-trading/replay/{run_id}",
-                headers=real_headers,
-                json={
-                    "days_back": 30,
-                    "position_size_pct": 0.10,
-                    "max_positions": 3,
-                },
-            )
-            assert replay_resp.status_code == 200, f"Replay failed: {replay_resp.json()}"
-            replay_data = replay_resp.json()
+            # IN_WINDOW_DAYS is derived from the seeded ages, so "both seeded
+            # trades are inside the window" is a property of the declared
+            # clock. It used to be `days_back: 30` measured against a fixture
+            # seeded at the wall clock, which made the answer depend on when
+            # the suite ran.
+            replay_data = _replay(client, real_headers, run_id, IN_WINDOW_DAYS)
 
             assert replay_data["status"] == "completed"
             assert replay_data["total_trades"] == expected["total_trades"]
@@ -386,17 +510,29 @@ class TestRealAPILoginWithFixture:
             assert abs(status_data["current_capital"] - float(expected["final_capital"])) < CENT_TOL
             assert abs(status_data["win_rate"] - float(expected["win_rate"])) < DECIMAL_TOL
 
-            trade1_exit_date = FIXED_5_DAYS_AGO_1H.date()
-            report_resp = client.get(
-                f"/api/v1/paper-trading/daily-report/{run_id}"
-                f"?report_date={trade1_exit_date.isoformat()}",
-                headers=real_headers,
-            )
-            assert report_resp.status_code == 200
-            report_data = report_resp.json()
+            # Per-bucket counts derived from the seed clock: the seeded
+            # schedule exits exactly one trade on each of these two days, so
+            # a 2 (both trades landing in one bucket) and a 0 (an empty window
+            # the report still answers happily for) are both refused here. The
+            # previous form was `>= 1`, which accepted either.
+            report_data = _report(client, real_headers, run_id, TRADE1_BUCKET)
             assert report_data["run_id"] == run_id
-            assert report_data["trades"]["count"] >= 1
+            assert report_data["date"] == TRADE1_BUCKET.isoformat()
+            assert report_data["trades"]["count"] == 1
+            assert report_data["trades"]["wins"] == 1
+            assert report_data["trades"]["losses"] == 0
             assert abs(report_data["portfolio"]["starting_capital"] - 100000.0) < CENT_TOL
+
+            trade2_report = _report(client, real_headers, run_id, TRADE2_BUCKET)
+            assert trade2_report["trades"]["count"] == 1
+            assert trade2_report["trades"]["wins"] == 0
+            assert trade2_report["trades"]["losses"] == 1
+
+            # A calendar day inside the replayed span with no exit on it. This
+            # is what makes the two counts above informative: without a date
+            # that must answer 0, "every date answers 1" would look identical.
+            empty_report = _report(client, real_headers, run_id, EMPTY_BUCKET)
+            assert empty_report["trades"]["count"] == 0
 
             saved_ids = _capture_all_ids(portfolio_id, run_id)
 
@@ -470,7 +606,9 @@ class TestRealAPILoginWithFixture:
                 for actual_pnl, exp_pnl in zip(pos_pnls, expected_pnls):
                     assert abs(actual_pnl - exp_pnl) < CENT_TOL
 
-                assert len(saved_ids["metric_ids"]) >= 1
+                # One metric row per seeded exit date, and the rows together
+                # account for every trade the window admitted.
+                assert len(saved_ids["metric_ids"]) == len(SEED)
                 metrics = db.execute(
                     sql_membership.list_sql(
                         "SELECT * FROM paper_trading_daily_metrics WHERE id IN :mids",
@@ -521,7 +659,7 @@ class TestRealAPILoginWithFixture:
         }
 
         try:
-            with api_test_fixtures(test_email) as (auth_headers, user_id, study_run_id):
+            with api_test_fixtures(test_email, now=FIXED_NOW) as (auth_headers, user_id, study_run_id), frozen_replay_clock():
                 captured["user_id"] = user_id
 
                 login_resp = client.post(
@@ -549,7 +687,7 @@ class TestRealAPILoginWithFixture:
                 replay_resp = client.post(
                     f"/api/v1/paper-trading/replay/{captured['run_id']}",
                     headers=real_headers,
-                    json={"days_back": 30, "position_size_pct": 0.10, "max_positions": 3},
+                    json={"days_back": IN_WINDOW_DAYS, "position_size_pct": 0.10, "max_positions": 3},
                 )
                 assert replay_resp.status_code == 200
                 assert replay_resp.json()["status"] == "completed"
@@ -587,3 +725,169 @@ class TestRealAPILoginWithFixture:
         _verify_zero_residual_by_ids(
             captured["saved_ids"], test_email, captured["user_id"]
         )
+
+    def test_trades_inside_the_window_are_counted_in_their_exit_buckets(self, client):
+        """Every trade the window admits is reported, on its own exit day.
+
+        This is the half of U8 that ``assert count >= 1`` could not answer. The
+        floor accepted a 2 (both trades credited to one day) and a 0 (a window
+        that selected nothing) alike, so the suite stayed green while per-day
+        attribution went unmeasured.
+
+        ``IN_WINDOW_DAYS`` is derived from the seeded ages, so "both rows are
+        inside" is a property of the declared clock rather than the calendar.
+        """
+        test_email = f"window_in_{uuid4().hex[:8]}@example.com"
+        expected = _calculate_expected_replay()
+
+        with api_test_fixtures(test_email, now=FIXED_NOW) as (
+            auth_headers, user_id, study_run_id
+        ), frozen_replay_clock():
+            headers, _, run_id = _login_and_create(client, test_email)
+
+            # The rows the window is about to admit must exist for this user
+            # first; otherwise "counted" and "nothing to count" look identical.
+            assert _seeded_trade_count(study_run_id) == len(SEED)
+
+            replay_data = _replay(client, headers, run_id, IN_WINDOW_DAYS)
+            assert replay_data["status"] == "completed"
+            assert replay_data["total_trades"] == len(SEED)
+            assert abs(
+                replay_data["win_rate"] - float(expected["win_rate"])
+            ) < DECIMAL_TOL
+
+            # One trade per day, and the money on each day is that one trade's
+            # net P&L: a count alone would still pass if both trades had been
+            # credited to the same bucket.
+            trade1_report = _report(client, headers, run_id, TRADE1_BUCKET)
+            assert trade1_report["trades"]["count"] == 1
+            assert trade1_report["trades"]["wins"] == 1
+            assert trade1_report["trades"]["losses"] == 0
+            assert abs(
+                trade1_report["portfolio"]["daily_pnl"]
+                - float(expected["trades"][0]["net_pnl"])
+            ) < CENT_TOL
+
+            trade2_report = _report(client, headers, run_id, TRADE2_BUCKET)
+            assert trade2_report["trades"]["count"] == 1
+            assert trade2_report["trades"]["wins"] == 0
+            assert trade2_report["trades"]["losses"] == 1
+            assert abs(
+                trade2_report["portfolio"]["daily_pnl"]
+                - float(expected["trades"][1]["net_pnl"])
+            ) < CENT_TOL
+
+            # A date the window spans with no exit on it. Without this row the
+            # two counts above could simply be "every date answers 1".
+            gap_report = _report(client, headers, run_id, EMPTY_BUCKET)
+            assert gap_report["trades"]["count"] == 0
+            assert gap_report["portfolio"]["daily_pnl"] == 0.0
+
+    def test_trades_older_than_the_window_are_excluded(self, client):
+        """An entry before the cutoff is dropped even though the row is there.
+
+        Each ``days_back`` choice gets its own run: the service refuses a second
+        replay of a completed run (``app/services/paper_trading.py:276``), and a
+        fresh run also stops the two verdicts from sharing written state. The
+        source rows are seeded identically for both, so the cutoff is the only
+        thing these assertions can be measuring.
+        """
+        test_email = f"window_out_{uuid4().hex[:8]}@example.com"
+        expected_kept = _calculate_expected_replay(kept=(1,))
+
+        with api_test_fixtures(test_email, now=FIXED_NOW) as (
+            auth_headers, user_id, study_run_id
+        ), frozen_replay_clock():
+            assert _seeded_trade_count(study_run_id) == len(SEED)
+
+            headers, _, run_id = _login_and_create(client, test_email)
+            replay_data = _replay(client, headers, run_id, ONE_SHORT_DAYS)
+
+            assert replay_data["status"] == "completed"
+            assert replay_data["total_trades"] == 1
+            assert abs(
+                replay_data["total_pnl"] - float(expected_kept["total_pnl"])
+            ) < CENT_TOL
+            assert abs(
+                replay_data["final_capital"] - float(expected_kept["final_capital"])
+            ) < CENT_TOL
+
+            # The dropped trade's exit day answers 0 while its source row is
+            # still in the database — the filter excluded it, it was never
+            # missing. Re-count after the replay to show the replay itself did
+            # not consume the source row.
+            dropped_report = _report(client, headers, run_id, TRADE1_BUCKET)
+            assert dropped_report["trades"]["count"] == 0
+            assert dropped_report["portfolio"]["daily_pnl"] == 0.0
+            assert _seeded_trade_count(study_run_id) == len(SEED)
+
+            kept_report = _report(client, headers, run_id, TRADE2_BUCKET)
+            assert kept_report["trades"]["count"] == 1
+            assert kept_report["trades"]["losses"] == 1
+            assert abs(
+                kept_report["portfolio"]["daily_pnl"]
+                - float(expected_kept["trades"][0]["net_pnl"])
+            ) < CENT_TOL
+
+            # A window shorter than both ages admits nothing. Zero admitted is
+            # a completed run with no win rate, not a run that lost everything.
+            empty_headers, _, empty_run_id = _login_and_create(client, test_email)
+            empty_replay = _replay(client, empty_headers, empty_run_id, ALL_OUT_DAYS)
+            assert empty_replay["status"] == "completed"
+            assert empty_replay["total_trades"] == 0
+            assert empty_replay["win_rate"] is None
+
+            for bucket in (TRADE1_BUCKET, TRADE2_BUCKET):
+                nothing = _report(client, empty_headers, empty_run_id, bucket)
+                assert nothing["trades"]["count"] == 0
+
+    def test_replay_window_boundary_is_inclusive_at_the_cutoff(self, client):
+        """The entry edge is ``>=``, pinned by a one-day step across the cutoff.
+
+        Entries land on whole days behind the declared clock, so one day of
+        ``days_back`` moves the cutoff from exactly on trade 1's entry to one
+        day past it:
+
+            AT_CUTOFF_DAYS  cutoff == trade1.entry_time        -> 2 admitted
+            ONE_SHORT_DAYS  cutoff == trade1.entry_time + 1d   -> 1 admitted
+
+        A strict ``>`` would answer 1 on the first line and an off-by-one in the
+        delta would answer 2 on the second, so the pair pins the boundary in
+        both directions instead of asserting a convention.
+        """
+        test_email = f"window_edge_{uuid4().hex[:8]}@example.com"
+        expected = _calculate_expected_replay()
+
+        # The exit edge is deliberately not what these two cases test: both
+        # seeded exits precede the pinned ``as_of``, so the entry clause is
+        # always the one that can drop a trade here.
+        assert SEED[0]["exit"] < FIXED_NOW and SEED[1]["exit"] < FIXED_NOW
+
+        with api_test_fixtures(test_email, now=FIXED_NOW) as (
+            auth_headers, user_id, study_run_id
+        ), frozen_replay_clock():
+            headers, _, run_id = _login_and_create(client, test_email)
+            on_cutoff = _replay(client, headers, run_id, AT_CUTOFF_DAYS)
+            assert on_cutoff["total_trades"] == len(SEED), (
+                "cutoff == entry_time must admit the trade; a strict > would "
+                f"have returned {on_cutoff['total_trades']}"
+            )
+
+            edge_report = _report(client, headers, run_id, TRADE1_BUCKET)
+            assert edge_report["trades"]["count"] == 1
+            assert abs(
+                edge_report["portfolio"]["daily_pnl"]
+                - float(expected["trades"][0]["net_pnl"])
+            ) < CENT_TOL
+
+            past_headers, _, past_run_id = _login_and_create(client, test_email)
+            one_day_past = _replay(client, past_headers, past_run_id, ONE_SHORT_DAYS)
+            assert one_day_past["total_trades"] == len(SEED) - 1
+            assert (
+                _report(client, past_headers, past_run_id, TRADE1_BUCKET)["trades"]["count"]
+                == 0
+            )
+            assert (
+                _report(client, past_headers, past_run_id, TRADE2_BUCKET)["trades"]["count"]
+                == 1
+            )

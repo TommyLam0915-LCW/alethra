@@ -8,17 +8,47 @@ Cleanup errors propagate:
 - Test body fails, cleanup fails → both errors visible
 """
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from sqlalchemy import text
 from tests import uuid_identity
 from tests.conftest import TestSession
 
+# How far behind the seed clock each study trade is entered, and how long it is
+# held. They live here because this module is the only writer of those rows; a
+# test that re-typed "5 days" was asserting against a second copy of a
+# schedule it did not control.
+TRADE_AGE_DAYS = (5, 3)
+TRADE_HOLD = timedelta(hours=1)
+
+
+def seed_schedule(now: datetime) -> tuple[dict, ...]:
+    """The exact timestamps ``api_test_fixtures`` writes for clock ``now``.
+
+    The writer and the assertions call this one function, so a calendar bucket
+    or a query window can only be derived from the clock that seeded the rows.
+    Entries land on whole days behind ``now``, which makes a one-day
+    ``days_back`` step hit an entry exactly instead of near it.
+    """
+    return tuple(
+        {
+            "entry": now - timedelta(days=age),
+            "exit": now - timedelta(days=age) + TRADE_HOLD,
+            "exit_date": (now - timedelta(days=age) + TRADE_HOLD).date(),
+        }
+        for age in TRADE_AGE_DAYS
+    )
+
 
 @contextmanager
-def api_test_fixtures(email: str):
+def api_test_fixtures(email: str, *, now: datetime | None = None):
     """Context manager that creates and cleans up API test fixtures.
     
     Args:
         email: Test user email
+        now: the clock every seeded timestamp is derived from; defaults to the
+            wall clock. A test that asserts a calendar bucket has to pass the
+            same instant it freezes the replay window against, or the row is
+            written from one clock and judged from another.
     
     Creates in order:
     1. User
@@ -38,8 +68,12 @@ def api_test_fixtures(email: str):
     """
     from app.auth.jwt import get_password_hash, create_access_token
     from app.models.user import User
-    from datetime import datetime, timezone, timedelta
+    from datetime import datetime, timezone
     from uuid import uuid4, UUID
+
+    # One clock per fixture instance: resolving it here rather than at each
+    # write means the run row and the trade rows cannot straddle a midnight.
+    seed_now = now if now is not None else datetime.now(timezone.utc)
 
     user_id = uuid4()
     study_run_id = uuid4()
@@ -77,8 +111,6 @@ def api_test_fixtures(email: str):
         
         db = TestSession()
         try:
-            now = datetime.now(timezone.utc)
-            
             db.execute(
                 text("""
                     INSERT INTO strategy_study_runs (
@@ -91,7 +123,7 @@ def api_test_fixtures(email: str):
                         '{}', '{}', '[]', 2, :now
                     )
                 """),
-                {"id": str(study_run_id), "user_id": str(user_id), "now": now},
+                {"id": str(study_run_id), "user_id": str(user_id), "now": seed_now},
             )
             db.commit()
         finally:
@@ -102,12 +134,14 @@ def api_test_fixtures(email: str):
         
         db = TestSession()
         try:
-            now = datetime.now(timezone.utc)
-            
+            schedule = seed_schedule(seed_now)
+
             # Trade 1: Buy @ $100, sell @ $110 → profitable
+            # Indexing the schedule instead of re-typing the offsets is the
+            # check: a changed TRADE_AGE_DAYS stops these two rows, not a
+            # silent drift between what was written and what is asserted.
             trade1_id = str(uuid4())
-            entry_time_1 = now - timedelta(days=5)
-            exit_time_1 = now - timedelta(days=5) + timedelta(hours=1)
+            entry_time_1, exit_time_1 = schedule[0]["entry"], schedule[0]["exit"]
             db.execute(
                 text("""
                     INSERT INTO strategy_study_trades (
@@ -124,14 +158,13 @@ def api_test_fixtures(email: str):
                 """),
                 {
                     "id": trade1_id, "run_id": str(study_run_id),
-                    "entry_time": entry_time_1, "exit_time": exit_time_1, "now": now,
+                    "entry_time": entry_time_1, "exit_time": exit_time_1, "now": seed_now,
                 },
             )
             
             # Trade 2: Buy @ $100, sell @ $90 → loss
             trade2_id = str(uuid4())
-            entry_time_2 = now - timedelta(days=3)
-            exit_time_2 = now - timedelta(days=3) + timedelta(hours=1)
+            entry_time_2, exit_time_2 = schedule[1]["entry"], schedule[1]["exit"]
             db.execute(
                 text("""
                     INSERT INTO strategy_study_trades (
@@ -148,7 +181,7 @@ def api_test_fixtures(email: str):
                 """),
                 {
                     "id": trade2_id, "run_id": str(study_run_id),
-                    "entry_time": entry_time_2, "exit_time": exit_time_2, "now": now,
+                    "entry_time": entry_time_2, "exit_time": exit_time_2, "now": seed_now,
                 },
             )
             
