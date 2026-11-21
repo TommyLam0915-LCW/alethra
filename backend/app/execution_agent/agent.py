@@ -625,7 +625,8 @@ class ExecutionAgent:
         - Failed uploads are persisted in durable journal and retried across restarts (P0-C)
         - Intent is only marked completed after all fills are acknowledged
         """
-        max_wait_seconds = 60
+        max_wait_seconds = self.config.fill_monitor_max_wait_seconds
+        poll_seconds = self.config.fill_monitor_poll_seconds
         start_time = time.time()
 
         while time.time() - start_time < max_wait_seconds:
@@ -633,7 +634,7 @@ class ExecutionAgent:
                 status_val = self.ibkr_client.get_order_status(broker_order_id)
             except Exception as e:
                 logger.error(f"Error checking order status: {_safe_exception(e)}")
-                time.sleep(1)
+                time.sleep(poll_seconds)
                 continue
 
             status_enum = BrokerOrderStatus(status_val)
@@ -685,7 +686,7 @@ class ExecutionAgent:
                         f"Order {broker_order_id} is FILLED but {len(pending_for_order)} fill(s) "
                         f"not yet delivered to platform; continuing retry"
                     )
-                    time.sleep(2)
+                    time.sleep(2 * poll_seconds)
                     continue
                 else:
                     # All fills delivered
@@ -705,7 +706,7 @@ class ExecutionAgent:
                         f"Order {broker_order_id} was {status_enum.value} but "
                         f"{len(pending_for_order)} fill(s) not yet delivered; continuing retry"
                     )
-                    time.sleep(2)
+                    time.sleep(2 * poll_seconds)
                     continue
                 
                 # All fills delivered (or no fills), report cancellation
@@ -720,12 +721,12 @@ class ExecutionAgent:
                         f"Failed to report cancellation: {_safe_exception(e)}"
                     )
                     # Don't mark complete if cancellation report failed
-                    time.sleep(2)
+                    time.sleep(2 * poll_seconds)
                     continue
                 self._completed_intents.add(intent_id)
                 return
 
-            time.sleep(1)
+            time.sleep(poll_seconds)
 
         # Timeout - don't mark complete, will continue on next poll
         logger.warning(

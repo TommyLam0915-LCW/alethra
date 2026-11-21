@@ -21,6 +21,13 @@ class AgentConfig:
         poll_interval_seconds: How often to poll for new order intents
         reconnect_interval_seconds: How long to wait before reconnecting to IB Gateway
         max_reconnect_attempts: Maximum reconnection attempts before giving up
+        fill_monitor_max_wait_seconds: Wall-clock deadline for one fill-monitor
+            pass. The monitor's loop condition is ``time.time()`` based, so this
+            — not the sleep spacing — decides how long an order that never
+            reaches a terminal status is watched.
+        fill_monitor_poll_seconds: Pause between monitor polls, and the base for
+            the 2x backoff used when a terminal status still has undelivered
+            fills or a failed report.
         trading_mode: "paper" (default) or "live"
         allow_live: Must be True to permit trading_mode="live" (live is disabled by default)
         log_level: Logging level (DEBUG, INFO, WARNING, ERROR)
@@ -33,6 +40,8 @@ class AgentConfig:
     poll_interval_seconds: int = 5
     reconnect_interval_seconds: int = 10
     max_reconnect_attempts: int = 5
+    fill_monitor_max_wait_seconds: float = 60.0
+    fill_monitor_poll_seconds: float = 1.0
     trading_mode: str = "paper"
     allow_live: bool = False
     log_level: str = "INFO"
@@ -51,6 +60,10 @@ class AgentConfig:
             raise ValueError(f"Invalid ib_gateway_port: {self.ib_gateway_port}")
         if self.poll_interval_seconds <= 0:
             raise ValueError("poll_interval_seconds must be positive")
+        if self.fill_monitor_max_wait_seconds <= 0:
+            raise ValueError("fill_monitor_max_wait_seconds must be positive")
+        if self.fill_monitor_poll_seconds <= 0:
+            raise ValueError("fill_monitor_poll_seconds must be positive")
         if self.trading_mode not in ("paper", "live"):
             raise ValueError(
                 f"Invalid trading_mode: {self.trading_mode!r} (expected 'paper' or 'live')"

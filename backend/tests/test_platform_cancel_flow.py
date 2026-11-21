@@ -157,18 +157,16 @@ def _make_agent(testclient, headers, transport):
         poll_interval_seconds=1,
         max_reconnect_attempts=3,
         reconnect_interval_seconds=0,
+        # The monitor's exit is a wall-clock deadline (time.time() based), so
+        # shortening the deadline is what actually shortens the wait; an order
+        # that never reaches a terminal status still gets polled, just briefly.
+        fill_monitor_max_wait_seconds=0.2,
+        fill_monitor_poll_seconds=0.02,
     )
     alethra_client = TestClientAlethraClient(testclient, headers)
     agent = ExecutionAgent(config, IBKRClient(transport), alethra_client)
     agent.connect()
     return agent
-
-
-@pytest.fixture(autouse=True)
-def _no_monitor_sleep(monkeypatch):
-    """The fill monitor polls up to 60 times with 1s sleeps; drop the sleeps
-    so a submitted-unfilled order exits the monitor quickly in tests."""
-    monkeypatch.setattr("app.execution_agent.agent.time.sleep", lambda s: None)
 
 
 class TestPlatformCancelFlow:
@@ -397,3 +395,85 @@ class TestCancelRequestedContract:
         agent._cancel_submitted_order(intent)
         alethra.report_order_cancelled.assert_called_once()
         assert intent.intent_id in agent._completed_intents
+
+
+class TestFillMonitorDeadline:
+    """The fill monitor leaves on a wall-clock deadline, so the deadline — not
+    a suppressed sleep — is what makes an order that never reaches a terminal
+    status leave quickly.
+
+    This class replaces an autouse fixture that patched ``time.sleep`` through
+    the agent module's namespace. ``app.execution_agent.agent.time`` *is* the
+    stdlib module, so that patch was process-wide, and the three measured runs
+    still returned 60.04s / 60.05s per node: suppressing the sleeps cannot
+    shorten a deadline computed from ``time.time()``.
+    """
+
+    deadline_seconds = 0.2
+    poll_seconds = 0.02
+
+    def _monitor_never_terminating_order(self, monkeypatch, alethra):
+        transport = FakeBrokerTransport(fill_mode="delayed", seed=0)
+        monkeypatch.setattr(transport._rng, "random", lambda: 0.9)
+        transport.connect()
+        result = transport.submit_order("US:AAPL", "BUY", 10)
+        assert result.success
+
+        config = AgentConfig(
+            alethra_api_key="k",
+            alethra_api_url="http://x",
+            fill_monitor_max_wait_seconds=self.deadline_seconds,
+            fill_monitor_poll_seconds=self.poll_seconds,
+        )
+        agent = ExecutionAgent(config, IBKRClient(transport), alethra)
+        return agent, transport, result.broker_order_id
+
+    def test_default_config_reproduces_the_production_wait(self):
+        config = AgentConfig()
+        assert config.fill_monitor_max_wait_seconds == 60.0
+        assert config.fill_monitor_poll_seconds == 1.0
+
+    @pytest.mark.parametrize("timing", [
+        {"fill_monitor_max_wait_seconds": 0},
+        {"fill_monitor_max_wait_seconds": -1},
+        {"fill_monitor_poll_seconds": 0},
+        {"fill_monitor_poll_seconds": -0.5},
+    ])
+    def test_validate_rejects_non_positive_monitor_timing(self, timing):
+        config = AgentConfig(alethra_api_key="k", alethra_api_url="http://x", **timing)
+        with pytest.raises(ValueError, match="must be positive"):
+            config.validate()
+
+    def test_unfilled_order_leaves_at_the_configured_deadline(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        alethra = MagicMock()
+        agent, transport, broker_ref = self._monitor_never_terminating_order(
+            monkeypatch, alethra
+        )
+
+        polls = {"n": 0}
+        original_status = transport.get_order_status
+
+        def counting_status(broker_order_id):
+            polls["n"] += 1
+            return original_status(broker_order_id)
+
+        monkeypatch.setattr(transport, "get_order_status", counting_status)
+
+        started = time.monotonic()
+        agent._monitor_fills_for_known_order("deadline-intent", broker_ref)
+        elapsed = time.monotonic() - started
+
+        # The wait is the configured deadline — not the 60s production default,
+        # and not an instant return.
+        assert self.deadline_seconds <= elapsed < 5.0, elapsed
+        # Each poll still pays a real sleep, so the pass is bounded by
+        # deadline/poll. A process-wide no-op sleep would blow this bound
+        # (that is what the removed fixture used to hide, not speed up).
+        assert 2 <= polls["n"] <= int(self.deadline_seconds / self.poll_seconds) + 3
+        # Exit reason is the deadline: no terminal status was ever reported and
+        # the intent stays un-completed for the next poll.
+        alethra.report_order_cancelled.assert_not_called()
+        alethra.report_fill.assert_not_called()
+        assert "deadline-intent" not in agent._completed_intents
