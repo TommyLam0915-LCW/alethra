@@ -6,6 +6,7 @@ import {
   type CandidateStatus,
 } from './candidate';
 import type { CryptoOverview, CryptoSeriesPayload } from './cryptoBars';
+import { readCsvExportMeta, type CsvExportMeta } from './csvRecords';
 import type { FeedbackSubmitRequest } from './feedbackDraft';
 import type { IntradayCapability, IntradaySeriesPayload } from './intradayBars';
 
@@ -173,17 +174,21 @@ async function authorizedFetch(
   return response;
 }
 
+async function apiErrorFrom(response: Response): Promise<ApiError> {
+  const error = await response.json().catch(() => ({ detail: 'Request failed' }));
+  return new ApiError(
+    formatErrorDetail(error.detail),
+    response.status,
+    error.detail,
+    requestIdOf(error, response),
+  );
+}
+
 export async function apiFetch(endpoint: string, options: RequestInit = {}) {
   const response = await authorizedFetch(endpoint, options, true);
 
   if (!response.ok) {
-    const error = await response.json().catch(() => ({ detail: 'Request failed' }));
-    throw new ApiError(
-      formatErrorDetail(error.detail),
-      response.status,
-      error.detail,
-      requestIdOf(error, response),
-    );
+    throw await apiErrorFrom(response);
   }
 
   // 204 No Content carries no body; response.json() would throw on it.
@@ -197,19 +202,23 @@ export async function apiFetch(endpoint: string, options: RequestInit = {}) {
 // Same authorization handling as apiFetch, but returns the raw body text so a
 // non-JSON download (e.g. the trade-journal CSV) is not forced through .json().
 export async function apiFetchText(endpoint: string, options: RequestInit = {}): Promise<string> {
+  return (await apiFetchTextWithHeaders(endpoint, options)).text;
+}
+
+// For a download whose response also carries facts about itself: the journal
+// CSV reports in headers how many rows it wrote out of how many matched, and
+// the body cannot show the difference.
+export async function apiFetchTextWithHeaders(
+  endpoint: string,
+  options: RequestInit = {},
+): Promise<{ text: string; headers: Headers }> {
   const response = await authorizedFetch(endpoint, options, false);
 
   if (!response.ok) {
-    const error = await response.json().catch(() => ({ detail: 'Request failed' }));
-    throw new ApiError(
-      formatErrorDetail(error.detail),
-      response.status,
-      error.detail,
-      requestIdOf(error, response),
-    );
+    throw await apiErrorFrom(response);
   }
 
-  return response.text();
+  return { text: await response.text(), headers: response.headers };
 }
 
 export interface AIConversationContext {
@@ -1073,13 +1082,20 @@ export const api = {
       const q = qs.toString();
       return apiFetch(`/api/v1/journal/trades${q ? `?${q}` : ''}`);
     },
-    tradesCsv: (params: Record<string, any>) => {
+    // The file says what it holds; only the headers say whether that is all
+    // the filter matched, so both travel back to the caller.
+    tradesCsv: async (
+      params: Record<string, any>,
+    ): Promise<{ text: string; meta: CsvExportMeta }> => {
       const qs = new URLSearchParams();
       for (const [k, v] of Object.entries(params)) {
         if (v !== undefined && v !== null && v !== '') qs.set(k, String(v));
       }
       const q = qs.toString();
-      return apiFetchText(`/api/v1/journal/trades.csv${q ? `?${q}` : ''}`);
+      const { text, headers } = await apiFetchTextWithHeaders(
+        `/api/v1/journal/trades.csv${q ? `?${q}` : ''}`,
+      );
+      return { text, meta: readCsvExportMeta((name) => headers.get(name)) };
     },
     filters: () => apiFetch('/api/v1/journal/filters'),
     cumulativePnl: (params: Record<string, any>) => {

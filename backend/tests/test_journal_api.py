@@ -6,7 +6,7 @@ Covers:
 - Summary stats (total_pnl, win_rate, profit_factor)
 - GET /v1/journal/cumulative-pnl — running cumulative P&L series
 - GET /v1/journal/equity-curve — equity + drawdown
-- GET /v1/journal/trades.csv — CSV export format
+- GET /v1/journal/trades.csv — CSV export format and its row-count headers
 - GET /v1/journal/filters — available filter values
 """
 
@@ -21,12 +21,25 @@ from decimal import Decimal
 import pytest
 
 from tests.conftest import TestSession
+from app.config import get_settings
+from app.lib.export_headers import (
+    EXPORT_METADATA_HEADERS,
+    EXPORT_ROW_LIMIT_HEADER,
+    EXPORT_ROWS_EXPORTED_HEADER,
+    EXPORT_ROWS_MATCHED_HEADER,
+    EXPORT_TRUNCATED_HEADER,
+)
 from app.models.strategy_study import StrategyStudyRun, StrategyStudyTrade
 from app.models.user import User
+from app.services import journal_service as svc
 
 ANCHOR = datetime(2026, 10, 1, tzinfo=timezone.utc)
 INSTRUMENT_BTC = "CRYPTO:KRAKEN:BTC-USD"
 INSTRUMENT_ETH = "CRYPTO:KRAKEN:ETH-USD"
+# The middleware only answers for an origin the deployment allows, so taking the
+# first configured one keeps this file's CORS test about expose_headers rather
+# than about how CORS_ORIGINS happens to be set here.
+EXPORT_TEST_ORIGIN = get_settings().cors_origins_list[0]
 
 
 # ---------------------------------------------------------------------------
@@ -537,6 +550,117 @@ class TestCsvExport:
         rows = list(csv.reader(io.StringIO(resp.text)))
         assert len(rows) == 1, f"expected the header line only, got {len(rows)} records"
         assert "net_pnl" in rows[0]
+
+    def test_csv_export_headers_agree_with_the_file_they_came_in(
+        self, client, seeded_user_id
+    ):
+        """A complete export says so, and the number it says is the body's own.
+
+        Comparing the header to a hand-written count would let the fixture and
+        the assertion drift together; counting the records in the returned file
+        makes the header answer to the file rather than to the test.
+        """
+        headers = _auth_headers(client, seeded_user_id)
+        resp = client.get("/api/v1/journal/trades.csv", headers=headers)
+        rows_in_file = len(list(csv.reader(io.StringIO(resp.text)))) - 1
+
+        assert rows_in_file > 0, "the fixture exported nothing to compare against"
+        assert resp.headers[EXPORT_ROWS_EXPORTED_HEADER] == str(rows_in_file)
+        assert resp.headers[EXPORT_ROWS_MATCHED_HEADER] == str(rows_in_file)
+        assert resp.headers[EXPORT_TRUNCATED_HEADER] == "false"
+        assert int(resp.headers[EXPORT_ROW_LIMIT_HEADER]) == svc.CSV_EXPORT_ROW_LIMIT
+
+    def test_csv_export_reports_truncation_it_cannot_show_in_the_file(
+        self, client, seeded_user_id, monkeypatch
+    ):
+        """Below the cap the file is the filter; above it, the file is a prefix.
+
+        Nothing but ``CSV_EXPORT_ROW_LIMIT`` is changed, so the writer, the
+        count query and the response are the production ones. The cap is read
+        from the module at call time, which is what lets it be lowered to a
+        size a five-trade fixture can overflow.
+        """
+        headers = _auth_headers(client, seeded_user_id)
+        matched = int(
+            client.get("/api/v1/journal/trades.csv", headers=headers).headers[
+                EXPORT_ROWS_MATCHED_HEADER
+            ]
+        )
+        assert matched > 1, "fixture too small to be truncated"
+
+        monkeypatch.setattr(svc, "CSV_EXPORT_ROW_LIMIT", 1)
+        resp = client.get("/api/v1/journal/trades.csv", headers=headers)
+        rows_in_file = len(list(csv.reader(io.StringIO(resp.text)))) - 1
+
+        assert rows_in_file == 1
+        assert resp.headers[EXPORT_ROWS_EXPORTED_HEADER] == "1"
+        assert resp.headers[EXPORT_ROWS_MATCHED_HEADER] == str(matched)
+        assert resp.headers[EXPORT_ROW_LIMIT_HEADER] == "1"
+        assert resp.headers[EXPORT_TRUNCATED_HEADER] == "true"
+
+    def test_export_headers_survive_a_cross_origin_read(self, client, seeded_user_id):
+        """A header the browser cannot read is a header the user never sees.
+
+        ``expose_headers`` is the only thing standing between these counts and
+        a silently truncated download, so the CORS answer is part of the fix.
+        """
+        headers = _auth_headers(client, seeded_user_id)
+        resp = client.get(
+            "/api/v1/journal/trades.csv",
+            headers={**headers, "Origin": EXPORT_TEST_ORIGIN},
+        )
+        allowed = resp.headers.get("access-control-allow-origin")
+        assert allowed, (
+            "the middleware did not answer as a cross-origin response, so this "
+            "test would pass even with no expose_headers entry at all"
+        )
+        exposed = resp.headers.get("access-control-expose-headers", "")
+        for name in EXPORT_METADATA_HEADERS:
+            assert name in exposed, f"{name} is not exposed to the browser"
+
+    def test_every_filter_counts_the_rows_it_also_exports(self, client, seeded_user_id):
+        """The two numbers must be filtered the same way, or one of them is a guess.
+
+        ``rows_matched`` comes from ``_count_trades`` and the file comes from
+        ``_build_journal_stmt`` — two builders that currently state the same
+        clauses. Nothing makes them stay the same when a filter is added, and a
+        one-sided clause would print a wrong "X are missing" over a correct
+        file. Below the cap the three numbers must agree for every filter shape,
+        each case carrying its own hand-counted expectation so a filter that
+        silently matches nothing cannot pass by agreeing with itself.
+        """
+        cases = [
+            ({}, 5),
+            ({"instrument_id": INSTRUMENT_ETH}, 2),
+            ({"interval_minutes": 240}, 2),
+            ({"rule_id": "range_fade"}, 1),
+            ({"exit_reason": "stop_loss"}, 1),
+            ({"pnl_min": "0"}, 3),
+            ({"date_from": (ANCHOR + timedelta(days=10)).isoformat()}, 3),
+            ({"rule_family": "trend"}, 2),
+            ({"rule_family": "momentum"}, 1),
+            ({"rule_family": "mean_reversion"}, 2),
+            ({"rule_family": "not_a_real_family"}, 0),
+        ]
+        headers = _auth_headers(client, seeded_user_id)
+        for params, expected in cases:
+            resp = client.get(
+                "/api/v1/journal/trades.csv", params=params, headers=headers
+            )
+            rows_in_file = len(list(csv.reader(io.StringIO(resp.text)))) - 1
+            label = params or "no filter"
+
+            assert rows_in_file == expected, (
+                f"{label}: file holds {rows_in_file} records, expected {expected}"
+            )
+            assert resp.headers[EXPORT_ROWS_MATCHED_HEADER] == str(expected), (
+                f"{label}: counted {resp.headers[EXPORT_ROWS_MATCHED_HEADER]} "
+                f"matches, expected {expected}"
+            )
+            assert resp.headers[EXPORT_ROWS_EXPORTED_HEADER] == str(rows_in_file)
+            assert resp.headers[EXPORT_TRUNCATED_HEADER] == "false", (
+                f"{label}: a file holding every matched row is not truncated"
+            )
 
 
 class TestFilterOptions:

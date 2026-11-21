@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { api, formatErrorDetail, ApiError } from '@/lib/api';
-import { csvDataRowCount } from '@/lib/csvRecords';
+import { csvDataRowCount, csvTruncationNotice } from '@/lib/csvRecords';
 import { classifySummaryStatus } from '@/lib/journalSummaryStatus';
 import AppShell from '@/components/shell/AppShell';
 import JournalFilterBar from './JournalFilterBar';
@@ -559,6 +559,7 @@ export default function JournalDashboard() {
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
   const [exportNotice, setExportNotice] = useState<string | null>(null);
+  const [exportTruncated, setExportTruncated] = useState<string | null>(null);
 
   // Load filter options on mount
   useEffect(() => {
@@ -628,8 +629,9 @@ export default function JournalDashboard() {
     setExporting(true);
     setExportError(null);
     setExportNotice(null);
+    setExportTruncated(null);
     try {
-      const text = await api.journal.tradesCsv(appliedFilters);
+      const { text, meta } = await api.journal.tradesCsv(appliedFilters);
       const rows = csvDataRowCount(text);
       if (rows === 0) {
         // A filter that matches nothing is a 200 whose body is only the header line,
@@ -645,6 +647,10 @@ export default function JournalDashboard() {
       anchor.click();
       URL.revokeObjectURL(url);
       setExportNotice(`Exported ${rows} trade${rows === 1 ? '' : 's'} to journal-trades.csv.`);
+      // The file the person now holds is not the filter they asked for, and
+      // opening it cannot show that: the rows missing were never written.
+      const truncated = csvTruncationNotice(meta, rows);
+      if (truncated) setExportTruncated(truncated);
     } catch (err) {
       setExportError(refusalFrom(err));
     } finally {
@@ -713,6 +719,23 @@ export default function JournalDashboard() {
             }}
           >
             {exportNotice}
+          </div>
+        )}
+
+        {exportTruncated && (
+          <div
+            role="alert"
+            data-testid="journal-export-truncated"
+            style={{
+              border: '1px solid var(--warning)',
+              backgroundColor: 'rgba(245,158,11,0.14)',
+              borderRadius: 6,
+              padding: 12,
+              marginBottom: 16,
+              fontSize: 13,
+            }}
+          >
+            {exportTruncated}
           </div>
         )}
 

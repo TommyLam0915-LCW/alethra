@@ -88,6 +88,10 @@ _JOURNAL_CSV_COLUMNS = (
     "pnl_reason_zh",
 )
 
+# Rows a single CSV export writes. Above it the file is complete only by
+# accident, so the export reports the limit next to the rows it actually wrote.
+CSV_EXPORT_ROW_LIMIT = 100_000
+
 _FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
 
 
@@ -676,7 +680,7 @@ def get_journal_filter_options(
     }
 
 
-def journal_trades_csv_content(
+def journal_trades_csv_export(
     db: Session,
     *,
     user_id: UUID,
@@ -689,10 +693,16 @@ def journal_trades_csv_content(
     pnl_min: Optional[Decimal] = None,
     pnl_max: Optional[Decimal] = None,
     exit_reason: Optional[str] = None,
-) -> str:
-    """Generate CSV content for all filtered trades across all runs."""
-    trades = _fetch_rows(
-        db,
+) -> dict:
+    """Build the export file and report how much of the filter it left out.
+
+    The body cannot say this about itself: it holds exactly the rows that were
+    written, so a filter matching more than ``CSV_EXPORT_ROW_LIMIT`` produces a
+    file that looks complete and is not. ``rows_matched`` is counted over the
+    same filter with the same predicate the list view uses, and the caller
+    carries all four numbers to the client.
+    """
+    filters = dict(
         user_id=user_id,
         instrument_id=instrument_id,
         rule_id=rule_id,
@@ -703,9 +713,14 @@ def journal_trades_csv_content(
         pnl_min=pnl_min,
         pnl_max=pnl_max,
         exit_reason=exit_reason,
+    )
+    rows_matched = _count_trades(db, **filters)
+    trades = _fetch_rows(
+        db,
+        **filters,
         sort_by="entry_time",
         sort_dir="asc",
-        limit=100_000,
+        limit=CSV_EXPORT_ROW_LIMIT,
         offset=0,
     )
 
@@ -716,4 +731,11 @@ def journal_trades_csv_content(
         writer.writerow([
             _csv_cell(t.get(col)) for col in _JOURNAL_CSV_COLUMNS
         ])
-    return buffer.getvalue()
+    rows_exported = len(trades)
+    return {
+        "content": buffer.getvalue(),
+        "rows_exported": rows_exported,
+        "rows_matched": rows_matched,
+        "row_limit": CSV_EXPORT_ROW_LIMIT,
+        "truncated": rows_exported < rows_matched,
+    }

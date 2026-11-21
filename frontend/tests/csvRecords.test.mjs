@@ -69,9 +69,11 @@ function slice(source, from, to, what) {
 
 test('the export handler decides what happened from the file it received', () => {
   const panel = readPanel();
+  // The counter has to come from this module; which names travel alongside it
+  // is not part of the contract (P-2b added the truncation sentence here).
   assert.match(
     panel,
-    /import \{ csvDataRowCount \} from '@\/lib\/csvRecords';/,
+    /import \{[^}]*\bcsvDataRowCount\b[^}]*\} from '@\/lib\/csvRecords';/,
     'the panel does not import the shared counter',
   );
   const exporter = slice(panel, 'const handleDownloadCsv', 'const tabStyle', 'the export handler');

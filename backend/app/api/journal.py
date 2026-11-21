@@ -17,6 +17,12 @@ from sqlalchemy.orm import Session
 
 from app.auth.jwt import get_current_user
 from app.database import get_db
+from app.lib.export_headers import (
+    EXPORT_ROW_LIMIT_HEADER,
+    EXPORT_ROWS_EXPORTED_HEADER,
+    EXPORT_ROWS_MATCHED_HEADER,
+    EXPORT_TRUNCATED_HEADER,
+)
 from app.lib.measurement import measured, ratio, summed
 from app.models.user import User
 from app.services import journal_service as svc
@@ -123,7 +129,12 @@ def journal_trades_csv(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> Response:
-    """CSV export of all filtered trades across all runs."""
+    """CSV export of all filtered trades across all runs.
+
+    The row-count headers carry what the export could not put in the file: it
+    stops at ``journal_service.CSV_EXPORT_ROW_LIMIT``, and a 200 with a
+    well-formed body says nothing about how many matching trades are missing.
+    """
     fk = _filter_kwargs(
         user_id=current_user.id,
         instrument_id=instrument_id,
@@ -136,11 +147,19 @@ def journal_trades_csv(
         pnl_max=pnl_max,
         exit_reason=exit_reason,
     )
-    content = svc.journal_trades_csv_content(db, **fk)
+    export = svc.journal_trades_csv_export(db, **fk)
     return Response(
-        content=content,
+        content=export["content"],
         media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": 'attachment; filename="journal-trades.csv"'},
+        headers={
+            "Content-Disposition": 'attachment; filename="journal-trades.csv"',
+            EXPORT_ROWS_EXPORTED_HEADER: str(export["rows_exported"]),
+            EXPORT_ROWS_MATCHED_HEADER: str(export["rows_matched"]),
+            EXPORT_ROW_LIMIT_HEADER: str(export["row_limit"]),
+            EXPORT_TRUNCATED_HEADER: (
+                "true" if export["truncated"] else "false"
+            ),
+        },
     )
 
 
