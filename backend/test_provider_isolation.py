@@ -3,15 +3,6 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# Mock sklearn to avoid import errors
-sys.modules['sklearn'] = type(sys)('sklearn')
-sys.modules['sklearn.linear_model'] = type(sys)('sklearn.linear_model')
-sys.modules['sklearn.ensemble'] = type(sys)('sklearn.ensemble')
-sys.modules['sklearn.preprocessing'] = type(sys)('sklearn.preprocessing')
-sys.modules['sklearn.model_selection'] = type(sys)('sklearn.model_selection')
-sys.modules['sklearn.metrics'] = type(sys)('sklearn.metrics')
-sys.modules['sklearn.base'] = type(sys)('sklearn.base')
-
 from datetime import date
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker

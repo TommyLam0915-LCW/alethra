@@ -48,7 +48,25 @@ def override_get_db():
 TEST_USER_ID = UUID('00000000-0000-0000-0000-000000000001')
 TEST_VERSION_ID = UUID('00000000-0000-0000-0000-000000000003')
 
-app.dependency_overrides[get_db] = override_get_db
+# `app` is the shared `app.main.app` singleton, so an assignment here runs at
+# import time — that is, during collection, before any test has executed — and
+# stays installed for every later file in the same process, which then serves
+# its own requests from the in-memory database created above. Measured on a
+# fresh disposable DB: `pytest test_explicit_provider_selection.py
+# tests/test_ml_pipeline.py` = 18 failed / 41 passed, the failures reading
+# `pending` where the writer had committed `completed`. Scoped to this module
+# and restored afterwards, keeping whatever the session fixture had set.
+@pytest.fixture(autouse=True, scope="module")
+def isolate_dependency_overrides():
+    previous = dict(app.dependency_overrides)
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        yield
+    finally:
+        app.dependency_overrides.clear()
+        app.dependency_overrides.update(previous)
+
+
 client = TestClient(app)
 
 def setup_test_data():
