@@ -63,7 +63,7 @@ Add disclaimer to both paper portfolio pages:
 **Severity**: Medium (deployment safety)
 **Category**: Security hardening opportunity
 
-**Finding**: `backend/app/config.py` does not validate configuration for production deployment. The application will start with development placeholders (e.g., `JWT_SECRET_KEY=change-me-in-production-use-a-long-random-string`) even when `APP_ENV=production`.
+**Finding**: `backend/app/config.py` does not validate configuration for production deployment. The application will start with development placeholders (e.g., a `JWT_SECRET_KEY` whose literal was the shipped field default — not reprinted here; it is the first entry of `_INSECURE_JWT_DEFAULTS` in `backend/app/config.py`) even when `APP_ENV=production`.
 
 **Evidence**:
 - `backend/app/config.py`: No validation logic
@@ -79,6 +79,17 @@ Implement production safety validation:
   - AI keys are missing but non-mock AI provider is enabled
 - Add tests for validation logic
 - Document as "production safety hardening" — do not claim production readiness
+
+**Status update (delivery line `deliver/complete-20261120`)**: the fix above was
+implemented as a *production-like*-only check, which left this finding partly
+open — the key rule never ran in development, and development is the lane where
+that default actually signed sessions. `backend/app/config.py::_validate_jwt_secret`
+now applies the rule in every environment, the `jwt_secret_key` field default is
+empty, and `docker-compose.yml` requires the variable instead of supplying one,
+so the refused value has no runtime landing point left in this delivery line
+(measured: `R6 known-default landing points: 0`). Disposition and remaining
+exposure — the value is still valid on the published branch, and rotating it is
+an owner action — are recorded in `docs/completion-matrix-2026-11-20.md` §8.35.
 
 ---
 

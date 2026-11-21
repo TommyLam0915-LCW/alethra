@@ -34,7 +34,10 @@ _INTRADAY_INTERVAL_LABELS = {"1min", "5min", "15min", "30min"}
 
 class Settings(BaseSettings):
     database_url: str = "postgresql://user:pass@localhost:5432/dbname"  # Must be overridden via DATABASE_URL env var
-    jwt_secret_key: str = "change-me-in-production-use-a-long-random-string"
+    # No literal default: a field default here is a signing key handed to every
+    # process that forgets to configure one, so the empty string is refused by
+    # _validate_jwt_secret in every environment, not only production-like ones.
+    jwt_secret_key: str = ""
     jwt_algorithm: str = "HS256"
     jwt_access_token_expire_minutes: int = 1440
     ai_provider: str = "mock"
@@ -164,20 +167,10 @@ class Settings(BaseSettings):
         self._validate_research_auth_bypass()
         self._validate_intraday_bounds()
         self._validate_crypto_budget_bounds()
+        self._validate_jwt_secret()
 
         if not self.is_production_like:
             return self
-
-        if self.jwt_secret_key in _INSECURE_JWT_DEFAULTS:
-            raise ValueError(
-                f"JWT_SECRET_KEY must not be a well-known default when APP_ENV={self.app_env}. "
-                "Set a long, random secret (minimum 32 characters)."
-            )
-        if len(self.jwt_secret_key) < _MIN_JWT_SECRET_LENGTH:
-            raise ValueError(
-                f"JWT_SECRET_KEY must be at least {_MIN_JWT_SECRET_LENGTH} characters "
-                f"when APP_ENV={self.app_env} (got {len(self.jwt_secret_key)})."
-            )
 
         if self.cors_origins.strip() == "*":
             raise ValueError(
@@ -332,6 +325,35 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"INTRADAY_DEFAULT_INTERVAL must be one of "
                 f"{sorted(_INTRADAY_INTERVAL_LABELS)}."
+            )
+
+    def _validate_jwt_secret(self) -> None:
+        """Refuse an unconfigured signing key in *every* environment.
+
+        The well-known-default and minimum-length checks used to sit behind
+        ``is_production_like``, so the field default — a string that is also
+        the compose deployment value — signed real sessions in development
+        and in the test lane without ever being judged. There is no field
+        default now: a process that wants a key has to name one, and the
+        empty-string case is refused as the unconfigured case rather than
+        being treated as a value. The test lane names its own generated key
+        in ``backend/tests/conftest.py``.
+        """
+        if not self.jwt_secret_key.strip():
+            raise ValueError(
+                "JWT_SECRET_KEY is not configured; HS256 sessions would be "
+                "signed with an empty key. Set a long random secret of at "
+                "least 32 characters (`openssl rand -hex 32`)."
+            )
+        if self.jwt_secret_key in _INSECURE_JWT_DEFAULTS:
+            raise ValueError(
+                f"JWT_SECRET_KEY must not be a well-known default when APP_ENV={self.app_env}. "
+                "Set a long, random secret (minimum 32 characters)."
+            )
+        if len(self.jwt_secret_key) < _MIN_JWT_SECRET_LENGTH:
+            raise ValueError(
+                f"JWT_SECRET_KEY must be at least {_MIN_JWT_SECRET_LENGTH} characters "
+                f"when APP_ENV={self.app_env} (got {len(self.jwt_secret_key)})."
             )
 
     def _validate_candidate_passwordless(self) -> None:

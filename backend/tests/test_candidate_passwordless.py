@@ -321,8 +321,11 @@ class TestSettingsFailClosed:
             _settings(app_env="qa")
 
     def test_default_jwt_secret_refuses_the_mode(self):
+        """Refused by value, not by copy: the case names the product's own list."""
+        from app.config import _INSECURE_JWT_DEFAULTS
+
         with pytest.raises(ValidationError, match="JWT_SECRET_KEY"):
-            _settings(jwt_secret_key="change-me-in-production-use-a-long-random-string")
+            _settings(jwt_secret_key=sorted(v for v in _INSECURE_JWT_DEFAULTS if v)[0])
 
     def test_short_jwt_secret_refuses_the_mode(self):
         with pytest.raises(ValidationError, match="JWT_SECRET_KEY"):

@@ -20,12 +20,15 @@ every hex secret), a TypeScript ``key: 'value',`` entry whose trailing comma
 blocked the charset test, and ``frontend/e2e/*.spec.ts`` counted as a runtime
 path.
 
-The fourth is a rule that did not exist: two sites hardcode the value the
+The fourth is a rule that did not exist: two sites handed out the value the
 product itself lists in ``_INSECURE_JWT_DEFAULTS``, and no entropy test can see
 them because the value is lowercase words around separators. R6 judges that
 shape against the product's own refuse-list instead of against character classes.
 Its first version forced one tier for every hit, which a control then caught: a
-test that pins the refused default was being counted as runtime debt.
+test that pins the refused default was being counted as runtime debt. Those two
+runtime sites are gone as of §8.35 — the field default is empty and compose
+takes a required variable — but the rule and its controls stay, because the
+shape R6 covers is one a future default can walk straight back into.
 
 No database, no network.
 """
@@ -67,12 +70,13 @@ WEAK_BASELINE = {
     ("R1", "start_acceptance_env.sh", "JWT_SECRET_KEY", 44),
     ("R1", "verify_data_persistence.sh", "JWT_SECRET_KEY", 44),
     ("R1", "verify_quota_persistence.sh", "JWT_SECRET_KEY", 44),
-    # Visible only since R6: a prose default with no digit is invisible to every
-    # entropy rule, and the typed field default hides it from KEY_ASSIGN_RE too.
-    # The two sites are the product's own refused value being handed out as the
-    # default signing key, so the tier is debt, not an emergency.
-    ("R6", "backend/app/config.py", "jwt_secret_key", 48),
-    ("R6", "docker-compose.yml", "JWT_SECRET_KEY", 48),
+    # The two R6 entries that used to sit here — the typed field default in
+    # backend/app/config.py and the literal in docker-compose.yml — were this
+    # round's fix, not a re-tiering: the field default is now empty and the
+    # compose value is a required variable, so R6 has no runtime landing point
+    # left on the real tree (measured: 12 findings, WEAK 9 -> 7, "R6 known-default
+    # landing points: 0"). The rule itself stays, and the controls below keep
+    # proving it fires on both assignment shapes in a synthetic tree.
 }
 FIXTURE_BASELINE = {
     ("R1", "backend/tests/test_ai_assistant.py", "SECRET_KEY", 30),
@@ -209,24 +213,30 @@ def test_value_extraction_keeps_no_type_script_separator(tmp_path):
 
 
 def _known_default_from_the_product():
-    """The value the product assigns to ``jwt_secret_key`` *and* refuses.
+    """A refused value that the entropy rules cannot see.
 
     Read from the source rather than written here, because a literal copy of a
     credential-shaped string in this file would be another landing point — the
     mistake this gate already records once in its own history.
+
+    Until §8.35 this picked the value off ``Settings.jwt_secret_key``'s field
+    default, which was also the shape being judged. That default is now the
+    empty string, so the refuse-list itself is the carrier: R6's contract is
+    "the product names this value as one it will not sign with", and a value
+    with no digit is exactly what R1 cannot see.
     """
     values, loaded = aus.load_insecure_defaults(REPO)
     assert loaded, (
         "the product's _INSECURE_JWT_DEFAULTS could not be read — R6 is off, "
         "and a gate cannot assert about a rule it switched off")
-    for line in aus.read(aus.CONFIG_REL, REPO):
-        key, value = aus.typed_assign_value(line)
-        if key == "jwt_secret_key" and value in values:
-            return value
-    raise AssertionError(
-        "backend/app/config.py no longer defaults jwt_secret_key to a refused "
-        "value: R6's two recorded sites are gone, so regenerate WEAK_BASELINE "
-        "deliberately instead of leaving a stale set behind")
+    invisible = sorted(
+        v for v in values if not aus.is_secretish(v) and not aus.is_placeholder(v)
+    )
+    assert invisible, (
+        "no refused default is invisible to the entropy rules, which means R6 "
+        "has nothing left to cover — retire the rule instead of probing a value "
+        "the other rules already catch")
+    return invisible[0]
 
 
 def test_r6_judges_the_products_own_refuse_list():

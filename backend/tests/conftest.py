@@ -1,4 +1,5 @@
 import os
+import secrets
 from urllib.parse import urlparse
 
 from tests.lanes import mask_dsn
@@ -41,6 +42,15 @@ elif _env_b and not _env_a and _is_postgres_url(_env_b):
 
 _TEST_DB_PATH = os.environ.get("ALETHRA_TEST_DB", "sqlite:///./test.db")
 os.environ["DATABASE_URL"] = _TEST_DB_PATH
+
+# The product refuses an unconfigured JWT_SECRET_KEY in every environment now
+# (app/config.py::_validate_jwt_secret), so the signing key has to be named
+# before app.main is imported below. Generated, never copied: this lane's own
+# records show what a hand-copied fixture costs — a literal here that equals
+# the value docker-compose.yml hands a deployed stack is a credential, not a
+# fixture. An operator-set value still wins.
+if not os.environ.get("JWT_SECRET_KEY"):
+    os.environ["JWT_SECRET_KEY"] = secrets.token_urlsafe(48)
 
 import gc
 import pytest

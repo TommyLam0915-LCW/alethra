@@ -318,8 +318,13 @@ cmd_smoke() {
   say "release smoke: the pinned tree must import, route, and answer /health"
   (cd "$ROOT/backend" && "$PY" - <<'PY'
 import os
+import secrets
 os.environ.setdefault("DATABASE_URL", "sqlite:///./smoke.db")
 os.environ.setdefault("APP_ENV", "test")
+# Test-only injection, same rule as tests/conftest.py: this lane may conjure a
+# signing key because it never serves a session to anyone, and it generates it
+# instead of copying a literal. A real service start (dev.sh up) refuses here.
+os.environ.setdefault("JWT_SECRET_KEY", secrets.token_urlsafe(48))
 from app.main import app
 routes = [r.path for r in app.routes]
 print(f"  app imported        : {app.title!r}")
@@ -353,6 +358,13 @@ cmd_up() {
     exit 0
   fi
   need_venv
+  if [ -z "${JWT_SECRET_KEY:-}" ]; then
+    say "REFUSED: JWT_SECRET_KEY is not set, and the product no longer ships a signing-key default."
+    say "  this entry starts a real service, so the key has to be one you chose — dev.sh does not"
+    say "  generate it, because a key generated per start would silently invalidate every token"
+    say "  issued before the restart. export JWT_SECRET_KEY=\"\$(openssl rand -hex 32)\" and re-run."
+    exit 1
+  fi
   mkdir -p "$RUNS"
   say "starting backend on 127.0.0.1:8120 (log: $RUNS/backend.out)"
   (cd "$ROOT/backend" && DATABASE_URL="${ALETHRA_PG_URL:-sqlite:///./dev.db}" \

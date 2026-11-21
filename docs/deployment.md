@@ -232,10 +232,18 @@ docker compose -f docker-compose.prod.yml ps               # see which services 
 - Verify the `db` service is healthy: `docker compose -f docker-compose.prod.yml ps db`
 - Check credentials in `.env` match `DATABASE_URL` construction.
 
-### "JWT_SECRET_KEY must not be a well-known default"
+### "JWT_SECRET_KEY must not be a well-known default" / "JWT_SECRET_KEY is not configured"
 
-- The application refuses to start in production mode with a weak JWT secret.
+- Both messages mean the same thing: no usable signing key was named. The
+  rule runs in **every** `APP_ENV`, not only production — an unset key used
+  to be accepted everywhere except a production-like start, and the value it
+  fell back to was the same one `docker-compose.yml` handed a deployed stack.
 - Generate a new one: `openssl rand -hex 32`
+- Because `backend/migrations/env.py` loads the same settings, `alembic
+  upgrade head` refuses without the key too; export it before running any
+  migration by hand.
+- Rotating the key invalidates every session token issued before the
+  restart — schedule it with the sign-in step, not mid-session.
 
 ### 503 from /health/ready
 

@@ -2,14 +2,31 @@ import os
 import pytest
 from unittest.mock import patch
 
+# A value that satisfies the key rule without being anybody's credential. It
+# is not copied from a deployment: the historical base env here held the
+# literal that docker-compose.yml hands a deployed stack, which made this
+# file's "development" cases a reprint of a live signing key.
+_VALID_SECRET = "cfg" + "z" * 45
+
 
 def _fresh_settings(**env_overrides):
     env = {
         "APP_ENV": "development",
-        "JWT_SECRET_KEY": "change-me-in-production-use-a-long-random-string",
+        "JWT_SECRET_KEY": _VALID_SECRET,
     }
     env.update(env_overrides)
     with patch.dict(os.environ, env, clear=False):
+        from app.config import Settings
+        return Settings(_env_file=None)
+
+
+def _settings_with_bare_env(**env_overrides):
+    """Settings from an environment that names nothing but these overrides.
+
+    ``clear=True`` is what makes this the unconfigured case: the value cannot
+    be inherited from the test lane's own injected ``JWT_SECRET_KEY``.
+    """
+    with patch.dict(os.environ, env_overrides, clear=True):
         from app.config import Settings
         return Settings(_env_file=None)
 
@@ -25,15 +42,44 @@ def _prod_settings(**env_overrides):
     return _fresh_settings(**base)
 
 
+def _refused_defaults():
+    """The product's own refuse list minus the empty string.
+
+    Read from the product rather than copied here, and the empty value is
+    left out because it is the *unconfigured* case, tested on its own.
+    """
+    from app.config import _INSECURE_JWT_DEFAULTS
+
+    return sorted(v for v in _INSECURE_JWT_DEFAULTS if v)
+
+
 class TestDevelopmentDefaults:
-    def test_development_allows_default_jwt_secret(self):
+    def test_shipped_jwt_field_default_carries_no_secret(self):
+        from app.config import Settings
+
+        assert Settings.model_fields["jwt_secret_key"].default == ""
+
+    def test_development_refuses_an_unconfigured_jwt_secret(self):
+        with pytest.raises(Exception) as exc_info:
+            _settings_with_bare_env(APP_ENV="development", DATABASE_URL="sqlite:///./t.db")
+        assert "JWT_SECRET_KEY" in str(exc_info.value)
+
+    def test_development_refuses_every_well_known_default(self):
+        """A non-test setting that used to sign real sessions with these values."""
+        for secret in _refused_defaults():
+            with pytest.raises(Exception) as exc_info:
+                _fresh_settings(APP_ENV="development", JWT_SECRET_KEY=secret)
+            assert "JWT_SECRET_KEY" in str(exc_info.value), secret
+
+    def test_development_refuses_short_jwt_secret(self):
+        with pytest.raises(Exception) as exc_info:
+            _fresh_settings(APP_ENV="development", JWT_SECRET_KEY="short")
+        assert "at least 32" in str(exc_info.value)
+
+    def test_development_accepts_long_random_jwt_secret(self):
         s = _fresh_settings(APP_ENV="development")
         assert s.app_env == "development"
-        assert s.jwt_secret_key == "change-me-in-production-use-a-long-random-string"
-
-    def test_development_allows_short_jwt_secret(self):
-        s = _fresh_settings(APP_ENV="development", JWT_SECRET_KEY="short")
-        assert s.jwt_secret_key == "short"
+        assert s.jwt_secret_key == _VALID_SECRET
 
     def test_development_allows_cors_wildcard(self):
         s = _fresh_settings(CORS_ORIGINS="*")
@@ -55,7 +101,12 @@ class TestDevelopmentDefaults:
 class TestProductionSafety:
     def test_production_rejects_default_jwt_secret(self):
         with pytest.raises(Exception) as exc_info:
-            _fresh_settings(APP_ENV="production")
+            _settings_with_bare_env(
+                APP_ENV="production",
+                JWT_SECRET_KEY=_refused_defaults()[0],
+                DATABASE_URL="postgresql://user:pass@db.example.com:5432/alethra",
+                CORS_ORIGINS="https://app.alethra.com",
+            )
         assert "JWT_SECRET_KEY" in str(exc_info.value)
 
     def test_production_rejects_well_known_defaults(self):
@@ -77,7 +128,11 @@ class TestProductionSafety:
 
     def test_staging_rejects_default_jwt_secret(self):
         with pytest.raises(Exception) as exc_info:
-            _fresh_settings(APP_ENV="staging")
+            _fresh_settings(
+                APP_ENV="staging",
+                JWT_SECRET_KEY=_refused_defaults()[0],
+                DATABASE_URL="postgresql://db.example.com/test",
+            )
         assert "JWT_SECRET_KEY" in str(exc_info.value)
 
     def test_staging_accepts_long_random_secret(self):

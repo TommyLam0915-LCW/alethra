@@ -166,6 +166,12 @@ cd backend
 alembic upgrade head
 ```
 
+`migrations/env.py` builds `Settings` before it reads the alembic config, so
+the migration command is subject to the same startup rules as the service:
+`JWT_SECRET_KEY` must be exported (>= 32 characters, not a well-known
+default) or `alembic upgrade head` stops with a validation error before it
+touches any table.
+
 This migration:
 1. Detects if the schema is legacy (checks column types, table presence)
 2. Records original column types in `_legacy_schema_backup` for rollback

@@ -25,7 +25,10 @@ services:
       - "8000:8000"
     environment:
       DATABASE_URL: postgresql://postgres:postgres@db:5432/ai_investment_lab
-      JWT_SECRET_KEY: change-me-in-production-use-a-long-random-string
+      # Required, never defaulted: this file used to hand every stack it
+      # started the same signing key, and that key was also the product's
+      # field default. Generate one with `openssl rand -hex 32`.
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY is required; generate one with openssl rand -hex 32}
       JWT_ALGORITHM: HS256
       JWT_ACCESS_TOKEN_EXPIRE_MINUTES: 1440
       AI_PROVIDER: mock
