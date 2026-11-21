@@ -11,7 +11,6 @@ APScheduler's in-process BackgroundScheduler — no Redis or Celery required.
 from __future__ import annotations
 
 import logging
-import traceback
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import List, Optional
@@ -19,10 +18,11 @@ from uuid import UUID
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
+from app.lib.error_safety import safe_error_message
 from app.lib.timeutil import utcnow_aware
 from app.models.learning_job import LearningJob, LearningProposal
 from app.models.strategy_study import StrategyStudyRun
@@ -104,6 +104,43 @@ def _get_first_user_id(db: Session) -> Optional[UUID]:
     return user.id if user else None
 
 
+def _record_terminal_failure(job_id: Optional[UUID], exc: BaseException) -> None:
+    """Write a terminal ``failed`` state on a transaction the worker's own
+    session cannot undo.
+
+    Both jobs ran inside a single session whose exception handler calls
+    ``db.rollback()``. Before the job row was committed, that rollback discarded
+    it, so a batch that died mid-flight left no record that it had ever started —
+    the UI just showed the previous night's job again. Restricted to
+    ``status='running'`` so this can never overwrite a state another writer has
+    already settled.
+    """
+    if job_id is None:
+        return
+    db = SessionLocal()
+    try:
+        result = db.execute(
+            update(LearningJob)
+            .where(LearningJob.id == job_id, LearningJob.status == "running")
+            .values(
+                status="failed",
+                error_details=safe_error_message(exc),
+                completed_at=utcnow_aware(),
+            )
+        )
+        db.commit()
+        if result.rowcount == 0:
+            logger.warning(
+                "Learning job %s was not 'running' at failure time; terminal state left alone",
+                job_id,
+            )
+    except Exception:
+        db.rollback()
+        logger.exception("Could not record terminal failure for learning job %s", job_id)
+    finally:
+        db.close()
+
+
 def run_scheduled_research(
     scope: str = "daily",
     instruments: Optional[List[str]] = None,
@@ -122,6 +159,7 @@ def run_scheduled_research(
     if intervals is None:
         intervals = SCHEDULED_INTERVALS
     db = SessionLocal()
+    job_id: Optional[UUID] = None
     try:
         user_id = _get_first_user_id(db)
         if user_id is None:
@@ -141,7 +179,9 @@ def run_scheduled_research(
         )
         db.add(job)
         db.flush()
-        logger.info("Learning job %s started: %s research", job.id, scope)
+        job_id = job.id
+        db.commit()
+        logger.info("Learning job %s started: %s research", job_id, scope)
 
         results: List[dict] = []
         errors: List[str] = []
@@ -165,11 +205,19 @@ def run_scheduled_research(
                         result.get("walk_forward", {}).get("out_of_sample", {}).get("trades", 0),
                     )
                 except Exception as exc:
-                    error_msg = f"{instrument_id} @ {interval}m: {exc}"
-                    errors.append(error_msg)
-                    logger.warning("Study failed for %s: %s", error_msg, traceback.format_exc())
+                    # ``GET /learning/jobs`` renders ``error_details`` verbatim, so
+                    # this string reaches a person: keep the raw exception (paths,
+                    # DSNs) in the log and store only the bounded summary.
+                    errors.append(f"{instrument_id} @ {interval}m: {safe_error_message(exc)}")
+                    logger.warning(
+                        "Study failed for %s @ %dm", instrument_id, interval, exc_info=True
+                    )
 
-        job.status = "completed" if not errors else "completed"
+        # Both branches used to say "completed", so a batch whose every combo
+        # failed was recorded as a success. Partial failures stay "completed"
+        # because the batch did produce the results it claims; the per-combo
+        # reasons are in ``error_details`` and the counts in ``result_json``.
+        job.status = "failed" if errors and not results else "completed"
         job.completed_at = utcnow_aware()
         job.result_json = {
             "results": results,
@@ -182,14 +230,16 @@ def run_scheduled_research(
             job.error_details = "\n".join(errors)
         db.commit()
         logger.info(
-            "Learning job %s completed: %d/%d successful",
+            "Learning job %s %s: %d/%d successful",
             job.id,
+            job.status,
             len(results),
             len(results) + len(errors),
         )
-    except Exception:
+    except Exception as exc:
         db.rollback()
         logger.exception("Scheduled research failed catastrophically")
+        _record_terminal_failure(job_id, exc)
     finally:
         db.close()
 
@@ -300,6 +350,7 @@ def run_pattern_analysis_job():
     6. If validation passes, mark as deployable (never auto-deploy).
     """
     db = SessionLocal()
+    job_id: Optional[UUID] = None
     try:
         user_id = _get_first_user_id(db)
         if user_id is None:
@@ -315,7 +366,9 @@ def run_pattern_analysis_job():
         )
         db.add(job)
         db.flush()
-        logger.info("Pattern analysis job %s started", job.id)
+        job_id = job.id
+        db.commit()
+        logger.info("Pattern analysis job %s started", job_id)
 
         # Run analysis
         analysis = analyze_skill_patterns(db, user_id=user_id, lookback_runs=50)
@@ -424,9 +477,10 @@ def run_pattern_analysis_job():
         logger.info(
             "Pattern analysis job %s completed: %d proposals", job.id, proposals_created
         )
-    except Exception:
+    except Exception as exc:
         db.rollback()
         logger.exception("Pattern analysis job failed")
+        _record_terminal_failure(job_id, exc)
     finally:
         db.close()
 
