@@ -91,6 +91,10 @@ class StatusResponse(BaseModel):
     win_rate: Optional[float]
     start_date: Optional[str]
     end_date: Optional[str]
+    # The scrubbed text the worker's terminal handler stored beside status='failed'.
+    # None is "nothing was recorded" — a completed or cancelled run — not a reason
+    # that happens to be empty.
+    failure_reason: Optional[str] = None
 
 
 class DailyPortfolioBlock(BaseModel):
@@ -378,7 +382,8 @@ def get_history(
                 r.win_rate,
                 r.start_date,
                 r.end_date,
-                r.run_type
+                r.run_type,
+                r.failure_reason
             FROM paper_trading_runs r
             JOIN paper_portfolios p ON r.portfolio_id = p.id
             WHERE p.owner_id = :user_id
@@ -403,6 +408,9 @@ def get_history(
                 "start_date": r.start_date.isoformat() if r.start_date else None,
                 "end_date": r.end_date.isoformat() if r.end_date else None,
                 "run_type": r.run_type,
+                # Filled only by the failed branch of the replay's terminal
+                # UPDATE; null here means this run recorded no failure.
+                "failure_reason": r.failure_reason,
             }
             for r in results
         ]

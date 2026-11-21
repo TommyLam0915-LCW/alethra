@@ -35,7 +35,7 @@ VERSIONS_DIR = BACKEND_DIR / "migrations" / "versions"
 def test_every_migration_script_is_collected():
     """A script the collector cannot name must fail here, not vanish.
 
-    14 of 53 scripts declare ``revision: str = '…'``, which is ``ast.AnnAssign``
+    15 of 54 scripts declare ``revision: str = '…'``, which is ``ast.AnnAssign``
     rather than ``ast.Assign``.  Reading only the latter dropped the base schema
     and still produced a full-looking table list.
     """

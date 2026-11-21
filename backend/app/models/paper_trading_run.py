@@ -5,7 +5,7 @@ which track individual replay/execution runs and their daily performance aggrega
 """
 import uuid
 from datetime import datetime, date
-from sqlalchemy import Column, String, Integer, DateTime, Date, Numeric, ForeignKey, Index, UniqueConstraint, Boolean, false
+from sqlalchemy import Column, String, Integer, DateTime, Date, Numeric, ForeignKey, Index, UniqueConstraint, Boolean, Text, false
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 from app.database import Base
@@ -37,6 +37,11 @@ class PaperTradingRun(Base):
     # Added by migration c9d0e1f2a3b4; declared here so create_all (SQLite) and
     # the migrated schema (PostgreSQL) expose the same column set.
     cancel_requested = Column(Boolean, nullable=False, server_default=false())
+    # Added by migration f2a3b4c5d6e7. NULL means "no failure recorded" — a
+    # cancelled or completed run is not a failure and keeps this empty rather
+    # than storing a zero-length string. Text, not String(64), because the
+    # writer stores safe_error_message(exc), which is bounded at 200 characters.
+    failure_reason = Column(Text, nullable=True)
 
     __table_args__ = (
         Index("idx_paper_trading_runs_portfolio", "portfolio_id"),

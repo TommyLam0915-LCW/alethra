@@ -668,6 +668,11 @@ LINKAGE_FILE = f"{LINKAGE_REVISION}_add_quota_reservation_run_link.py"
 # rather than leaving two heads on the same parent.
 FEEDBACK_REVISION = "e1f2a3b4c5d6"
 FEEDBACK_FILE = f"{FEEDBACK_REVISION}_add_user_feedback.py"
+# P-4 added the replay's failure-reason column on top of the feedback slice, so
+# the head moved again. The pattern is the point: each new slice hangs off the
+# then-head instead of re-parenting onto the base and leaving two heads.
+REASON_REVISION = "f2a3b4c5d6e7"
+REASON_FILE = f"{REASON_REVISION}_add_paper_trading_run_failure_reason.py"
 
 
 def _revision_rows():
@@ -692,11 +697,12 @@ def test_the_linkage_revision_is_unique_and_is_the_only_head():
     ``alembic upgrade`` die on ``DuplicateRevision`` before touching the
     database. Nothing in the suite caught that until this test existed.
 
-    The head is no longer the linkage revision: the feedback slice now sits on
-    top of it, so this asserts one head and pins where it hangs. Two heads would
-    be the other way this file can fail — ``alembic upgrade head`` refuses to
-    choose between them — which is why the assertion compares the whole sorted
-    list instead of testing that the revision is merely reachable.
+    The head is no longer the linkage revision: the feedback slice and then the
+    failure-reason slice now sit on top of it, so this asserts one head and pins
+    where it hangs. Two heads would be the other way this file can fail —
+    ``alembic upgrade head`` refuses to choose between them — which is why the
+    assertion compares the whole sorted list instead of testing that the
+    revision is merely reachable.
     """
     rows = _revision_rows()
     assert rows, "no migration scripts found: this test would pass on an empty scan"
@@ -707,8 +713,9 @@ def test_the_linkage_revision_is_unique_and_is_the_only_head():
 
     referenced = {parent for _, _, parents in rows for parent in parents}
     heads = sorted(set(ids) - referenced)
-    assert heads == [FEEDBACK_REVISION], (
-        f"expected one head, the feedback revision on top of the linkage; got {heads}"
+    assert heads == [REASON_REVISION], (
+        f"expected one head, the failure-reason revision on top of the feedback "
+        f"slice; got {heads}"
     )
 
     parents = [row for row in rows if row[1] == LINKAGE_REVISION][0][2]
@@ -724,6 +731,15 @@ def test_the_linkage_revision_is_unique_and_is_the_only_head():
     )
     assert (_MIGRATIONS_DIR / FEEDBACK_FILE).exists(), (
         f"the head is named for {FEEDBACK_FILE}, which is not on disk"
+    )
+
+    reason_parents = [row for row in rows if row[1] == REASON_REVISION][0][2]
+    assert reason_parents == [FEEDBACK_REVISION], (
+        "the failure-reason revision must hang off the then-head, not branch off "
+        f"the base again: {reason_parents}"
+    )
+    assert (_MIGRATIONS_DIR / REASON_FILE).exists(), (
+        f"the head is named for {REASON_FILE}, which is not on disk"
     )
 
 

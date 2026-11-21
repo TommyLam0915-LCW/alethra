@@ -16,6 +16,7 @@ from sqlalchemy import bindparam, column, create_engine, select, table, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import SessionLocal
+from app.lib.error_safety import safe_error_message
 from app.lib.measurement import measured, percent_ratio, summed
 from app.services.paper_trading_exceptions import (
     AuthorizationError,
@@ -337,10 +338,12 @@ class PaperTradingEngine:
             # Atomic conditional UPDATE: only acquire execution rights if status allows
             # AND cancel has not been requested. PostgreSQL re-checks WHERE condition on
             # concurrent updates, so this prevents race between cancel and execution acquisition.
+            # failure_reason is cleared in the same statement: a run that is executing
+            # again must not still report why the previous attempt died.
             result = db.execute(
                 text("""
                 UPDATE paper_trading_runs
-                SET status = 'running', updated_at = CURRENT_TIMESTAMP
+                SET status = 'running', failure_reason = NULL, updated_at = CURRENT_TIMESTAMP
                 WHERE id = :id AND status IN ('queued', 'pending', 'failed')
                   AND cancel_requested = FALSE
                 RETURNING id
@@ -1070,6 +1073,9 @@ class PaperTradingEngine:
                     # - If cancel_requested=TRUE → status='cancelled'
                     # - If cancel_requested=FALSE → status='failed'
                     # Only applies if status='running' (worker ownership check)
+                    # The reason moves in the same statement, and only on the
+                    # failure branch: a cancelled run was stopped on purpose, so
+                    # storing the death text against it would claim a failure.
                     result = db.execute(
                         text("""
                         UPDATE paper_trading_runs
@@ -1077,11 +1083,15 @@ class PaperTradingEngine:
                                 WHEN cancel_requested = TRUE THEN 'cancelled'
                                 ELSE 'failed'
                             END,
+                            failure_reason = CASE
+                                WHEN cancel_requested = TRUE THEN NULL
+                                ELSE :reason
+                            END,
                             updated_at = CURRENT_TIMESTAMP
                         WHERE id = :id AND status = 'running'
                         RETURNING id, status, cancel_requested
                     """),
-                        {"id": run_id},
+                        {"id": run_id, "reason": safe_error_message(exc)},
                     )
 
                     row = result.fetchone()
@@ -1159,6 +1169,7 @@ class PaperTradingEngine:
                     UPDATE paper_trading_runs
                     SET status = 'cancelled',
                         cancel_requested = TRUE,
+                        failure_reason = NULL,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = :id AND status IN ('queued', 'pending', 'failed')
                       AND cancel_requested = FALSE
@@ -1623,6 +1634,11 @@ class PaperTradingEngine:
                 "win_rate": measured(run.win_rate),
                 "start_date": _as_date(run.start_date).isoformat() if run.start_date else None,
                 "end_date": _as_date(run.end_date).isoformat() if run.end_date else None,
+                # None means no failure was recorded, which is not the same claim
+                # as "": the writer only fills this on the 'failed' branch of the
+                # terminal-state UPDATE, so a completed or cancelled run reads back
+                # empty rather than a fabricated reason.
+                "failure_reason": run.failure_reason,
             }
 
         finally:

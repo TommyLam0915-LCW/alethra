@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '@/lib/api';
 import { createRequestGuard } from '@/lib/latestRequest';
+import { failureReasonText } from '@/lib/paperRunReason';
 import { formatNumber, formatPercentPoints } from '@/lib/format';
 
 interface PaperTradingRun {
@@ -25,6 +26,12 @@ interface PaperTradingRun {
   start_date: string | null;
   end_date: string | null;
   run_type: string;
+  // Written only by the failure branch of the replay's terminal UPDATE
+  // (backend/app/services/paper_trading.py:1086) and nullable in the DDL
+  // (backend/migrations/versions/f2a3b4c5d6e7_add_paper_trading_run_failure_reason.py:40),
+  // so null means "this run recorded no failure" — including every run that
+  // failed before the column shipped.
+  failure_reason: string | null;
 }
 
 interface DailyReport {
@@ -187,47 +194,53 @@ export function PaperTradingDashboard() {
       <div className="bg-white rounded-lg shadow p-4">
         <h3 className="text-lg font-semibold mb-3">Select Run</h3>
         <div className="space-y-2 max-h-64 overflow-y-auto">
-          {runs.map((run) => (
-            <button
-              key={run.run_id}
-              onClick={() => setSelectedRun(run.run_id)}
-              className={`w-full text-left p-3 rounded border transition ${
-                selectedRun === run.run_id
-                  ? 'border-blue-500 bg-blue-50'
-                  : 'border-gray-200 hover:border-gray-300'
-              }`}
-            >
-              <div className="flex justify-between items-start">
-                <div>
-                  <div className="font-medium">{run.skill}</div>
-                  <div className="text-sm text-gray-500">
-                    {run.instrument_id} @ {run.interval_minutes}m
+          {runs.map((run) => {
+            const reason = failureReasonText(run.status, run.failure_reason);
+            return (
+              <button
+                key={run.run_id}
+                onClick={() => setSelectedRun(run.run_id)}
+                className={`w-full text-left p-3 rounded border transition ${
+                  selectedRun === run.run_id
+                    ? 'border-blue-500 bg-blue-50'
+                    : 'border-gray-200 hover:border-gray-300'
+                }`}
+              >
+                <div className="flex justify-between items-start">
+                  <div>
+                    <div className="font-medium">{run.skill}</div>
+                    <div className="text-sm text-gray-500">
+                      {run.instrument_id} @ {run.interval_minutes}m
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <div className={`font-semibold ${pnlColorClass(run.total_pnl)}`}>
+                      {formatCurrency(run.total_pnl)}
+                    </div>
+                    <div className="text-xs text-gray-500">
+                      {run.total_trades} trades · {formatPercentPoints(run.win_rate)} WR
+                    </div>
                   </div>
                 </div>
-                <div className="text-right">
-                  <div className={`font-semibold ${pnlColorClass(run.total_pnl)}`}>
-                    {formatCurrency(run.total_pnl)}
-                  </div>
-                  <div className="text-xs text-gray-500">
-                    {run.total_trades} trades · {formatPercentPoints(run.win_rate)} WR
-                  </div>
+                <div className="mt-2">
+                  <span
+                    className={`inline-block px-2 py-1 text-xs rounded ${
+                      run.status === 'running'
+                        ? 'bg-green-100 text-green-800'
+                        : run.status === 'completed'
+                        ? 'bg-blue-100 text-blue-800'
+                        : 'bg-gray-100 text-gray-800'
+                    }`}
+                  >
+                    {run.status}
+                  </span>
+                  {reason && (
+                    <span className="block mt-1 text-xs text-red-700">{reason}</span>
+                  )}
                 </div>
-              </div>
-              <div className="mt-2">
-                <span
-                  className={`inline-block px-2 py-1 text-xs rounded ${
-                    run.status === 'running'
-                      ? 'bg-green-100 text-green-800'
-                      : run.status === 'completed'
-                      ? 'bg-blue-100 text-blue-800'
-                      : 'bg-gray-100 text-gray-800'
-                  }`}
-                >
-                  {run.status}
-                </span>
-              </div>
-            </button>
-          ))}
+              </button>
+            );
+          })}
         </div>
       </div>
 
@@ -361,44 +374,50 @@ export function PaperTradingDashboard() {
               </tr>
             </thead>
             <tbody className="bg-white divide-y divide-gray-200">
-              {runs.map((run) => (
-                <tr key={run.run_id} className="hover:bg-gray-50">
-                  <td className="px-4 py-3 text-sm font-medium text-gray-900">
-                    {run.skill}
-                  </td>
-                  <td className="px-4 py-3 text-sm text-gray-500">
-                    {run.instrument_id}
-                    <br />
-                    <span className="text-xs">{run.interval_minutes}m</span>
-                  </td>
-                  <td className="px-4 py-3 text-sm">
-                    <span
-                      className={`inline-block px-2 py-1 text-xs rounded ${
-                        run.status === 'running'
-                          ? 'bg-green-100 text-green-800'
-                          : run.status === 'completed'
-                          ? 'bg-blue-100 text-blue-800'
-                          : 'bg-gray-100 text-gray-800'
-                      }`}
+              {runs.map((run) => {
+                const reason = failureReasonText(run.status, run.failure_reason);
+                return (
+                  <tr key={run.run_id} className="hover:bg-gray-50">
+                    <td className="px-4 py-3 text-sm font-medium text-gray-900">
+                      {run.skill}
+                    </td>
+                    <td className="px-4 py-3 text-sm text-gray-500">
+                      {run.instrument_id}
+                      <br />
+                      <span className="text-xs">{run.interval_minutes}m</span>
+                    </td>
+                    <td className="px-4 py-3 text-sm">
+                      <span
+                        className={`inline-block px-2 py-1 text-xs rounded ${
+                          run.status === 'running'
+                            ? 'bg-green-100 text-green-800'
+                            : run.status === 'completed'
+                            ? 'bg-blue-100 text-blue-800'
+                            : 'bg-gray-100 text-gray-800'
+                        }`}
+                      >
+                        {run.status}
+                      </span>
+                      {reason && (
+                        <span className="block mt-1 text-xs text-red-700">{reason}</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 text-sm text-right text-gray-900">
+                      {run.total_trades}
+                    </td>
+                    <td className="px-4 py-3 text-sm text-right text-gray-900">
+                      {formatPercentPoints(run.win_rate)}
+                    </td>
+                    <td
+                      className={`px-4 py-3 text-sm text-right font-semibold ${pnlColorClass(
+                        run.total_pnl
+                      )}`}
                     >
-                      {run.status}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3 text-sm text-right text-gray-900">
-                    {run.total_trades}
-                  </td>
-                  <td className="px-4 py-3 text-sm text-right text-gray-900">
-                    {formatPercentPoints(run.win_rate)}
-                  </td>
-                  <td
-                    className={`px-4 py-3 text-sm text-right font-semibold ${pnlColorClass(
-                      run.total_pnl
-                    )}`}
-                  >
-                    {formatCurrency(run.total_pnl)}
-                  </td>
-                </tr>
-              ))}
+                      {formatCurrency(run.total_pnl)}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
