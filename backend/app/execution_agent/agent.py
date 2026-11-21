@@ -627,9 +627,12 @@ class ExecutionAgent:
         """
         max_wait_seconds = self.config.fill_monitor_max_wait_seconds
         poll_seconds = self.config.fill_monitor_poll_seconds
-        start_time = time.time()
+        # Monotonic, not wall clock: an NTP step or a manual clock change can
+        # rewind (or jump forward) time.time() mid-monitor, which would stretch
+        # this wait past its budget or skip the order without polling it once.
+        start_time = time.monotonic()
 
-        while time.time() - start_time < max_wait_seconds:
+        while time.monotonic() - start_time < max_wait_seconds:
             try:
                 status_val = self.ibkr_client.get_order_status(broker_order_id)
             except Exception as e:

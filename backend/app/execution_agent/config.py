@@ -5,6 +5,7 @@ Configuration is loaded from environment variables.
 """
 
 from dataclasses import dataclass
+from math import isfinite
 from typing import Optional
 
 
@@ -60,8 +61,15 @@ class AgentConfig:
             raise ValueError(f"Invalid ib_gateway_port: {self.ib_gateway_port}")
         if self.poll_interval_seconds <= 0:
             raise ValueError("poll_interval_seconds must be positive")
+        # NaN compares False against `<= 0`, so the positivity check alone lets a
+        # non-finite deadline through: NaN makes the monitor loop exit at once,
+        # infinity makes it run past any terminal status.
+        if not isfinite(self.fill_monitor_max_wait_seconds):
+            raise ValueError("fill_monitor_max_wait_seconds must be a finite number")
         if self.fill_monitor_max_wait_seconds <= 0:
             raise ValueError("fill_monitor_max_wait_seconds must be positive")
+        if not isfinite(self.fill_monitor_poll_seconds):
+            raise ValueError("fill_monitor_poll_seconds must be a finite number")
         if self.fill_monitor_poll_seconds <= 0:
             raise ValueError("fill_monitor_poll_seconds must be positive")
         if self.trading_mode not in ("paper", "live"):

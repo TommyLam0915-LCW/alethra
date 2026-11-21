@@ -398,9 +398,9 @@ class TestCancelRequestedContract:
 
 
 class TestFillMonitorDeadline:
-    """The fill monitor leaves on a wall-clock deadline, so the deadline — not
-    a suppressed sleep — is what makes an order that never reaches a terminal
-    status leave quickly.
+    """The fill monitor leaves on a deadline read from ``time.monotonic()``, so
+    the deadline — not a suppressed sleep, and not the wall clock's mood — is
+    what makes an order that never reaches a terminal status leave quickly.
 
     This class replaces an autouse fixture that patched ``time.sleep`` through
     the agent module's namespace. ``app.execution_agent.agent.time`` *is* the
@@ -477,3 +477,94 @@ class TestFillMonitorDeadline:
         alethra.report_order_cancelled.assert_not_called()
         alethra.report_fill.assert_not_called()
         assert "deadline-intent" not in agent._completed_intents
+
+    @pytest.mark.parametrize("timing", [
+        {"fill_monitor_max_wait_seconds": float("nan")},
+        {"fill_monitor_max_wait_seconds": float("inf")},
+        {"fill_monitor_poll_seconds": float("nan")},
+        {"fill_monitor_poll_seconds": float("-inf")},
+    ])
+    def test_validate_rejects_non_finite_monitor_timing(self, timing):
+        # NaN fails `<= 0` silently, and +inf passes it: either one reaches the
+        # monitor as a deadline that never fires (or always fires), so the
+        # positivity gate alone cannot be the guard.
+        config = AgentConfig(alethra_api_key="k", alethra_api_url="http://x", **timing)
+        with pytest.raises(ValueError, match="must be a finite number"):
+            config.validate()
+
+    class _Clock:
+        """A ``time`` stand-in whose wall and monotonic hands are independent.
+
+        Injected only into ``app.execution_agent.agent.time`` — module-local, so
+        no other code in the process sees it, which is the mistake the removed
+        autouse fixture made. ``sleep`` moves the monotonic hand instead of
+        really waiting, and ``time`` counts its own reads so a deadline still
+        computed from the wall clock is visible rather than merely slow.
+        """
+
+        guard_reads = 400
+
+        def __init__(self, wall_drift):
+            self.wall_drift = float(wall_drift)
+            self.wall_base = 1_700_000_000.0
+            self.wall_reads = 0
+            self.monotonic_now = 0.0
+
+        def monotonic(self):
+            return self.monotonic_now
+
+        def time(self):
+            self.wall_reads += 1
+            if self.wall_reads > self.guard_reads:
+                raise AssertionError(
+                    f"wall clock read {self.wall_reads} times: the monitor "
+                    "never left its deadline"
+                )
+            return self.wall_base + self.wall_drift * self.wall_reads
+
+        def sleep(self, seconds):
+            self.monotonic_now += seconds
+
+    def _monitor_with_fake_clock(self, monkeypatch, wall_drift):
+        from unittest.mock import MagicMock
+
+        alethra = MagicMock()
+        agent, transport, broker_ref = self._monitor_never_terminating_order(
+            monkeypatch, alethra
+        )
+        polls = {"n": 0}
+        original_status = transport.get_order_status
+
+        def counting_status(broker_order_id):
+            polls["n"] += 1
+            return original_status(broker_order_id)
+
+        monkeypatch.setattr(transport, "get_order_status", counting_status)
+        clock = self._Clock(wall_drift)
+        monkeypatch.setattr("app.execution_agent.agent.time", clock)
+        agent._monitor_fills_for_known_order("clock-intent", broker_ref)
+        return clock, polls["n"], agent
+
+    def test_wall_clock_stepping_backwards_does_not_extend_the_wait(self, monkeypatch):
+        # A clock rewound an hour between reads makes `time.time() - start`
+        # ever more negative: a wall-clock deadline would poll until this
+        # fake's read guard trips. The monotonic deadline leaves on budget.
+        clock, polls, agent = self._monitor_with_fake_clock(monkeypatch, -3600.0)
+
+        assert clock.wall_reads == 0
+        budget = int(self.deadline_seconds / self.poll_seconds)
+        assert budget - 1 <= polls <= budget + 2, polls
+        assert self.deadline_seconds <= clock.monotonic_now < (
+            self.deadline_seconds + self.poll_seconds
+        )
+        assert "clock-intent" not in agent._completed_intents
+
+    def test_wall_clock_jumping_forward_does_not_skip_the_order(self, monkeypatch):
+        # The mirror defect: with the wall clock as the measure, one forward
+        # step makes the budget look already spent, and an order that never
+        # reaches a terminal status is left with zero polls.
+        clock, polls, agent = self._monitor_with_fake_clock(monkeypatch, 3600.0)
+
+        assert polls >= 2, polls
+        assert clock.wall_reads == 0
+        assert "clock-intent" not in agent._completed_intents
