@@ -490,6 +490,7 @@ test.describe('Backbone Workflow Acceptance', () => {
       const toolLinks = [
         { href: '/training', text: /Training/i },
         { href: '/inference', text: /Inference/i },
+        { href: '/learning', text: /Learning proposals/i },
         { href: '/execution', text: /Execution/i },
         { href: '/paper-portfolio', text: /Paper portfolios/i },
         { href: '/pilot', text: /Pilot/i },
