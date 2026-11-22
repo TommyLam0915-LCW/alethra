@@ -114,6 +114,20 @@ class Settings(BaseSettings):
     # Auto-learning scheduler: runs daily research and weekly pattern analysis.
     # Off by default; requires explicit opt-in to consume provider quota.
     enable_learning_scheduler: bool = False
+    # How often the queue drain looks for pending learning jobs. The drain is
+    # the only executor: a request row is claimed and settled by it, never by a
+    # thread started inside the HTTP handler.
+    learning_queue_poll_seconds: int = 30
+    # How long a claim on a learning job is honoured. A row still `running`
+    # after this is settled as `failed` — the executor's silence is not proof
+    # the work finished, and re-running a research batch unasked would spend
+    # quota the owner never approved.
+    learning_lease_seconds: int = 1800
+    # Owner for scheduler-created work. Deliberately an email that has to match
+    # an active account: nothing here takes "the first user in the database" as
+    # an owner, so an unset or unmatched value means scheduled work is refused
+    # rather than attributed to somebody who did not ask for it.
+    learning_system_owner_email: str = ""
     # Auto-collection scheduler: periodically fetches new market data and runs backtests.
     # Off by default; requires explicit opt-in to consume provider quota.
     auto_collection_enabled: bool = False

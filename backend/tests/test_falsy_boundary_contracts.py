@@ -211,13 +211,61 @@ class TestProviderLaneOfAnUnboundSession:
         )
 
 
+class _InertExecutor:
+    """A scheduler the admission check can read, with no thread behind it."""
+
+    running = True
+
+    def get_job(self, job_id):
+        from app.workers.learning_scheduler import DRAIN_JOB_ID
+
+        class _Drain:
+            next_run_time = datetime(2099, 1, 1)
+
+        return _Drain() if job_id == DRAIN_JOB_ID else None
+
+
 class TestLearningTriggerKeepsTheRequestedScope:
     """Omitting the field means "default"; sending [] means "nothing"."""
 
     URL = "/api/v1/learning/jobs/trigger"
 
+    @pytest.fixture(autouse=True)
+    def _inert_executor(self):
+        """Let the trigger admit, with nothing that could run research.
+
+        Admission is pinned in ``test_learning_api.py``; these nodes are about
+        what the queued row records. The stub reports a next tick in 2099 and
+        never fires, so no provider call can start from here.
+        """
+        from app.workers.learning_scheduler import register_learning_scheduler
+
+        register_learning_scheduler(_InertExecutor())
+        yield
+        register_learning_scheduler(None)
+
     def _post(self, client, auth_headers, body):
         return client.post(self.URL, json=body, headers=auth_headers)
+
+    def _queue_then_drain(self, client, auth_headers, body):
+        """Queue through the API, then let the real executor run that row."""
+        from unittest.mock import patch
+
+        import app.workers.learning_scheduler as ls
+
+        resp = self._post(client, auth_headers, body)
+        assert resp.status_code == 201, resp.text
+        job_id = _uuid.UUID(resp.json()["job"]["id"])
+
+        calls = []
+
+        def _record(db, user_id, instrument_id, interval_minutes):
+            calls.append((instrument_id, interval_minutes))
+            return {"walk_forward": {"out_of_sample": {"trades": 0}}}
+
+        with patch.object(ls, "_run_single_study", side_effect=_record):
+            assert ls.drain_learning_queue() == 1
+        return job_id, calls
 
     def test_empty_instruments_is_refused_not_expanded_into_the_grid(
         self, client, auth_headers
@@ -249,95 +297,54 @@ class TestLearningTriggerKeepsTheRequestedScope:
         assert config["instruments"] == SCHEDULED_INSTRUMENTS
         assert config["intervals"] == SCHEDULED_INTERVALS
 
-    def test_requested_scope_is_recorded_verbatim(self, client, auth_headers):
-        r = self._post(
+    def test_requested_scope_is_recorded_and_then_run(self, client, auth_headers):
+        """The config the row records is the grid the executor actually runs.
+
+        When the trigger ran the batch inline, recording and running could not
+        drift apart. Under the queue they are two calls at two times, so the
+        executor has to iterate what this row froze rather than whatever the
+        settings say when it arrives.
+        """
+        from app.models.learning_job import LearningJob
+
+        job_id, calls = self._queue_then_drain(
             client,
             auth_headers,
             {
                 "job_type": "scheduled_study",
                 "instruments": ["CRYPTO:KRAKEN:SOL-USD"],
-                "intervals": [240],
+                "intervals": [240, 60],
             },
         )
-        assert r.status_code == 201, r.text
-        config = r.json()["job"]["config_json"]
+
+        db = TestSession()
+        try:
+            job = db.get(LearningJob, job_id)
+            config, result = job.config_json, job.result_json
+        finally:
+            db.close()
+
         assert config["instruments"] == ["CRYPTO:KRAKEN:SOL-USD"]
-        assert config["intervals"] == [240]
-
-    def test_the_dispatched_batch_runs_the_recorded_scope(self, monkeypatch):
-        """The config row is a claim about what will run; make it true."""
-        import app.workers.learning_scheduler as ls
-
-        calls = []
-        recorded = {}
-
-        class _FakeSession:
-            def add(self, obj):
-                recorded["job"] = obj
-
-            def flush(self):
-                pass
-
-            def commit(self):
-                pass
-
-            def close(self):
-                pass
-
-        monkeypatch.setattr(ls, "SessionLocal", _FakeSession)
-        monkeypatch.setattr(ls, "_get_first_user_id", lambda db: _uuid.uuid4())
-        monkeypatch.setattr(
-            ls,
-            "_run_single_study",
-            lambda db, user_id, instrument, interval: calls.append(
-                (instrument, interval)
-            )
-            or {"walk_forward": {"out_of_sample": {"trades": 0}}},
-        )
-
-        ls.run_scheduled_research(
-            scope="manual",
-            instruments=["CRYPTO:KRAKEN:SOL-USD"],
-            intervals=[240, 60],
-        )
-
+        assert config["intervals"] == [240, 60]
         assert calls == [("CRYPTO:KRAKEN:SOL-USD", 240), ("CRYPTO:KRAKEN:SOL-USD", 60)]
-        assert recorded["job"].config_json["instruments"] == ["CRYPTO:KRAKEN:SOL-USD"]
-        assert recorded["job"].config_json["intervals"] == [240, 60]
-        assert recorded["job"].result_json["total_combos"] == 2
+        assert result["total_combos"] == 2
+        assert result["successful"] == 2
 
-    def test_none_still_means_the_scheduled_default(self, monkeypatch):
-        import app.workers.learning_scheduler as ls
-
-        calls = []
-
-        class _FakeSession:
-            def add(self, obj):
-                pass
-
-            def flush(self):
-                pass
-
-            def commit(self):
-                pass
-
-            def close(self):
-                pass
-
-        monkeypatch.setattr(ls, "SessionLocal", _FakeSession)
-        monkeypatch.setattr(ls, "_get_first_user_id", lambda db: _uuid.uuid4())
-        monkeypatch.setattr(
-            ls,
-            "_run_single_study",
-            lambda db, user_id, instrument, interval: calls.append(
-                (instrument, interval)
-            )
-            or {"walk_forward": {"out_of_sample": {"trades": 0}}},
+    def test_none_still_means_the_scheduled_default(self, client, auth_headers):
+        from app.workers.learning_scheduler import (
+            SCHEDULED_INSTRUMENTS,
+            SCHEDULED_INTERVALS,
         )
 
-        ls.run_scheduled_research(scope="daily")
+        _, calls = self._queue_then_drain(
+            client, auth_headers, {"job_type": "scheduled_study"}
+        )
 
-        assert len(calls) == len(ls.SCHEDULED_INSTRUMENTS) * len(ls.SCHEDULED_INTERVALS)
+        assert calls == [
+            (instrument, interval)
+            for instrument in SCHEDULED_INSTRUMENTS
+            for interval in SCHEDULED_INTERVALS
+        ]
 
 
 class TestLongOnlyGuardFailsClosed:

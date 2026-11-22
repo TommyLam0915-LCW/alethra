@@ -1168,17 +1168,31 @@ export const api = {
       if (status) params.set('status', status);
       return apiFetch(`/api/v1/learning/proposals?${params.toString()}`);
     },
-    // POST /jobs/trigger creates the request record and, when the scheduler is
-    // up, dispatches real research work for the grid it names
-    // (`app/api/learning.py:203-232`). Omitting both fields takes the
-    // scheduled default set; sending `[]` is refused with 400 rather than
-    // silently expanded to the full workload.
-    triggerJob: (data: {
-      job_type: 'scheduled_study' | 'pattern_analysis';
-      instruments?: string[];
-      intervals?: number[];
-    }) =>
-      apiFetch('/api/v1/learning/jobs/trigger', { method: 'POST', body: JSON.stringify(data) }),
+    // POST /jobs/trigger is a queue write: it files the request record owned by
+    // this account and the scheduler's drain is what runs it. Omitting both grid
+    // fields takes the scheduled default set; sending `[]` is refused with 400
+    // rather than silently expanded to the full workload.
+    //
+    // `idempotencyKey` is sent as `Idempotency-Key`. Same key plus same content
+    // returns the row the first call filed (`replayed: true`); same key with
+    // different content is refused 409 rather than rewriting it. A caller that
+    // retries after an unknown transport failure must resend the *same* key —
+    // that is what keeps a double click from becoming two batches. Omitting the
+    // key means every call is a new operation, which is what a deliberate second
+    // run wants.
+    triggerJob: (
+      data: {
+        job_type: 'scheduled_study' | 'pattern_analysis';
+        instruments?: string[];
+        intervals?: number[];
+      },
+      idempotencyKey?: string,
+    ) =>
+      apiFetch('/api/v1/learning/jobs/trigger', {
+        method: 'POST',
+        body: JSON.stringify(data),
+        ...(idempotencyKey ? { headers: { 'Idempotency-Key': idempotencyKey } } : {}),
+      }),
     approveProposal: (proposalId: string) =>
       apiFetch(`/api/v1/learning/proposals/${proposalId}/approve`, { method: 'POST' }),
     deployProposal: (proposalId: string) =>

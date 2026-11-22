@@ -22,12 +22,18 @@ register('./tsResolveLoader.mjs', import.meta.url);
 const lib = await import('../src/lib/learningProposal.ts');
 const {
   DEPLOYABLE_EVIDENCE_STATUS,
+  OPERATION_KEY_MAX,
+  OPERATION_KEY_MIN,
   decisionFor,
   evidenceStatusLabel,
   evidenceStatusOf,
+  isSubmitSettled,
   jobResultSummaryOf,
   learningStatusLabel,
+  newOperationKey,
   refusalText,
+  triggerNoticeOf,
+  triggerUnsettledText,
   validationErrorOf,
   validationMetricsOf,
   validationPassedOf,
@@ -227,7 +233,7 @@ test('the result_json line uses only the counts each producer writes', () => {
   assert.equal(jobResultSummaryOf({ result_json: { successful: 3 } }), '');
 });
 
-// --- the four server refusals stay four separate sentences -------------------
+// --- the proposal refusals stay separate sentences --------------------------
 
 test('every refusal reason key the API can raise renders distinctly', () => {
   for (const key of ['proposal_not_found', 'validation_not_passed', 'proposal_not_approvable', 'proposal_not_validated']) {
@@ -309,4 +315,149 @@ test('the client calls the five real routes and the page is reachable from the n
   assert.ok(nav.includes("'/learning'"), 'the tools menu lost the /learning entry');
   assert.ok(page.includes("data-testid=\"learning-proposal-row\""));
   assert.ok(page.includes('decision.kind'));
+});
+
+// --- 本輪決策 三: one operation key per logical submit -----------------------
+
+// The route body is read rather than trusted: a new `reason` the server can
+// raise on this route must earn a sentence here, or the page would fall back to
+// echoing an English blob the owner cannot act on.
+function triggerRouteBody() {
+  const start = learningApi.indexOf('def trigger_learning_job');
+  const end = learningApi.indexOf('@router.', start + 1);
+  assert.ok(start >= 0 && end > start, 'the trigger route moved or lost its decorator');
+  return learningApi.slice(start, end);
+}
+
+test('the minted key is inside the bounds the endpoint enforces and unique per submit', () => {
+  const bounds = {
+    min: Number(learningApi.match(/USER_KEY_MIN = (\d+)/)[1]),
+    max: Number(learningApi.match(/USER_KEY_MAX = (\d+)/)[1]),
+  };
+  assert.equal(OPERATION_KEY_MIN, bounds.min, 'the frontend key floor left the server floor');
+  assert.equal(OPERATION_KEY_MAX, bounds.max, 'the frontend key ceiling left the server ceiling');
+  // The stored column is the namespaced form, so the page's key is only the
+  // tail of it; a minted key must never arrive pre-namespaced.
+  assert.ok(learningApi.includes('USER_KEY_PREFIX = "user:"'), 'the owner namespace moved');
+
+  for (const jobType of ['scheduled_study', 'pattern_analysis']) {
+    const minted = Array.from({ length: 200 }, () => newOperationKey(jobType));
+    for (const key of minted) {
+      assert.ok(key.startsWith(`${jobType}:`), `${key} does not name its job type`);
+      assert.ok(!key.includes('user:'), `${key} would be double-namespaced`);
+      assert.ok(key.length >= bounds.min && key.length <= bounds.max, `${key} length ${key.length}`);
+      // A key is an HTTP header value here; anything outside this set is a
+      // header the proxy layer (or fetch itself) can reject before the server.
+      assert.match(key, /^[A-Za-z0-9:_-]+$/);
+    }
+    // Two presses in the same millisecond must not mint the same key: that
+    // would turn two deliberate runs into one receipt.
+    assert.equal(new Set(minted).size, minted.length, `${jobType} minted a duplicate key`);
+  }
+  assert.notEqual(newOperationKey('scheduled_study'), newOperationKey('pattern_analysis'));
+});
+
+test('only an answer the browser never read keeps the key open', () => {
+  // A 5xx does not prove the request was refused: the endpoint may have
+  // committed the row before it died, which is the one case a retry must not
+  // file twice.
+  assert.equal(isSubmitSettled(null), false);
+  assert.equal(isSubmitSettled(500), false);
+  assert.equal(isSubmitSettled(502), false);
+  // 2xx filed (or replayed) and 4xx refused before filing — both end the submit,
+  // so the next press is a new operation with a new key.
+  for (const status of [200, 201, 400, 409, 422]) {
+    assert.equal(isSubmitSettled(status), true, `${status} left the key stuck`);
+  }
+});
+
+test('every reason the trigger route can raise has its own sentence on the page', () => {
+  const reasons = [...triggerRouteBody().matchAll(/"reason": "([a-z_]+)"/g)].map((m) => m[1]);
+  assert.deepEqual(
+    new Set(reasons),
+    new Set(['learning_executor_unavailable', 'idempotency_conflict']),
+    'the trigger route changed its refusal vocabulary without a page message',
+  );
+  for (const reason of reasons) {
+    assert.notEqual(refusalText(409, { reason }), '', `${reason} falls through to the default`);
+  }
+  const noExecutor = refusalText(409, {
+    reason: 'learning_executor_unavailable',
+    executor_status: 'learning_queue_drain_missing',
+    remedy: 'start the learning executor',
+  });
+  assert.ok(noExecutor.startsWith('拒絕：'), noExecutor);
+  // Nothing was filed is the fact the owner needs first; the remedy is secondary.
+  assert.ok(noExecutor.includes('沒有建立工作記錄'), noExecutor);
+  assert.ok(noExecutor.includes('learning_queue_drain_missing'), noExecutor);
+  assert.ok(noExecutor.includes('start the learning executor'), noExecutor);
+
+  const conflicted = refusalText(409, { reason: 'idempotency_conflict' });
+  assert.ok(conflicted.startsWith('拒絕：'), conflicted);
+  assert.ok(conflicted.includes('不會改寫原本那一筆'), conflicted);
+  assert.ok(conflicted.includes('沒有建立新工作'), conflicted);
+  assert.notEqual(conflicted, noExecutor);
+});
+
+test('a replayed trigger says the click was de-duplicated, not that work was created', () => {
+  const replayed = triggerNoticeOf({ job: { id: 'job-1' }, replayed: true });
+  assert.ok(replayed.includes('job-1'), replayed);
+  assert.ok(replayed.includes('去重'), replayed);
+  assert.ok(!replayed.includes('已排入學習要求'), replayed);
+  assert.ok(replayed.includes('沒有建立第二份工作'), replayed);
+
+  const filed = triggerNoticeOf({
+    job: { id: 'job-2' },
+    replayed: false,
+    next_claim_at: '2026-11-22T03:00:00+00:00',
+  });
+  assert.ok(filed.includes('job-2'), filed);
+  assert.ok(!filed.includes('去重'), filed);
+  assert.ok(!filed.includes('未回報'), filed);
+  // The same row is what the executor updates; the page must not imply a twin.
+  assert.ok(filed.includes('同一筆'), filed);
+
+  // Absences stay absences: no id and no claim time are reported as unreported,
+  // not as a blank or a zero.
+  const unknown = triggerNoticeOf({ replayed: false });
+  assert.ok(unknown.includes('ID 未回報'), unknown);
+  assert.ok(unknown.includes('未回報'), unknown);
+  assert.ok(triggerNoticeOf(null).includes('ID 未回報'));
+  // `replayed` is a boolean in the response; a missing flag is not a replay.
+  assert.ok(!triggerNoticeOf({ job: { id: 'job-3' } }).includes('去重'));
+});
+
+test('an unanswered press is worded as unknown and keeps the key visible', () => {
+  const key = newOperationKey('scheduled_study');
+  const text = triggerUnsettledText(key);
+  assert.ok(text.includes(key), text);
+  assert.ok(text.includes('可能已被記錄'), text);
+  assert.ok(text.includes('重送同一個要求'), text);
+  // Neither "已完成" nor a refusal: the page does not know yet, and must say so.
+  assert.ok(!text.includes('已排入學習要求'), text);
+  assert.ok(!text.includes('拒絕：'), text);
+});
+
+test('the page sends a key on every trigger and clears it only on a settled answer', () => {
+  assert.ok(
+    apiClient.includes("headers: { 'Idempotency-Key': idempotencyKey }"),
+    'api.ts no longer puts the key on the wire',
+  );
+  assert.ok(
+    /triggerJob\(\{ job_type: jobType \}, key\)/.test(page),
+    'the page stopped passing its key to the client',
+  );
+  assert.ok(
+    !/triggerJob\(\{ job_type: jobType \}\)/.test(page),
+    'a keyless trigger call is back on the page',
+  );
+  assert.ok(page.includes('newOperationKey(jobType)'), 'the page no longer mints a key');
+  assert.ok(page.includes('isSubmitSettled(status)'), 'the page ignores the settle/keep decision');
+  // The slot has to be readable by the second press before React re-renders,
+  // which is the double click this exists for. State would be one tick too late.
+  assert.ok(page.includes('operationKeys.current[jobType]'), 'the key moved out of the ref');
+  assert.ok(
+    page.includes('useRef<Partial<Record<LearningJobType, string>>>'),
+    'the key slot lost its per-job-type typing',
+  );
 });

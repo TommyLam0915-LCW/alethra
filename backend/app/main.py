@@ -54,10 +54,17 @@ _auto_collection_scheduler = None
 def start_learning_scheduler():
     global _learning_scheduler
     if settings.enable_learning_scheduler:
-        from app.workers.learning_scheduler import create_learning_scheduler
+        from app.workers.learning_scheduler import (
+            create_learning_scheduler,
+            register_learning_scheduler,
+        )
 
         _learning_scheduler = create_learning_scheduler()
         _learning_scheduler.start()
+        # Publishing the started scheduler is what makes POST /learning/jobs/trigger
+        # acceptable in this process: the endpoint asks whether a queue drain is
+        # live here rather than assuming a configured one is a running one.
+        register_learning_scheduler(_learning_scheduler)
         import logging
         logging.getLogger(__name__).info("Auto-learning scheduler started")
 
@@ -81,7 +88,12 @@ def start_auto_collection_scheduler():
 @app.on_event("shutdown")
 def stop_learning_scheduler():
     if _learning_scheduler:
+        from app.workers.learning_scheduler import register_learning_scheduler
+
         _learning_scheduler.shutdown(wait=False)
+        # A shut-down scheduler must stop being offered as an executor, or a
+        # submission after shutdown would be accepted and never claimed.
+        register_learning_scheduler(None)
         import logging
         logging.getLogger(__name__).info("Auto-learning scheduler stopped")
 

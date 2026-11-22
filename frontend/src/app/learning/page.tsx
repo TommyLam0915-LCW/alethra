@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { api, ApiError, formatErrorDetail } from '@/lib/api';
+import { api, ApiError } from '@/lib/api';
 import { createRequestGuard } from '@/lib/latestRequest';
 import { formatDateTime, formatParamMap, formatNumber, formatPercentFraction, formatPercentPoints } from '@/lib/format';
 import { statusPillClass } from '@/lib/status-styles';
@@ -11,14 +11,20 @@ import {
   decisionFor,
   evidenceStatusLabel,
   evidenceStatusOf,
+  isSubmitSettled,
   jobResultSummaryOf,
   learningStatusLabel,
+  newOperationKey,
   refusalText,
+  triggerNoticeOf,
+  triggerUnsettledText,
   validationErrorOf,
   validationMetricsOf,
   validationPassedOf,
+  type LearningJobType,
   type LearningJobRow,
   type LearningProposalRow,
+  type TriggerResponseShape,
 } from '@/lib/learningProposal';
 
 const PROPOSAL_STATUS_FILTERS = ['', 'pending', 'validated', 'deployed', 'rejected'];
@@ -52,6 +58,12 @@ export default function LearningPage() {
   const [triggering, setTriggering] = useState<string | null>(null);
   const proposalsGuard = useRef(createRequestGuard()).current;
   const jobsGuard = useRef(createRequestGuard()).current;
+  // One Idempotency-Key per logical submit, kept in a ref because press #2 has
+  // to see press #1's key before React re-renders — that instant is exactly
+  // what a double click is. The button's `disabled` only covers this tab while
+  // it is waiting; the key is what covers a second tab, a slow retry, and the
+  // transport failure that never told us whether the row was filed.
+  const operationKeys = useRef<Partial<Record<LearningJobType, string>>>({});
 
   const reload = useCallback(async () => {
     const proposalsToken = proposalsGuard.begin();
@@ -125,24 +137,38 @@ export default function LearningPage() {
     }
   };
 
-  const handleTrigger = async (jobType: 'scheduled_study' | 'pattern_analysis') => {
+  const handleTrigger = async (jobType: LearningJobType) => {
+    // Reuse this slot's key only while the submit has no settled answer, and
+    // mint a fresh one once the previous press got one. "Press again" after a
+    // definite refusal or a definite success is therefore a deliberate new
+    // operation; "press again" when the wire went silent is a retry of the
+    // operation the server may already hold.
+    const key = operationKeys.current[jobType] ?? newOperationKey(jobType);
+    operationKeys.current[jobType] = key;
     setTriggering(jobType);
     setActionError(null);
     setNotice(null);
     try {
-      const payload = await api.learning.triggerJob({ job_type: jobType });
-      const result = payload as { job?: LearningJobRow; message?: string };
-      const jobId = result?.job?.id;
-      setNotice(
-        `已建立 ${jobType} 工作記錄${jobId ? ` ${jobId}` : '（未回報 ID）'}。伺服器訊息：${
-          typeof result?.message === 'string' ? result.message : '（沒有訊息欄位）'
-        }`,
-      );
+      const payload = await api.learning.triggerJob({ job_type: jobType }, key);
+      setNotice(triggerNoticeOf(payload as TriggerResponseShape));
+      operationKeys.current[jobType] = undefined;
       await reload();
     } catch (err) {
-      setActionError(
-        err instanceof ApiError ? formatErrorDetail(err.detail) : '無法建立工作記錄。',
-      );
+      const status = err instanceof ApiError ? err.status : null;
+      if (isSubmitSettled(status)) {
+        // The server answered, and every 4xx on this route refuses before it
+        // enqueues, so nothing is waiting under this key. Drop it: the next
+        // press must be a new operation, not a retry of a request nobody filed.
+        operationKeys.current[jobType] = undefined;
+        setActionError(describeError(err, '無法建立工作記錄。'));
+      } else {
+        // No readable answer: the row may or may not exist. Keep the key so the
+        // next press replays this operation instead of filing a second batch,
+        // and re-read the list — a row here is the evidence that it landed.
+        operationKeys.current[jobType] = key;
+        setActionError(triggerUnsettledText(key));
+        await reload();
+      }
     } finally {
       setTriggering(null);
     }
@@ -219,7 +245,7 @@ export default function LearningPage() {
           <p data-testid="learning-proposals-empty" style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
             目前沒有符合篩選條件的提案。提案只能由排程工作建立：
             每個出場設定的成交筆數未達 30 筆時，分析不會提出任何參數調整
-            （services/pattern_analysis.py:333-334 直接回傳 None）。
+            （services/pattern_analysis.py:332-333 直接回傳 None）。
           </p>
         ) : (
           <div style={{ overflowX: 'auto' }}>
@@ -360,7 +386,7 @@ export default function LearningPage() {
         )}
         <p style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '10px' }}>
           「部署」這個按鈕做的事：後端只寫 status 與 deployed_at
-          兩個欄位（api/learning.py:470-471），並沒有任何研究、紙上交易或實盤流程讀取
+          兩個欄位（api/learning.py:592-600），並沒有任何研究、紙上交易或實盤流程讀取
           LearningProposal 或 proposed_exit_config。所以部署之後的實際交易行為不會改變；
           它記錄的是決定，不是生效的設定。
         </p>
@@ -400,14 +426,22 @@ export default function LearningPage() {
           </div>
         </div>
         <p style={{ fontSize: '12px', color: 'var(--text-muted)', margin: '0 0 10px' }}>
-          這兩個按鈕會真的送出 POST /api/v1/learning/jobs/trigger，建立的是「請求記錄」那一列：
-          排程器確實在跑時才會立刻另起執行緒以預設的標的與週期清單開始工作
-          （api/learning.py:203-232）；排程器沒啟動時，這一列會停在「待處理」，
-          而且定時觸發不會來認領它（同一端點的文件說明，:148-151）。
+          這兩個按鈕會真的送出 POST /api/v1/learning/jobs/trigger。它只建立「請求記錄」這一列工作，
+          不會自己執行：執行器 learning_queue_drain（workers/learning_scheduler.py:145-152）
+          認領這一列、寫 started_at，再把結果與 completed_at 寫回同一個 id
+          （:501、api/learning.py:183-197）。這個伺服器程序裡沒有可用的執行器時，
+          端點直接以 409 拒絕而且不建立任何記錄（api/learning.py:244-261），
+          不會留下永遠停在「待處理」的孤兒請求。
+          每次按下都帶一把 Idempotency-Key：同一把金鑰加同一內容由資料庫的去重索引回同一筆工作，
+          所以重複點擊不會多跑一次研究（本頁每個按鈕送出的內容都相同，因此同一按鈕的兩次按
+          屬於同一個操作）。只有在「前一次按下沒有讀到明確回應」時頁面才保留那把金鑰——
+          那是唯一可能已經悄悄建檔的情況；拿到明確的成功或拒絕之後，下一次按下會換一把新的，
+          所以刻意再跑一次仍然是兩個獨立的操作。
           真的執行會取用外部市場資料並使用運算，不是預覽。
-          自動排程的節奏是每日 02:00 研究、每週日 04:00 樣板分析
-          （workers/learning_scheduler.py:79-93），而且那兩個排程把工作記在資料庫中
-          「第一位使用者」名下（:99-104、:164、:355），不是目前登入者——
+          自動排程的節奏是每日 02:00 研究（workers/learning_scheduler.py:118-126）、
+          每週日 04:00 樣板分析（:129-136），而且那兩個排程把工作記在
+          LEARNING_SYSTEM_OWNER_EMAIL 指定的帳號名下（:242-261），不是目前登入者——
+          該設定沒有對到一個有效的帳號時，該次排程不建立任何記錄（:720-729）；
           所以第二個帳號的這張頁面不會看見那些自動記錄。
         </p>
         {loading ? (

@@ -1,17 +1,27 @@
 """Tests for the learning API endpoints.
 
 Covers:
-- GET /learning/jobs returns jobs
-- POST /learning/jobs/trigger creates job
+- GET /learning/jobs returns one owner's page with a real total
+- POST /learning/jobs/trigger queues one row owned by the caller, and refuses
+  when no executor could claim it
+- resubmission safety: ``Idempotency-Key`` replay, conflict, per-owner
+  namespace, and the database constraint underneath it
+- the lifecycle a caller is promised: the row this route files is the row the
+  executor settles
 - GET /learning/proposals returns proposals
 - POST /learning/proposals/{id}/approve records the owner decision
 - POST /learning/proposals/{id}/deploy updates status
 - GET /learning/analysis returns pattern data
+
+Nothing here runs real research: the trigger is a queue write, and the one node
+that drains the queue replaces ``_run_single_study`` so no provider call is made.
 """
 
+import threading
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy import select
@@ -21,7 +31,51 @@ from app.models.audit_event import AuditEvent
 from app.models.learning_job import LearningJob, LearningProposal
 from app.models.strategy_study import StrategyStudyRun, StrategyStudyTrade
 from app.models.user import User
+from app.workers import learning_scheduler as worker
+from app.workers.learning_scheduler import (
+    DRAIN_JOB_ID,
+    drain_learning_queue,
+    register_learning_scheduler,
+)
 from tests.conftest import TestSession
+from tests.lanes import pg_only
+
+STUDY_RESULT = {"walk_forward": {"out_of_sample": {"trades": 5}}}
+
+
+class _StubDrainJob:
+    """A drain job that reports its next tick without ever firing one."""
+
+    next_run_time = datetime(2099, 1, 1, tzinfo=timezone.utc)
+
+
+class _StubScheduler:
+    """What ``learning_executor_status`` reads for "an executor is live here".
+
+    The API admits a submission only when it can name a running drain, so these
+    nodes need that answer without starting a real APScheduler thread — a live
+    scheduler would run real research against the providers.
+    """
+
+    running = True
+
+    def get_job(self, job_id):
+        return _StubDrainJob() if job_id == DRAIN_JOB_ID else None
+
+
+@pytest.fixture
+def executor():
+    """Publish a readable-but-inert executor for this test, then withdraw it."""
+    register_learning_scheduler(_StubScheduler())
+    yield
+    register_learning_scheduler(None)
+
+
+@pytest.fixture(autouse=True)
+def _no_executor_leakage():
+    register_learning_scheduler(None)
+    yield
+    register_learning_scheduler(None)
 
 
 def _make_user_and_get_headers(client, email: str = "learning-api@alethra.io"):
@@ -150,9 +204,9 @@ def _make_proposal(
     """Create a proposal shaped the way learning_scheduler creates one.
 
     The scheduler writes ``rationale_json["evidence_status"]``
-    (learning_scheduler.py:360), runs the backtest and stores
-    ``validation_result`` unconditionally (:383), and only then decides the
-    status (:387-401). A fixture that omits either field is not describing a
+    (learning_scheduler.py:1038), runs the backtest and stores
+    ``validation_result`` unconditionally (:1061), and only then decides the
+    status (:1065-1066). A fixture that omits either field is not describing a
     product state, and the deploy gate reads both.
 
     ``status="validated"`` still exists for the node that proves deploy refuses
@@ -238,6 +292,49 @@ def _approval_events(proposal_id: uuid.UUID) -> list:
         db.close()
 
 
+def _job_row(job_id: uuid.UUID) -> LearningJob:
+    """Read one job back on a session independent of the request's."""
+    db = TestSession()
+    try:
+        row = db.scalars(select(LearningJob).where(LearningJob.id == job_id)).one()
+        db.expunge(row)
+        return row
+    finally:
+        db.close()
+
+
+def _job_rows_for(user_id: uuid.UUID) -> list:
+    db = TestSession()
+    try:
+        rows = (
+            db.query(LearningJob)
+            .filter(LearningJob.user_id == user_id)
+            .order_by(LearningJob.created_at.asc())
+            .all()
+        )
+        for row in rows:
+            db.expunge(row)
+        return rows
+    finally:
+        db.close()
+
+
+def _queued_events(job_ids) -> list:
+    db = TestSession()
+    try:
+        return list(
+            db.scalars(
+                select(AuditEvent).where(
+                    AuditEvent.entity_type == "learning_job",
+                    AuditEvent.event_type == "learning_job_queued",
+                    AuditEvent.entity_id.in_([str(i) for i in job_ids]),
+                )
+            ).all()
+        )
+    finally:
+        db.close()
+
+
 class TestListLearningJobs:
     def test_returns_empty_when_no_jobs(self, client, auth_headers):
         resp = client.get("/api/v1/learning/jobs", headers=auth_headers)
@@ -268,26 +365,358 @@ class TestListLearningJobs:
         assert data["total"] >= 1
         assert data["jobs"][0]["job_type"] == "scheduled_study"
 
+    def test_total_is_the_whole_set_not_the_page(self, client, auth_headers):
+        """"20 rows out of 2,000" must not read back as "20 total".
+
+        ``total`` used to be ``len(jobs)``, which made a page look like the
+        complete history and let a truncated list be reported as all the work
+        there is.
+        """
+        user_id = _get_user_id(auth_headers)
+        db = TestSession()
+        try:
+            for _ in range(3):
+                db.add(
+                    LearningJob(
+                        user_id=user_id,
+                        status="completed",
+                        job_type="scheduled_study",
+                        config_json={"instruments": ["BTC-USD"]},
+                    )
+                )
+            db.commit()
+        finally:
+            db.close()
+
+        resp = client.get(
+            "/api/v1/learning/jobs?limit=2&offset=0", headers=auth_headers
+        )
+        data = resp.json()
+        assert (data["total"], len(data["jobs"])) == (3, 2)
+        assert data["limit"] == 2 and data["offset"] == 0
+        assert data["has_more"] is True
+
+        second = client.get(
+            "/api/v1/learning/jobs?limit=2&offset=2", headers=auth_headers
+        ).json()
+        assert len(second["jobs"]) == 1
+        assert second["has_more"] is False
+        assert {j["id"] for j in data["jobs"]} & {j["id"] for j in second["jobs"]} == set()
+
+    def test_jobs_of_another_owner_are_not_listed(self, client, auth_headers):
+        """The list is scoped to the caller, not to the whole tenant."""
+        other_headers = _make_user_and_get_headers(client, "jobs-isolation-b@alethra.io")
+        other_id = _get_user_id(other_headers)
+        _make_run_with_trades(other_id)  # creates no job; insert one directly
+        db = TestSession()
+        try:
+            db.add(
+                LearningJob(
+                    user_id=other_id,
+                    status="completed",
+                    job_type="scheduled_study",
+                    config_json={"instruments": ["BTC-USD"]},
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        resp = client.get("/api/v1/learning/jobs", headers=auth_headers)
+        assert resp.json()["total"] == 0
+
 
 class TestTriggerLearningJob:
-    def test_creates_job(self, client, auth_headers):
+    def test_creates_job(self, client, auth_headers, executor):
         resp = client.post(
             "/api/v1/learning/jobs/trigger",
             json={"job_type": "scheduled_study"},
             headers=auth_headers,
         )
-        assert resp.status_code == 201
+        assert resp.status_code == 201, resp.json()
         data = resp.json()
         assert data["job"]["status"] == "pending"
         assert data["job"]["job_type"] == "scheduled_study"
+        # The row belongs to the caller: an endpoint-spawned run used to attribute
+        # the batch to "the first user in the table".
+        assert data["job"]["user_id"] == str(_get_user_id(auth_headers))
+        assert data["job"]["origin"] == "user"
+        assert data["replayed"] is False
+        assert data["next_claim_at"] is not None
 
-    def test_rejects_invalid_job_type(self, client, auth_headers):
+    def test_queued_request_is_audited_once(self, client, auth_headers, executor):
+        job_id = uuid.UUID(
+            client.post(
+                "/api/v1/learning/jobs/trigger",
+                json={"job_type": "scheduled_study"},
+                headers=auth_headers,
+            ).json()["job"]["id"]
+        )
+        events = _queued_events([job_id])
+        assert len(events) == 1
+        assert str(job_id) in str(events[0].entity_id)
+
+    def test_rejects_invalid_job_type(self, client, auth_headers, executor):
         resp = client.post(
             "/api/v1/learning/jobs/trigger",
             json={"job_type": "invalid_type"},
             headers=auth_headers,
         )
         assert resp.status_code == 422
+
+    def test_empty_instruments_is_refused_not_widened(self, client, auth_headers, executor):
+        """``[]`` used to be rewritten into the full scheduled grid.
+
+        A request for no instruments that runs three symbols x four grains is a
+        bigger run than the caller asked for, charged to their compute.
+        """
+        for payload in (
+            {"job_type": "scheduled_study", "instruments": []},
+            {"job_type": "scheduled_study", "intervals": []},
+        ):
+            resp = client.post(
+                "/api/v1/learning/jobs/trigger", json=payload, headers=auth_headers
+            )
+            assert resp.status_code == 400, resp.json()
+        assert _job_rows_for(_get_user_id(auth_headers)) == []
+
+    def test_pattern_analysis_rejects_a_grid_it_does_not_use(
+        self, client, auth_headers, executor
+    ):
+        resp = client.post(
+            "/api/v1/learning/jobs/trigger",
+            json={"job_type": "pattern_analysis", "instruments": ["BTC-USD"]},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 400
+
+    def test_refuses_without_an_executor_and_files_nothing(self, client, auth_headers):
+        """No live drain ⇒ the request is refused rather than parked.
+
+        This is the orphan-request defect: the endpoint accepted work that
+        nothing could ever claim, and the owner was left with a row at
+        ``pending`` and no deadline.
+        """
+        resp = client.post(
+            "/api/v1/learning/jobs/trigger",
+            json={"job_type": "scheduled_study"},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 409, resp.json()
+        detail = resp.json()["detail"]
+        assert detail["reason"] == "learning_executor_unavailable"
+        assert detail["remedy"]
+        assert _job_rows_for(_get_user_id(auth_headers)) == [], "a refused request filed a row"
+
+    def test_trigger_then_drain_settles_the_same_row(self, client, auth_headers, executor):
+        """The row this route files is the row the executor finishes.
+
+        One id goes ``pending`` → ``running`` → ``completed``; no second row
+        appears, and the caller's request does not sit queued forever.
+        """
+        user_id = _get_user_id(auth_headers)
+        body = {"job_type": "scheduled_study", "instruments": ["CRYPTO:KRAKEN:BTC-USD"], "intervals": [1440]}
+        job_id = uuid.UUID(
+            client.post(
+                "/api/v1/learning/jobs/trigger", json=body, headers=auth_headers
+            ).json()["job"]["id"]
+        )
+        assert _job_row(job_id).status == "pending"
+
+        with patch.object(worker, "_run_single_study", return_value=STUDY_RESULT) as study:
+            assert drain_learning_queue() == 1
+
+        assert study.call_count == 1
+        assert [r.id for r in _job_rows_for(user_id)] == [job_id]
+        job = _job_row(job_id)
+        assert (job.status, job.claimed_by) == ("completed", worker.executor_identity())
+        assert job.started_at is not None and job.completed_at is not None
+        assert job.result_json["successful"] == 1
+
+        listed = client.get("/api/v1/learning/jobs", headers=auth_headers).json()
+        assert listed["jobs"][0]["id"] == str(job_id)
+        assert listed["jobs"][0]["status"] == "completed"
+
+
+class TestResubmissionSafety:
+    """"三、實作提交重送安全" at the HTTP seam.
+
+    A retry of the same submit must return the task the first one filed; the
+    same key carrying a different request must be refused without rewriting the
+    first one; and a deliberate second run must not be mistaken for a retry.
+    """
+
+    KEY = "journal-double-click-0001"
+    BODY = {"job_type": "scheduled_study", "instruments": ["CRYPTO:KRAKEN:BTC-USD"], "intervals": [1440]}
+
+    def _post(self, client, headers, body=None, key=KEY):
+        return client.post(
+            "/api/v1/learning/jobs/trigger",
+            json=body if body is not None else self.BODY,
+            headers={**headers, "Idempotency-Key": key},
+        )
+
+    def test_same_key_same_content_returns_the_first_row(self, client, auth_headers, executor):
+        first = self._post(client, auth_headers)
+        assert first.status_code == 201, first.json()
+        assert first.json()["replayed"] is False
+
+        retry = self._post(client, auth_headers)
+        assert retry.status_code == 201, retry.json()
+        assert retry.json()["replayed"] is True
+        assert retry.json()["job"]["id"] == first.json()["job"]["id"]
+
+        rows = _job_rows_for(_get_user_id(auth_headers))
+        assert [r.id for r in rows] == [uuid.UUID(first.json()["job"]["id"])]
+        assert len(_queued_events([r.id for r in rows])) == 1, "the replay re-audited the submit"
+
+    def test_same_key_different_content_is_conflicted_not_rewritten(
+        self, client, auth_headers, executor
+    ):
+        first = self._post(client, auth_headers)
+        job_id = uuid.UUID(first.json()["job"]["id"])
+
+        changed = {"job_type": "scheduled_study", "instruments": ["CRYPTO:KRAKEN:ETH-USD"], "intervals": [1440]}
+        resp = self._post(client, auth_headers, changed)
+
+        assert resp.status_code == 409, resp.json()
+        assert resp.json()["detail"]["reason"] == "idempotency_conflict"
+
+        job = _job_row(job_id)
+        assert job.status == "pending"
+        assert job.config_json["instruments"] == ["CRYPTO:KRAKEN:BTC-USD"], "the refused retry rewrote the first request"
+        assert len(_job_rows_for(_get_user_id(auth_headers))) == 1
+
+    def test_same_key_different_job_type_is_conflicted(self, client, auth_headers, executor):
+        self._post(client, auth_headers)
+        resp = self._post(client, auth_headers, {"job_type": "pattern_analysis"})
+        assert resp.status_code == 409
+
+    def test_a_key_blocks_only_its_own_owner(self, client, auth_headers, executor):
+        """Keys live in a per-owner namespace, not a global one."""
+        a_id = _get_user_id(auth_headers)
+        b_headers = _make_user_and_get_headers(client, "resubmit-bystander@alethra.io")
+        b_id = _get_user_id(b_headers)
+
+        a = self._post(client, auth_headers)
+        assert a.status_code == 201
+
+        # Identical content and identical key, different owner: this is B's own
+        # operation and must not be handed A's row.
+        b = self._post(client, b_headers)
+        assert b.status_code == 201, b.json()
+        assert b.json()["replayed"] is False
+        assert b.json()["job"]["user_id"] == str(b_id)
+        assert b.json()["job"]["id"] != a.json()["job"]["id"]
+
+        rows = _job_rows_for(a_id) + _job_rows_for(b_id)
+        keyed = [r for r in rows if r.operation_key == f"user:{self.KEY}"]
+        assert len(keyed) == 2
+        assert {r.user_id for r in keyed} == {a_id, b_id}
+
+    def test_unkeyed_submits_are_two_deliberate_runs(self, client, auth_headers, executor):
+        """A caller who asks twice means twice."""
+        first = client.post(
+            "/api/v1/learning/jobs/trigger", json=self.BODY, headers=auth_headers
+        )
+        second = client.post(
+            "/api/v1/learning/jobs/trigger", json=self.BODY, headers=auth_headers
+        )
+        assert first.json()["job"]["id"] != second.json()["job"]["id"]
+        assert second.json()["replayed"] is False
+        assert len(_job_rows_for(_get_user_id(auth_headers))) == 2
+
+    def test_key_too_short_is_refused(self, client, auth_headers, executor):
+        resp = self._post(client, auth_headers, key="abc")
+        assert resp.status_code == 400
+        assert len(_job_rows_for(_get_user_id(auth_headers))) == 0
+
+    def test_key_is_stored_namespaced_and_a_cron_key_cannot_be_spoofed(
+        self, client, auth_headers, executor
+    ):
+        """The caller's key is stored under ``user:``, so it cannot collide with
+        the slots the scheduler mints for itself."""
+        resp = self._post(client, auth_headers, key="x" * 40)
+        assert resp.status_code == 201
+        stored = _job_rows_for(_get_user_id(auth_headers))[0]
+        assert stored.operation_key == f"user:{'x' * 40}"
+        assert not stored.operation_key.startswith("cron:")
+
+    def test_unique_index_refuses_a_second_row_for_the_same_submit(
+        self, client, auth_headers, executor
+    ):
+        """The guarantee is the constraint, not a disabled button.
+
+        Two writers that never saw each other's INSERT still cannot both file
+        this submit: the owner-scoped partial unique index refuses the loser.
+        """
+        db_a = TestSession()
+        db_b = TestSession()
+        try:
+            from app.workers.learning_scheduler import create_or_replay_learning_job
+
+            config = {"scope": "manual", "instruments": ["BTC-USD"], "intervals": [1440]}
+            job_a, replayed_a = create_or_replay_learning_job(
+                db_a,
+                user_id=_get_user_id(auth_headers),
+                job_type="scheduled_study",
+                config_json=config,
+                origin="user",
+                operation_key=f"user:{self.KEY}",
+            )
+            assert replayed_a is False
+            db_b.expunge_all()
+            job_b, replayed_b = create_or_replay_learning_job(
+                db_b,
+                user_id=_get_user_id(auth_headers),
+                job_type="scheduled_study",
+                config_json=config,
+                origin="user",
+                operation_key=f"user:{self.KEY}",
+            )
+            assert replayed_b is True, "the second writer filed a duplicate row"
+            assert job_b.id == job_a.id
+        finally:
+            db_a.close()
+            db_b.close()
+
+    @pg_only
+    def test_concurrent_double_click_files_one_row(self, client, auth_headers, executor):
+        """Two threads, one submit: one row, and both callers get it.
+
+        PostgreSQL-only. This SQLite lane shares one connection across every
+        session, so two concurrent writers cannot exist here at all — measured,
+        not assumed: the same node run on this lane produced
+        ``sqlite3.DatabaseError: UNIQUE constraint failed`` as a 500, because
+        the second thread's INSERT landed on the first thread's transaction on
+        the same connection rather than racing it. Reporting that as a product
+        defect would blame the harness for a dialect that has no two writers,
+        and reporting a pass would claim a race that never happened. The real
+        parallel INSERT is run on the PostgreSQL lane, where the loser meets a
+        23505 that ``create_or_replay_learning_job`` already handles.
+        """
+        results = {}
+        barrier = threading.Barrier(2)
+
+        def _fire(name):
+            barrier.wait()
+            resp = self._post(client, auth_headers)
+            results[name] = (resp.status_code, resp.json())
+
+        threads = [threading.Thread(target=_fire, args=(n,)) for n in ("a", "b")]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+        assert not any(t.is_alive() for t in threads), "a concurrent trigger never returned"
+
+        assert set(code for code, _ in results.values()) == {201}, results
+        ids = {data["job"]["id"] for _, data in results.values()}
+        assert len(ids) == 1, f"one submit produced {len(ids)} rows: {ids}"
+        assert sorted(data["replayed"] for _, data in results.values()) == [False, True]
+
+        rows = _job_rows_for(_get_user_id(auth_headers))
+        assert [r.id for r in rows] == [uuid.UUID(next(iter(ids)))]
 
 
 class TestListProposals:
@@ -325,9 +754,9 @@ class TestApproveProposal:
 
     Nothing in the product wrote ``evidence_status="validated_candidate"``
     before this endpoint: the only occurrence of that value in ``app/`` is the
-    deploy gate that demands it (api/learning.py:305), while
-    learning_scheduler.py:360 stores whatever pattern analysis produced
-    (hypothesis / descriptive / insufficient) and :387-388 forces
+    deploy gate that demands it (api/learning.py:552), while
+    learning_scheduler.py:1038 stores whatever pattern analysis produced
+    (hypothesis / descriptive / insufficient) and :1065-1066 forces
     ``status="pending"`` for hypotheses. The ladder therefore had no producer,
     and no proposal the product created could legally reach deploy.
     """
