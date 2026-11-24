@@ -228,21 +228,60 @@ class TestEndOfHorizonSettlement:
 class TestTerminalLedgerSeparation:
     """G1-2: cash, cost basis, market value, realized and unrealized P&L are separate."""
 
-    def test_the_five_quantities_are_named_apart_with_definitions(self, replay_case):
+    def test_every_terminal_quantity_is_named_apart_and_defined(self, replay_case):
         case = replay_case([SIGNAL_EXIT])
         ledger = case.replay(**COSTS)["terminal_ledger"]
 
         for key in ("cash_available", "position_cost_basis", "position_market_value",
-                    "realized_pnl_net_of_costs", "equity", "open_positions", "currency"):
+                    "realized_pnl_net_of_costs", "equity", "open_positions",
+                    "unrealized_pnl", "currency"):
             assert key in ledger, f"{key} missing from terminal_ledger: {sorted(ledger)}"
 
-        # Every quantity a reader can act on carries its own definition, so the
-        # difference between cash and equity is stated rather than guessed.
-        assert ledger["currency"] == "USD"
-        assert set(ledger["definitions"]) == {
-            "cash_available", "position_cost_basis", "position_market_value",
-            "realized_pnl_net_of_costs", "equity",
-        }
+        # The expectation is read off the ledger instead of hand-listed beside it:
+        # a quantity added without a definition, or a definition describing a
+        # quantity that was dropped, both fail here. "記錄單位與定義" is only met
+        # when neither can happen, and a hand-copied list of five names lets the
+        # first happen silently.
+        reported = {k for k in ledger if k != "definitions"}
+        defined = set(ledger["definitions"])
+        assert reported, "the ledger reports no quantity, so this check is vacuous"
+        assert defined == reported, (
+            f"reported without definition: {sorted(reported - defined)}; "
+            f"defined without reporting: {sorted(defined - reported)}"
+        )
+
+    def test_the_unit_is_the_portfolio_row_and_not_a_restated_literal(self, replay_case):
+        """The ledger says which currency it means, and gets it from the record.
+
+        Hardcoding "USD" beside a portfolio row that also says "USD" passes for
+        the wrong reason — the value never travels. Re-booking the row to EUR
+        before the replay is what makes the two claims distinguishable.
+        """
+        case = replay_case([SIGNAL_EXIT])
+        db = SessionLocal()
+        try:
+            moved = db.execute(
+                text("UPDATE paper_portfolios SET currency = 'EUR' "
+                     "WHERE id = :p"),
+                {"p": case.portfolio_id},
+            )
+            db.commit()
+            assert moved.rowcount == 1, "the fixture portfolio row was not found to re-book"
+        finally:
+            db.close()
+
+        ledger = case.replay(**COSTS)["terminal_ledger"]
+        assert ledger["currency"] == "EUR", (
+            "the ledger restated its own literal instead of reporting the row's unit"
+        )
+
+        db = SessionLocal()
+        try:
+            row = _one(db, "SELECT currency FROM paper_portfolios WHERE id = :p",
+                       p=case.portfolio_id)
+            assert row.currency == ledger["currency"]
+        finally:
+            db.close()
 
     def test_every_terminal_quantity_reproduces_from_the_source_row_by_hand(self, replay_case):
         """Independent recomputation along the actual cost rule.

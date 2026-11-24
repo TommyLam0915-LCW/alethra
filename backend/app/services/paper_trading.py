@@ -542,9 +542,11 @@ class PaperTradingEngine:
             if not run:
                 raise ResourceNotFoundError("Run", run_id)
 
-            # Cross-user rejection: validate ownership via portfolio
+            # Cross-user rejection: validate ownership via portfolio. The currency
+            # comes along with it because the terminal ledger reports the row's
+            # unit rather than restating a literal the create path already wrote.
             portfolio = db.execute(
-                text("SELECT owner_id FROM paper_portfolios WHERE id = :id"),
+                text("SELECT owner_id, currency FROM paper_portfolios WHERE id = :id"),
                 {"id": run.portfolio_id},
             ).fetchone()
 
@@ -560,6 +562,7 @@ class PaperTradingEngine:
             instrument = run.instrument_id
             interval = run.interval_minutes
             initial_capital = float(run.initial_capital)
+            portfolio_currency = portfolio.currency
 
             logger.info(f"Starting historical replay for {skill} on {instrument}")
 
@@ -1223,8 +1226,10 @@ class PaperTradingEngine:
             logger.info(f"✓ Cash reconciliation passed: equity={total_equity}, diff={reconciliation_diff}")
 
             # The quantities the run ends with, reported apart rather than folded
-            # into one "equity" the reader has to reinterpret. All are USD, the
-            # currency the portfolio row carries.
+            # into one "equity" the reader has to reinterpret. The unit is the
+            # portfolio row's own currency, carried down from the ownership check
+            # instead of restated here — a second literal would be free to drift
+            # from the row it claims to describe.
             #
             # An open position would be booked at cost, because this replay has no
             # price source outside the study rows — so its market value and its
@@ -1235,7 +1240,7 @@ class PaperTradingEngine:
                 (Decimal(str(t["net_pnl"])) for t in executed_trades), Decimal("0")
             )
             terminal_ledger = {
-                "currency": "USD",
+                "currency": portfolio_currency,
                 "cash_available": float(available_cash),
                 "open_positions": len(active_positions),
                 "position_cost_basis": float(position_value),
@@ -1244,9 +1249,12 @@ class PaperTradingEngine:
                 "realized_pnl_net_of_costs": float(realized_pnl_total),
                 "equity": float(total_equity),
                 "definitions": {
+                    "currency": "quote currency of the portfolio instrument, e.g. BTC-USD is USD",
                     "cash_available": "uninvested balance after entry and exit costs",
+                    "open_positions": "positions still holding quantity when the horizon ends",
                     "position_cost_basis": "quantity x average entry price of open positions",
                     "position_market_value": "None when nothing is open: no mark source exists in a replay",
+                    "unrealized_pnl": "None while a position is open, 0.0 once none is — a replay never marks to a price it does not have, so nothing is estimated here",
                     "realized_pnl_net_of_costs": "sum of settled round-trip net P&L: gross move - entry costs - exit costs",
                     "equity": "cash_available + position_cost_basis",
                 },
