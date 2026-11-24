@@ -548,6 +548,9 @@ export default function JournalDashboard() {
   const [filters, setFilters] = useState<JournalFilters>({});
   const [appliedFilters, setAppliedFilters] = useState<JournalFilters>({});
   const [activeTab, setActiveTab] = useState<TabKey>('trades');
+  // Lives here rather than inside the Unified panel because the export button
+  // has to write the same scope the panel is showing.
+  const [unifiedSource, setUnifiedSource] = useState<'all' | 'research' | 'paper'>('all');
 
   const [filterOptions, setFilterOptions] = useState<FilterOptions | null>(null);
   const [trades, setTrades] = useState<JournalTrade[]>([]);
@@ -631,7 +634,14 @@ export default function JournalDashboard() {
     setExportNotice(null);
     setExportTruncated(null);
     try {
-      const { text, meta } = await api.journal.tradesCsv(appliedFilters);
+      // The Unified tab shows both ledgers; the trades tab shows one. Exporting
+      // the research-only file from the tab that displays more than that gives
+      // the user a file that does not match the counts on screen.
+      const onUnifiedTab = activeTab === 'unified';
+      const fileName = onUnifiedTab ? 'journal-unified.csv' : 'journal-trades.csv';
+      const { text, meta } = onUnifiedTab
+        ? await api.journal.unifiedCsv(unifiedSource, appliedFilters)
+        : await api.journal.tradesCsv(appliedFilters);
       const rows = csvDataRowCount(text);
       if (rows === 0) {
         // A filter that matches nothing is a 200 whose body is only the header line,
@@ -643,10 +653,10 @@ export default function JournalDashboard() {
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement('a');
       anchor.href = url;
-      anchor.download = 'journal-trades.csv';
+      anchor.download = fileName;
       anchor.click();
       URL.revokeObjectURL(url);
-      setExportNotice(`Exported ${rows} trade${rows === 1 ? '' : 's'} to journal-trades.csv.`);
+      setExportNotice(`Exported ${rows} trade${rows === 1 ? '' : 's'} to ${fileName}.`);
       // The file the person now holds is not the filter they asked for, and
       // opening it cannot show that: the rows missing were never written.
       const truncated = csvTruncationNotice(meta, rows);
@@ -682,7 +692,11 @@ export default function JournalDashboard() {
           <button
             type="button"
             className="ws-range-btn"
-            aria-label="Export trades to CSV"
+            aria-label={
+              activeTab === 'unified'
+                ? `Export the unified journal (${unifiedSource}) to CSV`
+                : 'Export trades to CSV'
+            }
             disabled={exporting}
             onClick={() => void handleDownloadCsv()}
           >
@@ -843,7 +857,11 @@ export default function JournalDashboard() {
                     <SkillHeatmap filters={appliedFilters} />
                   )}
                   {activeTab === 'unified' && (
-                    <UnifiedJournalView />
+                    <UnifiedJournalView
+                      filters={appliedFilters}
+                      source={unifiedSource}
+                      onSourceChange={setUnifiedSource}
+                    />
                   )}
                   {activeTab === 'comparison' && (
                     <CrossRunComparison />

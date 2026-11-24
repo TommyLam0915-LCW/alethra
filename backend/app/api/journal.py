@@ -525,197 +525,98 @@ def journal_unified(
     source: str = Query("all", pattern="^(all|research|paper)$"),
     instrument_id: Optional[str] = Query(None),
     rule_id: Optional[str] = Query(None),
+    rule_family: Optional[str] = Query(None),
+    interval_minutes: Optional[int] = Query(None),
     date_from: Optional[datetime] = Query(None),
     date_to: Optional[datetime] = Query(None),
     pnl_min: Optional[Decimal] = Query(None),
     pnl_max: Optional[Decimal] = Query(None),
+    exit_reason: Optional[str] = Query(None),
     limit: int = Query(200, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> dict:
-    """Unified view merging research trades and paper trading fills.
+    """Unified journal: research trades and paper fills over one filter.
 
-    source=all: both research and paper trades
-    source=research: only strategy_study_trades
-    source=paper: only paper_fills + paper_orders
+    Every filter the trades endpoint takes is accepted here and reaches at
+    least one leg. ``filter_scope`` says which keys reached which leg and
+    ``limitations`` names, in the caller's own words, the ones this response
+    could not honour — a paper fill has no settled P&L, no run interval and no
+    exit reason, so a P&L filter narrows the research rows and nothing else.
 
-    Each trade includes a 'source' field indicating origin.
+    ``trades`` is one page of the merged population, ordered newest first by
+    ``journal_service.unified_sort_key``; ``summary`` counts and totals the
+    whole filtered set, not the page; ``page`` is what came back.
     """
-    from sqlalchemy import text
-    
-    unified_trades = []
-    
-    # Fetch research trades
-    if source in ('all', 'research'):
-        research_query = '''
-            SELECT 
-                'research' as source,
-                t.id,
-                t.run_id,
-                r.instrument_id,
-                t.rule_id,
-                t.exit_id,
-                t.entry_time,
-                t.exit_time,
-                t.entry_price,
-                t.exit_price,
-                t.net_pnl,
-                t.exit_reason,
-                t.bars_held,
-                t.mfe_pct,
-                t.mae_pct,
-                r.interval_minutes
-            FROM strategy_study_trades t
-            JOIN strategy_study_runs r ON t.run_id = r.id
-            WHERE r.user_id = :user_id
-        '''
-        
-        params = {'user_id': str(current_user.id)}
-        conditions = []
-        
-        if instrument_id:
-            conditions.append('r.instrument_id = :instrument_id')
-            params['instrument_id'] = instrument_id
-        
-        if rule_id:
-            conditions.append('t.rule_id = :rule_id')
-            params['rule_id'] = rule_id
-        
-        if date_from:
-            conditions.append('t.entry_time >= :date_from')
-            params['date_from'] = date_from
-        
-        if date_to:
-            conditions.append('t.entry_time <= :date_to')
-            params['date_to'] = date_to
-        
-        if pnl_min is not None:
-            conditions.append('t.net_pnl >= :pnl_min')
-            params['pnl_min'] = pnl_min
-        
-        if pnl_max is not None:
-            conditions.append('t.net_pnl <= :pnl_max')
-            params['pnl_max'] = pnl_max
-        
-        if conditions:
-            research_query += ' AND ' + ' AND '.join(conditions)
-        
-        research_query += ' ORDER BY t.entry_time DESC LIMIT :limit OFFSET :offset'
-        params['limit'] = limit
-        params['offset'] = offset
-        
-        research_result = db.execute(text(research_query), params).fetchall()
-        
-        for row in research_result:
-            unified_trades.append({
-                'source': row[0],
-                'id': str(row[1]),
-                'run_id': str(row[2]),
-                'instrument_id': row[3],
-                'rule_id': row[4],
-                'exit_id': row[5],
-                'entry_time': row[6].isoformat() if row[6] else None,
-                'exit_time': row[7].isoformat() if row[7] else None,
-                'entry_price': measured(row[8]),
-                'exit_price': measured(row[9]),
-                'net_pnl': measured(row[10]),
-                'exit_reason': row[11],
-                'bars_held': row[12],
-                'mfe': measured(row[13]),
-                'mae': measured(row[14]),
-                'interval_minutes': row[15],
-            })
-    
-    # Fetch paper trades
-    if source in ('all', 'paper'):
-        paper_query = '''
-            SELECT 
-                'paper' as source,
-                f.id,
-                f.paper_order_id,
-                o.asset_id,
-                f.bar_timestamp,
-                f.execution_price_before_costs,
-                f.quantity,
-                o.side,
-                o.order_type,
-                o.created_at as order_created_at
-            FROM paper_fills f
-            JOIN paper_orders o ON f.paper_order_id = o.id
-            JOIN paper_portfolios p ON o.portfolio_id = p.id
-            WHERE p.owner_id = :user_id
-        '''
-        
-        params = {'user_id': str(current_user.id)}
-        conditions = []
-        
-        if instrument_id:
-            conditions.append('o.asset_id = :instrument_id')
-            params['instrument_id'] = instrument_id
-        
-        if date_from:
-            conditions.append('f.bar_timestamp >= :date_from')
-            params['date_from'] = date_from
-        
-        if date_to:
-            conditions.append('f.bar_timestamp <= :date_to')
-            params['date_to'] = date_to
-        
-        if conditions:
-            paper_query += ' AND ' + ' AND '.join(conditions)
-        
-        paper_query += ' ORDER BY f.bar_timestamp DESC LIMIT :limit OFFSET :offset'
-        params['limit'] = limit
-        params['offset'] = offset
-        
-        paper_result = db.execute(text(paper_query), params).fetchall()
-        
-        for row in paper_result:
-            unified_trades.append({
-                'source': row[0],
-                'id': str(row[1]),
-                'order_id': str(row[2]),
-                'instrument_id': row[3],
-                'entry_time': row[4].isoformat() if row[4] else None,
-                'entry_price': measured(row[5]),
-                'quantity': measured(row[6]),
-                'side': row[7],
-                'order_type': row[8],
-                'created_at': row[9].isoformat() if row[9] else None,
-                'net_pnl': None,  # Paper fills don't have PnL directly
-            })
-    
-    # Sort by time
-    unified_trades.sort(
-        key=lambda x: x.get('entry_time') or '',
-        reverse=True
+    return svc.unified_journal_page(
+        db,
+        user_id=current_user.id,
+        source=source,
+        instrument_id=instrument_id,
+        rule_id=rule_id,
+        rule_family=rule_family,
+        interval_minutes=interval_minutes,
+        date_from=date_from,
+        date_to=date_to,
+        pnl_min=pnl_min,
+        pnl_max=pnl_max,
+        exit_reason=exit_reason,
+        limit=limit,
+        offset=offset,
     )
-    
-    # Compute summary
-    research_trades = [t for t in unified_trades if t['source'] == 'research']
-    paper_trades = [t for t in unified_trades if t['source'] == 'paper']
-    
-    research_pnl = sum(summed(t['net_pnl']) for t in research_trades)
-    research_wins = len([t for t in research_trades if summed(t['net_pnl']) > 0])
-    research_win_rate = ratio(research_wins, len(research_trades))
-    
-    return {
-        'trades': unified_trades,
-        'summary': {
-            'total_count': len(unified_trades),
-            'research_count': len(research_trades),
-            'paper_count': len(paper_trades),
-            'research_total_pnl': research_pnl,
-            'research_win_rate': research_win_rate,
+
+
+# ---------------------------------------------------------------------------
+# GET /journal/unified.csv
+# ---------------------------------------------------------------------------
+
+@router.get("/unified.csv")
+def journal_unified_csv(
+    source: str = Query("all", pattern="^(all|research|paper)$"),
+    instrument_id: Optional[str] = Query(None),
+    rule_id: Optional[str] = Query(None),
+    rule_family: Optional[str] = Query(None),
+    interval_minutes: Optional[int] = Query(None),
+    date_from: Optional[datetime] = Query(None),
+    date_to: Optional[datetime] = Query(None),
+    pnl_min: Optional[Decimal] = Query(None),
+    pnl_max: Optional[Decimal] = Query(None),
+    exit_reason: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Response:
+    """CSV export of the merged journal, over the range the unified tab shows.
+
+    The unified table lists both sources; ``/journal/trades.csv`` exports the
+    research rows only. Exporting one while displaying the other puts two
+    different filters behind one button, so the merged view exports from the
+    merged query and carries the same row-budget headers.
+    """
+    export = svc.unified_journal_csv_export(
+        db,
+        user_id=current_user.id,
+        source=source,
+        instrument_id=instrument_id,
+        rule_id=rule_id,
+        rule_family=rule_family,
+        interval_minutes=interval_minutes,
+        date_from=date_from,
+        date_to=date_to,
+        pnl_min=pnl_min,
+        pnl_max=pnl_max,
+        exit_reason=exit_reason,
+    )
+    return Response(
+        content=export["content"],
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": 'attachment; filename="journal-unified.csv"',
+            EXPORT_ROWS_EXPORTED_HEADER: str(export["rows_exported"]),
+            EXPORT_ROWS_MATCHED_HEADER: str(export["rows_matched"]),
+            EXPORT_ROW_LIMIT_HEADER: str(export["row_limit"]),
+            EXPORT_TRUNCATED_HEADER: (
+                "true" if export["truncated"] else "false"
+            ),
         },
-        'filters_applied': {
-            'source': source,
-            'instrument_id': instrument_id,
-            'rule_id': rule_id,
-            'date_from': date_from.isoformat() if date_from else None,
-            'date_to': date_to.isoformat() if date_to else None,
-            'pnl_min': measured(pnl_min),
-            'pnl_max': measured(pnl_max),
-        },
-    }
+    )

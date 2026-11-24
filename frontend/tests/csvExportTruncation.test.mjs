@@ -161,13 +161,45 @@ test('the export handler warns after the download, not instead of it', () => {
   const exporter = panel.slice(start, end);
 
   assert.match(exporter, /setExportTruncated\(null\)/, 'a stale warning survives a new export');
-  assert.match(exporter, /const \{ text, meta \} = await api\.journal\.tradesCsv/);
+  // The panel now downloads two files, one per tab, so each branch is pinned
+  // separately: `meta` has to come straight off the awaited response of the
+  // endpoint that tab shows, never reconstructed after the fact.
+  assert.match(exporter, /const \{ text, meta \} = /, 'the handler drops the export headers');
+  assert.match(exporter, /activeTab === 'unified'/, 'the download ignores which tab is open');
+  assert.match(
+    exporter,
+    /\? await api\.journal\.unifiedCsv\(unifiedSource, appliedFilters\)/,
+    'the unified branch does not await its own endpoint',
+  );
+  assert.match(
+    exporter,
+    /: await api\.journal\.tradesCsv\(appliedFilters\)/,
+    'the trades branch does not await its own endpoint',
+  );
   assert.match(exporter, /csvTruncationNotice\(meta, rows\)/);
   // The row count in the sentence is the one taken from the file itself.
   assert.ok(
     exporter.indexOf('setExportNotice(') < exporter.indexOf('csvTruncationNotice('),
     'the warning would replace the download claim instead of qualifying it',
   );
+});
+
+test('both csv clients hand back the headers, not just the body', () => {
+  const client = src('../src/lib/api.ts');
+
+  // A helper that returns `{ text }` alone would still compile at the call
+  // site and lose the warning silently, so the promise type is pinned per
+  // helper — the panel has two download branches now, not one.
+  for (const helper of ['tradesCsv', 'unifiedCsv']) {
+    const at = client.indexOf(`${helper}:`);
+    assert.notEqual(at, -1, `${helper} is gone from the client`);
+    const signature = client.slice(at, client.indexOf('=>', at));
+    assert.match(
+      signature,
+      /Promise<\{ text: string; meta: CsvExportMeta \}>/,
+      `${helper} no longer types the headers it returns`,
+    );
+  }
 });
 
 test('the truncation warning is rendered, not only set', () => {

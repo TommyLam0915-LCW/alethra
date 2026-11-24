@@ -1144,6 +1144,21 @@ export const api = {
       }
       return apiFetch(`/api/v1/journal/unified?${qs.toString()}`);
     },
+    // Same nine controls as the page, so the file a user downloads has the rows
+    // the table showed them — not the research leg alone.
+    unifiedCsv: async (
+      source: string,
+      params: Record<string, any>,
+    ): Promise<{ text: string; meta: CsvExportMeta }> => {
+      const qs = new URLSearchParams({ source });
+      for (const [k, v] of Object.entries(params)) {
+        if (v !== undefined && v !== null && v !== '') qs.set(k, String(v));
+      }
+      const { text, headers } = await apiFetchTextWithHeaders(
+        `/api/v1/journal/unified.csv?${qs.toString()}`,
+      );
+      return { text, meta: readCsvExportMeta((name) => headers.get(name)) };
+    },
   },
   admin: {
     collectionStatus: () => apiFetch('/api/v1/admin/collection/status'),

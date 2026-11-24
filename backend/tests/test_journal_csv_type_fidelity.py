@@ -21,6 +21,7 @@ from decimal import Decimal, InvalidOperation
 import pytest
 from sqlalchemy import Float, Integer, Numeric
 
+from app.models.paper_portfolio import DecisionRecord, PaperFill, PaperOrder
 from app.models.strategy_study import StrategyStudyTrade, StrategyStudyRun
 from app.services import journal_service as svc
 from tests.conftest import TestSession
@@ -38,11 +39,18 @@ def _schema_numeric_columns(header):
     Derived from the ORM and not from the renderer's registry: a sweep that
     walks the registry checks nothing at all the day the registry is emptied, or
     a money column is exported without joining it.
+
+    The paper models join the scan because ``/journal/unified.csv`` writes
+    through the same ``_csv_cell`` — a ``paper_fills`` money column that never
+    reached the registry has to be caught by the same gate.
     """
     numeric_types = (Integer, Numeric, Float)
     schema_numeric = {
         column.name
-        for model in (StrategyStudyTrade, StrategyStudyRun)
+        for model in (
+            StrategyStudyTrade, StrategyStudyRun,
+            PaperFill, PaperOrder, DecisionRecord,
+        )
         for column in model.__table__.columns
         if isinstance(column.type, numeric_types)
     }
@@ -245,9 +253,15 @@ class TestExportedFileIsTyped:
         silently keep the guard and re-introduce this bug, so the expectation is
         derived from the ORM's own column types and compared against the set the
         renderer consults.
+
+        Both products that reach ``_csv_cell`` are in the denominator: the
+        research header comes from the file the real endpoint returns, the
+        unified header from the contract ``unified_journal_csv_export`` writes,
+        which ``test_journal_unified_scope`` pins against its own endpoint.
         """
-        header, _ = _export(client, typed_export_user_id)
-        expected = _schema_numeric_columns(header)
+        research_header, _ = _export(client, typed_export_user_id)
+        expected = _schema_numeric_columns(research_header)
+        expected |= _schema_numeric_columns(svc._UNIFIED_CSV_COLUMNS)
         registered = set(svc._JOURNAL_CSV_NUMERIC_COLUMNS)
         assert expected == registered, (
             f"schema numbers not registered: {sorted(expected - registered)}; "
