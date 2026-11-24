@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.models.training import TrainingJob, TrainingJobStatus
 from app.providers import get_data_provider
-from app.services.market_data_storage import MarketDataStorage
+from app.services.market_data_storage import DAILY_INTERVAL_MINUTES, MarketDataStorage
 from app.ml.trainer import train_model, load_model, list_models
 from app.lib.error_safety import safe_error_message
 from app.lib.timeutil import utcnow
@@ -112,6 +112,7 @@ def _get_bars_with_storage(
                 adjustment_status=quality.get("adjustment") if isinstance(quality, dict) else None,
                 provider_note=quality.get("note") if isinstance(quality, dict) else None,
                 provider_note_zh=quality.get("note_zh") if isinstance(quality, dict) else None,
+                interval_minutes=DAILY_INTERVAL_MINUTES,
             )
         except Exception as e:
             logger.warning(f"Failed to store bars for {instrument_id}: {e}")

@@ -13,7 +13,11 @@ from app.auth.safety import rate_limit
 from app.models.user import User
 from app.providers import get_data_provider
 from app.providers.data_provider import ProviderNotConfiguredError, compute_staleness
-from app.services.market_data_storage import MarketDataStorage
+from app.services.market_data_storage import (
+    DAILY_INTERVAL_MINUTES,
+    GrainConflictError,
+    MarketDataStorage,
+)
 from app.services.price_view import (
     bar_view,
     market_status_view,
@@ -434,22 +438,33 @@ def get_instrument_bars(
     provider = get_data_provider()
     storage = MarketDataStorage(db)
 
+    persist_refused: Optional[str] = None
+
     try:
         bars = provider.get_bars(instrument_id, start_date, end_date)
 
         if bars:
             quality = provider.get_data_quality(instrument_id)
-            storage.store_bars(
-                instrument_id=instrument_id,
-                provider_id=provider.provider_id,
-                bars=bars,
-                data_nature=quality.get("data_nature", "unknown"),
-                adjustment_status=quality.get("adjustment"),
-                timezone=inst.timezone,
-                currency=inst.currency.value,
-                provider_note=quality.get("note"),
-                provider_note_zh=quality.get("note_zh"),
-            )
+            try:
+                storage.store_bars(
+                    instrument_id=instrument_id,
+                    provider_id=provider.provider_id,
+                    bars=bars,
+                    data_nature=quality.get("data_nature", "unknown"),
+                    adjustment_status=quality.get("adjustment"),
+                    timezone=inst.timezone,
+                    currency=inst.currency.value,
+                    provider_note=quality.get("note"),
+                    provider_note_zh=quality.get("note_zh"),
+                    interval_minutes=DAILY_INTERVAL_MINUTES,
+                )
+            except GrainConflictError as exc:
+                # Caching is not the service this route provides, so a refused
+                # cache write must not become a provider outage. Re-stamping the
+                # unlabelled row that already owns this key would also relabel
+                # it — a seeded five-minute series would come back declared as
+                # daily — so the write is dropped and the response says so.
+                persist_refused = str(exc)
     except ProviderNotConfiguredError as exc:
         # A normal unconfigured state must not be recorded as a provider
         # outage in storage metadata.
@@ -502,6 +517,7 @@ def get_instrument_bars(
         "bars": [bar_view(b, structure, tf, series_received_at) for b in bars],
         "disclaimer": "Data may be synthetic or demo-only. Not suitable for trading decisions.",
         "disclaimer_zh": "數據可能為模擬或演示數據。不適合用於交易決策。",
+        **({"storage_persist_refused": persist_refused} if persist_refused else {}),
     }
 
 
@@ -715,17 +731,34 @@ def refresh_instrument_bars(
             }
 
         quality = provider.get_data_quality(instrument_id)
-        stored_count = storage.store_bars(
-            instrument_id=instrument_id,
-            provider_id=provider.provider_id,
-            bars=bars,
-            data_nature=quality.get("data_nature", "unknown"),
-            adjustment_status=quality.get("adjustment"),
-            timezone=inst.timezone,
-            currency=inst.currency.value,
-            provider_note=quality.get("note"),
-            provider_note_zh=quality.get("note_zh"),
-        )
+        try:
+            stored_count = storage.store_bars(
+                instrument_id=instrument_id,
+                provider_id=provider.provider_id,
+                bars=bars,
+                data_nature=quality.get("data_nature", "unknown"),
+                adjustment_status=quality.get("adjustment"),
+                timezone=inst.timezone,
+                currency=inst.currency.value,
+                provider_note=quality.get("note"),
+                provider_note_zh=quality.get("note_zh"),
+                interval_minutes=DAILY_INTERVAL_MINUTES,
+            )
+        except GrainConflictError as exc:
+            # Persisting is what this route was asked to do, so a refused write
+            # is the answer rather than something to serve around. Reporting it
+            # as a provider outage would send an operator to check credentials
+            # when the dataset key is the problem.
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "reason": "grain_conflict",
+                    "instrument_id": instrument_id,
+                    "provider": provider.provider_id,
+                    "bars_stored": 0,
+                    "error": safe_error_message(exc),
+                },
+            )
 
         metadata = storage.get_metadata(instrument_id, provider.provider_id)
 
@@ -758,6 +791,10 @@ def refresh_instrument_bars(
 
     except ProviderNotConfiguredError as exc:
         raise _provider_failure(instrument_id, exc)
+    except HTTPException:
+        # The route's own refusal — a grain conflict above — is an answer, not
+        # a provider failure, and must not be relabelled by the handler below.
+        raise
     except SQLAlchemyError:
         # See get_instrument_bars: a storage failure is not a provider failure.
         raise
