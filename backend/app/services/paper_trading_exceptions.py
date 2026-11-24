@@ -44,3 +44,30 @@ class InvalidStateError(PaperTradingError):
             f"required states: {required_states}"
         )
         super().__init__(message)
+
+
+class UpstreamLineageDrift(PaperTradingError):
+    """Raised when the upstream rows a replay is bound to no longer match.
+
+    A run that has recorded ``source_lineage`` is bound to that exact
+    population. If a pinned trade has gone, or its recorded price, side,
+    quantity or P&L no longer hashes to the digest on record, replaying the
+    rows that happen to match today's query would produce a ledger whose
+    blood-line names a different dataset. Refusing is the honest answer; the
+    counts and digests travel with the message so the gap is diagnosable.
+
+    The descriptive key is named ``explanation``, not ``reason``: at the HTTP
+    layer this codebase reserves ``detail["reason"]`` for the machine-readable
+    code, and a handler that spreads this dictionary over it would silently
+    replace one with the other.
+    """
+
+    def __init__(self, run_id: str, detail: dict):
+        self.run_id = run_id
+        self.detail = detail
+        message = (
+            f"Run {run_id} is bound to {detail.get('recorded_trade_count')} upstream "
+            f"trades at digest {detail.get('recorded_digest')}, but that population no "
+            f"longer reads back the same: {detail.get('explanation')}"
+        )
+        super().__init__(message)

@@ -99,16 +99,47 @@ def find_call(calls, fragment: str) -> StatementCall:
 
 
 def trades_query(calls) -> StatementCall:
-    """The one SELECT over strategy_study_trades the replay issues."""
+    """The window-scoped SELECT over strategy_study_trades that chooses a population.
+
+    The replay issues exactly one of these. When the population it names is not
+    empty, a second SELECT follows — the bound re-read that dereferences the
+    recorded lineage (see ``lineage_reread_query``) — so the two are told apart
+    by the parameters each carries, not by how many statements were recorded.
+    """
     found = [
         c for c in calls
         if c.mentions("from strategy_study_trades") and c.statement.strip().upper().startswith("SELECT")
     ]
+    scoped = [c for c in found if "cutoff" in c.parameters and "as_of" in c.parameters]
+    assert len(scoped) == 1, (
+        f"expected exactly one window-scoped strategy_study_trades SELECT, got {len(scoped)} "
+        f"of {len(found)} trades SELECT(s): {[c.statement[:80] for c in found]}"
+    )
+    return scoped[0]
+
+
+def lineage_reread_query(calls) -> StatementCall:
+    """The bound re-read — the only trades SELECT that carries ``:trade_ids``.
+
+    Returns nothing when the recorded population is empty: an empty lineage
+    names no ids, so there is nothing to dereference. Use
+    ``lineage_reread_queries`` when the point of the test is that the read is
+    absent.
+    """
+    found = lineage_reread_queries(calls)
     assert len(found) == 1, (
-        f"expected exactly one strategy_study_trades SELECT, got {len(found)}: "
+        f"expected exactly one lineage re-read, got {len(found)}: "
         f"{[c.statement[:80] for c in found]}"
     )
     return found[0]
+
+
+def lineage_reread_queries(calls) -> list[StatementCall]:
+    """Every bound re-read the replay issued, in emission order."""
+    return [
+        c for c in calls
+        if c.mentions("from strategy_study_trades") and "trade_ids" in c.parameters
+    ]
 
 
 @dataclass
@@ -130,6 +161,42 @@ class ReplayCase:
             days_back=days_back,
             **kwargs,
         )
+
+    def reopen(self) -> None:
+        """Put the run back where a retry finds it: ``failed``, no cancel.
+
+        ``execute_historical_replay`` grants execution rights only from
+        queued/pending/failed, so a lineage test that wants a second attempt on
+        one run has to move the terminal state first. This writes no ledger
+        rows: it changes only the run's status, which is what a failed worker's
+        own terminal update leaves behind.
+        """
+        db = SessionLocal()
+        try:
+            db.execute(
+                text("UPDATE paper_trading_runs SET status = 'failed', "
+                     "cancel_requested = FALSE WHERE id = :id"),
+                {"id": self.run_id},
+            )
+            db.commit()
+        finally:
+            db.close()
+
+    def grow(self, *trades) -> list:
+        """Add study trades to the run's own upstream population, returning ids."""
+        db = SessionLocal()
+        try:
+            created = seed_study_trades(
+                db,
+                run_id=self.study_run_id,
+                base_time=self.base_time,
+                trades=trades,
+                start_index=len(self.trade_ids),
+            )
+        finally:
+            db.close()
+        self.trade_ids.extend(created)
+        return created
 
     def cleanup(self):
         db = SessionLocal()
@@ -200,37 +267,25 @@ def _seed_user(db, user_id: str) -> None:
     db.commit()
 
 
-def _seed_study_history(db, case: "ReplayCase", trades) -> None:
-    now = datetime.now(timezone.utc)
-    db.execute(
-        text("""
-            INSERT INTO strategy_study_runs (
-                id, user_id, lane, research_version, instrument_id, interval_minutes,
-                provider_id, data_nature, bar_count, first_open_time, last_open_time,
-                settings_json, walk_forward_json, bars_json, trade_count, created_at
-            ) VALUES (
-                :id, :user_id, 'strategy_research_simulated', 'v1.0', :instrument, :interval,
-                'test_provider', 'simulated', 100, :now, :now,
-                '{}', '{}', '[]', :trade_count, :now
-            )
-        """),
-        {
-            "id": case.study_run_id,
-            "user_id": case.user_id,
-            "instrument": INSTRUMENT,
-            "interval": INTERVAL_MINUTES,
-            "now": now,
-            "trade_count": len(trades),
-        },
-    )
+def seed_study_trades(
+    db, *, run_id: str, base_time: datetime, trades, start_index: int = 0,
+) -> list:
+    """Insert study trades under a run that already exists, returning their ids.
 
-    for idx, trade in enumerate(trades):
+    ``_seed_study_history`` uses this for the opening population and a lineage
+    test uses it again to grow that population after a replay has bound to it.
+    One row shape for both, so the grown case differs from the seed only in when
+    the row appeared — nothing about the trade itself is special.
+    """
+    now = datetime.now(timezone.utc)
+    created = []
+    for offset, trade in enumerate(trades):
         entry_hours, exit_hours, entry_price, exit_price = trade[:4]
         direction = trade[4] if len(trade) > 4 else "long"
         trade_id = str(uuid4())
-        entry_time = case.base_time + timedelta(hours=entry_hours)
-        exit_time = case.base_time + timedelta(hours=exit_hours)
-        case.trade_ids.append(trade_id)
+        entry_time = base_time + timedelta(hours=entry_hours)
+        exit_time = base_time + timedelta(hours=exit_hours)
+        created.append(trade_id)
         quantity = Decimal("1000")
         gross = quantity * (Decimal(str(exit_price)) - Decimal(str(entry_price)))
         if direction != "long":
@@ -251,8 +306,8 @@ def _seed_study_history(db, case: "ReplayCase", trades) -> None:
             """),
             {
                 "id": trade_id,
-                "run_id": case.study_run_id,
-                "idx": idx,
+                "run_id": run_id,
+                "idx": start_index + offset,
                 "rule_id": RULE_ID,
                 "direction": direction,
                 "outcome": "win" if gross >= 0 else "loss",
@@ -265,6 +320,36 @@ def _seed_study_history(db, case: "ReplayCase", trades) -> None:
             },
         )
     db.commit()
+    return created
+
+
+def _seed_study_history(db, case: "ReplayCase", trades) -> None:
+    db.execute(
+        text("""
+            INSERT INTO strategy_study_runs (
+                id, user_id, lane, research_version, instrument_id, interval_minutes,
+                provider_id, data_nature, bar_count, first_open_time, last_open_time,
+                settings_json, walk_forward_json, bars_json, trade_count, created_at
+            ) VALUES (
+                :id, :user_id, 'strategy_research_simulated', 'v1.0', :instrument, :interval,
+                'test_provider', 'simulated', 100, :now, :now,
+                '{}', '{}', '[]', :trade_count, :now
+            )
+        """),
+        {
+            "id": case.study_run_id,
+            "user_id": case.user_id,
+            "instrument": INSTRUMENT,
+            "interval": INTERVAL_MINUTES,
+            "now": datetime.now(timezone.utc),
+            "trade_count": len(trades),
+        },
+    )
+    case.trade_ids.extend(
+        seed_study_trades(
+            db, run_id=case.study_run_id, base_time=case.base_time, trades=trades
+        )
+    )
 
 
 @pytest.fixture

@@ -26,6 +26,7 @@ from app.services.paper_trading_exceptions import (
     AuthorizationError,
     InvalidStateError,
     ResourceNotFoundError,
+    UpstreamLineageDrift,
 )
 from app.services.research_paper_reconciliation import ScopeError, reconcile_books
 
@@ -162,6 +163,14 @@ class ReplayResponse(BaseModel):
     terminal_ledger: Optional[dict] = None
     counting: Optional[dict] = None
     refused_entries: Optional[list] = None
+    # The upstream study rows this replay priced, captured once per run:
+    # run ids, trade ids, research versions, the window and a content digest.
+    # Optional because a cancelled replay returns a status and no ledger.
+    source_lineage: Optional[dict] = None
+    # What this attempt's fresh window read found that the recorded lineage does
+    # not name. Without it, a retry whose trade count drops because the upstream
+    # moved shows the drop and nothing that explains it.
+    lineage_window_delta: Optional[dict] = None
 
 
 @router.post("/create", response_model=PortfolioResponse)
@@ -359,6 +368,16 @@ def execute_replay(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={"reason": "invalid_state", "message": str(exc)},
+        )
+    except UpstreamLineageDrift as exc:
+        # The run is bound to an upstream population that no longer reads back
+        # the same. Replaying whatever matches today's query would produce a
+        # ledger whose recorded blood-line names different trades, so this is
+        # reported as the conflict it is — with both sides of the comparison —
+        # rather than resolved by re-stamping the lineage.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"reason": "upstream_lineage_drift", "message": str(exc), **exc.detail},
         )
     except ValueError as exc:
         raise HTTPException(

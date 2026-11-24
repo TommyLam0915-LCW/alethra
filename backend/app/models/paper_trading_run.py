@@ -6,7 +6,7 @@ which track individual replay/execution runs and their daily performance aggrega
 import uuid
 from datetime import datetime, date
 from sqlalchemy import Column, String, Integer, DateTime, Date, Numeric, ForeignKey, Index, UniqueConstraint, Boolean, Text, false
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.sql import func
 from app.database import Base
 
@@ -42,6 +42,13 @@ class PaperTradingRun(Base):
     # than storing a zero-length string. Text, not String(64), because the
     # writer stores safe_error_message(exc), which is bounded at 200 characters.
     failure_reason = Column(Text, nullable=True)
+    # Added by migration d6e7f8a9b0c1. The upstream study trades this replay
+    # priced, captured once by the attempt that read them: run ids, trade ids,
+    # research versions, a content digest over the priced fields, and the
+    # window. The writer conditions on ``source_lineage IS NULL``, so a later
+    # attempt cannot restampe it and a reader can tell "nothing was consumed
+    # yet" (NULL) from "the population was empty" (trade_count 0).
+    source_lineage = Column(JSONB, nullable=True)
 
     __table_args__ = (
         Index("idx_paper_trading_runs_portfolio", "portfolio_id"),

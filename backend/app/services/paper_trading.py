@@ -7,6 +7,7 @@ Supports both historical replay (Option A) and live market data (Option B).
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import uuid
 from datetime import datetime, timedelta, date, timezone
@@ -24,6 +25,7 @@ from app.services.paper_trading_exceptions import (
     AuthorizationError,
     ResourceNotFoundError,
     InvalidStateError,
+    UpstreamLineageDrift,
 )
 
 logger = logging.getLogger(__name__)
@@ -143,6 +145,217 @@ def _provenance(trade, *, cutoff: datetime, as_of: datetime) -> dict:
         "cutoff": cutoff,
         "as_of": as_of,
     }
+
+
+# ---------------------------------------------------------------------------
+# Upstream lineage (G3-2)
+# ---------------------------------------------------------------------------
+
+REPLAY_LINEAGE_SCHEMA = "paper-replay-lineage/v1"
+
+# The columns whose values decide what the replay would compute. A price, a
+# side, a quantity or a recorded P&L that reads back differently is a different
+# dataset even when the row ids are the same, so all of them are in the digest.
+REPLAY_PRICED_FIELDS = (
+    "source_trade_id", "entry_time", "exit_time", "entry_price",
+    "exit_price", "net_pnl", "direction", "quantity",
+)
+
+# The single read used by both legs of a replay: the window SELECT appends the
+# ``entry_time``/``exit_time`` bounds, and the bound re-read appends an id
+# membership test. Keeping one SELECT is what makes the two legs comparable —
+# a digest taken over different columns than the ones re-read would report
+# either phantom drift or none at all.
+UPSTREAM_TRADES_SQL = """
+    SELECT
+        t.id as source_trade_id,
+        t.entry_time,
+        t.exit_time,
+        t.entry_price,
+        t.exit_price,
+        t.net_pnl,
+        t.direction,
+        t.quantity,
+        t.exit_reason,
+        t.run_id as source_run_id,
+        t.rule_id as source_rule_id,
+        t.exit_id as source_exit_id,
+        r.research_version as source_data_version
+    FROM strategy_study_trades t
+    JOIN strategy_study_runs r ON t.run_id = r.id
+    WHERE r.instrument_id = :instrument
+      AND r.interval_minutes = :interval
+      AND t.rule_id = :rule_id
+      AND r.user_id = :user_id
+"""
+
+
+def _lineage_value(value) -> str:
+    """Render one priced field the same way on either driver.
+
+    PostgreSQL hands back ``Decimal`` and ``datetime``, SQLite hands back
+    whatever the test fixtures bound — ``Decimal('150.00')`` and ``150.0`` are
+    one price, so the digest is taken over normalised values and not over the
+    driver's formatting.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, datetime):
+        return _as_utc(value).isoformat()
+    if isinstance(value, (Decimal, int, float)) and not isinstance(value, bool):
+        try:
+            return f"{Decimal(str(value)).normalize():f}"
+        except Exception:
+            return str(value)
+    return str(value)
+
+
+def replay_lineage_digest(rows) -> str:
+    """A content digest over the priced fields of the consumed rows.
+
+    Sorted, so the digest names the population rather than the row order the
+    database happened to return; prefixed, so it can never be mistaken for a
+    dataset checksum produced by the backtest engine's different recipe.
+    """
+    parts = sorted(
+        "|".join(_lineage_value(getattr(row, field, None)) for field in REPLAY_PRICED_FIELDS)
+        for row in rows
+    )
+    return "sha256:" + hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+
+
+def capture_replay_lineage(trades, *, skill: str, cutoff, as_of) -> dict:
+    """Describe exactly what this attempt read.
+
+    ``as_of`` is kept as the window it was read under, not as a claim about
+    completeness: rows a study inserts after this timestamp are outside this
+    lineage, which is why a later attempt can find more trades than a bound run
+    is allowed to take.
+    """
+    return {
+        "schema": REPLAY_LINEAGE_SCHEMA,
+        "rule_id": skill,
+        "trade_count": len(trades),
+        "upstream_run_ids": sorted({str(t.source_run_id) for t in trades if t.source_run_id}),
+        "upstream_trade_ids": [str(t.source_trade_id) for t in trades],
+        "upstream_research_versions": sorted({
+            str(t.source_data_version) for t in trades if t.source_data_version
+        }),
+        "cutoff": _lineage_value(cutoff),
+        "as_of": _lineage_value(as_of),
+        "content_digest": replay_lineage_digest(trades),
+    }
+
+
+def _decode_lineage(raw):
+    """Read a JSONB column that either driver may hand back as text."""
+    if isinstance(raw, str):
+        return json.loads(raw)
+    return raw
+
+
+def read_replay_lineage(db, run_id: str) -> Optional[dict]:
+    row = db.execute(
+        text("SELECT source_lineage FROM paper_trading_runs WHERE id = :id"),
+        {"id": run_id},
+    ).fetchone()
+    return _decode_lineage(row.source_lineage) if row else None
+
+
+def record_replay_lineage(db, run_id: str, lineage: dict) -> Optional[dict]:
+    """Write the capture once, and never over a recorded one.
+
+    The conditional UPDATE is the mechanism: ``source_lineage IS NULL`` is what
+    makes the first capture authoritative, so two attempts racing on one run —
+    or a retry after a failure — cannot each restampe the blood-line to whatever
+    matched their own wall-clock window. When this attempt loses, the row that
+    is on record is returned so the caller can bind to it instead of to its own
+    read.
+    """
+    wrote = db.execute(
+        text("""
+            UPDATE paper_trading_runs
+            SET source_lineage = :lineage, updated_at = CURRENT_TIMESTAMP
+            WHERE id = :id AND source_lineage IS NULL
+        """),
+        {"id": run_id, "lineage": json.dumps(lineage, default=str)},
+    ).rowcount
+    if wrote:
+        return None
+    return read_replay_lineage(db, run_id)
+
+
+def _lineage_recorded(raw, run_id: str) -> dict:
+    """Validate the shape of a capture before anything binds to it.
+
+    A JSONB blob that is missing its ids or its digest cannot be dereferenced,
+    and treating a half-readable record as no record would let a fresh attempt
+    overwrite the run's blood-line — the exact silent rewrite this field
+    exists to prevent. An unreadable record is reported, never repaired.
+    """
+    if not isinstance(raw, dict):
+        raise UpstreamLineageDrift(run_id, {"explanation": "lineage_unreadable",
+                                         "recorded_trade_count": None,
+                                         "recorded_digest": None})
+    for key in ("upstream_trade_ids", "trade_count", "content_digest"):
+        if key not in raw:
+            raise UpstreamLineageDrift(run_id,
+                                       {"explanation": f"lineage_missing_{key}",
+                                        "recorded_trade_count": raw.get("trade_count"),
+                                        "recorded_digest": raw.get("content_digest")})
+    return raw
+
+
+def replay_bound_trades(db, lineage, *, run_id: str, scope_params: dict):
+    """Read back the rows the recorded lineage names, and prove they are it.
+
+    The ownership predicates of the original scope stay in the WHERE clause — a
+    bound retry must not be able to widen its read by presenting a trade id
+    that belongs to somebody else's study. The two time bounds are dropped on
+    purpose: the lineage is the window, so a row that has left it is reported
+    as drift rather than silently excluded from a population on record.
+    """
+    lineage = _lineage_recorded(lineage, run_id)
+    trade_ids = [str(i) for i in lineage["upstream_trade_ids"]]
+
+    if not trade_ids:
+        rows = ()
+    else:
+        rows = db.execute(
+            text(UPSTREAM_TRADES_SQL + """
+              AND t.id IN :trade_ids
+            ORDER BY t.entry_time ASC
+            """).bindparams(bindparam("trade_ids", expanding=True)),
+            {**scope_params, "trade_ids": trade_ids},
+        ).fetchall()
+
+    if len(rows) != lineage["trade_count"]:
+        raise UpstreamLineageDrift(
+            run_id,
+            {
+                "explanation": (
+                    f"{lineage['trade_count'] - len(rows)} of the recorded trades are "
+                    "no longer readable under this owner, instrument, interval and rule"
+                ),
+                "recorded_trade_count": lineage["trade_count"],
+                "readable_trade_count": len(rows),
+                "recorded_digest": lineage["content_digest"],
+            },
+        )
+    digest = replay_lineage_digest(rows)
+    if digest != lineage["content_digest"]:
+        raise UpstreamLineageDrift(
+            run_id,
+            {
+                "explanation": "the recorded trades no longer carry the prices, sides, "
+                          "quantities or P&L they were replayed at",
+                "recorded_trade_count": lineage["trade_count"],
+                "readable_trade_count": len(rows),
+                "recorded_digest": lineage["content_digest"],
+                "current_digest": digest,
+            },
+        )
+    return rows
 
 
 class PaperTradingEngine:
@@ -576,40 +789,19 @@ class PaperTradingEngine:
             # Use rule_id (stable identifier) instead of rule_label_zh (display name)
             # Include source pinning fields: trade_id, run_id, rule_id, exit_id, data_version
             # Constrain by as_of: only trades where exit_time <= as_of (completed before replay start)
+            scope_params = {
+                "instrument": instrument,
+                "interval": interval,
+                "rule_id": skill,  # skill parameter now contains rule_id, not display name
+                "user_id": user_id,
+            }
             trades = db.execute(
-                text("""
-                SELECT
-                    t.id as source_trade_id,
-                    t.entry_time,
-                    t.exit_time,
-                    t.entry_price,
-                    t.exit_price,
-                    t.net_pnl,
-                    t.direction,
-                    t.quantity,
-                    t.exit_reason,
-                    t.run_id as source_run_id,
-                    t.rule_id as source_rule_id,
-                    t.exit_id as source_exit_id,
-                    r.research_version as source_data_version
-                FROM strategy_study_trades t
-                JOIN strategy_study_runs r ON t.run_id = r.id
-                WHERE r.instrument_id = :instrument
-                  AND r.interval_minutes = :interval
-                  AND t.rule_id = :rule_id
-                  AND r.user_id = :user_id
+                text(UPSTREAM_TRADES_SQL + """
                   AND t.entry_time >= :cutoff
                   AND t.exit_time <= :as_of
                 ORDER BY t.entry_time ASC
-            """),
-                {
-                    "instrument": instrument,
-                    "interval": interval,
-                    "rule_id": skill,  # skill parameter now contains rule_id, not display name
-                    "user_id": user_id,
-                    "cutoff": cutoff,
-                    "as_of": as_of,
-                },
+                """),
+                {**scope_params, "cutoff": cutoff, "as_of": as_of},
             ).fetchall()
 
             logger.info(f"Found {len(trades)} historical trades to replay")
@@ -644,6 +836,54 @@ class PaperTradingEngine:
 
             acquired_execution = True
             db.commit()
+
+            # Bind this attempt to one recorded upstream population (G3-2).
+            # Taken after the conditional UPDATE above, because an attempt that
+            # never acquired execution rights priced nothing and must not leave
+            # a capture that reads as if it had. From here the replay trades the
+            # rows the lineage names — the window read above is only the
+            # candidate capture — so a study row inserted, deleted or repaired
+            # between attempts cannot move the evidence under a run that already
+            # has a blood-line on record.
+            window_trades = trades
+            lineage = read_replay_lineage(db, run_id)
+            if lineage is None:
+                challenger = record_replay_lineage(
+                    db, run_id,
+                    capture_replay_lineage(window_trades, skill=skill, cutoff=cutoff, as_of=as_of),
+                )
+                # A non-None return means a concurrent attempt captured first,
+                # and its record is the one this process now has to honour.
+                lineage = challenger or read_replay_lineage(db, run_id)
+                if challenger is not None:
+                    logger.warning(
+                        f"Replay {run_id}: upstream capture already on record by another "
+                        "attempt; binding this attempt to the recorded population instead."
+                    )
+            trades = replay_bound_trades(
+                db, lineage, run_id=run_id, scope_params=scope_params
+            )
+
+            # Rows a fresh window read finds that the recorded lineage does not
+            # name are not this run's history, and saying so is what keeps the
+            # binding honest: a caller re-running a replay must be able to see
+            # that the upstream moved, rather than watch the trade count drop
+            # with nothing to point at.
+            outside_lineage = sorted(
+                {str(t.source_trade_id) for t in window_trades}
+                - {str(i) for i in lineage["upstream_trade_ids"]}
+            )
+            if outside_lineage:
+                logger.warning(
+                    f"Replay {run_id}: {len(outside_lineage)} upstream trades are inside the "
+                    "requested window but outside this run's recorded lineage, and were not "
+                    "replayed."
+                )
+            lineage_window_delta = {
+                "window_trade_count": len(window_trades),
+                "bound_trade_count": len(trades),
+                "outside_lineage_trade_ids": outside_lineage,
+            }
 
             # Build event list: each trade produces an entry event and an exit event.
             # Events are sorted by timestamp; at the same timestamp exits come first
@@ -1420,6 +1660,8 @@ class PaperTradingEngine:
                 "terminal_ledger": terminal_ledger,
                 "counting": counting,
                 "refused_entries": refused_entries,
+                "source_lineage": lineage,
+                "lineage_window_delta": lineage_window_delta,
             }
 
         except Exception as exc:
