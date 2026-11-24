@@ -55,6 +55,7 @@ from app.api.schemas import (
 )
 from app.data.demo_data import get_demo_ohlcv, get_date_range
 from app.services import emit_event
+from app.services.market_data_storage import pick_bar
 from app.services.paper_execution import PaperExecutionError, book_fill
 from app.services.risk_policy import (
     RiskInputs,
@@ -207,6 +208,23 @@ def _bound_session_provider(db: Session, session) -> Optional[str]:
     return _resolve_session_provider(session, db)
 
 
+def _bound_session_grain(session) -> Optional[int]:
+    """The bar grain a bound session replays, or None when its spec does not say.
+
+    The same declaration the replay cursor reads its bars at, so an order's
+    estimate, its execution window and its settlement day all come off one
+    series. A spec written before the timeframe key existed stays unbound
+    rather than inventing 1440 for rows the writer never stamped.
+    """
+    from app.api.simulations import _declared_daily_interval_minutes
+
+    return _declared_daily_interval_minutes(
+        session.experiment_version.strategy_spec
+        if session.experiment_version is not None
+        else None
+    )
+
+
 def _session_bound_marks(
     db: Session, portfolio: PaperPortfolio, asset_ids: Iterable[str]
 ) -> Dict[str, dict]:
@@ -238,7 +256,9 @@ def _session_bound_marks(
             query = query.filter(MarketDataBar.bar_timestamp <= value)
         else:
             query = query.filter(MarketDataBar.bar_date <= value)
-        bar = query.order_by(MarketDataBar.bar_timestamp.desc()).first()
+        bar = pick_bar(
+            query, reader="_session_bound_marks", newest=True
+        )
         if bar is None:
             continue
         marks[asset_id] = {
@@ -855,6 +875,7 @@ def _order_lifecycle_view(db: Session, portfolio: PaperPortfolio, order: PaperOr
             start_date=spec.get("start_date") or order.data_cutoff_at or "",
             end_date=spec.get("end_date") or "9999-12-31",
             market_clock_date=session.current_snapshot_date,
+            interval_minutes=_bound_session_grain(session),
         )
     return execution_view(
         db,
@@ -1333,21 +1354,27 @@ def _journal_cell(column: str, value: Any) -> str:
     return _guard_formula(text)
 
 
-def _portfolio_dataset_provider(db: Session, portfolio: PaperPortfolio) -> Optional[str]:
-    """Which provider's bars the bound session reads, when there is a bound session.
+def _portfolio_dataset_binding(
+    db: Session, portfolio: PaperPortfolio
+) -> tuple:
+    """(provider, grain) of the dataset the bound session replays.
 
     Settlement is looked up in the same dataset a fill executed on. A portfolio
     with no bound session has no dataset to read, so settlement is unknown rather
-    than guessed from an arbitrary source.
+    than guessed from an arbitrary source. The grain keeps a daily fill settling
+    on the next day the daily series traded, not the next four-hour row it shares
+    a midnight with.
     """
     if not portfolio.simulation_session_id:
-        return None
+        return None, None
     session = (
         db.query(SimulationSession)
         .filter(SimulationSession.id == portfolio.simulation_session_id)
         .first()
     )
-    return session.provider_id if session is not None else None
+    if session is None:
+        return None, None
+    return session.provider_id, _bound_session_grain(session)
 
 
 def _journal_rows(
@@ -1357,7 +1384,7 @@ def _journal_rows(
     decision_map: Dict[UUID, DecisionRecord],
 ) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
-    provider_id = _portfolio_dataset_provider(db, portfolio)
+    provider_id, interval_minutes = _portfolio_dataset_binding(db, portfolio)
     positions = (
         db.query(PaperPosition)
         .filter(PaperPosition.portfolio_id == portfolio.id)
@@ -1405,6 +1432,7 @@ def _journal_rows(
                     instrument_id=order.asset_id,
                     provider_id=provider_id,
                     execution_date=fill.execution_date,
+                    interval_minutes=interval_minutes,
                 )
                 row.update({
                     "record_type": "fill",

@@ -359,6 +359,47 @@ def test_manual_order_reads_its_estimate_at_the_daily_grain(
     assert all(grain == DAILY_INTERVAL_MINUTES for grain in asked), asked
 
 
+def test_pending_order_names_its_window_at_the_daily_grain(
+    client, auth_headers, grained_bars
+):
+    """The bar a fill will price from, read at the replay's own grain.
+
+    ``_observed_bar_close`` and ``next_execution_window`` are two queries over
+    one table, and only the first carried a grain, so the panel could quote a
+    daily estimate beside a four-hour window — two numbers from two series for
+    one decision. Once the shared single-price read refuses an unbound instant
+    rather than tie-breaking it, an unbound caller fails outright instead of
+    quietly quoting the wrong series, which is the better of the two outcomes
+    but still not the right one.
+    """
+    session_id = _grained_session(client, auth_headers)
+    assert _advance(client, auth_headers, session_id).status_code == 200
+
+    linked = client.post("/api/v1/paper-portfolio", headers=auth_headers, json={
+        "initial_virtual_cash": CASH,
+        "currency": "USD",
+        "simulation_session_id": session_id,
+    })
+    assert linked.status_code == 201, linked.text
+
+    submitted = client.post(
+        f"/api/v1/simulations/{session_id}/manual-decision",
+        headers=auth_headers,
+        json={
+            "action": "buy",
+            "quantity": 5,
+            "rationale": "The window must be the daily bar I will actually trade.",
+            "idempotency_key": f"window-{uuid.uuid4()}",
+        },
+    )
+    assert submitted.status_code == 200, submitted.text
+
+    window = submitted.json()["execution"]["next_window"]
+    assert window["date"] == GRAIN_DAYS[1]
+    assert window["open"] == pytest.approx(DAILY_LADDER[1], abs=1e-6)
+    assert window["open"] != pytest.approx(FOUR_H_LADDER[1], abs=1e-6)
+
+
 @pytest.mark.parametrize(
     "spec,expected",
     [

@@ -3,13 +3,14 @@ Test request budget: ensure single ingestion path with no duplicate fetches.
 """
 import pytest
 from unittest.mock import Mock, patch, MagicMock
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 import pandas as pd
 from uuid import uuid4
 
 from app.engine.backtest import run_backtest
 from app.providers.data_provider import DataProvider
 from app.models.market_data import MarketDataBar
+from app.services.market_data_storage import DAILY_INTERVAL_MINUTES
 
 
 class MockDataProvider(DataProvider):
@@ -105,7 +106,12 @@ class TestRequestBudget:
                 
                 while current <= end_date:
                     bar = Mock()
+                    bar.id = f"mock-{current.isoformat()}"
                     bar.bar_date = current
+                    bar.bar_timestamp = datetime.combine(
+                        current, datetime.min.time()
+                    )
+                    bar.interval_minutes = DAILY_INTERVAL_MINUTES
                     bar.open = price
                     bar.high = price + 1
                     bar.low = price - 1

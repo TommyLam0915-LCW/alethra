@@ -33,7 +33,11 @@ from app.models.personal_dataset import (
 )
 from app.models.simulation import SimulationSession
 from app.services.decision_labels import latest_labels
-from app.services.market_data_storage import MarketDataStorage
+from app.services.market_data_storage import (
+    MarketDataStorage,
+    order_bars,
+    refuse_bar_row_conflicts,
+)
 from app.services.personalization import (
     MIN_CONFIRMED_DECISIONS,
     get_active_consent,
@@ -189,21 +193,27 @@ def _daily_bars_visible_by(
     providers would duplicate dates, so one provider is bound explicitly (the
     session's provider when known, otherwise the provider covering the most
     daily bars, with a deterministic tie-break).
+
+    The one-bar-per-date step is a ``setdefault``, so a date that holds two rows
+    of the same identity would silently keep whichever arrived first. That is
+    the failure this read cannot afford — the feature matrix trained on the
+    series would describe one of the two rows and not say which — so a doubled
+    instant is refused by name instead, and both rows stay in the table.
     """
-    rows = (
-        db.query(MarketDataBar)
-        .filter(
+    rows = order_bars(
+        db.query(MarketDataBar).filter(
             MarketDataBar.instrument_id == instrument_id,
             MarketDataBar.bar_date <= cutoff.date(),
         )
-        .order_by(MarketDataBar.bar_date, MarketDataBar.provider_id)
-        .all()
+    ).all()
+    daily = refuse_bar_row_conflicts(
+        [
+            row
+            for row in rows
+            if row.bar_timestamp == datetime.combine(row.bar_date, time.min)
+        ],
+        reader="_daily_bars_visible_by",
     )
-    daily = [
-        row
-        for row in rows
-        if row.bar_timestamp == datetime.combine(row.bar_date, time.min)
-    ]
     if not daily:
         return []
 

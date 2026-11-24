@@ -62,6 +62,10 @@ from app.models.paper_portfolio import (
     PaperOrder,
     PaperPortfolio,
 )
+from app.services.market_data_storage import (
+    order_bars,
+    refuse_bar_row_conflicts,
+)
 from app.services.personal_dataset import (
     FEATURE_SCHEMA_VERSION,
     daily_bar_available_at,
@@ -623,8 +627,15 @@ def _load_daily_bars(
         query = query.filter(MarketDataBar.bar_date >= start_day)
     if end_day is not None:
         query = query.filter(MarketDataBar.bar_date <= end_day)
-    rows = query.order_by(MarketDataBar.bar_date, MarketDataBar.provider_id).all()
-    daily = [row for row in rows if row.bar_timestamp == datetime.combine(row.bar_date, datetime.min.time())]
+    rows = order_bars(query).all()
+    daily = refuse_bar_row_conflicts(
+        [
+            row
+            for row in rows
+            if row.bar_timestamp == datetime.combine(row.bar_date, datetime.min.time())
+        ],
+        reader="_load_daily_bars",
+    )
     if not daily:
         return []
 

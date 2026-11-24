@@ -31,6 +31,10 @@ from sqlalchemy.orm import Session
 from app.models.market_data import MarketDataBar
 from app.providers.kraken_provider import KrakenProvider
 from app.services.crypto_series import CandleSeries
+from app.services.market_data_storage import (
+    order_bars,
+    refuse_bar_row_conflicts,
+)
 from app.services.strategy_lab import LabBar
 
 PROVIDER_ID = "kraken"
@@ -121,15 +125,15 @@ def load_stored_bars(
     (NULL grain) are unknown and stay out.
     """
     step = interval_minutes * 60
-    stored = (
-        db.query(MarketDataBar)
-        .filter(
-            MarketDataBar.instrument_id == instrument_id,
-            MarketDataBar.provider_id == provider_id,
-            MarketDataBar.interval_minutes == interval_minutes,
-        )
-        .order_by(MarketDataBar.bar_timestamp.asc())
-        .all()
+    stored = refuse_bar_row_conflicts(
+        order_bars(
+            db.query(MarketDataBar).filter(
+                MarketDataBar.instrument_id == instrument_id,
+                MarketDataBar.provider_id == provider_id,
+                MarketDataBar.interval_minutes == interval_minutes,
+            )
+        ).all(),
+        reader="load_stored_bars",
     )
     bars: List[LabBar] = []
     for row in stored:

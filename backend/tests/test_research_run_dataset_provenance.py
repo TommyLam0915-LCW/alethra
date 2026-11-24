@@ -496,12 +496,13 @@ def test_two_grains_sharing_one_midnight_count_as_rows_not_sessions():
 
     assert len(frame) == 184
     assert frame["date"].nunique() == 92
-    # The sort is total over the priced fields, so the price sequence the
+    # The sort is total over each row's identity, so the price sequence the
     # engine walks does not depend on the order the rows arrived in.
     assert list(frame["close"]) == list(reversed_frame["close"])
-    # One midnight's two rows are placed by price, not by luck: the cheaper
-    # (daily) bar is walked first, always.
-    assert list(frame["close"][:2]) == [151.0, 151.5]
+    # One midnight's two rows are placed by grain, not by price: the finer
+    # series sorts first, always. Sorting them by their own values would make
+    # the sequence the engine trades a function of the prices themselves.
+    assert list(frame["close"][:2]) == [151.5, 151.0]
     assert _compute_stored_checksum(
         {"US:AAPL": frame}, ["US:AAPL"], "2024-01-02", "2024-03-15"
     ) == _compute_stored_checksum(

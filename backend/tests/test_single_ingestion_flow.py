@@ -7,11 +7,12 @@ the API layer, not the backtest engine.
 """
 import pytest
 from unittest.mock import Mock, patch
-from datetime import timedelta
+from datetime import datetime, timedelta
 import pandas as pd
 
 from app.engine.backtest import run_backtest
 from app.providers.data_provider import DataProvider
+from app.services.market_data_storage import DAILY_INTERVAL_MINUTES
 
 
 class MockDataProvider(DataProvider):
@@ -144,7 +145,12 @@ class TestSingleIngestionFlow:
             price = 100.0
             while current <= end:
                 bar = Mock()
+                bar.id = f"mock-{current.date().isoformat()}"
                 bar.bar_date = current.date()
+                bar.bar_timestamp = datetime.combine(
+                    current.date(), datetime.min.time()
+                )
+                bar.interval_minutes = DAILY_INTERVAL_MINUTES
                 bar.open = price
                 bar.high = price + 1
                 bar.low = price - 1
@@ -154,12 +160,12 @@ class TestSingleIngestionFlow:
                 stored_bars.append(bar)
                 price += 1
                 current += timedelta(days=1)
-            
+
             mock_storage.get_bars.return_value = stored_bars
             mock_storage.get_nature_map.return_value = {"US:AAPL": "live"}
-            
+
             mock_db_session = Mock()
-            
+
             strategy_spec = {
                 "template_type": "buy_and_hold",
                 "asset_ids": ["US:AAPL"],
@@ -169,7 +175,7 @@ class TestSingleIngestionFlow:
                 "commission_rate": 0.001,
                 "slippage_rate": 0.0005,
             }
-            
+
             result = run_backtest(
                 strategy_spec=strategy_spec,
                 data_provider=provider,
@@ -200,7 +206,12 @@ class TestSingleIngestionFlow:
             price = 100.0
             while current <= end:
                 bar = Mock()
+                bar.id = f"mock-{current.date().isoformat()}"
                 bar.bar_date = current.date()
+                bar.bar_timestamp = datetime.combine(
+                    current.date(), datetime.min.time()
+                )
+                bar.interval_minutes = DAILY_INTERVAL_MINUTES
                 bar.open = price
                 bar.high = price + 1
                 bar.low = price - 1

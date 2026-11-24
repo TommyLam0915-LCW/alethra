@@ -45,6 +45,272 @@ class GrainConflictError(RuntimeError):
     """
 
 
+class BarRowConflictError(RuntimeError):
+    """Two stored rows claim one instant for one provider at one grain.
+
+    The read-side half of ``GrainConflictError``. That constraint makes this
+    state impossible for labelled rows — but ``interval_minutes`` is nullable,
+    and PostgreSQL treats NULLs as distinct inside a unique constraint, so an
+    unlabelled series can grow a second row for a timestamp it already holds.
+    A reader that then takes ``.first()`` prices the trade off whichever row
+    the database happened to return first, which is neither a rule nor
+    reproducible.
+
+    The refusal names the colliding rows instead: they stay in the table,
+    because deleting the loser would destroy the evidence that the write
+    doubled up, and only the operator can decide which row is the real one.
+    """
+
+    reason = "duplicate_bar_rows"
+
+    def __init__(self, message: str, conflicts):
+        super().__init__(message)
+        self.conflicts = conflicts
+
+
+class AmbiguousBarProviderError(RuntimeError):
+    """Two providers hold a bar for the same instant and the caller bound none.
+
+    The study lane refuses this state as ``ambiguous_stored_providers``. A
+    single-bar read has the same problem in a smaller shape: ``.first()`` picks
+    one market's print and the result — an order's fill price, a position's
+    mark — quietly describes whichever provider the database returned first.
+    """
+
+    reason = "ambiguous_bar_providers"
+
+
+class AmbiguousBarGrainError(RuntimeError):
+    """Two grains hold the same instant and the caller bound neither.
+
+    The third way one instant can carry more than one price: one provider's
+    daily close and its four-hour close at one midnight are two rows the unique
+    constraint is happy with, and they are two different numbers. A read that
+    needs *the* close of that instant has to say which series it means; a read
+    that wants both — a chart, a per-grain study — filters by grain and never
+    reaches this refusal.
+    """
+
+    reason = "ambiguous_bar_grains"
+
+
+def bar_order_keys():
+    """The one ordering every stored-bar read uses.
+
+    ``bar_timestamp`` alone is not an order: two providers, two grains or two
+    duplicate rows share an instant, and the database is free to return them in
+    any sequence. ``provider_id`` and ``interval_minutes`` are the other two
+    components of the row's identity, so ordering by them makes the sequence
+    say something about the data; ``id`` is the final tie-break that makes the
+    order total even when the identity columns collide. NULL grains sort last
+    explicitly, because PostgreSQL and SQLite disagree about where NULLs go and
+    a series whose order depends on the driver is not deterministic.
+    """
+    return (
+        MarketDataBar.bar_timestamp.asc(),
+        MarketDataBar.provider_id.asc(),
+        MarketDataBar.interval_minutes.asc().nullslast(),
+        MarketDataBar.id.asc(),
+    )
+
+
+def _refuse_prior_order(query, helper: str) -> None:
+    """Reject a query that already carries an ORDER BY.
+
+    ``Query.order_by()`` extends rather than replaces, so a caller that sorted
+    by ``bar_date`` and then asked for the canonical keys would still get its
+    own non-total key in front — the exact silent tie this policy exists to
+    remove. Every helper here therefore takes a filter-only query.
+    """
+    if getattr(query, "_order_by_clauses", None):
+        raise ValueError(
+            f"{helper} was given a query that already chose an ordering. Pass the "
+            "filters only and let this helper order the rows: a caller-side ORDER BY "
+            "sorts ahead of the canonical (timestamp, provider, grain, id) keys and "
+            "decides ties by database return order again."
+        )
+
+
+def order_bars(query):
+    """Apply ``bar_order_keys`` to a ``MarketDataBar`` query."""
+    _refuse_prior_order(query, "order_bars")
+    return query.order_by(*bar_order_keys())
+
+
+# ``bar_order_keys`` puts a NULL grain last; rows already in memory need the
+# same rule, and a Python sort cannot ask the database where NULLs go.
+UNLABELLED_GRAIN_SORT_KEY = 10 ** 12
+
+
+def bar_sort_key(bar) -> tuple:
+    """One stored row's position in the canonical series order.
+
+    The SQL half is ``bar_order_keys``; this is the same key for rows that a
+    caller already holds, so an in-memory sort lands where a database sort
+    would. The components are coerced to one type each — instant, provider,
+    grain, row id — because a column that mixes ``None`` with integers has no
+    order at all in pandas, and a series that carries both an unlabelled and a
+    labelled bar for one window used to raise rather than sort. Prices never
+    enter this key: they are the row's answer, not its address.
+    """
+    stamp = getattr(bar, "bar_timestamp", None)
+    if stamp is None:
+        stamp = datetime.combine(bar.bar_date, datetime.min.time())
+    grain = getattr(bar, "interval_minutes", None)
+    return (
+        stamp,
+        str(getattr(bar, "provider_id", "") or ""),
+        UNLABELLED_GRAIN_SORT_KEY if grain is None else grain,
+        str(getattr(bar, "id", "") or ""),
+    )
+
+
+def bar_row_conflicts(rows, *, grain_attr: str = "interval_minutes") -> list:
+    """Groups of rows sharing (instrument, provider, grain, timestamp).
+
+    Keyed exactly as the unique constraint is, because a daily and a four-hour
+    bar at one midnight are not a conflict — they are two answers to two
+    questions. Only rows that would compete for one series slot count.
+    ``grain_attr`` is ``interval_minutes`` on ``market_data_bars`` and
+    ``timeframe`` on the intraday table: the same concept under two names.
+    """
+    groups: Dict[tuple, List[str]] = {}
+    for row in rows:
+        key = (
+            row.instrument_id,
+            row.provider_id,
+            getattr(row, grain_attr),
+            row.bar_timestamp,
+        )
+        groups.setdefault(key, []).append(str(row.id))
+    return [
+        (key, sorted(ids))
+        for key, ids in sorted(groups.items(), key=lambda item: str(item[0]))
+        if len(ids) > 1
+    ]
+
+
+def refuse_bar_row_conflicts(rows, *, reader: str, grain_attr: str = "interval_minutes"):
+    """Return ``rows`` unchanged, or refuse if any instant is doubled.
+
+    Nothing here sorts, dedupes or drops a row: the caller gets the same rows it
+    passed in when there is no conflict, and an exception naming them when there
+    is. Sorting by a price column to break the tie would pick a last close, and
+    keeping one row per timestamp would hide the doubling — both are refusals to
+    answer, not answers.
+    """
+    conflicts = bar_row_conflicts(rows, grain_attr=grain_attr)
+    if conflicts:
+        key, ids = conflicts[0]
+        instrument_id, provider_id, grain, bar_timestamp = key
+        grain_text = "grain unknown" if grain is None else f"{grain} {grain_attr}"
+        raise BarRowConflictError(
+            f"{reader} found {len(conflicts)} timestamp(s) in market data held by "
+            f"more than one row for the same provider and grain — first: "
+            f"{instrument_id} / {provider_id} / {grain_text} / {bar_timestamp} as "
+            f"rows {', '.join(ids)}. No row was chosen and none was deleted: the "
+            "series is refused until the duplicate is resolved, because taking "
+            "the first row would price the series on database return order.",
+            conflicts,
+        )
+    return rows
+
+
+def bar_identity(row, grain_attr: str = "interval_minutes") -> tuple:
+    """The four columns that make one bar one bar.
+
+    ``GrainConflictError`` and the unique constraint both key on this tuple, so
+    the read-side check has to use the same one or it would call a daily bar and
+    a four-hour bar at one midnight a conflict — they are not, they are two
+    answers to two questions.
+    """
+    return (
+        row.instrument_id,
+        row.provider_id,
+        getattr(row, grain_attr),
+        row.bar_timestamp,
+    )
+
+
+def pick_bar(query, *, reader: str, newest: bool = True):
+    """One row from ``query`` — the newest or earliest — or a refusal.
+
+    ``.order_by(bar_date).first()`` is the shape that decides a trade's price by
+    which row the database returns first: the sort key is not a total order, so
+    two rows for one provider at one grain and one instant both qualify, and
+    PostgreSQL is free to hand back either. This orders by the identity columns
+    plus ``id``, takes the leading row, then re-reads every row at that instant
+    under the caller's own filters and refuses three states:
+
+    * two or more rows carry the same (instrument, provider, grain, timestamp) —
+      the duplicate the unique constraint cannot see while the grain is NULL;
+    * the instant is held by two different providers while the caller bound
+      none — choosing either decides which market the result describes;
+    * the instant is held by two different grains while the caller bound none —
+      one instrument's daily close and four-hour close at one midnight are two
+      different numbers, and sorting one of them first is not a rule either.
+
+    Otherwise the leading row is returned and no row is deleted.
+    """
+    _refuse_prior_order(query, "pick_bar")
+    stamp = (
+        MarketDataBar.bar_timestamp.desc()
+        if newest
+        else MarketDataBar.bar_timestamp.asc()
+    )
+    ordered = query.order_by(
+        stamp,
+        MarketDataBar.provider_id.asc(),
+        MarketDataBar.interval_minutes.asc().nullslast(),
+        MarketDataBar.id.asc(),
+    )
+    candidate = ordered.first()
+    if candidate is None:
+        return None
+    # Every row at the leading instant, under the caller's own filters: a
+    # two-row window would miss the third copy of a doubled timestamp, and the
+    # instant is bounded by the data, not by a limit chosen here.
+    same_instant = (
+        query.filter(MarketDataBar.bar_timestamp == candidate.bar_timestamp).all()
+    )
+    conflicts = bar_row_conflicts(same_instant)
+    if conflicts:
+        key, ids = conflicts[0]
+        raise BarRowConflictError(
+            f"{reader} cannot choose {'the newest' if newest else 'the earliest'} "
+            f"stored bar: {len(ids)} rows carry the same instrument, provider, grain "
+            f"and timestamp ({key[0]} / {key[1]} / "
+            + ("grain unknown" if key[2] is None else f"{key[2]} minutes")
+            + f" / {key[3]}) as rows {', '.join(ids)}. None was taken and none was "
+            "deleted: choosing one would price the result on database return order, "
+            "so resolve the duplicate first.",
+            conflicts,
+        )
+    providers = sorted({row.provider_id for row in same_instant})
+    if len(providers) > 1:
+        raise AmbiguousBarProviderError(
+            f"{reader} found {'the newest' if newest else 'the earliest'} stored "
+            f"bar for {candidate.instrument_id} at {candidate.bar_timestamp} in "
+            f"{len(providers)} providers ({', '.join(providers)}) and no provider was "
+            "bound. Neither print was taken: choosing one would silently decide "
+            "which market the result prices against."
+        )
+    grains = sorted({
+        "unlabelled" if row.interval_minutes is None
+        else f"{row.interval_minutes} min"
+        for row in same_instant
+    })
+    if len(grains) > 1:
+        raise AmbiguousBarGrainError(
+            f"{reader} found {'the newest' if newest else 'the earliest'} stored "
+            f"bar for {candidate.instrument_id} at {candidate.bar_timestamp} in "
+            f"{len(grains)} grains ({', '.join(grains)}) and no grain was bound. "
+            "Neither close was taken: sorting the finer grain first is a "
+            "tie-break, not a rule about which series this session is trading."
+        )
+    return candidate
+
+
 class MarketDataStorage:
     """Storage layer for market data bars and metadata."""
 
@@ -558,7 +824,20 @@ class MarketDataStorage:
         end_date: Optional[date] = None,
         limit: Optional[int] = None,
     ) -> List[MarketDataBar]:
-        """Retrieve bars for an instrument with optional filters."""
+        """Retrieve bars for an instrument with optional filters.
+
+        Ordered by ``bar_order_keys``, so the series is the same sequence on
+        PostgreSQL and SQLite and on any planner day. ``limit`` keeps the
+        *newest* N rows and returns them still ascending: a window taken from
+        the head of the range would drop the bar every caller reads as the
+        latest, and a window taken from database return order is not a window
+        anyone can reproduce.
+
+        A duplicate is refused over the instants the window touches, not only
+        over the rows it happened to return: two rows sharing one identity can
+        straddle the cut, and a caller that received the newer half alone would
+        read a doubled latest bar as a clean one.
+        """
         query = self.db.query(MarketDataBar).filter(
             MarketDataBar.instrument_id == instrument_id
         )
@@ -572,12 +851,32 @@ class MarketDataStorage:
         if end_date:
             query = query.filter(MarketDataBar.bar_date <= end_date)
 
-        query = query.order_by(MarketDataBar.bar_timestamp)
-
         if limit:
-            query = query.limit(limit)
+            descending = (
+                MarketDataBar.bar_timestamp.desc(),
+                MarketDataBar.provider_id.desc(),
+                MarketDataBar.interval_minutes.desc().nullsfirst(),
+                MarketDataBar.id.desc(),
+            )
+            rows = list(query.order_by(*descending).limit(limit).all())
+            if rows:
+                # Two rows with one identity sit in adjacent ranks, so a cut
+                # can split them only at the oldest instant that survives.
+                # Re-reading that instant says whether the window is a series
+                # or half of a doubling.
+                oldest = rows[-1].bar_timestamp
+                seen = {row.id for row in rows}
+                rows.extend(
+                    row
+                    for row in query.filter(
+                        MarketDataBar.bar_timestamp == oldest
+                    ).all()
+                    if row.id not in seen
+                )
+            refuse_bar_row_conflicts(rows, reader="get_bars")
+            return list(reversed(rows[:limit]))
 
-        return query.all()
+        return refuse_bar_row_conflicts(order_bars(query).all(), reader="get_bars")
 
     def get_metadata(
         self,

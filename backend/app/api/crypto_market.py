@@ -398,7 +398,10 @@ def crypto_stored(
         limit=limit,
     )
     metadata = storage.get_metadata(instrument_id, provider.provider_id)
-    ordered = sorted(rows, key=lambda r: r.bar_timestamp)
+    # The rows arrive in the storage read order — instant, provider, grain, row
+    # id — which is a total order. Sorting them again by timestamp alone would
+    # reintroduce the tie the storage keys exist to settle.
+    ordered = rows
 
     return {
         "instrument": _instrument_payload(instrument),

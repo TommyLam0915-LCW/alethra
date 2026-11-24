@@ -1015,9 +1015,11 @@ def _crypto_instrument_detail(instrument, db: Session) -> dict:
     reads what storage already holds and says so.
     """
     storage = MarketDataStorage(db)
-    rows = sorted(
-        storage.get_bars(instrument_id=instrument.instrument_id, provider_id="kraken"),
-        key=lambda r: r.bar_timestamp,
+    # get_bars already returns the canonical (instant, provider, grain, id)
+    # order; re-sorting by timestamp alone would put the tie back, and this
+    # route reads ``rows[-1]`` as the latest bar the instrument is marked at.
+    rows = storage.get_bars(
+        instrument_id=instrument.instrument_id, provider_id="kraken"
     )
     latest = rows[-1] if rows else None
     metadata = storage.get_metadata(instrument.instrument_id, "kraken")

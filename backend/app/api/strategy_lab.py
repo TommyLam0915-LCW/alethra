@@ -37,7 +37,12 @@ from app.models.user import User
 from app.providers.crypto_registry import get_crypto_provider
 from app.providers.kraken_provider import KRAKEN_INTERVALS, KrakenError
 from app.providers.provider_registry import get_data_provider
-from app.services.market_data_storage import MarketDataStorage
+from app.services.market_data_storage import (
+    BarRowConflictError,
+    MarketDataStorage,
+    order_bars,
+    refuse_bar_row_conflicts,
+)
 from app.services.strategy_lab import (
     DEFAULT_COMMISSION_RATE,
     DEFAULT_INTERVALS,
@@ -387,15 +392,12 @@ def _stored_research_bars(
     and a four-hour bar legitimately share one midnight and the timestamp alone
     cannot tell them apart.
     """
-    rows = (
-        db.query(MarketDataBar)
-        .filter(
+    rows = order_bars(
+        db.query(MarketDataBar).filter(
             MarketDataBar.instrument_id == instrument_id,
             MarketDataBar.interval_minutes == interval_minutes,
         )
-        .order_by(MarketDataBar.bar_timestamp)
-        .all()
-    )
+    ).all()
     if not rows:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -433,6 +435,27 @@ def _stored_research_bars(
                 ),
             },
         )
+
+    # One provider at one grain still leaves the question of two rows for the
+    # same instant, which the unique constraint cannot prevent while
+    # ``interval_minutes`` is NULL — and PostgreSQL reads NULLs as distinct
+    # inside a constraint. Refusing names both rows; taking the first would
+    # price the study on database return order, and collapsing to one row per
+    # timestamp would delete the evidence that the write doubled up.
+    try:
+        refuse_bar_row_conflicts(rows, reader="_stored_research_bars")
+    except BarRowConflictError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "reason": exc.reason,
+                "instrument_id": instrument_id,
+                "interval_minutes": interval_minutes,
+                "network_used": False,
+                "duplicate_count": len(exc.conflicts),
+                "message": str(exc),
+            },
+        ) from exc
 
     step = timedelta(minutes=interval_minutes)
     bars: List[LabBar] = []

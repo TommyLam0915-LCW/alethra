@@ -56,6 +56,7 @@ from app.models.paper_portfolio import (
     PaperPortfolio,
     PositionStatus,
 )
+from app.services.market_data_storage import pick_bar
 
 DEFAULT_MAX_POSITION_PCT = 1.0
 DEFAULT_MAX_DAILY_ENTRIES = 10
@@ -345,7 +346,9 @@ def value_open_positions(
             )
             if provider_id:
                 query = query.filter(MarketDataBar.provider_id == provider_id)
-            bar = query.order_by(MarketDataBar.bar_date.desc()).first()
+            bar = pick_bar(
+                query, reader="value_open_positions", newest=True
+            )
             price = float(bar.close) if bar is not None else None
         if price is None:
             unpriced.append(position.asset_id)

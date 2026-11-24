@@ -73,7 +73,13 @@ from app.services.risk_policy import (
     evaluate_risk,
     value_open_positions,
 )
-from app.services.market_data_storage import DAILY_INTERVAL_MINUTES, MarketDataStorage
+from app.services.market_data_storage import (
+    DAILY_INTERVAL_MINUTES,
+    MarketDataStorage,
+    order_bars,
+    pick_bar,
+    refuse_bar_row_conflicts,
+)
 from app.models.market_data import MarketDataBar
 from app.providers import get_data_provider
 from sqlalchemy import distinct, func
@@ -130,7 +136,9 @@ def _load_stored_ohlcv(symbol: str, start_date: str, end_date: str, db: Session,
     if interval_minutes is not None:
         query = query.filter(MarketDataBar.interval_minutes == interval_minutes)
     
-    bars = query.order_by(MarketDataBar.bar_date).all()
+    bars = refuse_bar_row_conflicts(
+        order_bars(query).all(), reader="_load_stored_ohlcv"
+    )
     
     if not bars:
         return pd.DataFrame()
@@ -279,16 +287,16 @@ def _load_bound_intraday_bars(
     Each bar keeps its real datetime timestamp — never reduced to bar_date — so a
     daily bar cannot be mistaken for a 5-minute bar and ordering/time survive.
     """
-    rows = (
-        db.query(MarketDataBar)
-        .filter(
-            MarketDataBar.instrument_id == symbol,
-            MarketDataBar.provider_id == provider_id,
-            MarketDataBar.bar_date >= start_date,
-            MarketDataBar.bar_date <= end_date,
-        )
-        .order_by(MarketDataBar.bar_timestamp)
-        .all()
+    rows = refuse_bar_row_conflicts(
+        order_bars(
+            db.query(MarketDataBar).filter(
+                MarketDataBar.instrument_id == symbol,
+                MarketDataBar.provider_id == provider_id,
+                MarketDataBar.bar_date >= start_date,
+                MarketDataBar.bar_date <= end_date,
+            )
+        ).all(),
+        reader="_load_bound_intraday_bars",
     )
     return [
         {
@@ -751,6 +759,7 @@ def _execute_manual_orders(
         provider_id=provider_id,
         bar_timestamp=bar_timestamp,
         actor_id=actor_id,
+        interval_minutes=_declared_daily_interval_minutes(spec),
     )
 
     executed = [r for r in results if r.get("executed")]
@@ -1017,6 +1026,7 @@ def _execute_intraday_manual_orders(
         provider_id=provider_id,
         bar_timestamp=bar_timestamp,
         actor_id=actor_id,
+        interval_minutes=_declared_daily_interval_minutes(spec),
     )
     executed = [r for r in results if r.get("executed")]
     for fill in executed:
@@ -1632,6 +1642,7 @@ def list_session_orders(
                 start_date=spec.get("start_date") or order.data_cutoff_at or "",
                 end_date=spec.get("end_date") or "9999-12-31",
                 market_clock_date=session.current_snapshot_date,
+                interval_minutes=_declared_daily_interval_minutes(spec),
             )
         views.append(
             PaperOrderLifecycleResponse(
@@ -1776,7 +1787,7 @@ def _observed_bar_close(
         if interval_minutes is not None:
             query = query.filter(MarketDataBar.interval_minutes == interval_minutes)
 
-    bar = query.order_by(MarketDataBar.bar_date, MarketDataBar.bar_timestamp).first()
+    bar = pick_bar(query, reader="_observed_bar_close", newest=False)
     return float(bar.close) if bar is not None else None
 
 
@@ -2025,6 +2036,7 @@ def _submit_manual_order(
         provider_id=provider_id,
         start_date=spec["start_date"],
         end_date=spec["end_date"],
+        interval_minutes=_declared_daily_interval_minutes(spec),
     )
     order_info = {
         "order_id": str(order.id),

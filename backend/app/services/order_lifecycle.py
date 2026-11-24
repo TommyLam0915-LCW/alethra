@@ -52,6 +52,7 @@ from app.models.paper_portfolio import (
     RiskCheckStatus,
 )
 from app.models.simulation import SimulationSession
+from app.services.market_data_storage import pick_bar
 from app.services.paper_execution import PaperExecutionError, book_fill
 
 SETTLEMENT_POLICY_LABEL = "T+1 (next stored trading session of the bound dataset)"
@@ -117,6 +118,7 @@ def next_execution_window(
     start_date: str,
     end_date: str,
     after_date: Optional[str],
+    interval_minutes: Optional[int] = None,
 ) -> Optional[Dict[str, Any]]:
     """The first bar of the bound dataset that is strictly after ``after_date``.
 
@@ -124,6 +126,16 @@ def next_execution_window(
     order cannot be priced off a different series than the one the user decided
     against. ``after_date`` None means the user has not observed a bar yet, and
     the dataset's first bar is the window.
+
+    This is the row a fill price comes from, so two stored rows for one instant
+    are refused rather than resolved by taking whichever the database returns:
+    ``pick_bar`` names the colliding ids and leaves them in the table.
+
+    ``interval_minutes`` is the grain the caller's series is traded on, and it
+    is optional in the same way ``_observed_bar_close`` reads it: a caller that
+    knows it filters to it, and one that does not gets the refusal rather than
+    a tie-break. Binding it here and not binding it on the estimate that priced
+    the same decision would let the two halves of one order read two series.
     """
     query = db.query(MarketDataBar).filter(
         MarketDataBar.instrument_id == instrument_id,
@@ -132,10 +144,12 @@ def next_execution_window(
     )
     if provider_id:
         query = query.filter(MarketDataBar.provider_id == provider_id)
+    if interval_minutes is not None:
+        query = query.filter(MarketDataBar.interval_minutes == interval_minutes)
     if after_date:
         query = query.filter(MarketDataBar.bar_date > date.fromisoformat(after_date))
 
-    bar = query.order_by(MarketDataBar.bar_date).first()
+    bar = pick_bar(query, reader="next_execution_window", newest=False)
     if bar is None:
         return None
     return {
@@ -146,13 +160,23 @@ def next_execution_window(
     }
 
 
-def settle_date_after(db: Session, *, instrument_id: str, provider_id: Optional[str], execution_date: str) -> Optional[str]:
+def settle_date_after(
+    db: Session,
+    *,
+    instrument_id: str,
+    provider_id: Optional[str],
+    execution_date: str,
+    interval_minutes: Optional[int] = None,
+) -> Optional[str]:
     """The settlement session for a fill, from the dataset — never invented.
 
     US equities settle one trading session after the trade date, and the only
     trading calendar this product has is the bound dataset. When the dataset has
     no later bar, settlement is unknowable and this returns None rather than a
     guessed calendar date.
+
+    The grain is the one the fill itself was priced from, so a daily fill settles
+    on the next day the daily series traded, not on the next 4-hour row.
     """
     window = next_execution_window(
         db,
@@ -161,6 +185,7 @@ def settle_date_after(db: Session, *, instrument_id: str, provider_id: Optional[
         start_date=execution_date,
         end_date="9999-12-31",
         after_date=execution_date,
+        interval_minutes=interval_minutes,
     )
     return window["date"] if window else None
 
@@ -257,6 +282,7 @@ def execute_due_orders(
     actor_id: Any = None,
     now: Optional[datetime] = None,
     exclude_order_ids: Optional[List[Any]] = None,
+    interval_minutes: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """Fill the pending orders this bar is the first available window for.
 
@@ -372,6 +398,7 @@ def execute_due_orders(
             instrument_id=instrument_id,
             provider_id=provider_id,
             execution_date=execution_date,
+            interval_minutes=interval_minutes,
         )
         _stamp_decision_outcome(db, order, stamp)
 
@@ -596,6 +623,7 @@ def execution_view(
     start_date: str,
     end_date: str,
     market_clock_date: Optional[str] = None,
+    interval_minutes: Optional[int] = None,
 ) -> Dict[str, Any]:
     """What the user is told about one order's place in the lifecycle.
 
@@ -607,6 +635,10 @@ def execution_view(
     pending order left behind by that clock (paused account, a bar with no quote)
     is not waiting for a bar the market has already traded past; it waits for the
     next one.
+
+    ``interval_minutes`` is the grain the bound session replays. The estimate and
+    the window shown together have to come off one series, or the panel quotes a
+    daily close next to a four-hour open and calls the gap a fill price.
     """
     filled_quantity = round(
         sum(float(fill.quantity) for fill in order.fills), 8
@@ -633,6 +665,7 @@ def execution_view(
                     instrument_id=instrument_id,
                     provider_id=provider_id,
                     execution_date=last.execution_date,
+                    interval_minutes=interval_minutes,
                 ),
             }
         else:
@@ -664,6 +697,7 @@ def execution_view(
         start_date=start_date,
         end_date=end_date,
         after_date=after_date,
+        interval_minutes=interval_minutes,
     )
     if window is None:
         view["blockers"].append(BLOCKER_NO_QUOTE)

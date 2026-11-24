@@ -17,6 +17,7 @@ from app.engine.attribution import annotate_and_attribute
 from app.engine import exit_rules
 from app.engine.fill_math import quantity_precision_for
 from app.engine.intraday import INTRADAY_TIMEFRAMES
+from app.services.market_data_storage import bar_sort_key
 
 ENGINE_VERSION = "1.1.0"
 
@@ -144,27 +145,28 @@ def _stored_bars_to_dataframe(stored_bars: List[Any]) -> pd.DataFrame:
 
     Stored bars have bar_date (date object) instead of date (string).
 
-    The order is a total order over the priced fields, not just the timestamp:
-    a daily bar and a four-hour bar can share one midnight, and an unstable
-    sort of tied dates made the price sequence — and therefore the checksum —
-    depend on the row order the database happened to return.
+    The sequence is the identity of each row — instant, provider, grain, row id
+    — never its prices. An earlier version broke a one-midnight tie between a
+    daily and a four-hour bar by ``open/high/low/close``, which made the price
+    sequence the engine walks a function of the values themselves: the cheaper
+    bar was always traded first, on a market where cheaper-before-expensive is
+    not a rule anyone chose. ``MarketDataStorage.get_bars`` already returns rows
+    in this order; sorting here keeps a caller that assembled the list itself
+    from arriving in the same place regardless of the order it arrived in.
     """
     if not stored_bars:
         return pd.DataFrame(columns=["date", "open", "high", "low", "close"])
-    rows = []
-    for bar in stored_bars:
-        rows.append({
+    rows = [
+        {
             "date": datetime.combine(bar.bar_date, datetime.min.time()),
             "open": bar.open,
             "high": bar.high,
             "low": bar.low,
             "close": bar.close,
-        })
-    df = pd.DataFrame(rows)
-    df = df.sort_values(
-        ["date", "open", "high", "low", "close"], kind="mergesort"
-    ).reset_index(drop=True)
-    return df
+        }
+        for bar in sorted(stored_bars, key=bar_sort_key)
+    ]
+    return pd.DataFrame(rows).reset_index(drop=True)
 
 
 def _load_stored_bars(
