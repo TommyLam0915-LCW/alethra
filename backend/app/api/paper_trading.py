@@ -27,6 +27,7 @@ from app.services.paper_trading_exceptions import (
     InvalidStateError,
     ResourceNotFoundError,
 )
+from app.services.research_paper_reconciliation import ScopeError, reconcile_books
 
 router = APIRouter(prefix="/paper-trading", tags=["paper-trading"])
 logger = logging.getLogger(__name__)
@@ -276,6 +277,49 @@ def get_daily_report(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"reason": "report_failed", "message": safe_error_message(exc)},
+        )
+
+
+@router.get("/reconciliation/{run_id}")
+def get_book_reconciliation(
+    run_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Reconcile the study book against the paper book for one replay run.
+
+    Read-only, and rebuilt from durable rows — decisions, orders, fills, and the
+    study trades the run pinned — so it can be re-run after the worker is gone
+    and cannot alter what it describes. Deliberately no ``response_model``: a
+    partial model would silently drop the component list and the per-row terms,
+    which are the answer rather than the detail.
+
+    The caller supplies only the run id. The window is the ``(cutoff, as_of)``
+    pair the replay stamped on its own decisions; a window taken from the
+    request would be the caller's claim about the run instead of the run's, and
+    would let a second population be reconciled against the first's fills.
+    """
+    try:
+        _verify_run_ownership(db, run_id, str(current_user.id))
+        return reconcile_books(db, run_id=run_id, user_id=str(current_user.id))
+    except ScopeError as exc:
+        # The run exists but does not describe one reconcilable window: it
+        # stamped no source-pinned decision, or stamped several. 409 because
+        # nothing about the request is wrong — the run's own state is.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"reason": "scope_refused", "message": str(exc)},
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"reason": "not_found", "message": str(exc)},
+        )
+    except Exception as exc:
+        logger.exception("Failed to reconcile books")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"reason": "reconciliation_failed", "message": safe_error_message(exc)},
         )
 
 

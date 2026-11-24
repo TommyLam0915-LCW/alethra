@@ -34,6 +34,7 @@ from sqlalchemy import bindparam, event, text
 
 from app.database import SessionLocal, engine as app_engine
 from app.services.paper_trading import PaperTradingEngine
+from tests import uuid_identity
 
 
 INSTRUMENT = "CRYPTO:KRAKEN:REPLAY/USD"
@@ -165,6 +166,15 @@ class ReplayCase:
                              "(SELECT id FROM paper_orders WHERE portfolio_id = :v)"),
                         {"v": value},
                     )
+                elif table == "users":
+                    # This case owns exactly one user row, but which layer wrote
+                    # it varies: here it is a raw ``text()`` INSERT, so the id
+                    # sits dashed, while a test that registers the caller through
+                    # the ORM gets the same identity stored as 32-char hex. One
+                    # spelling would leave the other behind for the next node to
+                    # count.
+                    clause, params = uuid_identity.match("id", self.user_id, name="owner")
+                    db.execute(text(f"DELETE FROM users WHERE {clause}"), params)
                 else:
                     db.execute(text(f"DELETE FROM {table} WHERE {column} = :v"), {"v": value})
             if owned_ids:
@@ -267,13 +277,21 @@ def replay_case():
     """
     created: list[ReplayCase] = []
 
-    def _make(trades=(), initial_capital: Decimal = Decimal("100000")) -> ReplayCase:
-        user_id = str(uuid4())
-        db = SessionLocal()
-        try:
-            _seed_user(db, user_id)
-        finally:
-            db.close()
+    def _make(trades=(), initial_capital: Decimal = Decimal("100000"), user_id=None) -> ReplayCase:
+        """Seed a case under ``user_id``, or under a fresh seeded user.
+
+        A caller that already owns a ``users`` row — an HTTP test that
+        registered one through the ORM, say — passes its id and this skips
+        ``_seed_user``: a raw INSERT of the same identity would leave the column
+        holding two spellings of one user.
+        """
+        if user_id is None:
+            user_id = str(uuid4())
+            db = SessionLocal()
+            try:
+                _seed_user(db, user_id)
+            finally:
+                db.close()
 
         engine = PaperTradingEngine(session_factory=SessionLocal)
         created_case = engine.create_portfolio(
