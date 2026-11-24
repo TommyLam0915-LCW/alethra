@@ -10,13 +10,14 @@ No network is used: the fixture module writes deterministic synthetic candles
 with ``data_nature="fixture"``.
 """
 
+import csv
 import uuid
 from dataclasses import replace
 from datetime import datetime, timedelta
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import func
+from sqlalchemy import Float, Integer, Numeric, func
 
 from tests.conftest import TestSession
 from app.data.crypto_instruments import KRAKEN_BTC_USD
@@ -33,8 +34,10 @@ from app.models.paper_portfolio import (
 )
 from app.models.user import User
 from app.services.crypto_paper import (
+    RECEIPT_COLUMNS,
     CryptoPaperError,
     _csv_cell,
+    _RECEIPT_NUMERIC_COLUMNS,
     build_quote,
     quote_fingerprint,
     receipt_as_dict,
@@ -628,6 +631,72 @@ def test_receipt_csv_carries_identity_and_guards_formulas():
         assert _csv_cell(None) == ""
     finally:
         db.close()
+
+
+def test_receipt_csv_numeric_columns_stay_parseable():
+    """A BUY's negative cash movement must still be a number in the file.
+
+    ``receipt_as_dict`` renders money as text and the formula guard covers
+    ``-``, so the guard used to rewrite the one column an accountant sums. The
+    expectations below are the column names, hand-written: consulting the
+    service's own registry here would let an empty registry pass by checking
+    nothing.
+    """
+    db, user, portfolio = _make_portfolio()
+    try:
+        _seed(db)
+        db.commit()
+        result = _order(db, portfolio, user)
+        db.commit()
+
+        lines = receipts_csv([result.receipt]).splitlines()
+        header = next(csv.reader([lines[0]]))
+        cells = dict(zip(header, next(csv.reader([lines[1]]))))
+
+        assert cells["side"] == "BUY"
+        cash = cells["net_cash_change"]
+        assert cash.startswith("-"), f"a BUY must export negative cash, got {cash!r}"
+        assert not cash.startswith("'"), f"{cash!r} is text, not a number"
+        assert Decimal(cash) < 0
+
+        for column in (
+            "interval_minutes", "quantity", "observed_price", "execution_price",
+            "gross_amount", "commission_amount", "slippage_amount",
+            "net_cash_change", "ledger_gross_amount", "ledger_commission_amount",
+            "ledger_slippage_amount", "ledger_net_cash_change",
+            "commission_rate", "slippage_rate",
+        ):
+            cell = cells[column]
+            assert not cell.startswith("'"), f"{column}={cell!r} exported as text"
+            assert Decimal(cell).is_finite(), f"{column}={cell!r} is not a number"
+
+        # The guard is per column, not switched off: the same string in a text
+        # column is still neutralised.
+        assert _csv_cell("-1", "net_cash_change") == "-1"
+        assert _csv_cell("-1", "side") == "'-1"
+    finally:
+        db.close()
+
+
+def test_receipt_numeric_registry_matches_the_execution_table():
+    """The registry is hand-written; the schema is not asked to agree.
+
+    A money column added to ``RECEIPT_COLUMNS`` without joining the registry
+    would silently go back to being guarded text, so the expectation comes from
+    the ORM's own column types.
+    """
+    schema_numeric = {
+        column.name
+        for column in CryptoPaperExecution.__table__.columns
+        if isinstance(column.type, (Integer, Numeric, Float))
+    }
+    expected = schema_numeric & set(RECEIPT_COLUMNS)
+    assert expected, "the receipt export has no numeric column to check"
+    assert expected == set(_RECEIPT_NUMERIC_COLUMNS), (
+        f"schema numbers not registered: {sorted(expected - _RECEIPT_NUMERIC_COLUMNS)}; "
+        f"registered but not a schema number: "
+        f"{sorted(_RECEIPT_NUMERIC_COLUMNS - expected)}"
+    )
 
 
 def test_crypto_lane_never_writes_research_market_data():

@@ -1071,18 +1071,58 @@ def receipt_as_dict(receipt: CryptoPaperExecution) -> Dict[str, object]:
     }
 
 
-def _csv_cell(value) -> str:
+# Money and quantity reach the export already formatted as text, so the writer
+# has to be told which columns are numbers: a BUY's negative cash movement would
+# otherwise be guarded into ``'-10015.00`` and no spreadsheet column could sum
+# it. Columns named here are numeric; everything else is text.
+_RECEIPT_NUMERIC_COLUMNS = frozenset({
+    "interval_minutes",
+    "quantity",
+    "observed_price",
+    "execution_price",
+    "gross_amount",
+    "commission_amount",
+    "slippage_amount",
+    "net_cash_change",
+    "ledger_gross_amount",
+    "ledger_commission_amount",
+    "ledger_slippage_amount",
+    "ledger_net_cash_change",
+    "commission_rate",
+    "slippage_rate",
+})
+
+
+def _guard_formula(text: str) -> str:
+    """Neutralise spreadsheet CSV-formula injection (OWASP) in a text cell."""
+    if text[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + text
+    return text
+
+
+def _csv_cell(value, column: str = "") -> str:
+    """Render one cell, keeping the number/text contract per column.
+
+    A numeric column is written as plain fixed-point text and never guarded,
+    because ``-`` is both a minus sign and a formula prefix. A value there that
+    does not parse to a finite decimal is written as guarded text instead of
+    being coerced, so a bad number stays visible rather than turning into a
+    plausible zero. An unknown column is treated as text.
+    """
     if value is None:
         return ""
     if isinstance(value, bool):
         return "true" if value else "false"
-    if isinstance(value, (int, float, Decimal)):
-        return format(_as_decimal(value), "f")
     text = str(value)
-    # Spreadsheet formula injection: an external string must not start a formula.
-    if text[:1] in ("=", "+", "-", "@", "\t", "\r"):
-        return "'" + text
-    return text
+    if column in _RECEIPT_NUMERIC_COLUMNS:
+        try:
+            number = Decimal(text)
+        except InvalidOperation:
+            return _guard_formula(text)
+        if number.is_finite():
+            return format(number, "f")
+        return _guard_formula(text)
+    return _guard_formula(text)
 
 
 def receipts_csv(receipts: Sequence[CryptoPaperExecution]) -> str:
@@ -1091,5 +1131,7 @@ def receipts_csv(receipts: Sequence[CryptoPaperExecution]) -> str:
     writer.writerow(RECEIPT_COLUMNS)
     for receipt in receipts:
         row = receipt_as_dict(receipt)
-        writer.writerow([_csv_cell(row.get(column)) for column in RECEIPT_COLUMNS])
+        writer.writerow([
+            _csv_cell(row.get(column), column) for column in RECEIPT_COLUMNS
+        ])
     return buf.getvalue()

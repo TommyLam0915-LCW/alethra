@@ -13,7 +13,7 @@ from __future__ import annotations
 import csv
 import io
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
@@ -92,20 +92,69 @@ _JOURNAL_CSV_COLUMNS = (
 # accident, so the export reports the limit next to the rows it actually wrote.
 CSV_EXPORT_ROW_LIMIT = 100_000
 
+# The columns a spreadsheet has to be able to compute on. ``_row_to_dict``
+# renders money as text for the JSON body, so these arrive at the writer as
+# strings, and a string is what the formula guard below rewrites. Without the
+# column type every loss would be exported as ``'-123.45`` — left-aligned, and
+# no client can add it.
+_JOURNAL_CSV_NUMERIC_COLUMNS = frozenset({
+    "interval_minutes",
+    "trade_index",
+    "fold",
+    "entry_price",
+    "exit_price",
+    "quantity",
+    "gross_pnl",
+    "commission",
+    "slippage_cost",
+    "total_cost",
+    "net_pnl",
+    "cash_after",
+    "bars_held",
+    "mfe_pct",
+    "mae_pct",
+    "cost_ratio_pct",
+})
+
+# A cell starting with any of these could be read as a formula by Excel/Sheets.
 _FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
 
 
-def _csv_cell(value: Any) -> str:
+def _guard_formula(text: str) -> str:
+    """Neutralise spreadsheet CSV-formula injection (OWASP) in a text cell.
+
+    A leading single quote makes a spreadsheet show the literal text instead of
+    evaluating it. Numeric cells never come here — see ``_csv_cell``.
+    """
+    if text.startswith(_FORMULA_PREFIXES):
+        return "'" + text
+    return text
+
+
+def _csv_cell(value: Any, column: str = "") -> str:
+    """Render one cell, keeping the number/text contract per column.
+
+    A numeric column is normalised to plain fixed-point text and never guarded,
+    because ``-`` is both a minus sign and a formula prefix. A value there that
+    does not parse to a finite decimal is not a number, so it is written as
+    guarded text rather than silently coerced — the cell stays visibly wrong
+    instead of becoming a plausible zero. An unknown column is treated as text,
+    which is the fail-closed direction. An empty cell always means null.
+    """
     if value is None:
         return ""
     if isinstance(value, bool):
         return "true" if value else "false"
-    if isinstance(value, (int, float, Decimal)):
-        return format(Decimal(str(value)), "f")
     text = str(value)
-    if text.startswith(_FORMULA_PREFIXES):
-        return "'" + text
-    return text
+    if column in _JOURNAL_CSV_NUMERIC_COLUMNS:
+        try:
+            number = Decimal(text)
+        except InvalidOperation:
+            return _guard_formula(text)
+        if number.is_finite():
+            return format(number, "f")
+        return _guard_formula(text)
+    return _guard_formula(text)
 
 
 # ---------------------------------------------------------------------------
@@ -729,7 +778,7 @@ def journal_trades_csv_export(
     writer.writerow(_JOURNAL_CSV_COLUMNS)
     for t in trades:
         writer.writerow([
-            _csv_cell(t.get(col)) for col in _JOURNAL_CSV_COLUMNS
+            _csv_cell(t.get(col), col) for col in _JOURNAL_CSV_COLUMNS
         ])
     rows_exported = len(trades)
     return {
