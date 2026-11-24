@@ -30,7 +30,7 @@ from decimal import Decimal
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import event, text
+from sqlalchemy import bindparam, event, text
 
 from app.database import SessionLocal, engine as app_engine
 from app.services.paper_trading import PaperTradingEngine
@@ -133,6 +133,20 @@ class ReplayCase:
     def cleanup(self):
         db = SessionLocal()
         try:
+            # Audit rows key on the order/decision id rather than the portfolio,
+            # so they have to go before the rows that name them — otherwise a
+            # refusal's audit event outlives the case and a later test counting
+            # refusals database-wide reads a stale row. The ids are selected
+            # first and deleted by bound key because ``id::text`` is
+            # PostgreSQL-only and this fixture runs on both lanes.
+            owned_ids = [
+                str(row[0])
+                for row in db.execute(
+                    text("SELECT id FROM paper_orders WHERE portfolio_id = :p "
+                         "UNION ALL SELECT id FROM decision_records WHERE paper_portfolio_id = :p"),
+                    {"p": self.portfolio_id},
+                )
+            ]
             for table, column, value in (
                 ("paper_fills", "paper_order_id", self.portfolio_id),
                 ("decision_records", "paper_portfolio_id", self.portfolio_id),
@@ -153,6 +167,13 @@ class ReplayCase:
                     )
                 else:
                     db.execute(text(f"DELETE FROM {table} WHERE {column} = :v"), {"v": value})
+            if owned_ids:
+                db.execute(
+                    text("DELETE FROM audit_events WHERE entity_id IN :ids").bindparams(
+                        bindparam("ids", expanding=True)
+                    ),
+                    {"ids": owned_ids},
+                )
             db.commit()
         finally:
             db.close()

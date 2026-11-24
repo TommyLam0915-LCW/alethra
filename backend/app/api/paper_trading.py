@@ -139,6 +139,16 @@ class ReplayResponse(BaseModel):
 
     ``win_rate`` is Optional: a replay that selected no entries completes with zero
     trades, and a zero-trade run has no win rate rather than a win rate of 0.
+
+    The accounting block below is Optional because the worker can stop early: a
+    cancelled replay returns a status dict and no ledger, so requiring these
+    would turn a clean cancellation into a response-validation failure. For a
+    completed run all of them are present — cash, position cost basis, position
+    market value, realized and unrealized P&L and equity are reported apart with
+    their units and definitions (``terminal_ledger``), what each counter means
+    and how the two reconcile (``counting``), and every entry the risk guards
+    declined with its reason (``refused_entries``). The durable copies are the
+    decision/order/audit rows the same run writes.
     """
     run_id: str
     status: str
@@ -146,6 +156,11 @@ class ReplayResponse(BaseModel):
     total_pnl: float
     win_rate: Optional[float]
     final_capital: float
+    reconciliation_status: Optional[str] = None
+    reconciliation_diff: Optional[float] = None
+    terminal_ledger: Optional[dict] = None
+    counting: Optional[dict] = None
+    refused_entries: Optional[list] = None
 
 
 @router.post("/create", response_model=PortfolioResponse)

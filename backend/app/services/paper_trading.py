@@ -6,6 +6,7 @@ Supports both historical replay (Option A) and live market data (Option B).
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from datetime import datetime, timedelta, date, timezone
@@ -18,6 +19,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.database import SessionLocal
 from app.lib.error_safety import safe_error_message
 from app.lib.measurement import measured, percent_ratio, summed
+from app.services import emit_event
 from app.services.paper_trading_exceptions import (
     AuthorizationError,
     ResourceNotFoundError,
@@ -76,6 +78,71 @@ def _as_date(value):
         # come back with a time suffix; datetime.fromisoformat accepts both.
         return datetime.fromisoformat(value).date()
     return value
+
+
+def _exit_economics(
+    *,
+    quantity: Decimal,
+    entry_price: Decimal,
+    exit_price: Decimal,
+    is_long: bool,
+    entry_total_costs: Decimal,
+    commission_rate: Decimal,
+    slippage_rate: Decimal,
+) -> dict:
+    """The one round-trip arithmetic used by every settlement the replay writes.
+
+    Two paths settle positions — the in-loop exit signal and the end-of-horizon
+    settlement — and they must not be free to disagree about what an exit costs.
+    Before this function existed the second path booked cash as if it had paid
+    exit costs while writing no cost anywhere, so the ledger and the money moved
+    apart.
+
+    ``cash_delta`` is booked from the cost basis plus the price move rather than
+    from ``exit_gross``: for a long the two are the same number, and this replay
+    is long-only, but the formula that produced the existing balances is the one
+    kept.
+    """
+    gross_pnl = (
+        quantity * (exit_price - entry_price)
+        if is_long
+        else quantity * (entry_price - exit_price)
+    )
+    position_cost = quantity * entry_price
+    exit_gross = quantity * exit_price
+    exit_commission = exit_gross * commission_rate
+    exit_slippage = exit_gross * slippage_rate
+    exit_total_costs = exit_commission + exit_slippage
+    return {
+        "gross_pnl": gross_pnl,
+        "position_cost": position_cost,
+        "exit_gross": exit_gross,
+        "exit_commission": exit_commission,
+        "exit_slippage": exit_slippage,
+        "exit_total_costs": exit_total_costs,
+        "exit_net_proceeds": exit_gross - exit_total_costs,
+        "net_pnl": gross_pnl - entry_total_costs - exit_total_costs,
+        "cash_delta": position_cost + gross_pnl - exit_total_costs,
+    }
+
+
+def _provenance(trade, *, cutoff: datetime, as_of: datetime) -> dict:
+    """The source-pinning bind set that makes a replay row traceable upstream.
+
+    Every row the replay writes carries the study trade, its run, rule, exit
+    config and research version, plus the cutoff the query ran under. A refusal
+    carries it too: a declined signal that cannot be traced to the study row
+    that produced it is indistinguishable from a signal that never arrived.
+    """
+    return {
+        "source_trade_id": trade.source_trade_id,
+        "source_run_id": trade.source_run_id,
+        "source_rule_id": trade.source_rule_id,
+        "source_exit_config": trade.source_exit_id,
+        "source_data_version": trade.source_data_version,
+        "cutoff": cutoff,
+        "as_of": as_of,
+    }
 
 
 class PaperTradingEngine:
@@ -215,6 +282,219 @@ class PaperTradingEngine:
 
         finally:
             db.close()
+
+    def _record_exit_settlement(
+        self,
+        db: Session,
+        *,
+        portfolio_id: str,
+        user_id: str,
+        instrument: str,
+        position_id: str,
+        provenance: dict,
+        exit_time: datetime,
+        exit_price: Decimal,
+        quantity: Decimal,
+        is_long: bool,
+        econ: dict,
+        rationale: str,
+        fill_reason: str,
+    ) -> None:
+        """Write the four rows that turn an exit into a witnessed settlement.
+
+        Decision, order, fill and the position close, in that order, with the
+        exit costs from ``econ`` recorded on the fill. The end-of-horizon
+        settlement calls this with a different ``fill_reason`` rather than
+        keeping its own half-written version of the same sequence — a settlement
+        that moves cash but leaves the position row open and the daily counters
+        untouched is the defect this method closes.
+        """
+        decision_id = str(uuid.uuid4())
+        order_id = str(uuid.uuid4())
+        fill_id = str(uuid.uuid4())
+        side = "SELL" if is_long else "BUY"
+
+        db.execute(
+            text("""
+            INSERT INTO decision_records (
+                id, owner_id, actor_type, decision_type, decision_time,
+                rationale, paper_portfolio_id, source_trade_id, source_run_id,
+                source_rule_id, source_exit_config, source_data_version,
+                cutoff_timestamp, as_of_timestamp
+            )
+            VALUES (
+                :id, :owner_id, 'system', 'exit', :time,
+                :rationale, :portfolio_id, :source_trade_id, :source_run_id,
+                :source_rule_id, :source_exit_config, :source_data_version,
+                :cutoff, :as_of
+            )
+        """),
+            {
+                "id": decision_id,
+                "owner_id": user_id,
+                "time": exit_time,
+                "rationale": rationale,
+                "portfolio_id": portfolio_id,
+                **provenance,
+            },
+        )
+
+        db.execute(
+            text("""
+            INSERT INTO paper_orders (
+                id, portfolio_id, decision_id, asset_id, side, quantity,
+                order_type, created_at, status, actor_type
+            )
+            VALUES (
+                :id, :portfolio_id, :decision_id, :asset_id, :side, :quantity,
+                'market', :exit_time, 'filled', 'paper_trading'
+            )
+        """),
+            {
+                "id": order_id,
+                "portfolio_id": portfolio_id,
+                "decision_id": decision_id,
+                "asset_id": instrument,
+                "side": side,
+                "quantity": float(quantity),
+                "exit_time": exit_time,
+            },
+        )
+
+        db.execute(
+            text("""
+            INSERT INTO paper_fills (
+                id, paper_order_id, execution_date, observed_price,
+                execution_price_before_costs, slippage_amount, commission_amount,
+                quantity, gross_amount, net_cash_change, simulated_fill_reason, bar_timestamp
+            )
+            VALUES (
+                :id, :order_id, :exec_date, :obs_price,
+                :exec_price, :slippage, :commission,
+                :quantity, :gross, :net, :fill_reason, :timestamp
+            )
+        """),
+            {
+                "id": fill_id,
+                "order_id": order_id,
+                "exec_date": exit_time.strftime("%Y-%m-%d"),
+                "obs_price": exit_price,
+                "exec_price": exit_price,
+                "slippage": econ["exit_slippage"],
+                "commission": econ["exit_commission"],
+                "quantity": quantity,
+                "gross": econ["exit_gross"],
+                "net": econ["exit_net_proceeds"],
+                "fill_reason": fill_reason,
+                "timestamp": exit_time,
+            },
+        )
+
+        db.execute(
+            text("""
+            UPDATE paper_positions
+            SET closed_at = :closed_at,
+                realized_pnl = :realized_pnl,
+                status = 'closed'
+            WHERE id = :position_id
+        """),
+            {
+                "closed_at": exit_time,
+                "realized_pnl": econ["net_pnl"],
+                "position_id": position_id,
+            },
+        )
+
+    def _record_entry_refusal(
+        self,
+        db: Session,
+        *,
+        portfolio_id: str,
+        user_id: str,
+        instrument: str,
+        provenance: dict,
+        event_time: datetime,
+        reason: str,
+        detail: dict,
+        proposed_quantity: Decimal,
+        direction: str,
+    ) -> tuple[str, str]:
+        """Record an entry the engine declined, as decision + order + audit row.
+
+        A refusal used to exist only in the in-memory ``event_log``, which
+        ``ReplayResponse`` drops: the run's ledger looked like the signal had
+        never arrived. Three rows now say why the trade was declined — a
+        ``no_action`` decision, a ``rejected`` order carrying the proposal that
+        was declined, and an audit event. No fill row is written, and the caller
+        changes no cash, no position and no counter, which is what makes "we
+        declined it" different from "we traded it and did not say so".
+        """
+        decision_id = str(uuid.uuid4())
+        order_id = str(uuid.uuid4())
+        flags = {"refusal_reason": reason, **detail}
+        rationale = f"Paper entry refused at {event_time.isoformat()}: {reason}"
+
+        db.execute(
+            text("""
+            INSERT INTO decision_records (
+                id, owner_id, actor_type, decision_type, decision_time,
+                rationale, paper_portfolio_id, source_trade_id, source_run_id,
+                source_rule_id, source_exit_config, source_data_version,
+                cutoff_timestamp, as_of_timestamp, risk_flags
+            )
+            VALUES (
+                :id, :owner_id, 'system', 'no_action', :time,
+                :rationale, :portfolio_id, :source_trade_id, :source_run_id,
+                :source_rule_id, :source_exit_config, :source_data_version,
+                :cutoff, :as_of, :risk_flags
+            )
+        """),
+            {
+                "id": decision_id,
+                "owner_id": user_id,
+                "time": event_time,
+                "rationale": rationale,
+                "portfolio_id": portfolio_id,
+                "risk_flags": json.dumps(flags, default=str),
+                **provenance,
+            },
+        )
+
+        db.execute(
+            text("""
+            INSERT INTO paper_orders (
+                id, portfolio_id, decision_id, asset_id, side, quantity,
+                order_type, created_at, status, actor_type, rationale,
+                risk_check_status
+            )
+            VALUES (
+                :id, :portfolio_id, :decision_id, :asset_id, :side, :quantity,
+                'market', :created_at, 'rejected', 'paper_trading', :rationale,
+                'failed'
+            )
+        """),
+            {
+                "id": order_id,
+                "portfolio_id": portfolio_id,
+                "decision_id": decision_id,
+                "asset_id": instrument,
+                "side": "BUY" if (direction or "").lower() in LONG_ONLY_SIDES else "SELL",
+                "quantity": float(proposed_quantity),
+                "created_at": event_time,
+                "rationale": rationale,
+            },
+        )
+
+        emit_event(
+            db,
+            entity_type="paper_order",
+            entity_id=order_id,
+            event_type="paper_entry_refused",
+            actor_id=None,
+            actor_type="system",
+            payload={"reason": reason, "detail": detail, "decision_id": decision_id},
+        )
+        return decision_id, order_id
 
     def execute_historical_replay(
         self,
@@ -383,9 +663,12 @@ class PaperTradingEngine:
             # Simulation state — credible ledger with separate cash and position tracking
             # All calculations use Decimal for precision
             available_cash = Decimal(str(initial_capital))
-            position_value = Decimal("0")  # Total value locked in positions
+            # Cost basis of what is locked in positions, not a mark to market:
+            # this replay has no price source outside the study rows it reads.
+            position_value = Decimal("0")
             active_positions = {}  # idx -> position dict
             executed_trades = []
+            refused_entries = []
             daily_pnl = {}
             event_log = []
 
@@ -395,6 +678,41 @@ class PaperTradingEngine:
             # Cancel check counter - check every 100 events to avoid excessive DB queries
             event_counter = 0
             CANCEL_CHECK_INTERVAL = 100
+
+            def refuse_entry(event_time, trade, idx, reason, detail, proposed_quantity):
+                """Write the durable refusal, then log it for the caller.
+
+                Every guard below used to append to ``event_log`` and nothing
+                else, and ``ReplayResponse`` does not carry that list — so a
+                declined signal left no trace a reader could reopen.
+                """
+                decision_id, order_id = self._record_entry_refusal(
+                    db,
+                    portfolio_id=run.portfolio_id,
+                    user_id=user_id,
+                    instrument=instrument,
+                    provenance=_provenance(trade, cutoff=cutoff, as_of=as_of),
+                    event_time=event_time,
+                    reason=reason,
+                    detail=detail,
+                    proposed_quantity=proposed_quantity,
+                    direction=trade.direction,
+                )
+                event_log.append({
+                    "time": event_time.isoformat(),
+                    "event": "entry_blocked",
+                    "trade_idx": idx,
+                    "reason": reason,
+                    "decision_id": decision_id,
+                    "refused_order_id": order_id,
+                    **detail,
+                })
+                refused_entries.append({
+                    "trade_idx": idx,
+                    "reason": reason,
+                    "decision_id": decision_id,
+                    "refused_order_id": order_id,
+                })
 
             for event_time, event_type, idx in events:
                 # Periodic cancel check
@@ -447,26 +765,26 @@ class PaperTradingEngine:
                     entry_slippage_stored = Decimal(str(pos["entry_slippage"]))
                     entry_total_costs_stored = Decimal(str(pos["entry_total_costs"]))
 
-                    # Calculate realized PnL using Decimal precision (gross, before any costs)
-                    if is_long:
-                        realized_pnl = trade_quantity * (exit_price_dec - entry_price)
-                    else:
-                        realized_pnl = trade_quantity * (entry_price - exit_price_dec)
-
-                    # Apply exit commission and slippage
-                    exit_gross_dec = trade_quantity * exit_price_dec
-                    exit_commission = exit_gross_dec * commission_rate
-                    exit_slippage = exit_gross_dec * slippage_rate
-                    exit_total_costs = exit_commission + exit_slippage
-
-                    # Full round-trip net PnL: gross - entry costs - exit costs
-                    full_net_pnl = realized_pnl - entry_total_costs_stored - exit_total_costs
+                    econ = _exit_economics(
+                        quantity=trade_quantity,
+                        entry_price=entry_price,
+                        exit_price=exit_price_dec,
+                        is_long=is_long,
+                        entry_total_costs=entry_total_costs_stored,
+                        commission_rate=commission_rate,
+                        slippage_rate=slippage_rate,
+                    )
+                    realized_pnl = econ["gross_pnl"]
+                    full_net_pnl = econ["net_pnl"]
+                    exit_commission = econ["exit_commission"]
+                    exit_slippage = econ["exit_slippage"]
+                    exit_total_costs = econ["exit_total_costs"]
+                    position_cost = econ["position_cost"]
 
                     # Return position value + net PnL to available cash.
                     # Entry costs were already deducted from cash at entry time;
                     # exit costs are deducted here from the gross proceeds.
-                    position_cost = trade_quantity * entry_price
-                    available_cash += position_cost + realized_pnl - exit_total_costs
+                    available_cash += econ["cash_delta"]
                     position_value -= position_cost
 
                     # Track cash flows: gross proceeds, then separate exit costs (for audit)
@@ -474,117 +792,23 @@ class PaperTradingEngine:
                     cash_flows.append((event_time, "exit_commission", -exit_commission))
                     cash_flows.append((event_time, "exit_slippage", -exit_slippage))
 
-                    # Create exit decision, order, and fill (mirror entry logic)
-                    exit_decision_id = str(uuid.uuid4())
-                    exit_order_id = str(uuid.uuid4())
-                    exit_fill_id = str(uuid.uuid4())
-                    exit_side = "SELL" if is_long else "BUY"  # Close position: sell long, buy short
-
-                    # Create exit decision record with source pinning
-                    db.execute(
-                        text("""
-                        INSERT INTO decision_records (
-                            id, owner_id, actor_type, decision_type, decision_time,
-                            rationale, paper_portfolio_id, source_trade_id, source_run_id,
-                            source_rule_id, source_exit_config, source_data_version,
-                            cutoff_timestamp, as_of_timestamp
-                        )
-                        VALUES (
-                            :id, :owner_id, 'system', 'exit', :time,
-                            :rationale, :portfolio_id, :source_trade_id, :source_run_id,
-                            :source_rule_id, :source_exit_config, :source_data_version,
-                            :cutoff, :as_of
-                        )
-                    """),
-                        {
-                            "id": exit_decision_id,
-                            "owner_id": user_id,
-                            "time": exit_time,
-                            "rationale": f"Exit {exit_reason or 'signal'}: gross PnL ${realized_pnl:.2f}, net PnL ${full_net_pnl:.2f}",
-                            "portfolio_id": run.portfolio_id,
-                            "source_trade_id": source_trade_id,
-                            "source_run_id": source_run_id,
-                            "source_rule_id": source_rule_id,
-                            "source_exit_config": source_exit_id,
-                            "source_data_version": source_data_version,
-                            "cutoff": cutoff,
-                            "as_of": as_of,
-                        },
-                    )
-
-                    # Create exit order
-                    db.execute(
-                        text("""
-                        INSERT INTO paper_orders (
-                            id, portfolio_id, decision_id, asset_id, side, quantity,
-                            order_type, created_at, status, actor_type
-                        )
-                        VALUES (
-                            :id, :portfolio_id, :decision_id, :asset_id, :side, :quantity,
-                            'market', :exit_time, 'filled', 'paper_trading'
-                        )
-                    """),
-                        {
-                            "id": exit_order_id,
-                            "portfolio_id": run.portfolio_id,
-                            "decision_id": exit_decision_id,
-                            "asset_id": instrument,
-                            "side": exit_side,
-                            "quantity": float(trade_quantity),
-                            "exit_time": exit_time,
-                        },
-                    )
-
-                    # Create exit fill with non-zero costs
-                    # For exits: gross_amount is the proceeds (positive for cash inflow)
-                    # net_cash_change = gross_amount - commission - slippage
-                    exit_gross = trade_quantity * exit_price_dec
-                    exit_commission = exit_gross * commission_rate
-                    exit_slippage = exit_gross * slippage_rate
-                    exit_net = exit_gross - exit_commission - exit_slippage
-
-                    db.execute(
-                        text("""
-                        INSERT INTO paper_fills (
-                            id, paper_order_id, execution_date, observed_price,
-                            execution_price_before_costs, slippage_amount, commission_amount,
-                            quantity, gross_amount, net_cash_change, simulated_fill_reason, bar_timestamp
-                        )
-                        VALUES (
-                            :id, :order_id, :exec_date, :obs_price,
-                            :exec_price, :slippage, :commission,
-                            :quantity, :gross, :net, 'exit_signal', :timestamp
-                        )
-                    """),
-                        {
-                            "id": exit_fill_id,
-                            "order_id": exit_order_id,
-                            "exec_date": exit_time.strftime("%Y-%m-%d"),
-                            "obs_price": exit_price_dec,
-                            "exec_price": exit_price_dec,
-                            "slippage": exit_slippage,
-                            "commission": exit_commission,
-                            "quantity": trade_quantity,
-                            "gross": exit_gross,
-                            "net": exit_net,
-                            "timestamp": exit_time,
-                        },
-                    )
-
-                    # Update PaperPosition: close position and record full round-trip realized PnL
-                    db.execute(
-                        text("""
-                        UPDATE paper_positions
-                        SET closed_at = :closed_at,
-                            realized_pnl = :realized_pnl,
-                            status = 'closed'
-                        WHERE id = :position_id
-                    """),
-                        {
-                            "closed_at": exit_time,
-                            "realized_pnl": full_net_pnl,
-                            "position_id": pos["position_id"],
-                        },
+                    self._record_exit_settlement(
+                        db,
+                        portfolio_id=run.portfolio_id,
+                        user_id=user_id,
+                        instrument=instrument,
+                        position_id=pos["position_id"],
+                        provenance=_provenance(trade, cutoff=cutoff, as_of=as_of),
+                        exit_time=exit_time,
+                        exit_price=exit_price_dec,
+                        quantity=trade_quantity,
+                        is_long=is_long,
+                        econ=econ,
+                        rationale=(
+                            f"Exit {exit_reason or 'signal'}: gross PnL ${realized_pnl:.2f}, "
+                            f"net PnL ${full_net_pnl:.2f}"
+                        ),
+                        fill_reason="exit_signal",
                     )
 
                     # Update PaperPortfolio: adjust current_virtual_cash
@@ -627,51 +851,56 @@ class PaperTradingEngine:
                     # Process entry: check capacity and exposure limits
                     total_equity = available_cash + position_value
 
+                    # What the engine would have bought had the guard passed. A
+                    # refusal records the proposal it declined; when equity or
+                    # price cannot produce one, the proposal is zero units.
+                    if total_equity > 0 and entry_price_dec > 0:
+                        proposed_position_value = total_equity * Decimal(str(position_size_pct))
+                        proposed_quantity = proposed_position_value / entry_price_dec
+                    else:
+                        proposed_position_value = Decimal("0")
+                        proposed_quantity = Decimal("0")
+
                     if len(active_positions) >= max_positions:
-                        event_log.append({
-                            "time": event_time.isoformat(),
-                            "event": "entry_blocked",
-                            "trade_idx": idx,
-                            "active_positions": len(active_positions),
-                            "equity": float(total_equity),
-                            "reason": "max_positions",
-                        })
+                        refuse_entry(
+                            event_time, trade, idx, "max_positions",
+                            {
+                                "active_positions": len(active_positions),
+                                "equity": float(total_equity),
+                            },
+                            proposed_quantity,
+                        )
                         continue
 
                     # Exposure limit checks (engineering defaults for isolated simulation)
                     # Check equity > 0
                     if total_equity <= 0:
-                        event_log.append({
-                            "time": event_time.isoformat(),
-                            "event": "entry_blocked",
-                            "trade_idx": idx,
-                            "equity": float(total_equity),
-                            "reason": "equity_non_positive",
-                        })
+                        refuse_entry(
+                            event_time, trade, idx, "equity_non_positive",
+                            {"equity": float(total_equity)},
+                            proposed_quantity,
+                        )
                         continue
 
                     # Check price is valid
                     if float(entry_price) <= 0:
-                        event_log.append({
-                            "time": event_time.isoformat(),
-                            "event": "entry_blocked",
-                            "trade_idx": idx,
-                            "price": float(entry_price),
-                            "reason": "invalid_price",
-                        })
+                        refuse_entry(
+                            event_time, trade, idx, "invalid_price",
+                            {"price": float(entry_price)},
+                            proposed_quantity,
+                        )
                         continue
 
                     # Check available cash is sufficient
-                    proposed_position_value = total_equity * Decimal(str(position_size_pct))
                     if proposed_position_value > available_cash:
-                        event_log.append({
-                            "time": event_time.isoformat(),
-                            "event": "entry_blocked",
-                            "trade_idx": idx,
-                            "proposed_value": float(proposed_position_value),
-                            "available_cash": float(available_cash),
-                            "reason": "insufficient_cash",
-                        })
+                        refuse_entry(
+                            event_time, trade, idx, "insufficient_cash",
+                            {
+                                "proposed_value": float(proposed_position_value),
+                                "available_cash": float(available_cash),
+                            },
+                            proposed_quantity,
+                        )
                         continue
 
                     # Calculate current gross exposure (sum of absolute position values)
@@ -685,28 +914,28 @@ class PaperTradingEngine:
                     # Check single asset exposure limit (10% of equity)
                     single_asset_limit = total_equity * Decimal("0.10")
                     if proposed_position_value > single_asset_limit:
-                        event_log.append({
-                            "time": event_time.isoformat(),
-                            "event": "entry_blocked",
-                            "trade_idx": idx,
-                            "proposed_value": float(proposed_position_value),
-                            "limit": float(single_asset_limit),
-                            "reason": "single_asset_exposure_limit",
-                        })
+                        refuse_entry(
+                            event_time, trade, idx, "single_asset_exposure_limit",
+                            {
+                                "proposed_value": float(proposed_position_value),
+                                "limit": float(single_asset_limit),
+                            },
+                            proposed_quantity,
+                        )
                         continue
 
                     # Check total gross exposure limit (100% of equity)
                     total_exposure_limit = total_equity
                     if proposed_exposure > total_exposure_limit:
-                        event_log.append({
-                            "time": event_time.isoformat(),
-                            "event": "entry_blocked",
-                            "trade_idx": idx,
-                            "current_exposure": float(current_exposure),
-                            "proposed_exposure": float(proposed_exposure),
-                            "limit": float(total_exposure_limit),
-                            "reason": "total_exposure_limit",
-                        })
+                        refuse_entry(
+                            event_time, trade, idx, "total_exposure_limit",
+                            {
+                                "current_exposure": float(current_exposure),
+                                "proposed_exposure": float(proposed_exposure),
+                                "limit": float(total_exposure_limit),
+                            },
+                            proposed_quantity,
+                        )
                         continue
 
                     # All checks passed, proceed with entry
@@ -869,43 +1098,110 @@ class PaperTradingEngine:
                         "slippage": float(entry_slippage),
                     })
 
-            # Close out any positions still open at end (shouldn't happen with complete trade data)
-            for idx, pos in list(active_positions.items()):
-                logger.warning(f"Position {idx} still open at end of replay — forcing close")
+            # End-of-horizon settlement.
+            #
+            # A position can only still be open here when its own exit event was
+            # consumed before the entry that opened it — a study trade whose
+            # exit_time is not later than its entry_time. The economic event is
+            # real and already stored: the trades query returns only rows with a
+            # non-null exit_time at or before as_of, and both the price and the
+            # timestamp booked here are that row's. So the contract is the same
+            # witnessed settlement a normal exit gets — decision, order, fill with
+            # exit costs, position close, daily counter — not the earlier
+            # half-close, which moved cash and executed-trade counts while leaving
+            # paper_positions open and the exit costs unpaid.
+            #
+            # Valuation-only is the other coherent contract and is not the one
+            # taken: the run would end flat in cash but open on the books, and the
+            # only price this path has for such a position is the source row's exit
+            # price, so "unrealized" here would be the settlement number wearing a
+            # different label.
+            for idx in list(active_positions):
+                pos = active_positions.pop(idx)
                 trade = trades[idx]
                 # pos["exit_time"] is the trade's own exit timestamp; trade[1] is
-                # entry_time and would mis-stamp the forced-close cash flow.
+                # entry_time and would mis-stamp the settlement cash flow.
                 exit_time = pos["exit_time"]
-                exit_price = Decimal(str(pos["exit_price"]))
+                exit_price_dec = Decimal(str(pos["exit_price"]))
                 trade_quantity = Decimal(str(pos["quantity"]))
                 entry_price = Decimal(str(pos["entry_price"]))
+                entry_commission_stored = Decimal(str(pos["entry_commission"]))
+                entry_slippage_stored = Decimal(str(pos["entry_slippage"]))
                 entry_total_costs_stored = Decimal(str(pos["entry_total_costs"]))
 
-                if pos["is_long"]:
-                    realized_pnl = trade_quantity * (exit_price - entry_price)
-                else:
-                    realized_pnl = trade_quantity * (entry_price - exit_price)
+                econ = _exit_economics(
+                    quantity=trade_quantity,
+                    entry_price=entry_price,
+                    exit_price=exit_price_dec,
+                    is_long=pos["is_long"],
+                    entry_total_costs=entry_total_costs_stored,
+                    commission_rate=commission_rate,
+                    slippage_rate=slippage_rate,
+                )
 
-                # Full net PnL: gross - entry costs (no exit costs applied for forced close)
-                forced_net_pnl = realized_pnl - entry_total_costs_stored
+                logger.warning(
+                    f"Position {idx} still open at end of replay — settling at the "
+                    f"source trade's recorded exit {exit_time.isoformat()}"
+                )
 
-                # Return position value + gross PnL to available cash
-                # (entry costs were already deducted at entry time)
-                position_cost = trade_quantity * entry_price
-                available_cash += position_cost + realized_pnl
-                position_value -= position_cost
+                available_cash += econ["cash_delta"]
+                position_value -= econ["position_cost"]
 
-                cash_flows.append((exit_time, "forced_exit_proceeds", position_cost + realized_pnl))
+                cash_flows.append((exit_time, "exit_proceeds_gross", econ["position_cost"] + econ["gross_pnl"]))
+                cash_flows.append((exit_time, "exit_commission", -econ["exit_commission"]))
+                cash_flows.append((exit_time, "exit_slippage", -econ["exit_slippage"]))
+
+                self._record_exit_settlement(
+                    db,
+                    portfolio_id=run.portfolio_id,
+                    user_id=user_id,
+                    instrument=instrument,
+                    position_id=pos["position_id"],
+                    provenance=_provenance(trade, cutoff=cutoff, as_of=as_of),
+                    exit_time=exit_time,
+                    exit_price=exit_price_dec,
+                    quantity=trade_quantity,
+                    is_long=pos["is_long"],
+                    econ=econ,
+                    rationale=(
+                        f"End-of-horizon settlement: gross PnL ${econ['gross_pnl']:.2f}, "
+                        f"net PnL ${econ['net_pnl']:.2f}"
+                    ),
+                    fill_reason="end_of_horizon_settlement",
+                )
+
+                exit_date = exit_time.date() if isinstance(exit_time, datetime) else exit_time
+                if exit_date not in daily_pnl:
+                    daily_pnl[exit_date] = {"pnl": 0, "trades": 0, "wins": 0}
+                daily_pnl[exit_date]["pnl"] += econ["net_pnl"]
+                daily_pnl[exit_date]["trades"] += 1
+                if econ["net_pnl"] > 0:
+                    daily_pnl[exit_date]["wins"] += 1
 
                 executed_trades.append({
                     "entry_time": pos["entry_time"].isoformat(),
                     "exit_time": exit_time.isoformat(),
-                    "gross_pnl": float(realized_pnl),
-                    "entry_costs": float(entry_total_costs_stored),
-                    "net_pnl": float(forced_net_pnl),
-                    "forced": True,
+                    "gross_pnl": float(econ["gross_pnl"]),
+                    "entry_commission": float(entry_commission_stored),
+                    "entry_slippage": float(entry_slippage_stored),
+                    "exit_commission": float(econ["exit_commission"]),
+                    "exit_slippage": float(econ["exit_slippage"]),
+                    "net_pnl": float(econ["net_pnl"]),
+                    "settled_at_horizon_end": True,
                 })
-            active_positions.clear()
+
+                event_log.append({
+                    "time": exit_time.isoformat(),
+                    "event": "forced_exit",
+                    "trade_idx": idx,
+                    "active_positions": len(active_positions),
+                    "available_cash": float(available_cash),
+                    "position_value": float(position_value),
+                    "gross_pnl": float(econ["gross_pnl"]),
+                    "net_pnl": float(econ["net_pnl"]),
+                    "entry_costs": float(entry_total_costs_stored),
+                    "exit_costs": float(econ["exit_total_costs"]),
+                })
 
             # Reconciliation check: beginning cash + net flows = ending cash
             total_equity = available_cash + position_value
@@ -925,6 +1221,56 @@ class PaperTradingEngine:
                 )
 
             logger.info(f"✓ Cash reconciliation passed: equity={total_equity}, diff={reconciliation_diff}")
+
+            # The quantities the run ends with, reported apart rather than folded
+            # into one "equity" the reader has to reinterpret. All are USD, the
+            # currency the portfolio row carries.
+            #
+            # An open position would be booked at cost, because this replay has no
+            # price source outside the study rows — so its market value and its
+            # unrealized P&L are None (not measured) rather than the cost basis
+            # wearing a P&L label. After the end-of-horizon settlement above there
+            # is nothing open, which is why the two identity checks below hold.
+            realized_pnl_total = sum(
+                (Decimal(str(t["net_pnl"])) for t in executed_trades), Decimal("0")
+            )
+            terminal_ledger = {
+                "currency": "USD",
+                "cash_available": float(available_cash),
+                "open_positions": len(active_positions),
+                "position_cost_basis": float(position_value),
+                "position_market_value": None if active_positions else 0.0,
+                "unrealized_pnl": None if active_positions else 0.0,
+                "realized_pnl_net_of_costs": float(realized_pnl_total),
+                "equity": float(total_equity),
+                "definitions": {
+                    "cash_available": "uninvested balance after entry and exit costs",
+                    "position_cost_basis": "quantity x average entry price of open positions",
+                    "position_market_value": "None when nothing is open: no mark source exists in a replay",
+                    "realized_pnl_net_of_costs": "sum of settled round-trip net P&L: gross move - entry costs - exit costs",
+                    "equity": "cash_available + position_cost_basis",
+                },
+            }
+
+            # Two counts, defined apart and mapped per event rather than forced
+            # equal. run_settlements walks executed_trades (one entry per exit that
+            # closed a position, signal exits and end-of-horizon settlements both);
+            # daily_trades_sum buckets those same settlements by exit date. They
+            # agree because both are derived from the same list, and the
+            # closed-fill readback below is the third leg a caller can recompute.
+            # Refusals are counted separately: a refused entry opened nothing, so
+            # it appears in no settlement count.
+            counting = {
+                "run_settlements": len(executed_trades),
+                "daily_trades_sum": sum(m["trades"] for m in daily_pnl.values()),
+                "daily_dates": len(daily_pnl),
+                "entries_refused": len(refused_entries),
+                "refusals_by_reason": {
+                    reason: sum(1 for r in refused_entries if r["reason"] == reason)
+                    for reason in sorted({r["reason"] for r in refused_entries})
+                },
+                "events_processed": len(events),
+            }
 
             # Final commit protection: lock the run row to prevent cancel interference
             # with_for_update() renders "FOR UPDATE" on PostgreSQL and omits it on
@@ -1000,7 +1346,7 @@ class PaperTradingEngine:
                 )
 
             # Update run with final results
-            total_trades = len(executed_trades)
+            total_trades = counting["run_settlements"]
             total_pnl = total_equity - Decimal(str(initial_capital))
             # A replay that selected no entries has no win rate, not a win rate of
             # zero: storing 0 here would read back as "every trade lost" forever.
@@ -1032,14 +1378,18 @@ class PaperTradingEngine:
                 },
             )
 
-            # Update portfolio
+            # current_virtual_cash is the cash column, so it takes the cash
+            # balance. Here the two are the same number only because the run
+            # ends flat; binding total_equity would silently store a cost-basis
+            # mark as spendable cash in any future lane that ends with a position
+            # open.
             db.execute(
                 text("""
                 UPDATE paper_portfolios
                 SET current_virtual_cash = :capital, closed_at = CURRENT_TIMESTAMP
                 WHERE id = :id
             """),
-                {"capital": float(total_equity), "id": run.portfolio_id},
+                {"capital": float(available_cash), "id": run.portfolio_id},
             )
 
             db.commit()
@@ -1059,6 +1409,9 @@ class PaperTradingEngine:
                 "reconciliation_diff": float(reconciliation_diff),
                 "executed_trades": executed_trades,
                 "event_log": event_log,
+                "terminal_ledger": terminal_ledger,
+                "counting": counting,
+                "refused_entries": refused_entries,
             }
 
         except Exception as exc:
