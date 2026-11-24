@@ -61,6 +61,28 @@ def _visible_data_file_path(path: str, viewer: User) -> str:
     return os.path.basename(path.replace("\\", "/").rstrip("/")) or "restricted"
 
 
+def _require_license_record(source_type: str, license_status: Optional[str]) -> None:
+    """``licensed`` is a rights claim, so it must name the licence it rests on.
+
+    Before this guard, a row could be written as ``source_type="licensed"`` with
+    ``license_status`` left NULL, and every reader downstream would take the
+    platform's word for a permission nobody recorded. Refusal happens before
+    ``db.add``, so the rejected call leaves no dataset row and no audit event.
+    """
+    if source_type != SourceType.licensed.value:
+        return
+    if license_status is None or not license_status.strip():
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "reason": "licensed_source_requires_license_status",
+                "source_type": source_type,
+                "license_status": license_status,
+                "accepted_forms": "non-empty text naming the licence and its scope",
+            },
+        )
+
+
 class DatasetCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
     provider: str = Field(..., min_length=1, max_length=255)
@@ -121,6 +143,7 @@ def create_dataset(
             status_code=400,
             detail="user_uploaded datasets are not supported",
         )
+    _require_license_record(body.source_type, body.license_status)
 
     dataset = Dataset(
         name=body.name,

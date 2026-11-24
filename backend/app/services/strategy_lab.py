@@ -37,6 +37,9 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_DOWN
 from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from app.data.crypto_instruments import get_crypto_instrument
+from app.data.market_terms import disclosure_sentence, instrument_venue
+
 LAB_VERSION = "1.0.0"
 LANE = "strategy_lab_simulated"
 
@@ -885,6 +888,8 @@ def run_lab(
     total_requested = settings.trades_per_strategy * len(selected)
     total_executed = sum(result["trades_executed"] for result in results)
 
+    rights_en, rights_zh = disclosure_sentence(dataset.provider_id)
+
     return {
         "lane": LANE,
         "lab_version": LAB_VERSION,
@@ -944,8 +949,7 @@ def run_lab(
             "not the venue's actual fee schedule.",
             "No profitability claim. Costs are applied on both sides and usually dominate "
             "a one-bar holding period.",
-            "Market-data redistribution is NOT_CLEARED; this lane is for internal "
-            "research only.",
+            rights_en,
         ],
         "disclosures_zh": [
             "此為模擬研究：不接券商、不付款、不動用真實資金。",
@@ -954,7 +958,7 @@ def run_lab(
             "不重疊時段拼接；因此「持有 1 根」在不同時段代表不同實際時間長度。",
             "每邊 0.1% 手續費與 0.1% 滑價為本實驗假設，不是交易所實際費率。",
             "不保證獲利；單根持有下，成本通常主導結果。",
-            "行情資料對外重新分發尚未取得授權，本車道僅供內部研究。",
+            rights_zh,
         ],
     }
 
@@ -995,6 +999,14 @@ def _dataset_payload(dataset: StrategyDataset) -> dict:
 
 def build_plan() -> dict:
     """Static description of the lab. Performs no venue read."""
+    # The rights sentence is looked up from the instrument id this plan itself
+    # declares as its source, so the two cannot drift apart. An id the catalog
+    # does not know fails closed to "no source identified" rather than keeping
+    # whatever venue's sentence was hand-typed here last.
+    plan_instrument_id = "CRYPTO:KRAKEN:BTC-USD"
+    rights_en, rights_zh = disclosure_sentence(
+        instrument_venue(get_crypto_instrument(plan_instrument_id))
+    )
     return {
         "lane": LANE,
         "lab_version": LAB_VERSION,
@@ -1016,7 +1028,7 @@ def build_plan() -> dict:
         },
         "data_plan": {
             "venue": "Kraken public REST OHLC",
-            "instrument_id": "CRYPTO:KRAKEN:BTC-USD",
+            "instrument_id": plan_instrument_id,
             "intervals": list(DEFAULT_INTERVALS),
             "per_request_bar_cap": 720,
             "assembly": (
@@ -1054,7 +1066,7 @@ def build_plan() -> dict:
             "No stop-loss, take-profit, leverage or partial fills are modelled.",
             "The lab does not optimise parameters or claim that any rule is profitable.",
             "It is not connected to the paper portfolio, the broker lane or payments.",
-            "Market-data redistribution is NOT_CLEARED; internal research only.",
+            rights_en,
         ],
         "limitations_zh": [
             "單根持有是取樣設計，不是投資建議。",
@@ -1062,7 +1074,7 @@ def build_plan() -> dict:
             "不模擬停損、停利、槓桿或部分成交。",
             "不進行參數最佳化，也不宣稱任何策略可獲利。",
             "與模擬投組、券商車道及付款流程完全隔離。",
-            "行情資料對外重新分發尚未取得授權，僅供內部研究。",
+            rights_zh,
         ],
     }
 

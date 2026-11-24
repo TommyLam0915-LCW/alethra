@@ -24,6 +24,7 @@ from sqlalchemy import text
 
 from app.config import get_settings
 from app.models.rate_limit import RateLimitCounter
+from app.data.market_terms import terms_for_provider
 from app.data.real_instruments import get_instrument_by_id, get_provider_mapping
 from app.lib.error_safety import safe_error_message, safe_provider_status
 from app.providers.data_provider import (
@@ -195,10 +196,12 @@ class IntradayRefreshService:
         )
         now = _now()
         budget = self._budget_snapshot(now)
+        provider_id = provider.provider_id if provider else settings.data_provider
+        terms = terms_for_provider(provider_id)
         cap = {
             "lane": "intraday_rest",
             "enabled": settings.intraday_enabled,
-            "provider_id": provider.provider_id if provider else settings.data_provider,
+            "provider_id": provider_id,
             "provider_name": provider.provider_name if provider else None,
             "provider_connected": provider.is_available() if provider else False,
             "provider_error": provider_error,
@@ -214,7 +217,8 @@ class IntradayRefreshService:
             "data_nature": "unknown",
             "is_realtime": False,
             "realtime_evidence": "none_verified",
-            "data_rights": "INTERNAL_TEST_ONLY_NOT_CLEARED_FOR_REDISTRIBUTION",
+            "data_rights": terms.redistribution,
+            **terms.provenance(),
             "market_calendar_complete": bool(US_MARKET_STRUCTURE.holidays),
             "budget": {
                 **budget,

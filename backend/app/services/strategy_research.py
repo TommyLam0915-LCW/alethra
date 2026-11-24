@@ -30,6 +30,7 @@ from datetime import datetime
 from decimal import Decimal, ROUND_DOWN
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
+from app.data.market_terms import disclosure_sentence
 from app.services.strategy_lab import LabBar
 
 RESEARCH_VERSION = "1.0.0"
@@ -2181,6 +2182,12 @@ def run_study(
     )
     tested_folds = sum(1 for fold in walk_forward_folds if fold.get("test"))
 
+    # This engine receives bare bars: nothing in its signature says which venue
+    # printed them, and the callers differ (stored rows, live Kraken series,
+    # scheduler-fed batches). So the lane states that it cannot identify the
+    # source instead of repeating a rights sentence it did not earn.
+    rights_en, rights_zh = disclosure_sentence(None)
+
     payload = {
         "lane": LANE,
         "research_version": RESEARCH_VERSION,
@@ -2263,7 +2270,7 @@ def run_study(
             "The in-sample grid is shown for comparison and is not evidence of an edge.",
             "Win rate is not the objective: a tight target with a wide stop can raise it "
             "while lowering expectancy.",
-            "Market-data redistribution is NOT_CLEARED; internal research only.",
+            rights_en,
         ],
         "disclosures_zh": [
             "此為模擬研究：不接券商、不付款、不動用真實資金。",
@@ -2272,7 +2279,7 @@ def run_study(
             "規則與出場組合以走步前推（walk-forward）選擇；只有樣本外區塊可作為證據。",
             "全樣本網格僅供對照，不構成優勢證據。",
             "勝率不是目標：小目標配寬停損可以推高勝率，同時拉低期望值。",
-            "行情資料對外重新分發尚未取得授權，僅供內部研究。",
+            rights_zh,
         ],
     }
     if include_trades:

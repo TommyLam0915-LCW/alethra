@@ -272,7 +272,16 @@ def test_status_is_explicitly_read_only_and_not_cleared():
     status = provider.get_status()
     assert status["read_only"] is True
     assert status["orders_supported"] is False
-    assert status["redistribution"] == "NOT_CLEARED"
+    # The adapter used to invent its own fourth spelling of this status
+    # ("NOT_CLEARED"). It now carries the registry's sentence for Kraken
+    # specifically, plus the provenance that says the sentence was never read
+    # off a market-data terms document.
+    assert status["redistribution"] == "NOT_CLEARED_FOR_EXTERNAL_REDISTRIBUTION"
+    assert status["terms_provider_id"] == "kraken"
+    assert status["terms_recorded"] is True
+    assert status["terms_source"] is None
+    assert status["terms_reviewed_at"] is None
+    assert status["terms_claim_basis"] == "market_data_terms_never_reviewed"
     assert status["declared_pairs"] == [
         "CRYPTO:KRAKEN:BTC-USD",
         "CRYPTO:KRAKEN:ETH-USD",

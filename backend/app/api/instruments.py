@@ -30,6 +30,12 @@ from app.data.crypto_instruments import (
     get_crypto_instrument,
     get_kraken_pair,
 )
+from app.data.market_terms import (
+    instrument_venue,
+    terms_for_instrument,
+    terms_for_provider,
+    venue_labels,
+)
 from app.data.real_instruments import (
     ALL_REAL_INSTRUMENTS,
     get_instrument_by_id,
@@ -873,18 +879,33 @@ def get_market(market_code: str):
     }
 
 
-CRYPTO_REDISTRIBUTION = "NOT_CLEARED_FOR_EXTERNAL_REDISTRIBUTION"
-CRYPTO_TERMS_NOTE_ZH = (
-    "Kraken 公開行情只供本機／內部研究及模擬交易使用，未經核對不得對外重新分發。"
-)
 CRYPTO_AVAILABILITY_NOTE = (
-    "The venue serves only its most recent ~720 candles per interval; older "
+    "Kraken serves only its most recent ~720 candles per interval; older "
     "history cannot be paged, so the provider declares no historical window."
 )
+
+NO_WINDOW_MEASURED_NOTE = (
+    "No historical window is declared for this venue. The ~720-candle limit is "
+    "a Kraken measurement and is not this venue's; nothing here has been read "
+    "from the venue that quotes this pair."
+)
+
+
+def _availability_note(venue: Optional[str]) -> str:
+    """Which availability sentence this venue has actually earned.
+
+    One constant used to cover every crypto row, and the number in it was
+    observed on one venue only. Naming the venue inside the note is what stops
+    a second venue from inheriting a limit nobody measured on it.
+    """
+    if (venue or "").strip().lower() == "kraken":
+        return CRYPTO_AVAILABILITY_NOTE
+    return NO_WINDOW_MEASURED_NOTE
 
 
 def _crypto_instrument_payload(instrument) -> dict:
     mapping = get_kraken_pair(instrument.instrument_id)
+    terms = terms_for_instrument(instrument)
     return {
         "instrument_id": instrument.instrument_id,
         "symbol": instrument.symbol,
@@ -921,7 +942,63 @@ def _crypto_instrument_payload(instrument) -> dict:
             "available_start": None,
             "available_end": None,
             "availability_source": "unknown",
-            "availability_note": CRYPTO_AVAILABILITY_NOTE,
+            "availability_note": _availability_note(instrument_venue(instrument)),
+        },
+        # One terms block per row, from the venue that row's own identity names.
+        # A row whose venue has no record says TERMS_NOT_RECORDED here even when
+        # the catalog around it is entirely Kraken.
+        "terms": {
+            "venue": instrument_venue(instrument),
+            "provider_name": terms.provider_name,
+            "redistribution": terms.redistribution,
+            "use": terms.use,
+            "note_zh": terms.note_zh,
+            **terms.provenance(),
+        },
+    }
+
+
+def _catalog_terms(instruments) -> dict:
+    """One terms block for a whole catalog response.
+
+    A catalog-level sentence is only available when one venue spans the whole
+    response. Two venues in one list is not one rights situation, and an empty
+    list is none, so those answers say nothing instead of quoting whichever
+    sentence happens to be compiled into this module.
+    """
+    venues = venue_labels(instruments)
+    if len(venues) == 1:
+        record = terms_for_provider(venues[0].lower())
+        return {
+            "venues": venues,
+            "provider": record.provider_name or venues[0],
+            "provider_id": record.provider_id if record.recorded else venues[0].lower(),
+            "provider_name": record.provider_name,
+            "redistribution": record.redistribution,
+            "disclaimer": record.disclaimer,
+            "disclaimer_zh": record.disclaimer_zh,
+            "provenance": record.provenance(),
+        }
+    reason = (
+        "catalog_spans_multiple_venues"
+        if len(venues) > 1
+        else "catalog_contains_no_instrument"
+    )
+    return {
+        "venues": venues,
+        "provider": None,
+        "provider_id": None,
+        "provider_name": None,
+        "redistribution": None,
+        "disclaimer": None,
+        "disclaimer_zh": None,
+        "provenance": {
+            "terms_provider_id": None,
+            "terms_recorded": False,
+            "terms_source": None,
+            "terms_reviewed_at": None,
+            "terms_reviewed_by": None,
+            "terms_claim_basis": reason,
         },
     }
 
@@ -951,33 +1028,31 @@ def _crypto_catalog(
     if limit is not None:
         instruments = instruments[:limit]
 
+    catalog = _catalog_terms(instruments)
     return {
         "instruments": [_crypto_instrument_payload(i) for i in instruments],
         "total": len(instruments),
         "data_available": True,
         "data_status": {
             "state": "venue_public_data",
-            "provider_id": "kraken",
-            "provider_name": "Kraken",
+            "provider_id": catalog["provider_id"],
+            "provider_name": catalog["provider_name"],
             "feed_mode": "public_market_data_only",
             "detail": "Live public spot data; stored daily bars back research runs.",
         },
-        "provider": "Kraken",
-        "provider_id": "kraken",
-        "redistribution": CRYPTO_REDISTRIBUTION,
-        "data_disclaimer": (
-            "Live public venue data (Kraken). Internal research and simulated "
-            "fills only — not cleared for external redistribution."
-        ),
-        "data_disclaimer_zh": (
-            "Kraken 公開即時行情，只供內部研究及模擬成交，未經核可不得對外重新分發。"
-        ),
+        "provider": catalog["provider"],
+        "provider_id": catalog["provider_id"],
+        "venues": catalog["venues"],
+        "redistribution": catalog["redistribution"],
+        "data_disclaimer": catalog["disclaimer"],
+        "data_disclaimer_zh": catalog["disclaimer_zh"],
+        **catalog["provenance"],
     }
 
 
-def _crypto_coverage(instrument_id: str, db: Session) -> dict:
+def _crypto_coverage(instrument_id: str, db: Session, provider_id: str) -> dict:
     storage = MarketDataStorage(db)
-    metadata = storage.get_metadata(instrument_id, "kraken")
+    metadata = storage.get_metadata(instrument_id, provider_id)
     datasets = [
         {
             "provider_id": m.provider_id,
@@ -990,11 +1065,11 @@ def _crypto_coverage(instrument_id: str, db: Session) -> dict:
     ]
     return {
         "timeframe": "1d",
-        "provider_id": "kraken",
+        "provider_id": provider_id,
         "available_start": None,
         "available_end": None,
         "availability_source": "unknown",
-        "availability_note": CRYPTO_AVAILABILITY_NOTE,
+        "availability_note": _availability_note(provider_id),
         "stored_start": (
             metadata.first_bar_date.isoformat() if metadata and metadata.first_bar_date else None
         ),
@@ -1015,22 +1090,25 @@ def _crypto_instrument_detail(instrument, db: Session) -> dict:
     reads what storage already holds and says so.
     """
     storage = MarketDataStorage(db)
+    # The venue is part of a crypto instrument id, so it is also the provider
+    # key its bars were stored under. Reading them with a literal "kraken" would
+    # have this route answer about a venue the row does not belong to.
+    venue = (instrument_venue(instrument) or "").lower()
     # get_bars already returns the canonical (instant, provider, grain, id)
     # order; re-sorting by timestamp alone would put the tie back, and this
     # route reads ``rows[-1]`` as the latest bar the instrument is marked at.
-    rows = storage.get_bars(
-        instrument_id=instrument.instrument_id, provider_id="kraken"
-    )
+    rows = storage.get_bars(instrument_id=instrument.instrument_id, provider_id=venue)
     latest = rows[-1] if rows else None
-    metadata = storage.get_metadata(instrument.instrument_id, "kraken")
-    coverage = _crypto_coverage(instrument.instrument_id, db)
+    metadata = storage.get_metadata(instrument.instrument_id, venue)
+    coverage = _crypto_coverage(instrument.instrument_id, db, provider_id=venue)
+    terms = terms_for_instrument(instrument)
     payload = _crypto_instrument_payload(instrument)
     return {
         **payload,
         "lane": "crypto_live_research",
         "read_only": True,
         "orders_supported": False,
-        "data_source": "Kraken",
+        "data_source": terms.provider_name or venue.upper(),
         "feed_mode": "public_market_data_only",
         "latest_bar": (
             {
@@ -1065,12 +1143,12 @@ def _crypto_instrument_detail(instrument, db: Session) -> dict:
                 if metadata and metadata.last_success_at
                 else None
             ),
-            "redistribution": CRYPTO_REDISTRIBUTION,
-            "note_zh": CRYPTO_TERMS_NOTE_ZH,
+            "redistribution": terms.redistribution,
+            "note_zh": terms.note_zh,
         },
         "data_coverage": coverage,
-        "redistribution": CRYPTO_REDISTRIBUTION,
-        "note_zh": CRYPTO_TERMS_NOTE_ZH,
+        "redistribution": terms.redistribution,
+        "note_zh": terms.note_zh,
     }
 
 

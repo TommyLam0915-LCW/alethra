@@ -31,6 +31,7 @@ from app.data.crypto_instruments import (
     get_kraken_pair,
 )
 from app.providers.data_provider import AssetInfo, DataProvider, OHLCVBar
+from app.data.market_terms import terms_for_provider
 from app.providers.instruments import Instrument, Market, parse_crypto_instrument_id
 from app.services.crypto_series import CandleSeries, RawCandle, build_series
 from app.services.upstream_budget import (
@@ -939,7 +940,7 @@ class KrakenProvider(DataProvider):
             "last_success_at": self._last_success_at,
             "last_error_at": self._last_error_at,
             "declared_pairs": [i.instrument_id for i in CRYPTO_INSTRUMENTS],
-            "redistribution": "NOT_CLEARED",
+            **terms_for_provider(self.provider_id).payload(),
         }
         if self._last_budget is not None:
             status["last_reservation"] = self._last_budget

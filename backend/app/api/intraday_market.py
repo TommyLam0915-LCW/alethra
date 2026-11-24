@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 
 from app.auth.jwt import require_admin
 from app.auth.safety import rate_limit
+from app.data.market_terms import terms_for_provider
 from app.database import get_db
 from app.models.user import User
 from app.providers.data_provider import INTRADAY_INTERVALS
@@ -35,12 +36,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["intraday-market"])
 
 MAX_SERIES_HEIGHT = 2000
-
-DATA_RIGHTS = "INTERNAL_TEST_ONLY_NOT_CLEARED_FOR_REDISTRIBUTION"
-DATA_RIGHTS_NOTE_ZH = (
-    "現階段只供已授權之本機／內部測試使用。擁有 API key 不等於可對外分發行情；"
-    "任何公開頁面或收費展示前，須先取得該供應商之市場數據授權。"
-)
 
 TIMESTAMP_SEMANTICS = (
     "open_time is the start of the bar in UTC and is inclusive; close_time is "
@@ -118,6 +113,7 @@ def _series_payload(series: CandleSeries, interval: str) -> Dict[str, Any]:
 def _payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     instrument = payload["instrument"]
     series = payload["series"]
+    terms = terms_for_provider(payload["provider_id"])
     return {
         "instrument": _instrument_payload(instrument),
         "provider_id": payload["provider_id"],
@@ -134,8 +130,9 @@ def _payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "data_nature": "unknown",
         "is_realtime": False,
         "realtime_evidence": "none_verified",
-        "data_rights": DATA_RIGHTS,
-        "data_rights_note_zh": DATA_RIGHTS_NOTE_ZH,
+        "data_rights": terms.redistribution,
+        "data_rights_note_zh": terms.note_zh,
+        **terms.provenance(),
         "series": _series_payload(series, payload["interval"]),
         "unavailability_policy": UNAVAILABILITY_POLICY,
     }

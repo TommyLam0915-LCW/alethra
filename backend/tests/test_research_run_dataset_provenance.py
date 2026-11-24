@@ -187,7 +187,12 @@ def test_completed_stored_run_lands_a_snapshot_that_can_be_read_back(
     assert snapshot.checksum == run_row.dataset_checksum
     assert snapshot.dataset_id == dataset.id
     assert dataset.source_type == SourceType.venue_stored
-    assert dataset.license_status is None
+    # The lineage row states its rights position instead of leaving a NULL that
+    # a reader has to interpret. ``synthetic`` has no terms record at all, and
+    # the row says that — it does not borrow another venue's clearance.
+    assert dataset.license_status == (
+        "TERMS_NOT_RECORDED;claim_basis=no_terms_record_for_this_provider"
+    )
     # The locator addresses rows, not a file: nothing was exported to disk.
     assert snapshot.data_file_path.startswith("db:market_data_bars?provider=")
     assert PROVIDER in snapshot.data_file_path

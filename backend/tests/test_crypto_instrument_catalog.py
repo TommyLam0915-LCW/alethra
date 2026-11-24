@@ -82,6 +82,34 @@ class TestCryptoCatalogIsOptIn:
         assert row["data_window"]["available_start"] is None
         assert row["provider_mappings"][0]["provider_id"] == "kraken"
 
+    def test_terms_block_names_the_source_it_speaks_for(self, client):
+        """Rights sentences must be attributable at the row, not just the page.
+
+        Every crypto row used to inherit one Kraken constant, so a reader could
+        not tell which venue a sentence described and could not see that nobody
+        had read a market-data terms document behind it. Through the route, the
+        row now answers with its own venue and the citation state of the record.
+        """
+        resp = client.get("/api/v1/instruments", params={"market": "CRYPTO"})
+        body = resp.json()
+        row = next(r for r in body["instruments"] if r["instrument_id"] == BTC)
+
+        assert row["terms"]["venue"] == "KRAKEN"
+        assert row["terms"]["provider_name"] == "Kraken"
+        assert row["terms"]["redistribution"] == "NOT_CLEARED_FOR_EXTERNAL_REDISTRIBUTION"
+        assert row["terms"]["terms_provider_id"] == "kraken"
+        assert row["terms"]["terms_recorded"] is True
+        # A record with no document and no reviewer under it is not a citation.
+        assert row["terms"]["terms_source"] is None
+        assert row["terms"]["terms_reviewed_at"] is None
+        assert row["terms"]["terms_claim_basis"] == "market_data_terms_never_reviewed"
+
+        assert body["venues"] == ["KRAKEN"]
+        assert body["terms_claim_basis"] == "market_data_terms_never_reviewed"
+        # Nothing here may look like a cleared redistribution right.
+        assert "CLEARED_FOR" in body["redistribution"]
+        assert body["redistribution"] != "CLEARED"
+
     def test_market_value_is_case_insensitive(self, client):
         upper = client.get("/api/v1/instruments", params={"market": "CRYPTO"})
         lower = client.get("/api/v1/instruments", params={"market": "crypto"})

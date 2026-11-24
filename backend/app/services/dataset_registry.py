@@ -30,6 +30,7 @@ from typing import Optional, Sequence
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.data.market_terms import terms_for_provider
 from app.models.dataset import Dataset, DatasetSnapshot, SourceType
 
 logger = logging.getLogger(__name__)
@@ -78,6 +79,22 @@ def _get_or_create(model, db: Session, object_id: uuid.UUID, build) -> None:
             raise
 
 
+def _license_declaration(providers: Sequence[str]) -> str:
+    """What this platform can actually say about the rights on these rows.
+
+    The column used to stay NULL, which read as "no licence claimed" — true, but
+    indistinguishable from "nobody looked". The declaration names the fail-closed
+    status of the venue that served the rows, and the basis it rests on, so a
+    reader can tell an unreviewed clearance from an absent one. More than one
+    provider in one dataset is left explicitly undeclared rather than covered by
+    one venue's sentence.
+    """
+    if len(providers) != 1:
+        return "MULTI_PROVIDER_NO_SINGLE_TERMS_RECORD:" + ",".join(providers)
+    terms = terms_for_provider(providers[0])
+    return f"{terms.redistribution};claim_basis={terms.claim_basis}"
+
+
 def register_stored_bars_snapshot(
     db: Session,
     *,
@@ -123,9 +140,11 @@ def register_stored_bars_snapshot(
             name=f"{REGISTRY_NAME}|{provider_label}",
             provider=provider_label[:255],
             source_type=SourceType.venue_stored,
-            # No licence is asserted: these are the venue candles the platform
-            # itself wrote down, and this row says nothing about their terms.
-            license_status=None,
+            # These are the venue candles the platform itself wrote down. The
+            # row now carries that venue's fail-closed status and the basis for
+            # it, so "nothing here grants redistribution" is a statement the
+            # data makes, not an inference a reader has to risk.
+            license_status=_license_declaration(providers)[:255],
             description=(
                 "System registry for bars read back from market_data_bars. "
                 "Rows are addressed by instrument, provider and grain, not by "

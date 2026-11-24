@@ -545,6 +545,26 @@ def test_capability_is_honest_about_permissions(client, monkeypatch):
     assert body["declared_intervals"] == ["1min"]
 
 
+def test_capability_rights_follow_the_resolved_provider(client, monkeypatch):
+    """The rights sentence is looked up from the venue that served the lane.
+
+    A provider with no terms record must not inherit the sentence of whichever
+    provider the settings happened to name before.
+    """
+    configure(monkeypatch, FakeIntradayProvider([bar(3)], provider_id="finnhub"))
+    resp = client.get("/api/v1/market/intraday/capability")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["provider_id"] == "finnhub"
+    assert body["data_rights"] == "TERMS_NOT_RECORDED"
+    assert body["terms_provider_id"] == "finnhub"
+    assert body["terms_recorded"] is False
+    assert body["terms_claim_basis"] == "no_terms_record_for_this_provider"
+    # The recorded sentence belongs to another venue, so it cannot appear here.
+    assert "Twelve Data" not in resp.text
+    assert "INTERNAL_TEST_ONLY_NOT_CLEARED_FOR_REDISTRIBUTION" not in resp.text
+
+
 def test_capability_reports_missing_key_without_echoing_it(client, monkeypatch):
     configure(monkeypatch, ValueError("TWELVEDATA_API_KEY is absent"))
     resp = client.get("/api/v1/market/intraday/capability")

@@ -27,6 +27,7 @@ from app.data.crypto_instruments import (
     KRAKEN_BTC_USD,
     get_crypto_instrument,
 )
+from app.data.market_terms import terms_for_provider
 from app.database import get_db
 from app.lib.error_safety import safe_provider_status
 from app.models.user import User
@@ -73,7 +74,6 @@ RETENTION_NOTE_ZH = (
     "或改用有授權的歷史數據來源。"
 )
 
-TERMS_STATUS = "NOT_CLEARED_FOR_EXTERNAL_REDISTRIBUTION"
 TERMS_NOTE_ZH = (
     "現階段只供本機／內部研究及模擬交易使用。交易所公開行情不等於可對外重新分發；"
     "對外展示或收費前，須先核對該交易所之市場數據條款。"
@@ -243,7 +243,7 @@ def _series_payload(series: CandleSeries, instrument, provider) -> Dict[str, Any
             "feed_mode": provider.feed_mode,
             "data_nature": provider.get_data_quality(instrument.instrument_id)["data_nature"],
             "read_only": True,
-            "redistribution": TERMS_STATUS,
+            **terms_for_provider(provider.provider_id).payload(),
             "terms_note_zh": TERMS_NOTE_ZH,
         },
         "retention": _retention_payload(series),
@@ -259,6 +259,7 @@ def _series_payload(series: CandleSeries, instrument, provider) -> Dict[str, Any
 def crypto_market_overview():
     """Declared venue, pair, intervals and the terms status of this lane."""
     provider = get_crypto_provider()
+    terms = terms_for_provider(provider.provider_id)
     return {
         "lane": "crypto_research_mode",
         "stage": "local_or_internal_research",
@@ -288,7 +289,8 @@ def crypto_market_overview():
             }
             for i in CRYPTO_INSTRUMENTS
         ],
-        "redistribution": TERMS_STATUS,
+        "redistribution": terms.redistribution,
+        **terms.provenance(),
         "terms_note_zh": TERMS_NOTE_ZH,
         "provider": safe_provider_status(provider.get_status()),
     }
