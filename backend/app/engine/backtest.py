@@ -1,6 +1,5 @@
 import hashlib
 import json
-import uuid
 from datetime import datetime, date
 from typing import Dict, List, Any, Optional, Tuple
 
@@ -144,6 +143,11 @@ def _stored_bars_to_dataframe(stored_bars: List[Any]) -> pd.DataFrame:
     """Convert MarketDataBar model instances to DataFrame format.
 
     Stored bars have bar_date (date object) instead of date (string).
+
+    The order is a total order over the priced fields, not just the timestamp:
+    a daily bar and a four-hour bar can share one midnight, and an unstable
+    sort of tied dates made the price sequence — and therefore the checksum —
+    depend on the row order the database happened to return.
     """
     if not stored_bars:
         return pd.DataFrame(columns=["date", "open", "high", "low", "close"])
@@ -157,7 +161,9 @@ def _stored_bars_to_dataframe(stored_bars: List[Any]) -> pd.DataFrame:
             "close": bar.close,
         })
     df = pd.DataFrame(rows)
-    df = df.sort_values("date").reset_index(drop=True)
+    df = df.sort_values(
+        ["date", "open", "high", "low", "close"], kind="mergesort"
+    ).reset_index(drop=True)
     return df
 
 
@@ -460,6 +466,12 @@ def run_backtest(
             "provider_ids": provider_ids,
             "data_nature": data_nature.get(aid, "unknown"),
             "bar_count": int(len(df)),
+            # Distinct bar dates, not rows. 184 rows over 92 dates is one daily
+            # series plus a second grain sharing the same midnights — the pair
+            # says so, while "184 bars" alone reads as a longer window. The
+            # coverage block cannot name the grains; the rows can be re-read
+            # from market_data_bars by instrument, provider and date.
+            "session_count": int(df["date"].nunique()),
             "first_bar_date": df["date"].iloc[0].strftime("%Y-%m-%d"),
             "last_bar_date": df["date"].iloc[-1].strftime("%Y-%m-%d"),
         }
@@ -644,7 +656,10 @@ def run_backtest(
     return {
         "run_status": "completed",
         "strategy_spec_snapshot": strategy_spec,
-        "dataset_snapshot_id": str(uuid.uuid4()),
+        # No snapshot id here on purpose: the engine has not registered
+        # anything. The caller that writes the durable row decides the id, from
+        # the checksum and coverage below, so an identifier can never name a
+        # snapshot table row that does not exist.
         "dataset_checksum": dataset_checksum,
         "dataset_coverage": dataset_coverage,
         "bars_used": trading_days,
@@ -909,7 +924,15 @@ def _compute_stored_checksum(
     start_date: str,
     end_date: str,
 ) -> str:
-    """Compute a deterministic checksum for stored data (same format as demo checksum)."""
+    """Compute a deterministic checksum for stored data (same format as demo checksum).
+
+    The per-asset parts are sorted before they are joined. Row order inside an
+    asset is not evidence about the data — two grains sharing a midnight, or a
+    database returning the same rows in a different order, used to change this
+    digest while changing no price. A checksum that cannot be reproduced from
+    the rows cannot identify them, so the digest is now a function of the
+    content alone.
+    """
     canonical_parts = []
     for aid in sorted(asset_ids):
         if aid in ohlcv_data and not ohlcv_data[aid].empty:
@@ -918,7 +941,7 @@ def _compute_stored_checksum(
                 canonical_parts.append(
                     f"{aid}:{row['date'].strftime('%Y-%m-%d')}:{row['open']}:{row['high']}:{row['low']}:{row['close']}"
                 )
-    canonical = "|".join(canonical_parts)
+    canonical = "|".join(sorted(canonical_parts))
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
@@ -926,7 +949,6 @@ def _error_result(errors: List[str]) -> Dict[str, Any]:
     return {
         "run_status": "error",
         "strategy_spec_snapshot": {},
-        "dataset_snapshot_id": None,
         "dataset_checksum": None,
         "dataset_coverage": None,
         "bars_used": 0,

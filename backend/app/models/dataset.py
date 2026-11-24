@@ -12,6 +12,11 @@ class SourceType(str, enum.Enum):
     demo = "demo"
     licensed = "licensed"
     user_uploaded = "user_uploaded"
+    # Bars the platform fetched from a venue and wrote into market_data_bars
+    # itself. Not "demo" (the data is not synthetic) and not "licensed" (the
+    # registry makes no claim about licence terms). Written only by the stored
+    # series registry, never offered by the admin dataset form.
+    venue_stored = "venue_stored"
 
 
 class Dataset(Base):

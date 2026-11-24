@@ -673,6 +673,15 @@ FEEDBACK_FILE = f"{FEEDBACK_REVISION}_add_user_feedback.py"
 # then-head instead of re-parenting onto the base and leaving two heads.
 REASON_REVISION = "f2a3b4c5d6e7"
 REASON_FILE = f"{REASON_REVISION}_add_paper_trading_run_failure_reason.py"
+# The learning job lifecycle slice, then the two slices this round adds: the
+# column that says which family of bars a study read (Q3), and the enum label
+# the stored-series registry writes (Q4). Same pattern as above, one link each.
+LIFECYCLE_REVISION = "a3b4c5d6e7f8"
+LIFECYCLE_FILE = f"{LIFECYCLE_REVISION}_add_learning_job_lifecycle.py"
+DATASET_SOURCE_REVISION = "b4c5d6e7f8a9"
+DATASET_SOURCE_FILE = f"{DATASET_SOURCE_REVISION}_add_study_dataset_source.py"
+SOURCE_TYPE_REVISION = "c5d6e7f8a9b0"
+SOURCE_TYPE_FILE = f"{SOURCE_TYPE_REVISION}_add_venue_stored_source_type.py"
 
 
 def _revision_rows():
@@ -697,12 +706,11 @@ def test_the_linkage_revision_is_unique_and_is_the_only_head():
     ``alembic upgrade`` die on ``DuplicateRevision`` before touching the
     database. Nothing in the suite caught that until this test existed.
 
-    The head is no longer the linkage revision: the feedback slice and then the
-    failure-reason slice now sit on top of it, so this asserts one head and pins
-    where it hangs. Two heads would be the other way this file can fail —
-    ``alembic upgrade head`` refuses to choose between them — which is why the
-    assertion compares the whole sorted list instead of testing that the
-    revision is merely reachable.
+    The head is no longer the linkage revision: four slices now sit on top of
+    it, so this asserts one head and pins the whole order they hang in. Two
+    heads would be the other way this file can fail — ``alembic upgrade head``
+    refuses to choose between them — which is why the assertion compares the
+    whole sorted list instead of testing that the revision is merely reachable.
     """
     rows = _revision_rows()
     assert rows, "no migration scripts found: this test would pass on an empty scan"
@@ -711,36 +719,37 @@ def test_the_linkage_revision_is_unique_and_is_the_only_head():
     duplicates = sorted({revision for revision in ids if ids.count(revision) > 1})
     assert duplicates == [], f"duplicate revision ids, alembic would refuse to load: {duplicates}"
 
+    parents_by_id = {revision: parents for _, revision, parents in rows}
     referenced = {parent for _, _, parents in rows for parent in parents}
     heads = sorted(set(ids) - referenced)
-    assert heads == [REASON_REVISION], (
-        f"expected one head, the failure-reason revision on top of the feedback "
-        f"slice; got {heads}"
+    assert heads == [SOURCE_TYPE_REVISION], (
+        f"expected one head, the source-type label on top of the dataset-source "
+        f"column; got {heads}"
     )
 
-    parents = [row for row in rows if row[1] == LINKAGE_REVISION][0][2]
-    assert parents == ["c9d0e1f2a3b4"], (
+    assert parents_by_id[LINKAGE_REVISION] == ["c9d0e1f2a3b4"], (
         "the linkage revision must sit on the head this branch started from, "
-        f"not branch off it: {parents}"
+        f"not branch off it: {parents_by_id[LINKAGE_REVISION]}"
     )
 
-    feedback_parents = [row for row in rows if row[1] == FEEDBACK_REVISION][0][2]
-    assert feedback_parents == [LINKAGE_REVISION], (
-        "the feedback revision must re-parent onto the linkage instead of "
-        f"branching off the base again: {feedback_parents}"
-    )
-    assert (_MIGRATIONS_DIR / FEEDBACK_FILE).exists(), (
-        f"the head is named for {FEEDBACK_FILE}, which is not on disk"
-    )
-
-    reason_parents = [row for row in rows if row[1] == REASON_REVISION][0][2]
-    assert reason_parents == [FEEDBACK_REVISION], (
-        "the failure-reason revision must hang off the then-head, not branch off "
-        f"the base again: {reason_parents}"
-    )
-    assert (_MIGRATIONS_DIR / REASON_FILE).exists(), (
-        f"the head is named for {REASON_FILE}, which is not on disk"
-    )
+    # Every slice hangs off the head that existed when it was written. A link
+    # out of order here is a second head, and a missing file is a head the
+    # chain names but cannot load.
+    chain = [
+        (FEEDBACK_REVISION, FEEDBACK_FILE, LINKAGE_REVISION),
+        (REASON_REVISION, REASON_FILE, FEEDBACK_REVISION),
+        (LIFECYCLE_REVISION, LIFECYCLE_FILE, REASON_REVISION),
+        (DATASET_SOURCE_REVISION, DATASET_SOURCE_FILE, LIFECYCLE_REVISION),
+        (SOURCE_TYPE_REVISION, SOURCE_TYPE_FILE, DATASET_SOURCE_REVISION),
+    ]
+    for revision, filename, expected_parent in chain:
+        assert parents_by_id[revision] == [expected_parent], (
+            f"{revision} must hang off {expected_parent}, the head written before "
+            f"it, not branch off the base again: {parents_by_id[revision]}"
+        )
+        assert (_MIGRATIONS_DIR / filename).exists(), (
+            f"{revision} is named for {filename}, which is not on disk"
+        )
 
 
 def test_the_linkage_migration_and_the_model_declare_one_contract():

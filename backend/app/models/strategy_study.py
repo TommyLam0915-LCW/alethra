@@ -43,6 +43,11 @@ class StrategyStudyRun(Base):
     interval_minutes = Column(Integer, nullable=False)
     provider_id = Column(String(32), nullable=False)
     data_nature = Column(String(20), nullable=False)
+    # Which bars the study was priced off — the venue's rolling window or rows
+    # already in market_data_bars. provider_id and data_nature cannot tell the
+    # two apart, because the same Kraken pair can be read both ways. NULL means
+    # the run was written before this field existed.
+    dataset_source = Column(String(40), nullable=True)
 
     bar_count = Column(Integer, nullable=False)
     first_open_time = Column(DateTime(timezone=True), nullable=False)

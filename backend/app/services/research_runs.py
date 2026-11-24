@@ -22,7 +22,10 @@ Transaction boundaries (2026-11-15, durable admission):
   UPDATE matched the row settles or releases, and only then does it write its own
   terminal audit event, so outcome, billing and audit commit together or not at
   all. A rollback therefore discards the half-written outcome and leaves the
-  committed admitted row untouched.
+  committed admitted row untouched. The dataset snapshot of a stored series is
+  registered in this same transaction, after that write is won: a run that was
+  never published leaves no snapshot behind, and the execution phase stays
+  write-free.
 
 So an independent observer sees a committed non-terminal run for exactly the
 window in which a process intends to compute or is computing. That is what
@@ -62,6 +65,7 @@ from app.models.user import User
 from app.models.quota import QuotaReservation
 from app.providers import get_data_provider
 from app.services import emit_event
+from app.services.dataset_registry import register_stored_bars_snapshot
 
 
 logger = logging.getLogger(__name__)
@@ -129,6 +133,74 @@ def _run_failure_detail(exc: BaseException) -> str:
             "reporting it."
         )
     return safe_error_message(exc)
+
+
+# Only a series read wholly from storage can be registered: see
+# ``_dataset_snapshot_reason`` for what each other case means to a reader.
+SNAPSHOT_REGISTERED = "registered_stored_bars"
+
+
+def _dataset_snapshot_reason(result: Dict[str, Any]) -> str:
+    """Say, before anything is written, whether this run can name its dataset.
+
+    The answer goes into the run's own record, because NULL on its own reads
+    as an oversight. A fetched series lives in the venue's rolling window and
+    cannot be reproduced from this database later, and a mixed read would put
+    part of the price path outside the snapshot while the record implied it was
+    inside. Both are refused, in words.
+    """
+    source_used = result.get("data_source_used")
+    if source_used == "stored":
+        if not result.get("dataset_checksum"):
+            return "stored_series_without_checksum"
+        if not result.get("dataset_coverage"):
+            return "stored_series_without_coverage"
+        return SNAPSHOT_REGISTERED
+    if source_used == "mixed":
+        return "mixed_sources_not_registered"
+    return "provider_only"
+
+
+def _register_dataset_snapshot(
+    db: Session, result: Dict[str, Any]
+) -> Tuple[Optional[UUID], str]:
+    """Register the stored series this run priced off; return its id and the reason.
+
+    Provenance is worth less than the result it describes: if the registry
+    cannot write — a schema this build has not migrated, for instance — the
+    backtest is still a completed run with its checksum, and the reason says
+    the snapshot is missing rather than pretending it exists.
+    """
+    reason = _dataset_snapshot_reason(result)
+    if reason != SNAPSHOT_REGISTERED:
+        return None, reason
+    coverage = result.get("dataset_coverage") or {}
+    asset_ids = sorted(coverage)
+    provider_ids = sorted(
+        {
+            provider
+            for entry in coverage.values()
+            for provider in (entry.get("provider_ids") or [])
+        }
+    )
+    try:
+        snapshot_id = register_stored_bars_snapshot(
+            db,
+            asset_ids=asset_ids,
+            provider_ids=provider_ids,
+            start_date=str(result["start_date"]),
+            end_date=str(result["end_date"]),
+            checksum=result.get("dataset_checksum"),
+        )
+    except SQLAlchemyError:
+        logger.exception("stored dataset snapshot could not be registered")
+        return None, "registry_write_failed"
+    if snapshot_id is None:
+        # The classifier above and the registry refuse the same two shapes, so
+        # reaching here means the two have drifted. Reporting that is better
+        # than recording a reason that promises a snapshot id was produced.
+        return None, "registry_refused"
+    return snapshot_id, reason
 
 
 def execute_backtest_run(
@@ -207,29 +279,30 @@ def execute_backtest_run(
             # strategy, and would charge the run against the user's quota.
             raise BacktestRefused("; ".join(result.get("errors") or ["backtest refused"]))
 
+        result_payload = {
+            "transactions": result.get("transactions", []),
+            "round_trips": result.get("round_trips", []),
+            "daily_equity_curve": result.get("daily_equity_curve", []),
+            "daily_accounting": result.get("daily_accounting", []),
+            "data_provider": result.get("data_provider"),
+            "feed_mode": result.get("feed_mode"),
+            "data_source_used": result.get("data_source_used"),
+            "data_nature": result.get("data_nature"),
+            "dataset_checksum": result.get("dataset_checksum"),
+            "dataset_coverage": result.get("dataset_coverage"),
+            "bars_used": result.get("bars_used"),
+            "start_date": result.get("start_date"),
+            "end_date": result.get("end_date"),
+            "initial_cash": result.get("initial_cash"),
+            "final_equity": result.get("final_equity"),
+        }
         completed_values = {
             "status": RunStatus.completed,
             "metrics": result["metrics"],
             "warnings": result.get("warnings", []),
             "dataset_checksum": result.get("dataset_checksum"),
             "methodology_json": result.get("methodology_summary"),
-            "result_json": {
-                "transactions": result.get("transactions", []),
-                "round_trips": result.get("round_trips", []),
-                "daily_equity_curve": result.get("daily_equity_curve", []),
-                "daily_accounting": result.get("daily_accounting", []),
-                "data_provider": result.get("data_provider"),
-                "feed_mode": result.get("feed_mode"),
-                "data_source_used": result.get("data_source_used"),
-                "data_nature": result.get("data_nature"),
-                "dataset_checksum": result.get("dataset_checksum"),
-                "dataset_coverage": result.get("dataset_coverage"),
-                "bars_used": result.get("bars_used"),
-                "start_date": result.get("start_date"),
-                "end_date": result.get("end_date"),
-                "initial_cash": result.get("initial_cash"),
-                "final_equity": result.get("final_equity"),
-            },
+            "result_json": result_payload,
             "completed_at": datetime.now(timezone.utc).replace(tzinfo=None),
         }
 
@@ -273,6 +346,17 @@ def execute_backtest_run(
             logger.error(detail)
             db.refresh(run)
             return run
+
+        # Provenance is taken only by the writer that owns the outcome, and it
+        # commits in the same terminal transaction: a process that lost the
+        # conditional UPDATE above registers nothing, and the execution phase
+        # stays write-free. The snapshot names the stored rows the engine read,
+        # so the run can be reconciled against market_data_bars afterwards
+        # instead of only against a checksum nobody can dereference.
+        snapshot_id, snapshot_reason = _register_dataset_snapshot(db, result)
+        run.dataset_snapshot_id = snapshot_id
+        run.result_json = dict(result_payload, dataset_snapshot_reason=snapshot_reason)
+        db.flush()
 
         # The billing contract was decided by the admission, not by this call
         # site: a run admitted as billed has exactly one unit that names it, is

@@ -14,9 +14,11 @@ did, never a claim that the strategy is profitable.
 
 from __future__ import annotations
 
+import hashlib
 import logging
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from typing import List, Optional, Tuple
+from typing import List, Literal, Optional, Tuple
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
@@ -30,10 +32,12 @@ from app.auth.jwt import get_current_user
 from app.auth.safety import rate_limit
 from app.data.crypto_instruments import CRYPTO_INSTRUMENTS, get_crypto_instrument
 from app.database import get_db
+from app.models.market_data import MarketDataBar
 from app.models.user import User
 from app.providers.crypto_registry import get_crypto_provider
 from app.providers.kraken_provider import KRAKEN_INTERVALS, KrakenError
 from app.providers.provider_registry import get_data_provider
+from app.services.market_data_storage import MarketDataStorage
 from app.services.strategy_lab import (
     DEFAULT_COMMISSION_RATE,
     DEFAULT_INTERVALS,
@@ -95,6 +99,16 @@ BAR_LIMIT = 720
 # bars cannot cover a 40 bps round trip at their typical range, so the study
 # refuses to pretend they are tradeable.
 RESEARCH_INTERVALS = frozenset({1440, 240, 60, 15, 5})
+
+# Which bars a study was priced off. A venue read costs external quota and
+# only reaches the rolling window; a stored read costs nothing and reaches
+# whatever the platform has already written down. The two must never be
+# confused afterwards, so each series carries its own source label.
+VENUE_SOURCE = "venue_completed_bars"
+STORED_SOURCE = "stored_market_data_bars"
+# Namespaced so a stored digest can never be mistaken for a venue series
+# fingerprint, which is produced by a different recipe over different rows.
+STORED_FINGERPRINT_NS = "alethra-stored-bars/v1"
 
 
 class StrategyLabRunRequest(BaseModel):
@@ -174,6 +188,15 @@ def _instrument_payload(instrument) -> dict:
 class StrategyResearchRequest(BaseModel):
     instrument_id: str = DEFAULT_INSTRUMENT_ID
     interval_minutes: int = 1440
+    data_source: Literal["venue", "stored"] = Field(
+        default="venue",
+        description=(
+            "\"venue\" reads Kraken's most recent completed candles and spends "
+            "external quota. \"stored\" reads only bars already written to "
+            "market_data_bars at this exact grain, spends no quota, and refuses "
+            "with 409 instead of falling back to the network or the demo feed."
+        ),
+    )
     folds: int = Field(default=DEFAULT_FOLDS, ge=3, le=8)
     starting_cash: Decimal = Field(default=DEFAULT_STARTING_CASH, gt=0)
     notional_per_trade: Decimal = Field(default=DEFAULT_NOTIONAL_PER_TRADE, gt=0)
@@ -195,6 +218,14 @@ class StrategyResearchRequest(BaseModel):
     def _validate_balances(self) -> "StrategyResearchRequest":
         if self.starting_cash < self.notional_per_trade:
             raise ValueError("starting_cash must be greater than or equal to notional_per_trade")
+        if self.data_source == "stored" and self.target_bars is not None:
+            # A stored read has no paging: it returns every row the platform
+            # holds at this grain. Accepting target_bars here would answer a
+            # request for 2,000 bars with 720 and never say so.
+            raise ValueError(
+                "target_bars is a venue pagination request and is not accepted "
+                'with data_source="stored"'
+            )
         return self
 
 
@@ -277,26 +308,15 @@ def strategy_lab_run(
     return result
 
 
-def _research_study(
-    payload: StrategyResearchRequest, *, include_trades: bool
-) -> Tuple[dict, List[LabBar], dict]:
-    """Fetch one interval, run the study and attach its provenance.
+def _utc(value: Optional[datetime]) -> Optional[datetime]:
+    """``market_data_bars`` keeps naive UTC; the study engine works in aware UTC."""
+    if value is None or value.tzinfo is not None:
+        return value
+    return value.replace(tzinfo=timezone.utc)
 
-    The same path serves the ad-hoc preview and the durable record so both
-    describe the same engine over the same completed bars.
-    """
-    instrument = _require_instrument(payload.instrument_id)
 
-    if payload.interval_minutes not in RESEARCH_INTERVALS:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "reason": "unsupported_interval",
-                "interval_minutes": payload.interval_minutes,
-                "supported": sorted(RESEARCH_INTERVALS),
-            },
-        )
-
+def _venue_research_bars(payload: StrategyResearchRequest, instrument) -> Tuple[List[LabBar], dict]:
+    """Read the venue's most recent completed candles for one interval."""
     provider = _get_provider_for_instrument(instrument)
     try:
         if payload.target_bars and payload.target_bars > BAR_LIMIT:
@@ -338,6 +358,193 @@ def _research_study(
         )
         for candle in series.completed
     ]
+    data_nature = provider.get_data_quality(payload.instrument_id).get("data_nature", "unknown")
+    provenance = {
+        "provider_id": provider.provider_id,
+        "data_nature": data_nature,
+        "fingerprint": series.fingerprint,
+        "integrity_ok": series.integrity_ok,
+        "gap_count": len(series.gaps),
+        "missing_intervals": series.missing_intervals,
+        "fetched_at": series.fetched_at.isoformat(),
+        "is_stale": series.is_stale,
+        "staleness_assessed": True,
+        "source": VENUE_SOURCE,
+        "network_used": True,
+    }
+    return bars, provenance
+
+
+def _stored_research_bars(
+    db: Session, *, instrument_id: str, interval_minutes: int
+) -> Tuple[List[LabBar], dict]:
+    """Rebuild a study series from rows already written to ``market_data_bars``.
+
+    Nothing here reaches the network, so a series the platform does not hold is
+    a refusal rather than a fallback: quietly pricing the study off Kraken or
+    off the synthetic demo feed would report a stored result that was never
+    stored. Rows are read at exactly the requested grain, because a daily bar
+    and a four-hour bar legitimately share one midnight and the timestamp alone
+    cannot tell them apart.
+    """
+    rows = (
+        db.query(MarketDataBar)
+        .filter(
+            MarketDataBar.instrument_id == instrument_id,
+            MarketDataBar.interval_minutes == interval_minutes,
+        )
+        .order_by(MarketDataBar.bar_timestamp)
+        .all()
+    )
+    if not rows:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "reason": "no_stored_bars",
+                "instrument_id": instrument_id,
+                "interval_minutes": interval_minutes,
+                "network_used": False,
+                "message": (
+                    f"No row in market_data_bars carries {instrument_id} at grain "
+                    f"{interval_minutes} minutes. Nothing was fetched from the venue "
+                    'or the demo feed; re-run with data_source="venue" or store the '
+                    "interval first."
+                ),
+            },
+        )
+
+    provider_ids = sorted({row.provider_id for row in rows})
+    if len(provider_ids) > 1:
+        # Two providers price one instrument differently. Averaging them or
+        # picking the first would decide, silently, which market the study
+        # describes — so the series is refused and the caller picks one.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "reason": "ambiguous_stored_providers",
+                "instrument_id": instrument_id,
+                "interval_minutes": interval_minutes,
+                "provider_ids": provider_ids,
+                "network_used": False,
+                "message": (
+                    f"{instrument_id} is stored by {len(provider_ids)} providers "
+                    f"({', '.join(provider_ids)}) at grain {interval_minutes} minutes. "
+                    "The study will not merge or choose between them."
+                ),
+            },
+        )
+
+    step = timedelta(minutes=interval_minutes)
+    bars: List[LabBar] = []
+    for row in rows:
+        if row.volume is None and row.volume_decimal is None:
+            # An unrecorded volume is not a zero volume: reporting 0 would put
+            # a number in the series that no venue ever printed.
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "reason": "stored_bar_incomplete",
+                    "instrument_id": instrument_id,
+                    "provider_id": provider_ids[0],
+                    "bar_timestamp": _utc(row.bar_timestamp).isoformat(),
+                    "network_used": False,
+                    "message": (
+                        "A stored bar has no volume in either volume or "
+                        "volume_decimal. The study refuses to price it as zero."
+                    ),
+                },
+            )
+        bars.append(
+            LabBar(
+                open_time=_utc(row.bar_timestamp),
+                interval_minutes=interval_minutes,
+                open=Decimal(str(row.open)),
+                high=Decimal(str(row.high)),
+                low=Decimal(str(row.low)),
+                close=Decimal(str(row.close)),
+                volume=(
+                    row.volume_decimal if row.volume is None else Decimal(str(row.volume))
+                ),
+            )
+        )
+
+    gap_count = 0
+    missing_intervals = 0
+    for previous, current in zip(bars, bars[1:]):
+        delta = current.open_time - previous.open_time
+        if delta != step:
+            gap_count += 1
+            missing_intervals += int(delta // step) - 1
+
+    digest = hashlib.sha256()
+    digest.update(
+        f"{STORED_FINGERPRINT_NS}|{instrument_id}|{provider_ids[0]}|"
+        f"{interval_minutes}m|".encode()
+    )
+    for bar in bars:
+        digest.update(
+            (
+                f"{int(bar.open_time.timestamp())}:{bar.open}:{bar.high}:"
+                f"{bar.low}:{bar.close}:{bar.volume};"
+            ).encode()
+        )
+
+    nature_map = MarketDataStorage(db).get_nature_map([instrument_id])
+    data_nature = MarketDataStorage.resolve_nature(
+        nature_map, instrument_id, set(provider_ids)
+    )
+    provenance = {
+        "provider_id": provider_ids[0],
+        "data_nature": data_nature,
+        "fingerprint": digest.hexdigest(),
+        # A stored series is checked against its own grain, not the venue's
+        # trading calendar: a gap is a step that is not one interval long.
+        "integrity_ok": gap_count == 0,
+        "gap_count": gap_count,
+        "missing_intervals": missing_intervals,
+        # The last write, not a venue clock — this series was never fetched now.
+        "fetched_at": _utc(max(row.fetched_at for row in rows)).isoformat(),
+        "is_stale": None,
+        "staleness_assessed": False,
+        "source": STORED_SOURCE,
+        "network_used": False,
+        "row_count": len(rows),
+    }
+    return bars, provenance
+
+
+def _research_study(
+    payload: StrategyResearchRequest, db: Session, *, include_trades: bool
+) -> Tuple[dict, List[LabBar], dict]:
+    """Read one interval from the requested source, study it, attach provenance.
+
+    The same path serves the ad-hoc preview and the durable record so both
+    describe the same engine over the same completed bars. The venue and the
+    stored series differ only in where their bars came from; the engine, the
+    minimum-size refusal and the dataset block are shared, so a stored study
+    cannot quietly mean something else.
+    """
+    instrument = _require_instrument(payload.instrument_id)
+
+    if payload.interval_minutes not in RESEARCH_INTERVALS:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "reason": "unsupported_interval",
+                "interval_minutes": payload.interval_minutes,
+                "supported": sorted(RESEARCH_INTERVALS),
+            },
+        )
+
+    if payload.data_source == "stored":
+        bars, provenance = _stored_research_bars(
+            db,
+            instrument_id=payload.instrument_id,
+            interval_minutes=payload.interval_minutes,
+        )
+    else:
+        bars, provenance = _venue_research_bars(payload, instrument)
+
     if len(bars) < MIN_RESEARCH_BARS:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -349,6 +556,8 @@ def _research_study(
                 ),
                 "bars": len(bars),
                 "minimum_bars": MIN_RESEARCH_BARS,
+                "data_source": payload.data_source,
+                "network_used": provenance["network_used"],
             },
         )
 
@@ -370,48 +579,42 @@ def _research_study(
             detail={"reason": "insufficient_dataset", "message": str(exc)},
         )
 
-    data_nature = provider.get_data_quality(payload.instrument_id).get("data_nature", "unknown")
     dataset = {
         "instrument_id": payload.instrument_id,
         "interval_minutes": payload.interval_minutes,
-        "provider_id": provider.provider_id,
-        "data_nature": data_nature,
         "bars": len(bars),
         "first_open_time": bars[0].open_time.isoformat(),
         "last_open_time": bars[-1].open_time.isoformat(),
-        "fingerprint": series.fingerprint,
-        "integrity_ok": series.integrity_ok,
-        "gap_count": len(series.gaps),
-        "missing_intervals": series.missing_intervals,
-        "fetched_at": series.fetched_at.isoformat(),
-        "is_stale": series.is_stale,
-        "source": "venue_completed_bars",
+        **provenance,
     }
     result["dataset"] = dataset
     result["instrument"] = _instrument_payload(instrument)
-    
+
     # MB-15: Set fingerprint in batch_metadata from dataset
     if "batch_metadata" in result:
-        result["batch_metadata"]["fingerprint"] = series.fingerprint
-    
+        result["batch_metadata"]["fingerprint"] = provenance["fingerprint"]
+
     return result, bars, dataset
 
 
 @router.post("/research")
 def strategy_lab_research(
     payload: StrategyResearchRequest,
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     _rate_limit=Depends(rate_limit("strategy_research")),
 ):
     """Cost-aware multi-bar study with walk-forward out-of-sample selection.
 
-    One venue read supplies one interval; the study then runs entirely in
-    memory. Rule/exit selection for each fold reads only the folds before it,
-    and the in-sample grid is returned only as a comparison, never as evidence.
+    One read supplies one interval — the venue's rolling window, or the bars
+    already in market_data_bars when ``data_source`` is ``"stored"`` — and the
+    study then runs entirely in memory. Rule/exit selection for each fold reads
+    only the folds before it, and the in-sample grid is returned only as a
+    comparison, never as evidence.
     This preview writes nothing; use ``/research/runs`` to keep the record.
     """
     result, _bars, _dataset = _research_study(
-        payload, include_trades=payload.include_trades
+        payload, db, include_trades=payload.include_trades
     )
     return result
 
@@ -431,7 +634,7 @@ def strategy_research_run_create(
     The stored bars are the exact completed bars the engine read, so the run
     can be re-checked after the venue's rolling window has moved past it.
     """
-    result, bars, dataset = _research_study(payload, include_trades=True)
+    result, bars, dataset = _research_study(payload, db, include_trades=True)
     try:
         run = persist_study(
             db,
