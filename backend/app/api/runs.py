@@ -11,6 +11,7 @@ from app.auth.jwt import get_current_user
 from app.auth.provenance import request_actor_provenance
 from app.api.schemas import (
     ResearchRunResponse,
+    RunReproducibilityResponse,
     VersionDiffResponse,
     VersionDiffEntry,
     RunComparisonResponse,
@@ -25,8 +26,26 @@ from app.auth.api_keys import check_api_key_scope
 from app.services.research_runs import (
     execute_backtest_run,
 )
+from app.services.run_reproducibility import (
+    REPRODUCIBLE,
+    assess_run_reproducibility,
+)
 
 router = APIRouter(tags=["runs"])
+
+
+def _with_reproducibility(db: Session, run: ResearchRun) -> ResearchRunResponse:
+    """Attach the read-time reproducibility verdict to one run's response.
+
+    Built here rather than on the model: a stored verdict would freeze an
+    answer about rows that can be deleted, and a run that was recomputable
+    when it finished is not thereby recomputable now.
+    """
+    response = ResearchRunResponse.model_validate(run)
+    response.reproducibility = RunReproducibilityResponse.model_validate(
+        assess_run_reproducibility(db, run).as_dict()
+    )
+    return response
 
 
 @router.post(
@@ -707,6 +726,24 @@ def compare_runs(
     if missing_fields:
         _append_limitation(limitations, f"部分資料來源資訊缺失：{', '.join(missing_fields)}")
 
+    # A run whose stored series can no longer be read back is not a weaker
+    # comparison, it is not a comparison at all: the two sets of numbers would
+    # be measurements of series, one of which nobody can point at again. So
+    # the verdict reaches ``fair_comparison`` rather than only the note list.
+    # Each side is named, because one refusal sentence for two runs cannot be
+    # acted on: the reader has to know which run lost its series.
+    for side in (run_a_obj, run_b_obj):
+        verdict = assess_run_reproducibility(db, side)
+        if verdict.status == REPRODUCIBLE:
+            continue
+        fair_comparison = False
+        _append_limitation(
+            limitations,
+            f"run {side.id} 嘅數據無法由 market_data_bars 現有列重算"
+            f"（{verdict.reason}）："
+            f"{verdict.detail}；兩者回報差異不可歸因於策略，此比較不作為績效證據。",
+        )
+
     sides = [
         RunComparisonSide(
             run_id=run_a_obj.id,
@@ -767,7 +804,7 @@ def get_run(
     ).first()
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
-    return run
+    return _with_reproducibility(db, run)
 
 
 @router.get("/experiments/{experiment_id}/runs", response_model=List[ResearchRunResponse])
@@ -786,6 +823,6 @@ def list_runs(
     runs = db.query(ResearchRun).join(ExperimentVersion).filter(
         ExperimentVersion.experiment_id == experiment_id
     ).order_by(ResearchRun.started_at.desc()).all()
-    return runs
+    return [_with_reproducibility(db, run) for run in runs]
 
 

@@ -228,11 +228,41 @@ class RevisionResponse(BaseModel):
     change_kind: str
 
 
+class RunSeriesVerdict(BaseModel):
+    """One instrument of one run, measured against storage at read time."""
+
+    instrument_id: str
+    provider_ids: List[str]
+    window: List[str]
+    status: str
+    reason: str
+    recorded_rows: Optional[int] = None
+    stored_rows: int = 0
+    recorded_checksum: Optional[str] = None
+    recomputed_checksum: Optional[str] = None
+
+
+class RunReproducibilityResponse(BaseModel):
+    """Whether this run's stored series can still be read back, and why not.
+
+    Derived on every read and never stored: reproducibility is a fact about
+    what ``market_data_bars`` holds now, so writing it at completion would
+    predict the future and writing it later would be a backfill.
+    """
+
+    status: str
+    reason: str
+    detail: str
+    snapshot_registered: bool
+    legs: List[RunSeriesVerdict] = []
+
+
 class ResearchRunResponse(BaseModel):
     id: UUID
     experiment_version_id: UUID
     dataset_snapshot_id: Optional[UUID]
     dataset_checksum: Optional[str]
+    reproducibility: Optional[RunReproducibilityResponse] = None
     engine_version: str
     config_hash: str
     status: str
