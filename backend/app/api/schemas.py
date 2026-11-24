@@ -278,6 +278,7 @@ class AdHocBacktestResponse(BaseModel):
     engine_version: Optional[str] = None
     data_provider: Optional[str] = None
     feed_mode: Optional[str] = None
+    data_source_requested: Optional[str] = None
     data_source_used: Optional[str] = None
     data_nature: Optional[Dict[str, str]] = None
     dataset_checksum: Optional[str] = None

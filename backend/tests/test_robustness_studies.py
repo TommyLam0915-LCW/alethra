@@ -430,6 +430,41 @@ class TestExecution:
         assert detail["aggregate"]["scope"] == "all_attempts"
         assert detail["aggregate"]["return_stats"]["count"] == 3
 
+    def test_each_attempt_names_the_source_policy_it_ran_under(
+        self, client, auth_headers
+    ):
+        """``data_identity`` holds the ask and the series as two separate keys.
+
+        The grid never names a source: every cell runs under the engine's
+        ``auto`` policy. So the asked-for value is that policy and the used
+        value is whichever series the policy settled on — two keys that are
+        allowed to disagree, and a reader can tell them apart without knowing
+        how the cell was launched.
+        """
+        _grant_research_runs(100)
+        exp = _create_experiment(client, auth_headers)
+        created = _create_study(
+            client,
+            auth_headers,
+            exp["id"],
+            exp["current_version_id"],
+            "period_slices",
+            config={"slices": 2},
+        )
+        assert created.status_code == 201, created.text
+        resp = _run(client, auth_headers, created.json()["id"])
+        assert resp.status_code == 200, resp.text
+
+        attempts = resp.json()["attempts"]
+        assert len(attempts) == 2
+        for attempt in attempts:
+            identity = attempt["data_identity"]
+            assert identity["data_source_requested"] == "auto"
+            assert identity["data_source_used"] in ("provider", "mixed", "stored")
+            assert identity["data_source_requested"] != identity["data_source_used"], (
+                "the row collapsed the policy into the series it read"
+            )
+
     def test_walk_forward_selects_on_train_and_measures_on_test(self, client, auth_headers):
         _grant_research_runs(100)
         exp = _create_experiment(client, auth_headers)

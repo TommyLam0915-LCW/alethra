@@ -752,6 +752,7 @@ def _run_cell(
         for key in (
             "data_provider",
             "feed_mode",
+            "data_source_requested",
             "data_source_used",
             "data_nature",
             "start_date",

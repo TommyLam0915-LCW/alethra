@@ -286,6 +286,12 @@ def execute_backtest_run(
             "daily_accounting": result.get("daily_accounting", []),
             "data_provider": result.get("data_provider"),
             "feed_mode": result.get("feed_mode"),
+            # Both halves of the source contract are stored: what the caller
+            # asked for and what the series actually came from. `used` alone
+            # cannot show a fallback, and `auto` in particular is a policy, not
+            # an answer — a run that reads as `stored` says nothing about
+            # whether storage was asked for or merely happened to cover it.
+            "data_source_requested": result.get("data_source_requested"),
             "data_source_used": result.get("data_source_used"),
             "data_nature": result.get("data_nature"),
             "dataset_checksum": result.get("dataset_checksum"),

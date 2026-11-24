@@ -1158,6 +1158,7 @@ def run_experiment_backtest(
             engine_version=result.get("engine_version"),
             data_provider=result.get("data_provider"),
             feed_mode=result.get("feed_mode"),
+            data_source_requested=result.get("data_source_requested"),
             data_source_used=result.get("data_source_used"),
             data_nature=result.get("data_nature"),
             dataset_checksum=result.get("dataset_checksum"),

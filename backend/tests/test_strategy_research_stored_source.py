@@ -455,3 +455,86 @@ def test_venue_run_and_stored_run_of_the_same_pair_stay_distinguishable(client, 
     # the storage path, not the "live" the venue reports for the same pair.
     assert stored_body["data_nature"] == "real"
     assert venue_body["data_nature"] == "live"
+
+
+# -- asked for, and read -----------------------------------------------------
+
+
+def test_the_stored_run_row_records_what_was_asked_as_well_as_what_was_read(
+    client, auth_headers, no_venue_read
+):
+    """The durable row holds the pair, not only the series.
+
+    ``dataset_source`` says where the bars came from. It cannot say whether the
+    caller asked for storage or the platform chose it, and the two columns do
+    not even share a vocabulary — ``stored`` beside ``stored_market_data_bars``.
+    A reader that has to infer the ask from the answer is reading one column
+    twice.
+    """
+    _seed()
+
+    created = client.post(
+        "/api/v1/strategy-lab/research/runs",
+        headers=auth_headers,
+        json=_stored({"folds": 3}),
+    )
+    assert created.status_code == 201, created.text
+    body = created.json()
+
+    assert body["dataset_source_requested"] == "stored"
+    assert body["dataset_source"] == "stored_market_data_bars"
+    assert body["dataset_source_requested"] != body["dataset_source"]
+
+    for url in (
+        "/api/v1/strategy-lab/research/runs",
+        f"/api/v1/strategy-lab/research/runs/{body['id']}",
+    ):
+        response = client.get(url, headers=auth_headers)
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        record = (
+            next(item for item in payload["records"] if item["id"] == body["id"])
+            if "records" in payload
+            else payload
+        )
+        assert record["dataset_source_requested"] == "stored"
+        assert record["dataset_source"] == "stored_market_data_bars"
+
+
+def test_a_request_that_named_no_source_records_the_default_that_was_applied(
+    client, auth_headers, venue
+):
+    # The payload omits ``data_source`` entirely, so the request holds the
+    # model's default rather than a choice the caller typed. Recording it is
+    # what keeps "the platform decided" readable apart from "asked to decide"
+    # — and apart from a row written before the column existed, which reads
+    # NULL in both halves.
+    _seed()
+
+    created = client.post(
+        "/api/v1/strategy-lab/research/runs",
+        headers=auth_headers,
+        json={"interval_minutes": DAILY, "folds": 3},
+    )
+    assert created.status_code == 201, created.text
+    body = created.json()
+    assert venue.calls, "the venue leg made no read, so it proved nothing"
+
+    assert body["dataset_source_requested"] == "venue"
+    assert body["dataset_source"] == "venue_completed_bars"
+
+
+def test_the_preview_reports_the_pair_and_stores_nothing(
+    client, auth_headers, no_venue_read
+):
+    _seed()
+
+    response = _post(client, auth_headers, no_venue_read, _stored({"folds": 3}))
+
+    assert response.status_code == 200, response.text
+    dataset = response.json()["dataset"]
+    assert dataset["data_source_requested"] == "stored"
+    assert dataset["source"] == "stored_market_data_bars"
+    assert (
+        client.get("/api/v1/strategy-lab/research/runs", headers=auth_headers).json()["records"] == []
+    ), "the preview wrote a durable record"

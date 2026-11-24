@@ -332,6 +332,80 @@ def test_a_run_that_was_never_published_leaves_no_snapshot(db, client, auth_head
         session.close()
 
 
+# -- what was asked, and what was read -------------------------------------
+
+
+def test_a_durable_run_stores_the_source_it_was_asked_to_use(
+    db, client, auth_headers, stored_dataset
+):
+    run = _run(db, client, auth_headers, data_source="stored")
+
+    assert run.status == "completed", run.error_details
+    row, _, _ = _readback(run.id)
+    assert row.result_json["data_source_requested"] == "stored"
+    assert row.result_json["data_source_used"] == "stored"
+
+
+def test_auto_that_found_storage_is_not_recorded_as_storage_asked_for(
+    db, client, auth_headers, stored_dataset
+):
+    """``used`` alone cannot tell a chosen source from a policy that landed there.
+
+    Both runs price the same rows and both read as ``stored`` in
+    ``data_source_used``, so the two records would be identical but for
+    ``data_source_requested``: one caller asked for storage, the other asked the
+    platform to decide and storage happened to cover it.
+    """
+    asked = _run(db, client, auth_headers, data_source="stored")
+    settled = _run(db, client, auth_headers, data_source="auto")
+
+    assert asked.status == "completed", asked.error_details
+    assert settled.status == "completed", settled.error_details
+    asked_row, _, _ = _readback(asked.id)
+    settled_row, _, _ = _readback(settled.id)
+
+    assert asked_row.result_json["data_source_used"] == "stored"
+    assert settled_row.result_json["data_source_used"] == "stored"
+    assert asked_row.result_json["data_source_requested"] == "stored"
+    assert settled_row.result_json["data_source_requested"] == "auto"
+    assert (
+        asked_row.result_json["data_source_requested"]
+        != settled_row.result_json["data_source_requested"]
+    ), "the two different asks collapsed into one record"
+
+
+def test_the_asked_for_value_keeps_the_policy_and_the_read_value_keeps_the_series(
+    db, client, auth_headers, stored_dataset
+):
+    # One asset priced from rows this database holds, the other from the
+    # provider — the only shape where the two halves cannot be the same word.
+    spec = {**SPEC, "asset_ids": [ASSET, OTHER]}
+    run = _run(db, client, auth_headers, data_source="auto", spec=spec)
+
+    assert run.status == "completed", run.error_details
+    row, _, _ = _readback(run.id)
+    requested = row.result_json["data_source_requested"]
+    used = row.result_json["data_source_used"]
+
+    assert requested == "auto"
+    assert used == "mixed"
+    assert requested != used, "the row recorded the policy as if it were a series"
+
+
+def test_a_refused_run_claims_neither_half_of_the_source_contract(
+    db, client, auth_headers
+):
+    # No stored rows at all: the refusal is raised before any outcome is
+    # published, so the run row holds no result payload to misread.
+    run = _run(db, client, auth_headers, data_source="stored")
+
+    assert run.status == "failed"
+    row, _, _ = _readback(run.id)
+    assert row.result_json is None, (
+        "a run that priced nothing is storing a source for it"
+    )
+
+
 # -- the 184-rows-over-92-sessions case ------------------------------------
 
 

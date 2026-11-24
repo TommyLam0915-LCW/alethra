@@ -208,3 +208,31 @@ def test_durable_hint_points_at_a_real_route(client, auth_headers, stored_datase
     assert set(properties) >= {"persisted", "run_id", "durable_run", "computed_at"}
     assert properties["persisted"]["const"] is False
     assert properties["run_id"]["type"] == "null"
+
+
+def test_adhoc_response_names_the_source_policy_and_the_series_it_read(
+    client, auth_headers, stored_dataset
+):
+    """Two fields, not one word twice.
+
+    This route launches the engine with its default ``auto`` policy and exposes
+    no switch, so the ask is always the policy while the series is whichever one
+    the policy settled on. ``data_source_used`` alone would let a reader
+    conclude that the caller asked for storage.
+    """
+    experiment_id, version_id = _create_version(client, auth_headers)
+    body = client.post(
+        f"/api/v1/experiments/{experiment_id}/versions/{version_id}/backtest",
+        headers=auth_headers,
+    ).json()
+
+    assert body["status"] == "completed", body.get("errors")
+    assert body["data_source_requested"] == "auto"
+    assert body["data_source_used"] == "stored"
+    assert body["data_source_requested"] != body["data_source_used"]
+
+    schema = (
+        client.get("/openapi.json").json()["components"]["schemas"]
+        ["AdHocBacktestResponse"]["properties"]
+    )
+    assert set(schema) >= {"data_source_requested", "data_source_used"}

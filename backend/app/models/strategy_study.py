@@ -48,6 +48,13 @@ class StrategyStudyRun(Base):
     # two apart, because the same Kraken pair can be read both ways. NULL means
     # the run was written before this field existed.
     dataset_source = Column(String(40), nullable=True)
+    # The pair is read as (this column, dataset_source) = (asked for, got):
+    # ``dataset_source`` alone cannot tell a source the caller chose from a
+    # source the platform settled on, and the two vocabularies do not overlap —
+    # this holds ``venue``/``stored``, that holds ``venue_completed_bars``/
+    # ``stored_market_data_bars``. They coincide today because no fallback
+    # exists; recording both is what would make a future one visible.
+    dataset_source_requested = Column(String(40), nullable=True)
 
     bar_count = Column(Integer, nullable=False)
     first_open_time = Column(DateTime(timezone=True), nullable=False)

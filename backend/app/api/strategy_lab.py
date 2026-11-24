@@ -585,6 +585,11 @@ def _research_study(
         "bars": len(bars),
         "first_open_time": bars[0].open_time.isoformat(),
         "last_open_time": bars[-1].open_time.isoformat(),
+        # The pair is read as (this key, ``source`` below) = (asked for, got).
+        # They coincide today because a missing stored series is a refusal, not
+        # a fallback; recording both is what would make a future fallback
+        # visible in the row instead of inferred from the engine.
+        "data_source_requested": payload.data_source,
         **provenance,
     }
     result["dataset"] = dataset

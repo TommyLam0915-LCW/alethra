@@ -682,6 +682,15 @@ DATASET_SOURCE_REVISION = "b4c5d6e7f8a9"
 DATASET_SOURCE_FILE = f"{DATASET_SOURCE_REVISION}_add_study_dataset_source.py"
 SOURCE_TYPE_REVISION = "c5d6e7f8a9b0"
 SOURCE_TYPE_FILE = f"{SOURCE_TYPE_REVISION}_add_venue_stored_source_type.py"
+# The two slices this round adds: the JSONB column that pins which upstream
+# study rows a paper replay was priced from, and the study column that records
+# which source the caller asked for. Same pattern as above, one link each.
+LINEAGE_REVISION = "d6e7f8a9b0c1"
+LINEAGE_FILE = f"{LINEAGE_REVISION}_add_paper_replay_source_lineage.py"
+SOURCE_REQUESTED_REVISION = "a9b0c1d2e3f4"
+SOURCE_REQUESTED_FILE = (
+    f"{SOURCE_REQUESTED_REVISION}_record_study_data_source_requested.py"
+)
 
 
 def _revision_rows():
@@ -706,11 +715,12 @@ def test_the_linkage_revision_is_unique_and_is_the_only_head():
     ``alembic upgrade`` die on ``DuplicateRevision`` before touching the
     database. Nothing in the suite caught that until this test existed.
 
-    The head is no longer the linkage revision: four slices now sit on top of
-    it, so this asserts one head and pins the whole order they hang in. Two
-    heads would be the other way this file can fail — ``alembic upgrade head``
-    refuses to choose between them — which is why the assertion compares the
-    whole sorted list instead of testing that the revision is merely reachable.
+    The head is no longer the linkage revision: every slice written since then
+    sits on top of it, so this asserts one head and pins the whole order they
+    hang in. Two heads would be the other way this file can fail — ``alembic
+    upgrade head`` refuses to choose between them — which is why the assertion
+    compares the whole sorted list instead of testing that the revision is
+    merely reachable.
     """
     rows = _revision_rows()
     assert rows, "no migration scripts found: this test would pass on an empty scan"
@@ -722,9 +732,9 @@ def test_the_linkage_revision_is_unique_and_is_the_only_head():
     parents_by_id = {revision: parents for _, revision, parents in rows}
     referenced = {parent for _, _, parents in rows for parent in parents}
     heads = sorted(set(ids) - referenced)
-    assert heads == [SOURCE_TYPE_REVISION], (
-        f"expected one head, the source-type label on top of the dataset-source "
-        f"column; got {heads}"
+    assert heads == [SOURCE_REQUESTED_REVISION], (
+        f"expected one head, the study's data-source-requested column on top of "
+        f"the replay lineage column; got {heads}"
     )
 
     assert parents_by_id[LINKAGE_REVISION] == ["c9d0e1f2a3b4"], (
@@ -741,6 +751,8 @@ def test_the_linkage_revision_is_unique_and_is_the_only_head():
         (LIFECYCLE_REVISION, LIFECYCLE_FILE, REASON_REVISION),
         (DATASET_SOURCE_REVISION, DATASET_SOURCE_FILE, LIFECYCLE_REVISION),
         (SOURCE_TYPE_REVISION, SOURCE_TYPE_FILE, DATASET_SOURCE_REVISION),
+        (LINEAGE_REVISION, LINEAGE_FILE, SOURCE_TYPE_REVISION),
+        (SOURCE_REQUESTED_REVISION, SOURCE_REQUESTED_FILE, LINEAGE_REVISION),
     ]
     for revision, filename, expected_parent in chain:
         assert parents_by_id[revision] == [expected_parent], (
