@@ -1,10 +1,16 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { api, formatErrorDetail, ApiError } from '@/lib/api';
 import { csvDataRowCount, csvTruncationNotice } from '@/lib/csvRecords';
 import { classifySummaryStatus } from '@/lib/journalSummaryStatus';
+import {
+  journalViewUrl,
+  readJournalSource,
+  readJournalTab,
+  type JournalSource,
+} from '@/lib/journalTabUrl';
 import AppShell from '@/components/shell/AppShell';
 import JournalFilterBar from './JournalFilterBar';
 import JournalSummaryCards from './JournalSummaryCards';
@@ -91,7 +97,9 @@ export interface JournalSummary {
   worst_trade: { trade_id: string; net_pnl: string; entry_time: string; instrument_id: string; rule_label_zh: string } | null;
 }
 
-type TabKey = 'trades' | 'cumulative-pnl' | 'equity-curve' | 'skill-attribution' | 'skill-heatmap' | 'unified' | 'comparison' | 'auto-collection' | 'paper-trading';
+export type TabKey = 'trades' | 'cumulative-pnl' | 'equity-curve' | 'skill-attribution' | 'skill-heatmap' | 'unified' | 'comparison' | 'auto-collection' | 'paper-trading';
+
+export const DEFAULT_TAB: TabKey = 'trades';
 
 const TABS: { key: TabKey; label: string }[] = [
   { key: 'trades', label: 'Trades' },
@@ -104,6 +112,8 @@ const TABS: { key: TabKey; label: string }[] = [
   { key: 'auto-collection', label: 'Auto Collection' },
   { key: 'paper-trading', label: 'Paper Trading' },
 ];
+
+const TAB_KEYS: TabKey[] = TABS.map((tab) => tab.key);
 
 const TAB_DESCRIPTIONS: Record<TabKey, { title: string; description: string }> = {
   'trades': {
@@ -469,6 +479,12 @@ function PerformanceInsights({ summary, skills, trades }: { summary: JournalSumm
 // Empty State
 // ---------------------------------------------------------------------------
 
+// Where a first research run actually happens. The Strategy lab section is
+// rendered by the crypto market-data page; `/strategy-lab` has never been a
+// route in this app, so the previous destination sent a user with no trades to
+// a 404 — the one reader the CTA exists for.
+const STRATEGY_LAB_PAGE_PATH = '/market-data/crypto';
+
 function EmptyState({ onNavigate }: { onNavigate: (path: string) => void }) {
   return (
     <div
@@ -520,8 +536,8 @@ function EmptyState({ onNavigate }: { onNavigate: (path: string) => void }) {
         to start tracking trades and analyzing performance.
       </p>
       <button
-        onClick={() => onNavigate('/strategy-lab')}
-        aria-label="Go to Strategy Lab to run your first research"
+        onClick={() => onNavigate(STRATEGY_LAB_PAGE_PATH)}
+        aria-label={`Go to the Strategy lab on the ${STRATEGY_LAB_PAGE_PATH} page to run your first research`}
         style={{
           padding: '10px 20px',
           backgroundColor: 'var(--seed-primary, var(--primary))',
@@ -543,14 +559,25 @@ function EmptyState({ onNavigate }: { onNavigate: (path: string) => void }) {
 // Component
 // ---------------------------------------------------------------------------
 
-export default function JournalDashboard() {
+export default function JournalDashboard({ initialTab }: { initialTab?: TabKey } = {}) {
   const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
   const [filters, setFilters] = useState<JournalFilters>({});
   const [appliedFilters, setAppliedFilters] = useState<JournalFilters>({});
-  const [activeTab, setActiveTab] = useState<TabKey>('trades');
+  // The address is the entry point, not a record of the last click: opening
+  // `/journal/unified` or `/journal?tab=unified` has to land on Unified, and a
+  // `tab=` that names no tab has to stop claiming one instead of silently
+  // rendering Trades under it. A page path supplies the default; the query can
+  // still override it, and the effect below normalizes whichever won.
+  const [activeTab, setActiveTab] = useState<TabKey>(() =>
+    readJournalTab(searchParams.get('tab'), TAB_KEYS, initialTab ?? DEFAULT_TAB),
+  );
   // Lives here rather than inside the Unified panel because the export button
   // has to write the same scope the panel is showing.
-  const [unifiedSource, setUnifiedSource] = useState<'all' | 'research' | 'paper'>('all');
+  const [unifiedSource, setUnifiedSource] = useState<JournalSource>(() =>
+    readJournalSource(searchParams.get('source')),
+  );
 
   const [filterOptions, setFilterOptions] = useState<FilterOptions | null>(null);
   const [trades, setTrades] = useState<JournalTrade[]>([]);
@@ -563,6 +590,16 @@ export default function JournalDashboard() {
   const [exportError, setExportError] = useState<string | null>(null);
   const [exportNotice, setExportNotice] = useState<string | null>(null);
   const [exportTruncated, setExportTruncated] = useState<string | null>(null);
+
+  // The address follows the view, not the other way round: it is written after
+  // the state it describes, and only when the two disagree, so opening a link
+  // never re-navigates the page away from itself.
+  useEffect(() => {
+    const next = journalViewUrl(activeTab, DEFAULT_TAB, unifiedSource);
+    const query = searchParams.toString();
+    const current = query ? `${pathname}?${query}` : pathname;
+    if (next !== current) router.replace(next, { scroll: false });
+  }, [activeTab, unifiedSource, pathname, searchParams, router]);
 
   // Load filter options on mount
   useEffect(() => {
