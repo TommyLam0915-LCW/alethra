@@ -5,9 +5,14 @@ import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import { api, ApiError } from '@/lib/api';
 import { BENCHMARK_METRIC_KEYS, describeBenchmark, describeRecordedBenchmark } from '@/lib/benchmarkState';
-import { describeRunStatus } from '@/lib/runStatus';
+import { describeRunStatus, isCancellable } from '@/lib/runStatus';
 import { formatDateTime, formatParamMap, formatRatePercent } from '@/lib/format';
 import { ACTOR_LABELS, EXIT_REASON_LABELS, SIDE_LABELS, label } from '@/lib/copy';
+import {
+  type RunTradesExport,
+  describeExportHeadline,
+  exportFileName,
+} from '@/lib/runExport';
 
 interface RunDetail {
   id: string;
@@ -196,6 +201,15 @@ export default function RunDetailPage() {
   const experimentId = params?.id ?? '';
   const runId = params?.runId ?? '';
   const [state, setState] = useState<LoadState>({ phase: 'loading' });
+  const [reload, setReload] = useState(0);
+  const [cancelReason, setCancelReason] = useState('');
+  const [cancelling, setCancelling] = useState(false);
+  const [cancelNotice, setCancelNotice] = useState('');
+  const [cancelError, setCancelError] = useState('');
+  const [exportSummary, setExportSummary] = useState<RunTradesExport | null>(null);
+  const [exportBusy, setExportBusy] = useState(false);
+  const [exportError, setExportError] = useState('');
+  const [exportNotice, setExportNotice] = useState('');
 
   useEffect(() => {
     if (!runId || !experimentId) {
@@ -237,7 +251,84 @@ export default function RunDetailPage() {
     return () => {
       cancelled = true;
     };
-  }, [experimentId, runId]);
+  }, [experimentId, runId, reload]);
+
+  // The entry the server's own refusal tells the caller to use, put on the row
+  // it names. The success message is the server's `note`, not a sentence
+  // written here, because the note is what says the computing process has not
+  // been confirmed stopped — paraphrasing it would delete that.
+  async function cancelRun() {
+    setCancelling(true);
+    setCancelError('');
+    setCancelNotice('');
+    try {
+      const result = (await api.runs.cancel(runId, cancelReason.trim() || undefined)) as {
+        note?: string;
+      };
+      setCancelNotice(result?.note ?? 'The run was closed as cancelled.');
+      setReload((n) => n + 1);
+    } catch (e) {
+      const refused = e instanceof ApiError && e.status === 409;
+      const { heading, detail } = describeError(
+        e,
+        refused
+          ? 'Something wrote an outcome for this run first, so nothing was changed'
+          : 'The run could not be cancelled',
+      );
+      setCancelError(`${heading}: ${detail}`);
+      if (refused) setReload((n) => n + 1);
+    } finally {
+      setCancelling(false);
+    }
+  }
+
+  // The basis and the row count come from the export route itself, never from
+  // what this page can see in `result_json`. That distinction is the point of
+  // the call: "this run filled nothing" and "this run cannot be answered" are
+  // different facts, and only the server is allowed to say which one happened.
+  async function checkExport() {
+    setExportBusy(true);
+    setExportError('');
+    setExportNotice('');
+    try {
+      setExportSummary((await api.runs.trades(runId)) as RunTradesExport);
+    } catch (e) {
+      setExportSummary(null);
+      const { heading, detail } = describeError(
+        e,
+        'This run has no fills to export',
+      );
+      setExportError(`${heading}: ${detail}`);
+    } finally {
+      setExportBusy(false);
+    }
+  }
+
+  async function downloadExport() {
+    setExportBusy(true);
+    setExportError('');
+    try {
+      const text = await api.runs.tradesCsv(runId);
+      const blob = new Blob([text], { type: 'text/csv;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      const filename = exportFileName(runId);
+      anchor.href = url;
+      anchor.download = filename;
+      anchor.click();
+      URL.revokeObjectURL(url);
+      setExportNotice(
+        `Saved ${filename}. Each row repeats the run, version, dataset checksum ` +
+          'and engine it came from.',
+      );
+    } catch (e) {
+      setExportNotice('');
+      const { heading, detail } = describeError(e, 'The export could not be saved');
+      setExportError(`${heading}: ${detail}`);
+    } finally {
+      setExportBusy(false);
+    }
+  }
 
   if (state.phase === 'loading') {
     return (
@@ -311,6 +402,66 @@ export default function RunDetailPage() {
         <p style={{ margin: '0 0 16px', fontSize: '12px', color: 'var(--text-muted)' }}>
           No completion record after 30 minutes and no completed_at. This is not a completion, and it is not still running.
         </p>
+      )}
+
+      {(isCancellable(run.status) || cancelNotice || cancelError) && (
+        <div className="dash-panel" data-testid="run-cancel-panel" style={{ marginBottom: '16px' }}>
+          <div className="dash-panel-body" style={{ padding: '16px 20px' }}>
+            {isCancellable(run.status) ? (
+              <>
+                <p style={{ margin: '0 0 10px', fontSize: '12px', color: 'var(--text-muted)' }}>
+                  This row records an attempt with no outcome. It is not proof the
+                  process is alive, and it is not proof it stopped: this version
+                  stays blocked until an outcome is written. Cancelling writes the
+                  one outcome you actually know — that you stopped waiting — closes
+                  the run, answers for its quota unit, and publishes no result.
+                </p>
+                <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                  <input
+                    data-testid="run-cancel-reason"
+                    value={cancelReason}
+                    onChange={(e) => setCancelReason(e.target.value)}
+                    placeholder="Why are you closing it? (optional)"
+                    maxLength={500}
+                    style={{ flex: 1, fontSize: '13px', padding: '6px 8px' }}
+                  />
+                  <button
+                    type="button"
+                    data-testid="run-cancel-submit"
+                    onClick={cancelRun}
+                    disabled={cancelling}
+                    style={{ fontSize: '13px', padding: '6px 12px' }}
+                  >
+                    {cancelling ? 'Cancelling…' : 'Cancel this run'}
+                  </button>
+                </div>
+              </>
+            ) : (
+              <p style={{ margin: 0, fontSize: '12px', color: 'var(--text-muted)' }}>
+                No outcome was published, and nothing further can be published on
+                this run.
+              </p>
+            )}
+            {cancelNotice && (
+              <p
+                role="status"
+                data-testid="run-cancel-notice"
+                style={{ margin: '10px 0 0', fontSize: '12px', color: 'var(--text-secondary)' }}
+              >
+                {cancelNotice}
+              </p>
+            )}
+            {cancelError && (
+              <p
+                role="alert"
+                data-testid="run-cancel-error"
+                style={{ margin: '10px 0 0', fontSize: '12px', color: 'var(--negative)' }}
+              >
+                {cancelError}
+              </p>
+            )}
+          </div>
+        </div>
       )}
 
       <h1 style={{ margin: '0 0 8px', fontSize: '24px', color: 'var(--text-white)' }}>Run results</h1>
@@ -455,6 +606,80 @@ export default function RunDetailPage() {
           </div>
         </div>
       )}
+
+      <div className="dash-panel" data-testid="run-export-panel" style={{ marginBottom: '16px' }}>
+        <div className="dash-panel-body" style={{ padding: '16px 20px' }}>
+          <h3 style={{ margin: '0 0 8px', fontSize: '15px' }}>Export this run&apos;s fills</h3>
+          <p style={{ margin: '0 0 10px', fontSize: '12px', color: 'var(--text-muted)' }}>
+            The file is the run&apos;s own record: one line per filled leg, under
+            the field names the engine wrote, with the run, version, dataset
+            checksum, data nature and engine repeated on every row. Checking
+            first asks the server what it can stand behind before a file is
+            taken as evidence.
+          </p>
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              data-testid="run-export-check"
+              onClick={checkExport}
+              disabled={exportBusy}
+              style={{ fontSize: '13px', padding: '6px 12px' }}
+            >
+              {exportBusy ? 'Working…' : 'Check what can be exported'}
+            </button>
+            {exportSummary && (
+              <button
+                type="button"
+                className="btn btn-primary"
+                data-testid="run-export-download"
+                onClick={downloadExport}
+                disabled={exportBusy}
+                style={{ fontSize: '13px', padding: '6px 12px' }}
+              >
+                Download CSV
+              </button>
+            )}
+          </div>
+          {exportSummary && (
+            <div
+              data-testid="run-export-basis"
+              style={{ marginTop: '10px', fontSize: '12px', color: 'var(--text-secondary)' }}
+            >
+              <div>{describeExportHeadline(exportSummary)}</div>
+              <div style={{ marginTop: '4px' }}>{exportSummary.basis_note}</div>
+              <div
+                data-testid="run-export-count"
+                style={{ marginTop: '4px', fontFamily: 'monospace', color: 'var(--text-muted)' }}
+              >
+                dataset_checksum: {String(exportSummary.provenance?.dataset_checksum ?? '—')} ·
+                engine: {String(exportSummary.provenance?.engine_version ?? '—')} ·
+                window: {String(exportSummary.provenance?.window_start ?? '—')} →{' '}
+                {String(exportSummary.provenance?.window_end ?? '—')} · data:{' '}
+                {String(exportSummary.provenance?.data_nature ?? '—')}
+              </div>
+            </div>
+          )}
+          {exportError && (
+            <p
+              role="alert"
+              data-testid="run-export-error"
+              style={{ margin: '10px 0 0', fontSize: '12px', color: 'var(--danger, #dc2626)' }}
+            >
+              {exportError}
+            </p>
+          )}
+          {exportNotice && (
+            <p
+              role="status"
+              data-testid="run-export-notice"
+              style={{ margin: '10px 0 0', fontSize: '12px', color: 'var(--text-secondary)' }}
+            >
+              {exportNotice}
+            </p>
+          )}
+        </div>
+      </div>
 
       <div className="dash-panel" style={{ marginBottom: '16px' }}>
         <div className="dash-panel-body" style={{ padding: '20px' }}>

@@ -6,8 +6,14 @@ import { test, expect, type Locator, type Page } from '@playwright/test';
 /**
  * Tracked E2E for the personal strategy learning product loop:
  * consent -> review -> frozen snapshot -> training job -> artifact/model version
- * -> activate -> prediction via the active-version alias
+ * -> one skill account -> activate for that account -> prediction resolved from
+ * that account's own selection
  * -> second version -> comparability -> comparison -> select -> rollback.
+ *
+ * Every activation, selection, rollback and prediction below names one skill
+ * account (a paper portfolio), because that account's own selection is what
+ * authorizes its inference. The account is opened through the product's own
+ * create page, not by a fixture.
  *
  * DATA SETUP vs UI UNDER TEST (disclosed item-by-item):
  *   - beforeAll runs the tracked seed backend/scripts/seed_e2e_personal_learning.py
@@ -61,6 +67,7 @@ const ACCOUNT = {
 
 let worker: ChildProcess | null = null;
 let strategyVersionId = '';
+let skillUnitId = '';
 let expectedConfirms = 0;
 
 function seedEnv(): NodeJS.ProcessEnv {
@@ -156,6 +163,26 @@ test('desktop journey: consent -> review -> snapshot -> job -> version -> activa
   try {
     await login(page);
     const authorization = { Authorization: `Bearer ${await token(page)}` };
+
+    // 0b. One skill account. A skill account *is* a paper portfolio, and it is
+    //     the scope of every activation, selection, rollback and prediction
+    //     below — the account's own selection is what authorizes its inference.
+    //     Opened the way a customer opens one: the product's create form.
+    await page.goto(`${FRONTEND_BASE}/paper-portfolio`, { waitUntil: 'networkidle' });
+    const createResponse = page.waitForResponse(
+      (res) =>
+        res.url().endsWith('/api/v1/paper-portfolio') && res.request().method() === 'POST',
+    );
+    await page.getByTestId('pp-new-cash').fill('100000');
+    await page.getByTestId('pp-create-portfolio').click();
+    const createdRes = await createResponse;
+    expect(createdRes.status(), 'skill account create').toBe(201);
+    skillUnitId = ((await createdRes.json()) as { id: string }).id;
+    await page.waitForURL((url) => url.pathname === `/paper-portfolio/${skillUnitId}`, {
+      timeout: 30000,
+    });
+    await shot(page, '00-skill-account');
+
     await page.goto(`${FRONTEND_BASE}/training`, { waitUntil: 'networkidle' });
 
     // 0. Consent — granted through the product UI, not by a DB fixture.
@@ -286,18 +313,27 @@ test('desktop journey: consent -> review -> snapshot -> job -> version -> activa
     await expect(card).toContainText(`版本 ${model!.version_number}`);
     await expect(card).toContainText(`artifact ${model!.artifact_sha256!.slice(0, 8)}`);
 
-    // 4. Activate — the alias must resolve to this immutable version.
+    // 4. Activate — for this one skill account. The account's own selection is
+    //    what authorizes its inference; the record-wide alias authorizes nobody.
     const activateResponse = page.waitForResponse(
       (res) =>
         res.url().endsWith(`/api/v1/ml/personal/models/${modelId}/activate`) &&
         res.request().method() === 'POST',
     );
     await panel.getByTestId(`pl-activate-${modelId}`).click();
-    expect((await activateResponse).status(), 'activate').toBe(200);
-    await expect(card.getByTestId('pl-model-active')).toHaveText('使用中');
+    const activateRes = await activateResponse;
+    expect(activateRes.status(), 'activate').toBe(200);
+    expect(
+      (activateRes.request().postDataJSON() as { skill_unit_id?: string }).skill_unit_id,
+      'activation must name the skill account it activates for',
+    ).toBe(skillUnitId);
+    await expect(card.getByTestId('pl-model-active')).toHaveText('此帳號使用中');
+    await expect(panel.getByTestId('pl-skill-unit-version')).toContainText(
+      `此帳號目前使用：版本 ${model!.version_number}`,
+    );
     await shot(page, '04-model-active');
 
-    // 5. Predict through the active-version alias.
+    // 5. Predict — resolved from this account's selection, not from a global flag.
     const predictResponse = page.waitForResponse(
       async (res) => {
         if (!res.url().endsWith('/predict')) return false;
@@ -317,15 +353,26 @@ test('desktop journey: consent -> review -> snapshot -> job -> version -> activa
     await panel.getByTestId('pl-predict-run').click();
     const predictRes = await predictResponse;
     expect(predictRes.status(), 'prediction').toBe(200);
+    expect(
+      (predictRes.request().postDataJSON() as { skill_unit_id?: string }).skill_unit_id,
+      'a prediction must be asked for one skill account',
+    ).toBe(skillUnitId);
     const prediction = (await predictRes.json()) as {
-      resolved_version: { version_number: number; resolved_from_active_alias: boolean };
+      resolved_version: { version_number: number; resolved_from: string };
+      skill_unit_id: string;
       as_of: { as_of_date: string; feature_bar_date: string };
     };
-    expect(prediction.resolved_version.resolved_from_active_alias).toBe(true);
+    expect(prediction.skill_unit_id, 'the answer says which account it belongs to').toBe(
+      skillUnitId,
+    );
+    expect(prediction.resolved_version.resolved_from).toBe('skill_unit_selection');
     expect(prediction.as_of.feature_bar_date < prediction.as_of.as_of_date).toBe(true);
     const result = panel.getByTestId('pl-predict-result');
     await expect(result).toContainText(`實際解析版本 ${model!.version_number}`);
-    await expect(result).toContainText('由使用中版本別名解析');
+    await expect(result).toContainText('自己的選用解析');
+    await expect(panel.getByTestId('pl-predict-scope')).toContainText(
+      `此估計只屬於技能帳號 ${skillUnitId.slice(0, 8)}`,
+    );
     await expect(result).toContainText(`特徵 K 線 ${prediction.as_of.feature_bar_date}`);
     await expect(result).toContainText('同意目前有效：是');
     await shot(page, '05-prediction');
@@ -481,8 +528,9 @@ test('desktop journey: consent -> review -> snapshot -> job -> version -> activa
     await shot(page, '07-comparison');
     await shotElement(panel.getByTestId('pl-comparison-result'), '07-comparison-result');
 
-    // 8. Explicit select with a saved rationale, then rollback to the version
-    //    that was active before the switch. History must show both actions.
+    // 8. Explicit select for this skill account, with a saved rationale, then
+    //    rollback to the version this account used before the switch. History
+    //    must show both actions and label the scope of each.
     const selectRationale = 'E2E：比較後選用版本 B';
     await panel.getByTestId('pl-selection-rationale').fill(selectRationale);
     const selectResponse = page.waitForResponse(
@@ -496,13 +544,22 @@ test('desktop journey: consent -> review -> snapshot -> job -> version -> activa
     expect(selectRes.status(), 'select version').toBe(200);
     const selectBody = selectRes.request().postDataJSON() as {
       expected_active_version_id?: string | null;
+      skill_unit_id?: string;
     };
     expect(
       Object.prototype.hasOwnProperty.call(selectBody, 'expected_active_version_id'),
       'the UI must send the active version it last saw',
     ).toBe(true);
+    expect(
+      selectBody.expected_active_version_id,
+      'the guard compares against this account, not the record alias',
+    ).toBe(modelId);
+    expect(selectBody.skill_unit_id, 'a switch is made for one skill account').toBe(
+      skillUnitId,
+    );
     const selection = (await selectRes.json()) as {
       already_active: boolean;
+      skill_unit_id: string | null;
       selection: {
         selection_id: string;
         action: string;
@@ -513,6 +570,9 @@ test('desktop journey: consent -> review -> snapshot -> job -> version -> activa
       } | null;
     };
     expect(selection.already_active).toBe(false);
+    expect(selection.skill_unit_id, 'the server binds the row to this account').toBe(
+      skillUnitId,
+    );
     expect(selection.selection, 'a new selection row').not.toBeNull();
     expect(selection.selection!.action).toBe('select');
     expect(selection.selection!.comparison_run_id).toBe(comparison.comparison_run_id);
@@ -521,8 +581,11 @@ test('desktop journey: consent -> review -> snapshot -> job -> version -> activa
     await expect(
       panel.getByTestId(`pl-selection-${selection.selection!.selection_id}`),
     ).toContainText(`選用 版本 ${secondModel!.version_number}`);
-    await expect(panel.getByTestId('pl-compare')).toContainText(
-      `目前使用中：版本 ${secondModel!.version_number}`,
+    await expect(
+      panel.getByTestId(`pl-selection-${selection.selection!.selection_id}`),
+    ).toContainText(`範圍：帳號 ${skillUnitId.slice(0, 8)}`);
+    await expect(panel.getByTestId('pl-scope-active')).toContainText(
+      `目前使用：版本 ${secondModel!.version_number}`,
     );
 
     const rollbackResponse = page.waitForResponse(
@@ -536,11 +599,15 @@ test('desktop journey: consent -> review -> snapshot -> job -> version -> activa
     expect(rollbackRes.status(), 'rollback').toBe(200);
     const rollbackBody = rollbackRes.request().postDataJSON() as {
       expected_active_version_id?: string | null;
+      skill_unit_id?: string;
     };
     expect(
       rollbackBody.expected_active_version_id,
       'rollback carries the version the UI shows as active',
     ).toBe(secondModelId);
+    expect(rollbackBody.skill_unit_id, 'rollback undoes this account, not the alias').toBe(
+      skillUnitId,
+    );
     const rollback = (await rollbackRes.json()) as {
       selection: {
         selection_id: string;
@@ -553,10 +620,46 @@ test('desktop journey: consent -> review -> snapshot -> job -> version -> activa
     await expect(
       panel.getByTestId(`pl-selection-${rollback.selection.selection_id}`),
     ).toContainText(`回退 版本 ${model!.version_number}`);
-    await expect(panel.getByTestId('pl-compare')).toContainText(
-      `目前使用中：版本 ${model!.version_number}`,
+    await expect(panel.getByTestId('pl-scope-active')).toContainText(
+      `目前使用：版本 ${model!.version_number}`,
     );
+    await expect(card.getByTestId('pl-model-active')).toHaveText('此帳號使用中');
     await shot(page, '08-selection-rollback');
+
+    // 9. Isolation, through the same panel: a second skill account opened the
+    //    same way has never been given a selection, so the panel says so rather
+    //    than inheriting whatever the first account happens to use. Switching
+    //    back must show the first account's own state again.
+    await page.goto(`${FRONTEND_BASE}/paper-portfolio`, { waitUntil: 'networkidle' });
+    const secondCreateResponse = page.waitForResponse(
+      (res) =>
+        res.url().endsWith('/api/v1/paper-portfolio') && res.request().method() === 'POST',
+    );
+    await page.getByTestId('pp-new-cash').fill('50000');
+    await page.getByTestId('pp-create-portfolio').click();
+    const secondCreated = await secondCreateResponse;
+    expect(secondCreated.status(), 'second skill account create').toBe(201);
+    const secondSkillUnitId = ((await secondCreated.json()) as { id: string }).id;
+
+    await page.goto(`${FRONTEND_BASE}/training`, { waitUntil: 'networkidle' });
+    const skillSelect = page.getByTestId('pl-skill-unit-select');
+    await expect(skillSelect).not.toHaveValue('');
+    await skillSelect.selectOption(secondSkillUnitId);
+    await expect(page.getByTestId('pl-skill-unit-version')).toContainText(
+      '尚未為此帳號選用任何版本',
+    );
+    await expect(page.getByTestId('pl-scope-active')).toContainText(
+      '此範圍還沒有任何使用中版本',
+    );
+    await expect(page.getByTestId('pl-predict-run')).toBeDisabled();
+    await expect(page.getByTestId('pl-compare')).toBeVisible();
+    await shot(page, '09-second-account-isolated');
+
+    await skillSelect.selectOption(skillUnitId);
+    await expect(page.getByTestId('pl-skill-unit-version')).toContainText(
+      `此帳號目前使用：版本 ${model!.version_number}`,
+    );
+    await expect(page.getByTestId('pl-predict-run')).toBeEnabled();
   } finally {
     await page.close();
   }
@@ -577,6 +680,11 @@ test('mobile smoke: the personal learning panel renders with its controls', asyn
     const panel = page.getByTestId('personal-learning-panel');
     await expect(panel).toBeVisible();
     await expect(panel).toContainText('個人策略學習');
+    // The scope control is rendered, and it is on one of this account's skill
+    // units — the one the desktop journey left a selection on.
+    const skillCard = panel.getByTestId('pl-skill-unit');
+    await skillCard.scrollIntoViewIfNeeded();
+    await expect(skillCard.getByTestId('pl-skill-unit-select')).not.toHaveValue('');
     const summary = panel.getByTestId('pl-review-summary');
     await summary.scrollIntoViewIfNeeded();
     await expect(summary).toContainText(String(expectedConfirms));

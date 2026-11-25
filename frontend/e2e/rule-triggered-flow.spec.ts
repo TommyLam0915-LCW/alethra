@@ -1,4 +1,4 @@
-import { readFileSync } from 'fs';
+import { loadRuntime, runtimeAvailable, TIER_B_SKIP, type Runtime } from './runtime';
 import { test, expect, type Page } from '@playwright/test';
 
 /**
@@ -30,35 +30,11 @@ import { test, expect, type Page } from '@playwright/test';
  *     waitForResponse / expect-poll, never arbitrary sleeps.
  */
 
-interface Runtime {
-  frontendBase: string;
-  email: string;
-  password: string;
-}
-
-function loadRuntime(): Runtime {
-  const fromFile: Record<string, string> = {};
-  const credFile = process.env.E2E_CRED_FILE;
-  if (credFile) {
-    for (const line of readFileSync(credFile, 'utf-8').split('\n')) {
-      const match = /^([A-Z0-9_]+)=(.*)$/.exec(line.trim());
-      if (match) fromFile[match[1]] = match[2];
-    }
-  }
-  const pick = (key: string): string | undefined => process.env[key] ?? fromFile[key];
-  const email = pick('E2E_EMAIL');
-  const password = pick('E2E_PASSWORD');
-  if (!email || !password) {
-    throw new Error('Missing E2E_EMAIL / E2E_PASSWORD. Set E2E_CRED_FILE to .local/e2e-credentials.env.');
-  }
-  return {
-    frontendBase: pick('E2E_FRONTEND_BASE') ?? 'http://localhost:3099',
-    email,
-    password,
-  };
-}
-
-const runtime = loadRuntime();
+// A missing tier-B stack is a fact about this machine, not about the code: it must skip
+// these tests rather than throw at load and make the whole suite unlistable.
+let runtime: Runtime;
+test.skip(!runtimeAvailable(), TIER_B_SKIP);
+test.beforeAll(() => { runtime = loadRuntime(); });
 const EXPERIMENT_TITLE = 'E2E 規則觸發流程（僅供自動化測試）';
 const ASSET = 'DEMO-ALPHA';
 const MAX_ADVANCES = 30;

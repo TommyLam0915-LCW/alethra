@@ -9,6 +9,7 @@ import { statusPillClass } from '@/lib/status-styles';
 import AppShell from '@/components/shell/AppShell';
 import PersonalizationPanel from '@/components/training/PersonalizationPanel';
 import PersonalStrategyLearningPanel from '@/components/training/PersonalStrategyLearningPanel';
+import DailyEstimatePanel from '@/components/training/DailyEstimatePanel';
 import { formatDate, formatDateTime } from '@/lib/format';
 import { explainMlFailure, describeStoredJobFailure } from '@/lib/mlFailureMessages';
 
@@ -553,6 +554,7 @@ export default function TrainingPage() {
 
         <PersonalizationPanel />
         <PersonalStrategyLearningPanel />
+        <DailyEstimatePanel />
 
         {showForm && (
           <div className="card" style={{ marginBottom: '24px' }}>

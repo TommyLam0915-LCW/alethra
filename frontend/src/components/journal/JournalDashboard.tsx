@@ -131,8 +131,8 @@ const TAB_DESCRIPTIONS: Record<TabKey, { title: string; description: string }> =
     description: 'Compare multiple research runs side-by-side. Select up to 10 runs to see their metrics together. Best/worst values are highlighted to help you identify top performers.',
   },
   'auto-collection': {
-    title: 'Auto Data Collection',
-    description: 'Manage automatic data collection scheduler. Start/stop the scheduler, trigger manual collections, and view recent collection runs. Keeps your research data up-to-date automatically.',
+    title: 'Interval Data Collection',
+    description: 'Every account this host serves gets the research grid studied once per interval window, and each cycle — including the ones refused or skipped because nothing new arrived — leaves one row below. Start/stop only affects this worker, and starting is refused unless the deployment set AUTO_COLLECTION_ENABLED, because a background cycle spends market-data quota.',
   },
   'paper-trading': {
     title: 'Paper Trading',

@@ -109,6 +109,7 @@ export const RUN_STATUS_LABELS: Record<string, string> = {
   running: 'Running',
   completed: 'Completed',
   failed: 'Failed',
+  cancelled: 'Cancelled',
 };
 
 /* ── trade vocabulary ───────────────────────────────────────────────── */
@@ -209,6 +210,9 @@ export const ATTEMPT_STATUS_LABELS: Record<string, string> = {
   pending: 'Not run',
   completed: 'Completed',
   failed: 'Failed',
+  // The cell's own run was closed by decision, which is not a computation that
+  // broke; the study panel must not read it as `failed`.
+  cancelled: 'Cancelled',
   skipped: 'Skipped',
 };
 

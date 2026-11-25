@@ -174,6 +174,19 @@ const KIND_LABEL = ROBUSTNESS_KIND_LABELS;
 const STATUS_LABEL = ROBUSTNESS_STUDY_STATUS_LABELS;
 const ROLE_LABEL = ROBUSTNESS_ROLE_LABELS;
 
+// This sentence used to name four states by hand, so a fifth one the ledger
+// counted never reached the page and the numbers stopped adding up to the
+// attempts total. The known order renders first, and anything the server
+// counted that is not in this list renders after it rather than disappearing.
+const ATTEMPT_COUNT_ORDER = ['completed', 'failed', 'cancelled', 'skipped', 'pending'];
+
+function attemptCountOrder(counts: Record<string, number>): string[] {
+  const extra = Object.keys(counts)
+    .filter((key) => !ATTEMPT_COUNT_ORDER.includes(key))
+    .sort();
+  return [...ATTEMPT_COUNT_ORDER, ...extra];
+}
+
 const th: React.CSSProperties = {
   padding: '6px 10px',
   textAlign: 'right',
@@ -834,10 +847,13 @@ export default function RobustnessPanel({
               </div>
             )}
             <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '6px' }}>
-              Attempt status: completed {selected.aggregate.counts.completed ?? 0} · failed{' '}
-              {selected.aggregate.counts.failed ?? 0} · skipped{' '}
-              {selected.aggregate.counts.skipped ?? 0} · not run{' '}
-              {selected.aggregate.counts.pending ?? 0}
+              {'Attempt status: '}
+              {attemptCountOrder(selected.aggregate.counts).map((key, i) => (
+                <span key={key}>
+                  {i > 0 ? ' · ' : ''}
+                  {label(ATTEMPT_STATUS_LABELS, key)} {selected.aggregate.counts[key] ?? 0}
+                </span>
+              ))}
             </div>
             {selected.aggregate.best_attempt && (
               <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px' }}>

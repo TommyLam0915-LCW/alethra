@@ -1,10 +1,17 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import Link from 'next/link';
 import { api, ApiError } from '@/lib/api';
 import { describeRunStatus } from '@/lib/runStatus';
+import {
+  attemptFor,
+  keepAttemptAfter,
+  mintRunKey,
+  wasAnswered,
+  type RunAttempt,
+} from '@/lib/runRetry';
 import { brand } from '@/lib/brand';
 import { statusPillClass } from '@/lib/status-styles';
 import RevisionPanel from '@/components/experiments/RevisionPanel';
@@ -165,6 +172,11 @@ export default function ExperimentDetailPage() {
   // can tell "you do not have this research" apart from "the service is down",
   // and offer a retry instead of silently rendering a not-found screen.
   const [loadFailure, setLoadFailure] = useState<{ kind: 'not_found' | 'forbidden' | 'unavailable'; status: number | null } | null>(null);
+  // A start click the server never answered, kept so the next click on the same
+  // version resubmits it under the same `Idempotency-Key` instead of being
+  // admitted as a second backtest. A ref, not state: nothing renders it, and a
+  // re-render must not mint a key that replaces it.
+  const unansweredRun = useRef<RunAttempt | null>(null);
 
   useEffect(() => {
     const token = localStorage.getItem('token');
@@ -232,8 +244,19 @@ export default function ExperimentDetailPage() {
     setRunning(true);
     setError('');
 
+    const versionId = experiment.current_version_id;
+    // The attempt this click represents, keyed so an unanswered request is
+    // resubmitted rather than admitted twice (src/lib/runRetry.ts). A reused key
+    // needs no banner here: the row it returned is the run the user asked for,
+    // and `RevisionPanel` is the entry that narrates per-version attempts.
+    const { attempt } = attemptFor(unansweredRun.current, versionId, mintRunKey);
+    // Held from the moment the request leaves, so a second click while the first
+    // is still in flight sends the same key and is answered with the attempt it
+    // already started, rather than the active-run refusal.
+    unansweredRun.current = attempt;
+    let answered = true;
     try {
-      const run = await api.runs.create(experiment.current_version_id);
+      const run = await api.runs.create(versionId, attempt?.key ?? null);
       setRuns([run, ...runs]);
       const [timelineData, notesData] = await Promise.all([
         api.timeline.get(experimentId),
@@ -241,8 +264,16 @@ export default function ExperimentDetailPage() {
       ]);
       setTimeline(timelineData);
     } catch (err: any) {
-      setError(err.message || 'The backtest could not be started.');
+      answered = wasAnswered(err);
+      setError(
+        `${err.message || 'The backtest could not be started.'}${
+          answered
+            ? ''
+            : ' The request was not answered, so clicking run again resubmits this attempt rather than starting a second one.'
+        }`
+      );
     } finally {
+      unansweredRun.current = keepAttemptAfter(attempt, answered);
       setRunning(false);
     }
   };

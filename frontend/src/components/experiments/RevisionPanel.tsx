@@ -1,10 +1,18 @@
 'use client';
 
-import { useMemo, useState, type ReactNode } from 'react';
+import { useMemo, useRef, useState, type ReactNode } from 'react';
 import Link from 'next/link';
 import { api, ApiError } from '@/lib/api';
 import { formatDateTime } from '@/lib/format';
 import { RUN_STATUS_LABELS, STRATEGY_TEMPLATE_LABELS, label } from '@/lib/copy';
+import { activeRunIdFromRefusal } from '@/lib/runStatus';
+import {
+  attemptFor,
+  keepAttemptAfter,
+  mintRunKey,
+  wasAnswered,
+  type RunAttempt,
+} from '@/lib/runRetry';
 import {
   canonicalSpec,
   diffSpecs,
@@ -135,6 +143,15 @@ export default function RevisionPanel({
   const [formError, setFormError] = useState('');
 
   const [runningVersionId, setRunningVersionId] = useState<string | null>(null);
+  // The run id from the 409 that refused this start, kept so the refusal can be
+  // answered from here: the row it names is the only thing standing between this
+  // version and a new run, and the entry that closes it is on that page.
+  const [blockingRunId, setBlockingRunId] = useState<string | null>(null);
+  // One click the server never answered is remembered here, so the next click on
+  // the same version resubmits that attempt under the same `Idempotency-Key`
+  // instead of being admitted as a second backtest. A ref, not state: nothing
+  // renders it, and a re-render must not mint a key that replaces it.
+  const unansweredRun = useRef<RunAttempt | null>(null);
   const [actionNotice, setActionNotice] = useState('');
   const [actionError, setActionError] = useState('');
 
@@ -291,19 +308,51 @@ export default function RevisionPanel({
     setRunningVersionId(version.id);
     setActionError('');
     setActionNotice('');
+    setBlockingRunId(null);
+    // The attempt this click represents. It reuses the stored key only while the
+    // stored key belongs to the same version, and forgets it as soon as the
+    // server answers in any way — see src/lib/runRetry.ts for why a 5xx counts as
+    // an answer and a dropped connection does not.
+    const { attempt, reused } = attemptFor(unansweredRun.current, version.id, mintRunKey);
+    // Held from the moment the request leaves, so a second click while the first
+    // is still in flight sends the same key and is answered with the attempt it
+    // already started, rather than the active-run refusal.
+    unansweredRun.current = attempt;
+    let answered = true;
     try {
-      const run = await api.runs.create(version.id);
+      const run = await api.runs.create(version.id, attempt?.key ?? null);
       const ret = run?.metrics?.total_return_pct;
       const status = run?.status ? label(RUN_STATUS_LABELS, run.status) : 'Unknown';
       setActionNotice(
-        run?.status === 'completed'
-          ? `v${version.version_number} backtest completed${ret != null ? `: total return ${Number(ret).toFixed(2)}%` : ''}.`
-          : `v${version.version_number} backtest status: ${status}.`
+        (reused
+          ? `This click resubmitted the v${version.version_number} request that was never answered, so the platform reused that attempt instead of starting a second one. `
+          : '') +
+          (run?.status === 'completed'
+            ? `v${version.version_number} backtest completed${ret != null ? `: total return ${Number(ret).toFixed(2)}%` : ''}.`
+            : `v${version.version_number} backtest status: ${status}.`)
       );
       await onChanged();
     } catch (err) {
-      setActionError(describeError(err, 'The backtest could not be started'));
+      answered = wasAnswered(err);
+      // Only a refusal that names the row it is refusing for becomes a remedy
+      // link; any other 409 keeps the server's own words.
+      const conflictRunId =
+        err instanceof ApiError && err.status === 409
+          ? activeRunIdFromRefusal(err.detail)
+          : null;
+      setBlockingRunId(conflictRunId);
+      setActionError(
+        conflictRunId
+          ? 'Nothing was started and nothing was billed: this version already has ' +
+              'a run with no outcome. That row is not proof the earlier process is ' +
+              'alive, so the platform will not choose between waiting and closing it.'
+          : describeError(err, 'The backtest could not be started') +
+              (answered
+                ? ''
+                : ` The request was not answered. Clicking run on v${version.version_number} again resubmits this attempt rather than starting a second one.`),
+      );
     } finally {
+      unansweredRun.current = keepAttemptAfter(attempt, answered);
       setRunningVersionId(null);
     }
   };
@@ -591,6 +640,21 @@ export default function RevisionPanel({
       {actionError && (
         <p role="alert" data-testid="revision-action-error" style={{ color: 'var(--negative)', fontSize: '13px', margin: '0 0 12px' }}>
           {actionError}
+        </p>
+      )}
+      {blockingRunId && (
+        <p style={{ fontSize: '13px', margin: '0 0 12px' }}>
+          <Link
+            href={`/experiments/${experimentId}/runs/${blockingRunId}`}
+            data-testid="revision-blocking-run-link"
+            style={{ color: 'var(--accent-blue)', textDecoration: 'none' }}
+          >
+            Open the run that is holding this version
+          </Link>
+          <span style={{ color: 'var(--text-muted)' }}>
+            {' '}to read what it recorded, or to close it by decision and let this
+            version run again.
+          </span>
         </p>
       )}
 

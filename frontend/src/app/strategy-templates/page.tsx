@@ -12,6 +12,7 @@ import {
   type PreflightResult,
   type StrategyTemplateCatalog,
 } from '@/lib/strategyPreflight';
+import { statusToneColour } from '@/lib/dataManifest';
 
 export default function StrategyTemplatesPage() {
   const router = useRouter();
@@ -77,12 +78,9 @@ export default function StrategyTemplatesPage() {
   };
 
   const statusCopy = result ? PREFLIGHT_STATUS_COPY[result.status] : null;
-  const statusColour =
-    statusCopy?.tone === 'ok'
-      ? 'var(--success, #1d7a46)'
-      : statusCopy?.tone === 'warn'
-        ? 'var(--warning, #9a5b00)'
-        : 'var(--text-muted)';
+  // The same tone→colour map the data-manifest panel uses: one 'warn' verdict
+  // must not read amber on one page and green on the next.
+  const statusColour = statusToneColour(statusCopy?.tone ?? 'muted');
 
   return (
     <div className="container" style={{ paddingTop: '40px', paddingBottom: '60px' }}>

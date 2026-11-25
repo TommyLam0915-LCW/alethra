@@ -216,11 +216,14 @@ interface JourneyResponse {
 }
 
 interface Prediction {
+  // usage_records.id of this execution: the identity a decision records against
+  // so the journal can point back at the estimate it was based on.
+  inference_id: string;
   resolved_version: {
     model_version_id: string;
     record_id: string;
     version_number: number;
-    resolved_from_active_alias: boolean;
+    resolved_from: 'explicit_version_id' | 'skill_unit_selection' | 'record_active_alias';
   };
   model_estimate_zh: string;
   predicted_action: string;
@@ -234,6 +237,8 @@ interface Prediction {
   snapshot: { snapshot_id: string | null; checksum: string | null };
   artifact_sha256: string | null;
   training_job_id: string | null;
+  // The verdict is answered for this one skill account and says so.
+  skill_unit_id: string;
   consent_currently_active: boolean;
   not_for: string[];
   disclaimer_zh: string;
@@ -406,12 +411,23 @@ interface SelectionEntry {
   comparison_run_id: string | null;
   rationale: string | null;
   created_at: string | null;
+  // Which scope the switch was made for. Null is the record-wide alias, not
+  // "every skill account".
+  skill_unit_id: string | null;
+}
+
+interface SkillUnit {
+  id: string;
+  status: string;
+  currency: string;
+  created_at: string | null;
 }
 
 interface SelectionResponse {
   already_active: boolean;
   selection: SelectionEntry | null;
   active_version: PersonalModel;
+  skill_unit_id?: string | null;
   message_zh?: string;
 }
 
@@ -419,6 +435,8 @@ interface SelectionHistoryResponse {
   record_id: string;
   active_version_id: string | null;
   selections: SelectionEntry[];
+  skill_unit_id?: string | null;
+  skill_active_version_id?: string | null;
 }
 
 interface ComparisonSummaryEntry {
@@ -453,6 +471,28 @@ const ACTION_LABELS: Record<string, string> = {
   hold: '觀望',
 };
 
+// A model estimate is an action; a recorded decision is a decision type. The
+// seeding below only pre-fills what the person can still change: the estimate
+// never writes the decision itself.
+const DECISION_TYPE_BY_ACTION: Record<string, 'entry' | 'exit' | 'no_action'> = {
+  buy: 'entry',
+  sell: 'exit',
+  hold: 'no_action',
+};
+
+const DECISION_TYPE_LABELS_ZH: Record<string, string> = {
+  entry: '進場',
+  exit: '出場',
+  no_action: '不動作',
+};
+
+const CONFIDENCE_LABELS_ZH: Record<string, string> = {
+  low: '低',
+  medium: '中',
+  high: '高',
+  not_provided: '不自評',
+};
+
 const JOB_STATUS_LABELS: Record<string, string> = {
   pending: '排隊中',
   running: '執行中',
@@ -484,6 +524,13 @@ const WINDOW_REASON_LABELS: Record<string, string> = {
 const SELECTION_ACTION_LABELS: Record<string, string> = {
   select: '選用',
   rollback: '回退',
+};
+
+const SKILL_UNIT_STATUS_LABELS: Record<string, string> = {
+  active: '進行中',
+  paused: '已暫停',
+  retired: '已退休',
+  completed: '已完成',
 };
 
 const WORKER_STATE_COLORS: Record<string, string> = {
@@ -585,6 +632,10 @@ interface StrategyLoadResult {
   comparisons: ComparisonSummaryEntry[];
   selections: SelectionEntry[];
   activeVersionId: string | null;
+  // The version the requested skill account is actually served, when the read
+  // was scoped to one. Null means that account has never been switched.
+  skillActiveVersionId: string | null;
+  scopeSkillUnitId: string | null;
 }
 
 interface LoadFailure {
@@ -637,6 +688,26 @@ export default function PersonalStrategyLearningPanel() {
     as_of_date: '',
   });
   const [prediction, setPrediction] = useState<Prediction | null>(null);
+  // The decision the person records against the estimate currently shown. It is
+  // keyed by the inference id, so a successful save can never be displayed under
+  // a different, later inference without being re-recorded.
+  const [decisionForm, setDecisionForm] = useState<{
+    decision_type: 'entry' | 'exit' | 'no_action';
+    rationale: string;
+    expected_outcome: string;
+    self_reported_confidence: 'low' | 'medium' | 'high' | 'not_provided';
+    falsification_condition: string;
+  }>({
+    decision_type: 'no_action',
+    rationale: '',
+    expected_outcome: '',
+    self_reported_confidence: 'not_provided',
+    falsification_condition: '',
+  });
+  const [recordedDecision, setRecordedDecision] = useState<{
+    inference_id: string;
+    decision_id: string;
+  } | null>(null);
 
   const [compA, setCompA] = useState('');
   const [compB, setCompB] = useState('');
@@ -645,7 +716,14 @@ export default function PersonalStrategyLearningPanel() {
   const [rationale, setRationale] = useState('');
   const [selections, setSelections] = useState<SelectionEntry[]>([]);
   const [activeVersionId, setActiveVersionId] = useState<string | null>(null);
+  const [skillActiveVersionId, setSkillActiveVersionId] = useState<string | null>(null);
   const [comparisons, setComparisons] = useState<ComparisonSummaryEntry[]>([]);
+
+  // One skill account is the scope every inference, switch and rollback below
+  // answers for; nothing in this panel is valid without naming one.
+  const [skillUnits, setSkillUnits] = useState<SkillUnit[]>([]);
+  const [skillUnitId, setSkillUnitId] = useState('');
+  const [skillUnitFailure, setSkillUnitFailure] = useState<string | null>(null);
 
   const loadVersions = useCallback(async () => {
     const ticket = ++versionsSeq.current;
@@ -675,41 +753,73 @@ export default function PersonalStrategyLearningPanel() {
     };
   }, [loadVersions]);
 
-  const fetchStrategy = useCallback(async (id: string): Promise<StrategyLoadResult> => {
-    const [reviewBody, previewBody, snapshotsBody, modelsBody, journeyBody] = await Promise.all([
-      stageLoad('決策覆核', api.ml.reviewDecisions(id)),
-      stageLoad('快照預覽', api.ml.previewPersonalSnapshot(id)),
-      stageLoad('快照清單', api.ml.listPersonalSnapshots(id)),
-      stageLoad('模型版本', api.ml.listPersonalModels(id)),
-      stageLoad('整體進度', api.ml.personalJourney(id)),
-    ]);
-    const modelRows = (modelsBody as { models: PersonalModel[] }).models ?? [];
-    let comparisons: ComparisonSummaryEntry[] = [];
-    let selections: SelectionEntry[] = [];
-    let activeVersionId: string | null = null;
-    const recordId = modelRows[0]?.record_id;
-    if (recordId) {
-      const [comparisonsBody, selectionsBody] = await Promise.all([
-        stageLoad('比較記錄', api.ml.listPersonalComparisons(id)),
-        stageLoad('選用記錄', api.ml.listPersonalSelections(recordId)),
-      ]);
-      comparisons =
-        (comparisonsBody as { comparisons: ComparisonSummaryEntry[] }).comparisons ?? [];
-      const history = selectionsBody as SelectionHistoryResponse;
-      selections = history.selections ?? [];
-      activeVersionId = history.active_version_id ?? null;
+  const loadSkillUnits = useCallback(async () => {
+    try {
+      const rows = (await boundedWait(api.paperPortfolio.list(), '載入技能帳號')) as SkillUnit[];
+      setSkillUnits(rows);
+      setSkillUnitFailure(null);
+      const fallback = (rows.find((row) => row.status === 'active') ?? rows[0])?.id ?? '';
+      setSkillUnitId((current) =>
+        current && rows.some((row) => row.id === current) ? current : fallback,
+      );
+    } catch (err) {
+      setSkillUnitFailure(describeFailure(err, '無法載入技能帳號'));
     }
-    return {
-      review: reviewBody as ReviewResponse,
-      preview: previewBody as SnapshotBody,
-      journey: journeyBody as JourneyResponse,
-      snapshots: (snapshotsBody as { snapshots: SnapshotBody[] }).snapshots ?? [],
-      models: modelRows,
-      comparisons,
-      selections,
-      activeVersionId,
-    };
   }, []);
+
+  useEffect(() => {
+    loadSkillUnits().catch(() => undefined);
+  }, [loadSkillUnits]);
+
+  const fetchStrategy = useCallback(
+    async (id: string, skillUnitScope: string): Promise<StrategyLoadResult> => {
+      const [reviewBody, previewBody, snapshotsBody, modelsBody, journeyBody] = await Promise.all([
+        stageLoad('決策覆核', api.ml.reviewDecisions(id)),
+        stageLoad('快照預覽', api.ml.previewPersonalSnapshot(id)),
+        stageLoad('快照清單', api.ml.listPersonalSnapshots(id)),
+        stageLoad('模型版本', api.ml.listPersonalModels(id)),
+        stageLoad('整體進度', api.ml.personalJourney(id)),
+      ]);
+      const modelRows = (modelsBody as { models: PersonalModel[] }).models ?? [];
+      let comparisons: ComparisonSummaryEntry[] = [];
+      let selections: SelectionEntry[] = [];
+      let activeVersionId: string | null = null;
+      let skillActiveVersionId: string | null = null;
+      const recordId = modelRows[0]?.record_id;
+      if (recordId) {
+        const [comparisonsBody, selectionsBody] = await Promise.all([
+          stageLoad('比較記錄', api.ml.listPersonalComparisons(id)),
+          // Scoped to the chosen skill account, the history is that account's
+          // own switches and the answer names the version it is served.
+          stageLoad(
+            '選用記錄',
+            skillUnitScope
+              ? api.ml.listPersonalSelections(recordId, skillUnitScope)
+              : api.ml.listPersonalSelections(recordId),
+          ),
+        ]);
+        comparisons =
+          (comparisonsBody as { comparisons: ComparisonSummaryEntry[] }).comparisons ?? [];
+        const history = selectionsBody as SelectionHistoryResponse;
+        selections = history.selections ?? [];
+        activeVersionId = history.active_version_id ?? null;
+        skillActiveVersionId = history.skill_active_version_id ?? null;
+      }
+      return {
+        review: reviewBody as ReviewResponse,
+        preview: previewBody as SnapshotBody,
+        journey: journeyBody as JourneyResponse,
+        snapshots: (snapshotsBody as { snapshots: SnapshotBody[] }).snapshots ?? [],
+        models: modelRows,
+        comparisons,
+        selections,
+        activeVersionId,
+        skillActiveVersionId,
+        scopeSkillUnitId: skillUnitScope || null,
+      };
+    },
+    [],
+  );
 
   // Applies a payload only after the caller confirmed it still belongs to the
   // newest request, so the cleared/selected state below cannot be overwritten
@@ -728,6 +838,7 @@ export default function PersonalStrategyLearningPanel() {
     setComparisons(result.comparisons);
     setSelections(result.selections);
     setActiveVersionId(result.activeVersionId);
+    setSkillActiveVersionId(result.skillActiveVersionId);
   }, []);
 
   const runStrategyLoad = useCallback(
@@ -743,7 +854,10 @@ export default function PersonalStrategyLearningPanel() {
         setLoadFailure((current) => (current?.retry === 'strategy' ? null : current));
       }
       try {
-        const result = await boundedWait(fetchStrategy(id), '載入個人策略學習資料');
+        const result = await boundedWait(
+          fetchStrategy(id, skillUnitId),
+          '載入個人策略學習資料',
+        );
         if (strategySeq.current !== ticket) return null;
         applyStrategyResult(result);
         setLoadFailure(null);
@@ -761,7 +875,7 @@ export default function PersonalStrategyLearningPanel() {
         if (strategySeq.current === ticket) setStrategyLoading(false);
       }
     },
-    [applyStrategyResult, fetchStrategy],
+    [applyStrategyResult, fetchStrategy, skillUnitId],
   );
 
   useEffect(() => {
@@ -777,6 +891,10 @@ export default function PersonalStrategyLearningPanel() {
     setComparisons([]);
     setSelections([]);
     setActiveVersionId(null);
+    // Same for a different skill account: the previous account's switch history
+    // and its answered prediction belong to that account, not this one.
+    setSkillActiveVersionId(null);
+    setPrediction(null);
     setPollPaused(false);
     pollFailures.current = 0;
     runStrategyLoad(versionId).catch(() => undefined);
@@ -1072,14 +1190,37 @@ export default function PersonalStrategyLearningPanel() {
     }
   };
 
+  // The version in force for the scope every switch below is checked against:
+  // the skill account's own selection when one is chosen, otherwise the
+  // record-wide alias. Sending the other scope's value would make the server
+  // refuse a switch that is actually current.
+  const scopeActiveVersionId = skillUnitId ? skillActiveVersionId : activeVersionId;
+
+  const skillUnitLabel = () => {
+    const unit = skillUnits.find((row) => row.id === skillUnitId);
+    return unit ? `技能帳號 ${shortId(unit.id)}` : '此技能帳號';
+  };
+
+  // '使用中' on its own used to mean the record-wide alias, which is not the
+  // version this skill account is actually served. Say which scope is in force.
+  const inScopeSuffix = skillUnitId ? ' · 此帳號使用中' : ' · 記錄別名使用中';
+
   const activate = async (model: PersonalModel) => {
+    if (!skillUnitId) {
+      setError('請先選擇技能帳號；沒有帳號，沒有任何推論會被授權。');
+      return;
+    }
     setBusy(model.model_version_id);
     setError(null);
     setNotice(null);
     try {
-      await api.ml.activatePersonalModel(model.model_version_id);
+      await api.ml.activatePersonalModel(model.model_version_id, {
+        skill_unit_id: skillUnitId,
+      });
       if (versionId) await runStrategyLoad(versionId).catch(() => undefined);
-      setNotice(`已將版本 ${model.version_number} 設為使用中版本。`);
+      setNotice(
+        `已將版本 ${model.version_number} 設為${skillUnitLabel()}目前使用的版本；其他技能帳號不受影響。`,
+      );
     } catch (err) {
       setError(describeFailure(err, '無法啟用此模型版本'));
     } finally {
@@ -1160,6 +1301,10 @@ export default function PersonalStrategyLearningPanel() {
       setError('選用版本需要填寫理由（至少 2 個字）。');
       return;
     }
+    if (!skillUnitId) {
+      setError('請先選擇技能帳號；選用是為一個技能帳號做出來的決定。');
+      return;
+    }
     const runMatchesTarget =
       comparison &&
       [comparison.versions.a.model_version_id, comparison.versions.b.model_version_id].includes(
@@ -1174,7 +1319,8 @@ export default function PersonalStrategyLearningPanel() {
       const body = (await api.ml.selectPersonalModel(targetId, {
         rationale: rationale.trim(),
         comparison_run_id: runMatchesTarget,
-        expected_active_version_id: activeVersionId,
+        expected_active_version_id: scopeActiveVersionId,
+        skill_unit_id: skillUnitId,
       })) as SelectionResponse;
       setNotice(body.message_zh ?? `已選用版本 ${target.version_number}。`);
       setRationale('');
@@ -1197,13 +1343,18 @@ export default function PersonalStrategyLearningPanel() {
       setError('找不到可回退的模型記錄。');
       return;
     }
+    if (!skillUnitId) {
+      setError('請先選擇技能帳號；回退只會還原一個技能帳號的使用中版本。');
+      return;
+    }
     setBusy('rollback');
     setError(null);
     setNotice(null);
     try {
       const body = (await api.ml.rollbackPersonalModel(recordId, {
         rationale: rationale.trim() || null,
-        expected_active_version_id: activeVersionId,
+        expected_active_version_id: scopeActiveVersionId,
+        skill_unit_id: skillUnitId,
       })) as { selection: SelectionEntry; active_version: PersonalModel; message_zh?: string };
       setNotice(body.message_zh ?? '已回退到上一個版本。');
       setRationale('');
@@ -1242,9 +1393,15 @@ export default function PersonalStrategyLearningPanel() {
   };
 
   const runPrediction = async () => {
-    const target = models.find((model) => model.is_active) ?? models[0];
-    if (!target) {
+    // Which version answers is not chosen here: the record route resolves the
+    // version this skill account's own selection names, and re-checks it.
+    const recordId = models[0]?.record_id;
+    if (!recordId) {
       setError('此策略尚無可用的個人決策模型版本。');
+      return;
+    }
+    if (!skillUnitId) {
+      setError('請先選擇技能帳號：推論只回答「這個技能帳號」會被模型如何估計。');
       return;
     }
     if (!predictForm.instrument_id.trim() || predictForm.as_of_date.length !== 10) {
@@ -1255,13 +1412,61 @@ export default function PersonalStrategyLearningPanel() {
     setError(null);
     setNotice(null);
     try {
-      const body = (await api.ml.predictPersonalViaRecord(target.record_id, {
+      const body = (await api.ml.predictPersonalViaRecord(recordId, {
         instrument_id: predictForm.instrument_id.trim(),
         as_of_date: predictForm.as_of_date,
+        skill_unit_id: skillUnitId,
       })) as Prediction;
       setPrediction(body);
+      // Only a starting point for the person to edit, taken from this estimate's
+      // own action; nothing is written until they press save.
+      setDecisionForm((current) => ({
+        ...current,
+        decision_type: DECISION_TYPE_BY_ACTION[body.predicted_action] ?? 'no_action',
+      }));
+      setRecordedDecision(null);
     } catch (err) {
       setError(describeFailure(err, '推論未執行'));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  // An estimate is only an answer until the person says what they decided with
+  // it. This posts to the paper desk's own decision route carrying the inference
+  // id, so the journal's lineage column comes from the customer's action instead
+  // of being reconstructed later (there is nothing to reconstruct from: a
+  // decision recorded without it can never be attributed afterwards).
+  const recordInferenceDecision = async (inference: Prediction) => {
+    if (inference.skill_unit_id !== skillUnitId) {
+      setError('推論結果的技能帳號與上方選取的不一致，請重新整理後再記錄決策。');
+      return;
+    }
+    const rationale = decisionForm.rationale.trim();
+    const expectedOutcome = decisionForm.expected_outcome.trim();
+    const falsification = decisionForm.falsification_condition.trim();
+    if (decisionForm.decision_type !== 'no_action' && (!rationale || !expectedOutcome)) {
+      setError('進場與出場必須填寫理由與預期結果，否則此筆記錄會被拒絕。');
+      return;
+    }
+    setBusy('decision');
+    setError(null);
+    setNotice(null);
+    try {
+      const saved = (await api.paperPortfolio.createDecision(inference.skill_unit_id, {
+        // Only a declaration: the server labels the actor from the credential it
+        // verified, so this panel cannot write itself a human decision.
+        actor_type: 'human',
+        decision_type: decisionForm.decision_type,
+        rationale: rationale || null,
+        expected_outcome: expectedOutcome || null,
+        self_reported_confidence: decisionForm.self_reported_confidence,
+        falsification_condition: falsification || null,
+        linked_inference_id: inference.inference_id,
+      })) as { id: string };
+      setRecordedDecision({ inference_id: inference.inference_id, decision_id: saved.id });
+    } catch (err) {
+      setError(describeFailure(err, '決策未記錄'));
     } finally {
       setBusy(null);
     }
@@ -2059,6 +2264,84 @@ export default function PersonalStrategyLearningPanel() {
             style={{ marginTop: '22px', paddingTop: '16px', borderTop: '1px solid var(--border)' }}
           >
             <strong style={{ fontSize: '14px' }}>4. 模型版本與推論</strong>
+            <div
+              data-testid="pl-skill-unit"
+              style={{
+                marginTop: '14px',
+                padding: '10px 12px',
+                border: '1px solid var(--border)',
+                borderRadius: '8px',
+                fontSize: '12px',
+              }}
+            >
+              <strong>技能帳號（每一次推論與選用都只對它有效）</strong>
+              {skillUnitFailure ? (
+                <div
+                  data-testid="pl-skill-unit-failed"
+                  style={{ marginTop: '6px', color: 'var(--warning)' }}
+                >
+                  {skillUnitFailure}
+                  <button
+                    type="button"
+                    className="btn"
+                    data-testid="pl-skill-unit-retry"
+                    style={{ marginLeft: '8px' }}
+                    onClick={() => loadSkillUnits().catch(() => undefined)}
+                  >
+                    重試
+                  </button>
+                </div>
+              ) : skillUnits.length === 0 ? (
+                <p
+                  data-testid="pl-skill-unit-empty"
+                  style={{ margin: '6px 0 0', color: 'var(--text-secondary)' }}
+                >
+                  你目前還沒有技能帳號。模型版本是以「某個技能帳號選用了它」來授權推論的，
+                  所以沒有帳號時下面的推論與選用都不會送出。請先到
+                  <a href="/paper-portfolio">模擬投資組合</a>
+                  以正式流程建立一個，再回到此頁。
+                </p>
+              ) : (
+                <>
+                  <div style={{ marginTop: '6px', display: 'flex', gap: '10px', alignItems: 'end', flexWrap: 'wrap' }}>
+                    <label style={{ display: 'grid', gap: '4px' }}>
+                      <span style={{ color: 'var(--text-muted)' }}>技能帳號</span>
+                      <select
+                        data-testid="pl-skill-unit-select"
+                        value={skillUnitId}
+                        onChange={(event) => {
+                          setSkillUnitId(event.target.value);
+                          setPrediction(null);
+                        }}
+                        style={{ minWidth: '240px', padding: '5px 8px' }}
+                      >
+                        {skillUnits.map((unit, index) => (
+                          <option key={unit.id} value={unit.id}>
+                            帳號 {index + 1} · {shortId(unit.id)} ·{' '}
+                            {SKILL_UNIT_STATUS_LABELS[unit.status] ?? unit.status} · {unit.currency}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <span data-testid="pl-skill-unit-version" style={{ color: 'var(--text-secondary)' }}>
+                      {skillActiveVersionId ? (
+                        <>
+                          此帳號目前使用：版本{' '}
+                          {models.find((model) => model.model_version_id === skillActiveVersionId)
+                            ?.version_number ?? shortId(skillActiveVersionId)}
+                        </>
+                      ) : (
+                        <>尚未為此帳號選用任何版本；它的推論會被拒絕，直到你為它選用一次。</>
+                      )}
+                    </span>
+                  </div>
+                  <div style={{ marginTop: '4px', color: 'var(--text-muted)' }}>
+                    切換技能帳號只改變此頁要服務的對象；其他帳號的使用中版本、
+                    歷史推論與模擬紀錄都不受影響。
+                  </div>
+                </>
+              )}
+            </div>
             {models.length === 0 ? (
               <p style={{ margin: '10px 0 0', fontSize: '13px', color: 'var(--text-secondary)' }}>
                 此策略尚無模型版本。完成快照與訓練後，版本會顯示在這裡。
@@ -2068,6 +2351,11 @@ export default function PersonalStrategyLearningPanel() {
                 {models.map((model) => {
                   const test = model.evaluation?.metrics?.metrics?.test;
                   const baseline = model.evaluation?.metrics?.baseline;
+                  // "In use" is a statement about one skill account, not about
+                  // the record: the alias is a different scope and authorizes
+                  // no account's inference.
+                  const inScope =
+                    skillUnitId !== '' && skillActiveVersionId === model.model_version_id;
                   return (
                     <div
                       key={model.model_version_id}
@@ -2082,7 +2370,7 @@ export default function PersonalStrategyLearningPanel() {
                     >
                       <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'center' }}>
                         <span style={{ fontWeight: 600 }}>版本 {model.version_number}</span>
-                        {model.is_active && (
+                        {inScope ? (
                           <span
                             data-testid="pl-model-active"
                             style={{
@@ -2092,9 +2380,22 @@ export default function PersonalStrategyLearningPanel() {
                               color: 'var(--positive)',
                             }}
                           >
-                            使用中
+                            此帳號使用中
                           </span>
-                        )}
+                        ) : model.is_active ? (
+                          <span
+                            data-testid="pl-model-alias"
+                            style={{
+                              padding: '1px 8px',
+                              borderRadius: '10px',
+                              border: '1px solid var(--border)',
+                              color: 'var(--text-muted)',
+                            }}
+                            title="記錄別名指向此版本；它不代表任何技能帳號正在使用它。"
+                          >
+                            記錄別名指向
+                          </span>
+                        ) : null}
                         <span style={{ fontFamily: 'monospace', color: 'var(--text-muted)' }}>
                           artifact {shortId(model.artifact_sha256)}
                         </span>
@@ -2154,9 +2455,14 @@ export default function PersonalStrategyLearningPanel() {
                           className="btn"
                           data-testid={`pl-activate-${model.model_version_id}`}
                           onClick={() => activate(model)}
-                          disabled={model.is_active || busy === model.model_version_id}
+                          disabled={inScope || busy === model.model_version_id || !skillUnitId}
+                          title={
+                            skillUnitId
+                              ? undefined
+                              : '請先選擇技能帳號：使用中版本是針對某個帳號決定的。'
+                          }
                         >
-                          {model.is_active ? '已在使用中' : '設為使用中版本'}
+                          {inScope ? '此帳號已使用此版本' : '設為此帳號使用中版本'}
                         </button>
                       </div>
                     </div>
@@ -2164,6 +2470,7 @@ export default function PersonalStrategyLearningPanel() {
                 })}
               </div>
             )}
+
 
             {models.length > 0 && (
               <div
@@ -2199,7 +2506,12 @@ export default function PersonalStrategyLearningPanel() {
                   className="btn btn-primary"
                   data-testid="pl-predict-run"
                   onClick={runPrediction}
-                  disabled={busy === 'predict'}
+                  disabled={busy === 'predict' || !skillUnitId}
+                  title={
+                    skillUnitId
+                      ? undefined
+                      : '沒有技能帳號時不會送出：推論只回答某個技能帳號被模型如何估計。'
+                  }
                 >
                   以使用中版本推論
                 </button>
@@ -2221,10 +2533,20 @@ export default function PersonalStrategyLearningPanel() {
                   {prediction.model_estimate_zh}：{actionLabel(prediction.predicted_action)}
                 </div>
                 <div style={{ marginTop: '4px', color: 'var(--text-secondary)' }}>
-                  實際解析版本 {prediction.resolved_version.version_number}
-                  {prediction.resolved_version.resolved_from_active_alias
-                    ? '（由使用中版本別名解析）'
-                    : '（明確指定版本）'}
+                  實際解析版本 {prediction.resolved_version.version_number}（
+                  {prediction.resolved_version.resolved_from === 'explicit_version_id'
+                    ? '明確指定版本'
+                    : prediction.resolved_version.resolved_from === 'skill_unit_selection'
+                      ? `由${skillUnitLabel()}自己的選用解析`
+                      : '由記錄別名解析（該帳號尚無自己的選用）'}
+                  ）
+                </div>
+                <div data-testid="pl-predict-scope" style={{ marginTop: '4px', color: 'var(--text-secondary)' }}>
+                  此估計只屬於技能帳號 {shortId(prediction.skill_unit_id)}
+                  {prediction.skill_unit_id === skillUnitId
+                    ? '（即上方選取的帳號）'
+                    : '（與上方目前選取的帳號不同，請重新整理）'}
+                  ；換一個技能帳號就是另一個答案。
                 </div>
                 <div style={{ marginTop: '4px', color: 'var(--text-secondary)' }}>
                   機率：
@@ -2242,6 +2564,148 @@ export default function PersonalStrategyLearningPanel() {
                 </div>
                 <div style={{ marginTop: '4px', color: 'var(--text-muted)' }}>
                   不適用於：{prediction.not_for.join('、')}
+                </div>
+                <div
+                  data-testid="pl-predict-inference-id"
+                  style={{ marginTop: '4px', color: 'var(--text-muted)' }}
+                >
+                  本次推論紀錄 {shortId(prediction.inference_id)}：下面記錄的決策會回連到這一筆估計。
+                </div>
+
+                <div
+                  data-testid="pl-decision-form"
+                  style={{
+                    marginTop: '12px',
+                    paddingTop: '12px',
+                    borderTop: '1px solid var(--border)',
+                    display: 'grid',
+                    gap: '8px',
+                  }}
+                >
+                  <strong style={{ fontSize: '12px' }}>記錄這次推論之後的決策</strong>
+                  <p style={{ margin: 0, color: 'var(--text-secondary)', fontSize: '12px' }}>
+                    模型只給估計，這一筆由本人填寫。存進去後，它出現在這個技能帳號的決策清單與
+                    CSV／JSON 交易日誌匯出（journal）的 linked_inference_id 欄位，之後才能回溯「當時模型怎麼說、本人怎麼做」。
+                    記錄者的身分由伺服器依登入憑證判定（密碼登入＝本人，API key＝代理），
+                    此表單自報的 actor_type 只當作聲明，不會把代理寫的操作升階成本人確認。
+                  </p>
+                  <div style={{ display: 'flex', gap: '10px', alignItems: 'end', flexWrap: 'wrap' }}>
+                    <label style={{ display: 'grid', gap: '4px' }}>
+                      <span style={{ color: 'var(--text-muted)' }}>決策類型</span>
+                      <select
+                        data-testid="pl-decision-type"
+                        value={decisionForm.decision_type}
+                        onChange={(event) =>
+                          setDecisionForm((current) => ({
+                            ...current,
+                            decision_type: event.target.value as 'entry' | 'exit' | 'no_action',
+                          }))
+                        }
+                        style={{ padding: '5px 8px' }}
+                      >
+                        {(['entry', 'exit', 'no_action'] as const).map((value) => (
+                          <option key={value} value={value}>
+                            {DECISION_TYPE_LABELS_ZH[value]}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label style={{ display: 'grid', gap: '4px' }}>
+                      <span style={{ color: 'var(--text-muted)' }}>自評信心</span>
+                      <select
+                        data-testid="pl-decision-confidence"
+                        value={decisionForm.self_reported_confidence}
+                        onChange={(event) =>
+                          setDecisionForm((current) => ({
+                            ...current,
+                            self_reported_confidence: event.target.value as
+                              'low' | 'medium' | 'high' | 'not_provided',
+                          }))
+                        }
+                        style={{ padding: '5px 8px' }}
+                      >
+                        {(['not_provided', 'low', 'medium', 'high'] as const).map((value) => (
+                          <option key={value} value={value}>
+                            {CONFIDENCE_LABELS_ZH[value]}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+                  <label style={{ display: 'grid', gap: '4px' }}>
+                    <span style={{ color: 'var(--text-muted)' }}>
+                      理由（進場／出場必填）
+                    </span>
+                    <textarea
+                      data-testid="pl-decision-rationale"
+                      value={decisionForm.rationale}
+                      rows={2}
+                      onChange={(event) =>
+                        setDecisionForm((current) => ({ ...current, rationale: event.target.value }))
+                      }
+                      style={{ padding: '5px 8px', fontSize: '12px' }}
+                    />
+                  </label>
+                  <label style={{ display: 'grid', gap: '4px' }}>
+                    <span style={{ color: 'var(--text-muted)' }}>
+                      預期結果（進場／出場必填）
+                    </span>
+                    <input
+                      data-testid="pl-decision-outcome"
+                      value={decisionForm.expected_outcome}
+                      onChange={(event) =>
+                        setDecisionForm((current) => ({
+                          ...current,
+                          expected_outcome: event.target.value,
+                        }))
+                      }
+                      style={{ padding: '5px 8px', fontSize: '12px' }}
+                    />
+                  </label>
+                  <label style={{ display: 'grid', gap: '4px' }}>
+                    <span style={{ color: 'var(--text-muted)' }}>什麼情況下算判斷錯誤（可留空）</span>
+                    <input
+                      data-testid="pl-decision-falsify"
+                      value={decisionForm.falsification_condition}
+                      onChange={(event) =>
+                        setDecisionForm((current) => ({
+                          ...current,
+                          falsification_condition: event.target.value,
+                        }))
+                      }
+                      style={{ padding: '5px 8px', fontSize: '12px' }}
+                    />
+                  </label>
+                  <div style={{ display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      data-testid="pl-decision-save"
+                      onClick={() => recordInferenceDecision(prediction)}
+                      disabled={
+                        busy === 'decision' || prediction.skill_unit_id !== skillUnitId || !skillUnitId
+                      }
+                      title={
+                        prediction.skill_unit_id === skillUnitId
+                          ? '以此推論識別碼建立一筆本人決策記錄（不扣額度、不交易、不下單）。'
+                          : '推論結果與選取的技能帳號不一致時不會送出，避免把決策連到別的帳號。'
+                      }
+                    >
+                      {busy === 'decision' ? '記錄中…' : '記錄這個推論的決策'}
+                    </button>
+                    {recordedDecision && recordedDecision.inference_id === prediction.inference_id && (
+                      <span
+                        data-testid="pl-decision-saved"
+                        style={{ color: 'var(--positive)', fontSize: '12px' }}
+                      >
+                        已記錄決策 {shortId(recordedDecision.decision_id)}，
+                        回連推論 {shortId(recordedDecision.inference_id)}。
+                      </span>
+                    )}
+                  </div>
+                  <p style={{ margin: 0, color: 'var(--text-muted)', fontSize: '11px' }}>
+                    這裡只寫決策記錄，不會建立或提交任何訂單；真的要交易時，訂單走回放頁或該帳號的模擬投資組合頁提交。
+                  </p>
                 </div>
               </div>
             )}
@@ -2290,7 +2754,7 @@ export default function PersonalStrategyLearningPanel() {
                       {models.map((model) => (
                         <option key={model.model_version_id} value={model.model_version_id}>
                           版本 {model.version_number}
-                          {model.is_active ? ' · 使用中' : ''}
+                          {scopeActiveVersionId === model.model_version_id ? inScopeSuffix : ''}
                         </option>
                       ))}
                     </select>
@@ -2310,7 +2774,7 @@ export default function PersonalStrategyLearningPanel() {
                       {models.map((model) => (
                         <option key={model.model_version_id} value={model.model_version_id}>
                           版本 {model.version_number}
-                          {model.is_active ? ' · 使用中' : ''}
+                          {scopeActiveVersionId === model.model_version_id ? inScopeSuffix : ''}
                         </option>
                       ))}
                     </select>
@@ -2556,7 +3020,8 @@ export default function PersonalStrategyLearningPanel() {
                 >
                   <strong>選用或回退版本</strong>
                   <div style={{ marginTop: '6px', color: 'var(--text-muted)' }}>
-                    切換使用中版本不會刪除任何版本、artifact 或已保存的評估；使用中別名推論會回傳解析後的固定版本。
+                    切換使用中版本不會刪除任何版本、artifact 或已保存的評估；這裡的切換只對上方選取的技能帳號生效，
+                    其他帳號仍使用它們自己當時選用的版本。
                   </div>
                   <label style={{ display: 'grid', gap: '4px', marginTop: '8px' }}>
                     <span style={{ color: 'var(--text-muted)' }}>選用理由（至少 2 個字，會永久保存）</span>
@@ -2574,7 +3039,7 @@ export default function PersonalStrategyLearningPanel() {
                       className="btn"
                       data-testid="pl-select-a"
                       onClick={() => selectVersion('a')}
-                      disabled={busy !== null || !comparison}
+                      disabled={busy !== null || !comparison || !skillUnitId}
                     >
                       選用版本 A
                     </button>
@@ -2583,7 +3048,7 @@ export default function PersonalStrategyLearningPanel() {
                       className="btn"
                       data-testid="pl-select-b"
                       onClick={() => selectVersion('b')}
-                      disabled={busy !== null || !comparison}
+                      disabled={busy !== null || !comparison || !skillUnitId}
                     >
                       選用版本 B
                     </button>
@@ -2592,18 +3057,27 @@ export default function PersonalStrategyLearningPanel() {
                       className="btn"
                       data-testid="pl-rollback"
                       onClick={rollbackVersion}
-                      disabled={busy !== null || !selections[0]?.previous_version_id}
+                      disabled={busy !== null || !skillUnitId || !selections[0]?.previous_version_id}
                     >
                       回退到上一個版本
                     </button>
                   </div>
-                  {activeVersionId && (
-                    <div style={{ marginTop: '6px', color: 'var(--text-secondary)' }}>
-                      目前使用中：版本{' '}
-                      {models.find((model) => model.model_version_id === activeVersionId)
-                        ?.version_number ?? shortId(activeVersionId)}
-                    </div>
-                  )}
+                  <div
+                    data-testid="pl-scope-active"
+                    style={{ marginTop: '6px', color: 'var(--text-secondary)' }}
+                  >
+                    {scopeActiveVersionId ? (
+                      <>
+                        {skillUnitId
+                          ? `${skillUnitLabel()} 目前使用：版本 `
+                          : '目前使用中（記錄別名，未授權任何帳號）：版本 '}
+                        {models.find((model) => model.model_version_id === scopeActiveVersionId)
+                          ?.version_number ?? shortId(scopeActiveVersionId)}
+                      </>
+                    ) : (
+                      <>此範圍還沒有任何使用中版本。</>
+                    )}
+                  </div>
                 </div>
 
                 {comparisons.length > 0 && (
@@ -2661,7 +3135,10 @@ export default function PersonalStrategyLearningPanel() {
 
                 {selections.length > 0 && (
                   <div style={{ marginTop: '12px', fontSize: '12px' }}>
-                    <strong>版本選用紀錄</strong>
+                    <strong>
+                      版本選用紀錄
+                      {skillUnitId ? `（${skillUnitLabel()}）` : '（全部範圍）'}
+                    </strong>
                     <div style={{ display: 'grid', gap: '4px', marginTop: '6px' }}>
                       {selections.map((entry) => (
                         <div
@@ -2675,6 +3152,9 @@ export default function PersonalStrategyLearningPanel() {
                           {entry.previous_version_number !== null
                             ? `（原版本 ${entry.previous_version_number}）`
                             : ''}
+                          {entry.skill_unit_id
+                            ? ` · 範圍：帳號 ${shortId(entry.skill_unit_id)}`
+                            : ' · 範圍：記錄別名'}
                           {entry.rationale ? ` · 理由：${entry.rationale}` : ''}
                         </div>
                       ))}
@@ -2725,7 +3205,14 @@ function ComparisonVersionCard({
           {label} · 版本 {version.version_number}
         </strong>
         <span style={{ color: 'var(--text-muted)' }}>{version.model_type}</span>
-        {version.is_active && <span style={{ color: 'var(--positive)' }}>使用中</span>}
+        {version.is_active && (
+          <span
+            style={{ color: 'var(--text-muted)' }}
+            title="記錄別名指向此版本；它不代表任何技能帳號正在使用它。"
+          >
+            記錄別名指向
+          </span>
+        )}
         {version.revoked && <span style={{ color: 'var(--warning)' }}>已撤銷</span>}
         <span style={{ fontFamily: 'monospace', color: 'var(--text-muted)' }}>
           artifact {shortId(version.artifact_sha256)}

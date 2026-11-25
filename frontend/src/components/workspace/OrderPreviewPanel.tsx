@@ -1,8 +1,24 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
-import { api, ApiError } from '@/lib/api';
+import { api, ApiError, formatErrorDetail } from '@/lib/api';
+import {
+  isStillViewed,
+  frozenVersion,
+  reviewStamp,
+} from '@/lib/reviewCurrency';
+import {
+  LINEAGE_ATTACH_LABEL_ZH,
+  LINEAGE_ATTACH_NOTE_ZH,
+  LINEAGE_HOLD_NOTE_ZH,
+  LINEAGE_NO_SOURCE_NOTE_ZH,
+  LINEAGE_STATE_LABELS_ZH,
+  estimateSourceFromStatus,
+  lineageRefusalOf,
+  lineageState,
+  type EstimateSource,
+} from '@/lib/dailyEstimate';
 import {
   ACTION_LABELS,
   label,
@@ -53,6 +69,11 @@ interface ManualReview {
   rationale: string;
   idempotency_key: string;
   cursorLabel: string;
+  /** Frozen with the review: sent live, a concurrent write's newer version would
+   *  answer the server's optimistic lock instead of tripping it. */
+  expected_version: number | null;
+  /** Frozen at review time: what the owner had explicitly chosen as the origin. */
+  linked_inference_id: string | null;
 }
 
 interface ManualResult {
@@ -173,6 +194,24 @@ export default function OrderPreviewPanel({
   const [sessionOrders, setSessionOrders] = useState<Record<string, any>[]>([]);
   const [sessionOrdersLoaded, setSessionOrdersLoaded] = useState(false);
   const [cancellingOrderId, setCancellingOrderId] = useState('');
+  // The estimate this account may be allowed to name as the decision's origin.
+  // It is read for the portfolio the form submits for, because that is the
+  // account the backend settles into and verifies the inference against — an
+  // id from another skill account is refused at the door, not accepted and
+  // misfiled. Nothing is ever attached without an explicit tick.
+  const [estimateSource, setEstimateSource] = useState<EstimateSource | null>(null);
+  const [lineageSelected, setLineageSelected] = useState(false);
+  const [lineageLoading, setLineageLoading] = useState(false);
+
+  // The session this view holds *now*, for the continuations that resolve after
+  // an await. The `session` prop inside a callback is the one that was on screen
+  // when the request left; using it to decide whether a late payload still
+  // belongs here is what let a re-read of an abandoned session overwrite the one
+  // the owner had moved to.
+  const viewedSessionId = useRef<string | null>(session?.id ?? null);
+  useEffect(() => {
+    viewedSessionId.current = session?.id ?? null;
+  }, [session?.id]);
 
   /** The session's own intents, so a pending order survives a reload. */
   const loadSessionOrders = useCallback(async (sessionId: string | null) => {
@@ -217,6 +256,22 @@ export default function OrderPreviewPanel({
       setPortfolioId('');
     } finally {
       setPortfoliosLoaded(true);
+    }
+  }, []);
+
+  /** What the estimate service last produced for one skill account, or nothing. */
+  const loadEstimateSource = useCallback(async (skillUnitId: string) => {
+    setLineageLoading(true);
+    try {
+      const status = await api.ml.dailyEstimateStatus(skillUnitId);
+      setEstimateSource(estimateSourceFromStatus(status));
+    } catch {
+      // A status route that cannot be read is not evidence that no estimate
+      // exists; the picker says so rather than offering a silent "none".
+      setEstimateSource(null);
+    } finally {
+      setLineageLoading(false);
+      setLineageSelected(false);
     }
   }, []);
 
@@ -321,24 +376,50 @@ export default function OrderPreviewPanel({
   }, [portfoliosLoaded, portfolios, selected, session, rules, instrumentId]);
 
   const isManual = target.kind === 'manual';
+  // Only the manual door writes a paper decision, so only it asks for a source.
+  // The intent flow below writes an ExecutionIntent, which is a different record
+  // behind a different door and has no inference-lineage field to fill.
+  useEffect(() => {
+    if (!isManual || !selected?.id) {
+      setEstimateSource(null);
+      setLineageSelected(false);
+      return;
+    }
+    loadEstimateSource(selected.id);
+  }, [isManual, selected?.id, loadEstimateSource]);
   // Reading the lifecycle record is not the same decision as being allowed to write to it:
   // the book stays available for the account's bound session even once submission is disabled.
   const bookSession =
     selected && session && session.id === selected.simulation_session_id ? session : null;
   const manualQuantity = Math.floor(parseFloat(quantityText) || 0);
+  // One derivation for the checkbox, the prose under it and the payload, so the
+  // panel cannot offer to attach a source this action would be refused for — the
+  // same function the replay page uses, on the same three facts.
+  const lineage = lineageState({
+    has_source: !!estimateSource,
+    selected: lineageSelected,
+    action,
+  });
   // Every input the submitted decision depends on, flattened to one comparable value.
-  // The server cursor is part of it, so an advance elsewhere invalidates the review.
-  const signature = JSON.stringify([
+  // The server cursor and its lock counter are both part of it, so an advance or a
+  // decision written elsewhere voids the review here instead of costing a 409.
+  const signature = reviewStamp({
     portfolioId,
     instrumentId,
     action,
-    session?.id ?? null,
-    session?.current_snapshot_date ?? null,
-    session?.current_bar_timestamp ?? null,
-    session?.status ?? null,
-    action === 'buy' ? manualQuantity : null,
-    rationale.trim(),
-  ]);
+    sessionId: session?.id ?? null,
+    snapshotDate: session?.current_snapshot_date ?? null,
+    barTimestamp: session?.current_bar_timestamp ?? null,
+    status: session?.status ?? null,
+    stateVersion: frozenVersion(session),
+    buyQuantity: action === 'buy' ? manualQuantity : null,
+    rationale: rationale.trim(),
+    // Naming a different origin is a different decision, so it has to be
+    // reviewed as one: an untick after the review must not ride on the old
+    // stamp, and neither must a new estimate arriving while the form sat idle.
+    attachedInferenceId:
+      lineage === 'attached' ? estimateSource?.inference_id ?? null : null,
+  });
   const reviewStale = !!review && review.stamp !== signature;
 
   useEffect(() => {
@@ -350,6 +431,9 @@ export default function OrderPreviewPanel({
     setManualResult(null);
     setManualUnknown('');
     setReconcileNote('');
+    // The named estimate is one instrument's verdict; a tick made while the form
+    // showed another must not follow the owner onto this one.
+    setLineageSelected(false);
   }, [instrumentId]);
 
   const lotSize = instrument?.lot_size;
@@ -404,6 +488,12 @@ export default function OrderPreviewPanel({
       // double click or a re-send after an unknown outcome cannot create two decisions.
       idempotency_key: `ws-${session.id.slice(0, 8)}-${Date.now()}`,
       cursorLabel: sessionClock(session),
+      expected_version: frozenVersion(session),
+      // Frozen at the press, through the same derivation as the checkbox: a hold
+      // with a stale tick still sends no field, because the route refuses that
+      // combination rather than recording it somewhere else.
+      linked_inference_id:
+        lineage === 'attached' && estimateSource ? estimateSource.inference_id : null,
     });
   };
 
@@ -420,7 +510,10 @@ export default function OrderPreviewPanel({
         rationale: review.rationale || undefined,
       };
       if (review.quantity !== null) payload.quantity = review.quantity;
-      if (typeof session?.state_version === 'number') payload.expected_version = session.state_version;
+      if (review.expected_version !== null) payload.expected_version = review.expected_version;
+      // Sent only when the owner named this estimate as the origin. A missing
+      // field means "no claimed source" — never "take the latest one".
+      if (review.linked_inference_id) payload.linked_inference_id = review.linked_inference_id;
       const res = (await api.simulations.manualDecision(review.sessionId, payload)) as {
         session: ReplaySession;
         decision: Record<string, any>;
@@ -440,15 +533,31 @@ export default function OrderPreviewPanel({
       setNotice(
         manualNotice(res.decision, res.order ?? null, res.rejection ?? null, res.fill ?? null)
       );
-      if (res.session?.id === session?.id) onSessionChange?.(res.session);
+      if (isStillViewed(viewedSessionId.current, res.session?.id)) onSessionChange?.(res.session);
       loadSessionOrders(review.sessionId);
       setReview(null);
       setRationale('');
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Submission failed';
-      if (err instanceof ApiError && err.status === 409) {
+      const refusal = err instanceof ApiError ? lineageRefusalOf(err.status, err.detail) : null;
+      if (refusal && err instanceof ApiError) {
+        // The route refused the claimed origin and wrote nothing, so the tick is
+        // dropped rather than retried: the same payload gets the same refusal.
+        setReview(null);
+        setLineageSelected(false);
+        setError(`${refusal.message_zh ?? formatErrorDetail(err.detail)}（reason：${refusal.reason}）`);
+      } else if (err instanceof ApiError && err.status === 409) {
         setReview(null);
         if (message.includes('State version conflict')) {
+          // This review stamped a version that no longer exists, and the session
+          // object still holds it: without a re-read every later review would
+          // freeze the same dead number and the door would never open again.
+          try {
+            const fresh = (await api.simulations.get(review.sessionId)) as ReplaySession;
+            if (isStillViewed(viewedSessionId.current, fresh?.id)) onSessionChange?.(fresh);
+          } catch {
+            // Best effort — the message below still asks the owner to re-check.
+          }
           setError('State version conflict: the session was changed by another action; re-check the latest cursor and submit again.');
         } else if (message.includes('Idempotency key conflict') || message.includes('idempotency_key')) {
           setError(
@@ -481,7 +590,7 @@ export default function OrderPreviewPanel({
         api.simulations.decisions(review.sessionId) as Promise<any[]>,
         api.simulations.get(review.sessionId) as Promise<ReplaySession>,
       ]);
-      if (fresh && fresh.id === session?.id) onSessionChange?.(fresh);
+      if (isStillViewed(viewedSessionId.current, fresh?.id)) onSessionChange?.(fresh);
       const hit = Array.isArray(rows)
         ? rows.find((d) => d?.decision_detail?.idempotency_key === review.idempotency_key)
         : null;
@@ -827,6 +936,65 @@ export default function OrderPreviewPanel({
               />
             </div>
 
+            <div
+              className="ws-form-field"
+              data-testid="ws-lineage-picker"
+              style={{
+                marginBottom: 8,
+                padding: '8px 10px',
+                border: '1px solid var(--border)',
+                borderRadius: 6,
+                background: 'var(--surface-2)',
+              }}
+            >
+              <label
+                htmlFor="ws-lineage-attach"
+                style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, fontWeight: 600 }}
+              >
+                <input
+                  id="ws-lineage-attach"
+                  type="checkbox"
+                  data-testid="ws-lineage-attach"
+                  checked={lineage === 'attached'}
+                  disabled={lineage === 'no_source' || lineage === 'hold_no_lineage' || lineageLoading}
+                  onChange={(e) => setLineageSelected(e.target.checked)}
+                />
+                {LINEAGE_ATTACH_LABEL_ZH}
+              </label>
+              <div data-testid="ws-lineage-state" className="ws-muted ws-small">
+                {LINEAGE_STATE_LABELS_ZH[lineage]}
+                {lineageLoading ? '（讀取中）' : ''}
+              </div>
+              {estimateSource && (
+                <div data-testid="ws-lineage-source" className="ws-small" style={{ fontFamily: 'monospace' }}>
+                  inference_id: {estimateSource.inference_id}
+                  {estimateSource.instrument_id ? ` · ${estimateSource.instrument_id}` : ''}
+                  {estimateSource.as_of_date ? ` · 估計時點 ${estimateSource.as_of_date}` : ''}
+                  {' · '}
+                  {estimateSource.predicted_action
+                    ? estimateSource.predicted_action
+                    : estimateSource.verdict_durable === false
+                      ? '結論不在帳本列上'
+                      : '（此列未持有結論）'}
+                </div>
+              )}
+              {lineage === 'no_source' && !lineageLoading && (
+                <div data-testid="ws-lineage-none" className="ws-muted ws-small">
+                  {LINEAGE_NO_SOURCE_NOTE_ZH}
+                </div>
+              )}
+              {lineage === 'hold_no_lineage' && (
+                <div data-testid="ws-lineage-hold" className="ws-muted ws-small">
+                  {LINEAGE_HOLD_NOTE_ZH}
+                </div>
+              )}
+              {lineage === 'attached' && (
+                <div data-testid="ws-lineage-note" className="ws-muted ws-small">
+                  {LINEAGE_ATTACH_NOTE_ZH}
+                </div>
+              )}
+            </div>
+
             <p className="ws-muted ws-small" data-testid="order-manual-semantics">
               Type: market (the backend manual-decision endpoint accepts only buy/sell/hold — no
               limit orders and no partial fills). A sell fills the whole position held by the
@@ -956,6 +1124,12 @@ export default function OrderPreviewPanel({
                   <td>{review.rationale || NOT_PROVIDED}</td>
                 </tr>
                 <tr>
+                  <td className="ws-muted">Claimed source inference</td>
+                  <td data-testid="order-review-lineage">
+                    {review.linked_inference_id ?? '未明選來源（不會自動取最新估計）'}
+                  </td>
+                </tr>
+                <tr>
                   <td className="ws-muted">Replay cursor</td>
                   <td data-testid="order-review-cursor">{review.cursorLabel}</td>
                 </tr>
@@ -1035,6 +1209,14 @@ export default function OrderPreviewPanel({
               <tr>
                 <td className="ws-muted">Snapshot date</td>
                 <td>{text(manualResult.decision?.snapshot_date)}</td>
+              </tr>
+              {/* Read back from what the server wrote, not from what this browser
+                  pressed: the field the response carries is the one the ledger holds. */}
+              <tr>
+                <td className="ws-muted">Source inference on the record</td>
+                <td data-testid="order-manual-lineage">
+                  {text(manualResult.decision?.decision_detail?.linked_inference_id)}
+                </td>
               </tr>
               <tr>
                 <td className="ws-muted">Cash / equity after decision</td>

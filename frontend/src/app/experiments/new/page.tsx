@@ -6,6 +6,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { brand } from '@/lib/brand';
 import { STRATEGY_TEMPLATE_LABELS } from '@/lib/copy';
+import DataManifestPanel from '@/components/experiments/DataManifestPanel';
 import type { DataCoverage } from '@/components/workspace/types';
 
 const DEMO_ASSETS = ['DEMO-ALPHA', 'DEMO-BETA', 'DEMO-BENCHMARK'];
@@ -260,6 +261,26 @@ function NewExperimentForm() {
     return params;
   };
 
+  const buildStrategySpec = () => ({
+    schema_version: '1.0',
+    template_type: templateType,
+    asset_ids: [assetId],
+    frequency: '1d',
+    start_date: startDate,
+    end_date: endDate,
+    initial_cash: parseFloat(initialCash),
+    signal_parameters: buildSignalParameters(),
+    entry_rule: {},
+    exit_rule: {},
+    sizing_rule: {},
+    risk_parameters: buildRiskParameters(),
+    execution_timing: { execute_at: 'next_open' },
+    commission_rate: parseFloat(commissionRate) || 0,
+    slippage_rate: parseFloat(slippageRate) || 0,
+    benchmark_id: benchmarkId,
+    currency: 'USD',
+  });
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
@@ -270,24 +291,11 @@ function NewExperimentForm() {
         title,
         hypothesis,
         research_type: 'quantitative',
+        // The same object the data-manifest panel checked, plus the approval
+        // stamp the server defines as not part of the spec's substance
+        // (IGNORED_CHANGE_FIELDS, app/api/experiments.py:575).
         strategy_spec: {
-          schema_version: '1.0',
-          template_type: templateType,
-          asset_ids: [assetId],
-          frequency: '1d',
-          start_date: startDate,
-          end_date: endDate,
-          initial_cash: parseFloat(initialCash),
-          signal_parameters: buildSignalParameters(),
-          entry_rule: {},
-          exit_rule: {},
-          sizing_rule: {},
-          risk_parameters: buildRiskParameters(),
-          execution_timing: { execute_at: 'next_open' },
-          commission_rate: parseFloat(commissionRate) || 0,
-          slippage_rate: parseFloat(slippageRate) || 0,
-          benchmark_id: benchmarkId,
-          currency: 'USD',
+          ...buildStrategySpec(),
           user_approved_at: new Date().toISOString(),
         },
       });
@@ -584,6 +592,11 @@ function NewExperimentForm() {
               will find no data.
             </div>
           )}
+
+          {/* Coverage above answers "how wide is the cached range"; this asks the
+              engine's own read path what a run from the parameters in this form
+              would price off, and what it refuses. */}
+          <DataManifestPanel spec={buildStrategySpec()} assetLabel={assetId} />
 
           <div className="form-group">
             <label htmlFor="exp-initial-cash">Initial cash (USD) *</label>

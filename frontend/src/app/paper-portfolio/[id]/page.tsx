@@ -5,6 +5,13 @@ import { useRouter, useParams } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import { statusPillClass } from '@/lib/status-styles';
+import {
+  SOURCE_STATE_LABELS,
+  SOURCE_STATE_MISSING_NOTE,
+  SOURCE_STATE_UNREADABLE_NOTE,
+  inferenceSourceState,
+  type InferenceSourceState,
+} from '@/lib/decisionLineage';
 import AppShell from '@/components/shell/AppShell';
 import { formatDate, formatDateTime } from '@/lib/format';
 import {
@@ -81,6 +88,7 @@ interface Decision {
   falsification_condition: string | null;
   outcome_status: string;
   risk_flags: any;
+  linked_inference_id: string | null;
 }
 
 /** Accent per decision type; the label text comes from the shared map. */
@@ -130,6 +138,14 @@ export default function PaperPortfolioDetailPage() {
   });
   const [submitting, setSubmitting] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const [decisionDownloading, setDecisionDownloading] = useState(false);
+  // `inference_source_state` exists only on the decision-history export, so the
+  // Decisions tab reads that same route (format=json) to show the state instead
+  // of sending the owner off to open a CSV. null means not read yet — which is
+  // not the same fact as 「no decision names a source」.
+  const [sourceStates, setSourceStates] = useState<Record<string, InferenceSourceState> | null>(null);
+  const [unreadableStates, setUnreadableStates] = useState(0);
+  const [sourceStateError, setSourceStateError] = useState('');
   // One key per submission attempt: reused when the user retries the very same
   // order after a lost response, cleared as soon as any field changes.
   const [pendingIdempotencyKey, setPendingIdempotencyKey] = useState<string | null>(null);
@@ -245,25 +261,97 @@ export default function PaperPortfolioDetailPage() {
     }
   };
 
+  const downloadText = (filename: string, text: string, mime: string) => {
+    const blob = new Blob([text], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   const handleDownloadCsv = async () => {
     setDownloading(true);
     try {
       const text = await api.paperPortfolio.journalCsv(portfolioId);
-      const blob = new Blob([text], { type: 'text/csv;charset=utf-8' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `trade-journal-${portfolioId}.csv`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      downloadText(`trade-journal-${portfolioId}.csv`, text, 'text/csv;charset=utf-8');
     } catch (err: any) {
       setError(err.message);
     } finally {
       setDownloading(false);
     }
   };
+
+  const handleDownloadDecisionHistory = async () => {
+    setDecisionDownloading(true);
+    try {
+      const text = await api.paperPortfolio.decisionHistoryCsv(portfolioId);
+      downloadText(`decision-history-${portfolioId}.csv`, text, 'text/csv;charset=utf-8');
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setDecisionDownloading(false);
+    }
+  };
+
+  const handleDownloadDecisionHistoryJson = async () => {
+    setDecisionDownloading(true);
+    try {
+      const payload = await api.paperPortfolio.decisionHistoryJson(portfolioId);
+      downloadText(
+        `decision-history-${portfolioId}.json`,
+        JSON.stringify(payload, null, 2),
+        'application/json;charset=utf-8',
+      );
+      // The same read fills the on-screen states: one response, so the file
+      // and the page cannot disagree about what the ledger said.
+      applySourceStates(payload);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setDecisionDownloading(false);
+    }
+  };
+
+  function applySourceStates(payload: any) {
+    const records = Array.isArray(payload?.records) ? payload.records : null;
+    if (!records) {
+      setSourceStates(null);
+      setSourceStateError('The decision-history export carried no records array; the source states were not read.');
+      return;
+    }
+    const next: Record<string, InferenceSourceState> = {};
+    let unreadable = 0;
+    for (const record of records) {
+      const state = inferenceSourceState(record?.inference_source_state);
+      if (state && typeof record?.decision_id === 'string') next[record.decision_id] = state;
+      else unreadable += 1;
+    }
+    // A row this build cannot name is counted, not dropped: a page that showed
+    // nothing for it would read as "no source claimed".
+    setUnreadableStates(unreadable);
+    setSourceStates(next);
+    setSourceStateError('');
+  }
+
+  // Read the decision-history export when the Decisions tab opens, so the
+  // source state is on screen and not only inside a downloaded file.
+  useEffect(() => {
+    if (activeTab !== 'decisions' || sourceStates !== null) return;
+    (async () => {
+      try {
+        applySourceStates(await api.paperPortfolio.decisionHistoryJson(portfolioId));
+      } catch (err: any) {
+        setSourceStateError(
+          `Could not read the source states: ${err.message || 'unknown error'}. ` +
+            'A failed read is not evidence that no decision names a source.',
+        );
+      }
+    })();
+  }, [activeTab, portfolioId, sourceStates]);
 
   if (loading) {
     return (
@@ -362,6 +450,32 @@ export default function PaperPortfolioDetailPage() {
               opacity: downloading ? 0.6 : 1,
             }}>
             {downloading ? 'Exporting…' : 'Download trade journal CSV'}
+          </button>
+          <button
+            onClick={handleDownloadDecisionHistory}
+            disabled={decisionDownloading}
+            data-testid="pp-download-decision-history"
+            title="Every decision recorded for this account — including ones that placed no order — with the model run each one names."
+            style={{
+              padding: '0.375rem 0.75rem', background: 'rgba(59,130,246,0.10)', color: 'var(--primary-text)',
+              border: '1px solid var(--primary)', borderRadius: '4px',
+              cursor: decisionDownloading ? 'default' : 'pointer', fontSize: '0.8125rem',
+              opacity: decisionDownloading ? 0.6 : 1,
+            }}>
+            {decisionDownloading ? 'Exporting…' : 'Download decision history CSV'}
+          </button>
+          <button
+            onClick={handleDownloadDecisionHistoryJson}
+            disabled={decisionDownloading}
+            data-testid="pp-download-decision-history-json"
+            title="The same rows as the CSV, plus column_semantics: what each column means, including inference_source_state."
+            style={{
+              padding: '0.375rem 0.75rem', background: 'rgba(59,130,246,0.10)', color: 'var(--primary-text)',
+              border: '1px solid var(--primary)', borderRadius: '4px',
+              cursor: decisionDownloading ? 'default' : 'pointer', fontSize: '0.8125rem',
+              opacity: decisionDownloading ? 0.6 : 1,
+            }}>
+            {decisionDownloading ? 'Exporting…' : 'Download decision history JSON'}
           </button>
           {portfolio.status === 'active' && (
             <>
@@ -774,6 +888,16 @@ export default function PaperPortfolioDetailPage() {
       {activeTab === 'decisions' && (
         <div role="tabpanel" id="pp-panel-decisions" aria-labelledby="pp-tab-decisions">
           <h2 style={{ fontSize: '1.1rem', marginBottom: '0.75rem' }}>Decisions</h2>
+          {sourceStateError && (
+            <div role="status" data-testid="pp-source-state-error" style={{ fontSize: '0.8125rem', color: 'var(--warning)', marginBottom: '0.5rem' }}>
+              {sourceStateError}
+            </div>
+          )}
+          {unreadableStates > 0 && (
+            <div data-testid="pp-source-state-unreadable" style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)', marginBottom: '0.5rem' }}>
+              {`${unreadableStates} row(s): ${SOURCE_STATE_UNREADABLE_NOTE}`}
+            </div>
+          )}
           {decisions.length === 0 ? (
             <div style={{ padding: '1rem', color: 'var(--text-secondary)' }}>No decisions recorded yet.</div>
           ) : (
@@ -783,6 +907,9 @@ export default function PaperPortfolioDetailPage() {
                 const linkedOrder = orders
                   .filter((o) => o.decision_id === d.id)
                   .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))[0] ?? null;
+                // null here means the export was not read (or this row was not in
+                // it) — not 「no source」, which is the route's own `none` state.
+                const sourceState = sourceStates ? sourceStates[d.id] ?? null : null;
                 return (
                   <div key={d.id} style={{
                     padding: '1rem', background: 'var(--surface-1)', border: '1px solid var(--border-strong)',
@@ -874,6 +1001,29 @@ export default function PaperPortfolioDetailPage() {
                         No linked paper order record
                       </div>
                     )}
+                    <div data-testid="pp-decision-inference-source" style={{ marginTop: '0.25rem', fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                      {d.linked_inference_id ? (
+                        <>
+                          Model run this decision names: <code>{d.linked_inference_id}</code>
+                          {' '}—{' '}
+                          <span data-testid="pp-decision-source-state">
+                            {sourceState
+                              ? SOURCE_STATE_LABELS[sourceState]
+                              : 'source state not read yet (opening this tab reads it; a failed read is not a missing source)'}
+                          </span>
+                          {' '}(pinned version and data cut-off are in the decision history export)
+                        </>
+                      ) : (
+                        <span data-testid="pp-decision-source-state">
+                          No model run named — this was decided without a personal-model estimate.
+                        </span>
+                      )}
+                      {sourceState === 'missing' && (
+                        <div style={{ marginTop: '0.25rem', color: 'var(--warning)' }}>
+                          {SOURCE_STATE_MISSING_NOTE}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 );
               })}

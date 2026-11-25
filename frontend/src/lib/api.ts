@@ -270,13 +270,40 @@ export const api = {
     methodReview: (id: string) => apiFetch(`/api/v1/experiments/${id}/method-review`),
   },
   runs: {
-    create: (versionId: string) =>
-      apiFetch(`/api/v1/versions/${versionId}/runs`, { method: 'POST' }),
+    // `idempotencyKey` is the optional `Idempotency-Key` header; src/lib/runRetry.ts
+    // decides when a click may carry one. Without a key the server cannot tell a
+    // resubmission after a lost response from a deliberate second backtest, so it
+    // admits and bills both. An admitted key is answered with 200 (same row)
+    // instead of 201, which `apiFetch` does not surface — see runRetry.ts.
+    create: (versionId: string, idempotencyKey?: string | null) =>
+      apiFetch(`/api/v1/versions/${versionId}/runs`, {
+        method: 'POST',
+        headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined,
+      }),
     get: (runId: string) =>
       apiFetch(`/api/v1/runs/${runId}`),
     list: (experimentId: string) => apiFetch(`/api/v1/experiments/${experimentId}/runs`),
+    // Close an attempt by decision. `reason` is the optional query parameter
+    // the server stores in the audit event; the response carries `note`, which
+    // is the server's own words for what this does and does not prove about the
+    // process, and callers must show it rather than paraphrase it.
+    cancel: (runId: string, reason?: string) =>
+      apiFetch(
+        `/api/v1/runs/${runId}/cancel${
+          reason ? `?reason=${encodeURIComponent(reason)}` : ''
+        }`,
+        { method: 'POST' },
+      ),
     compare: (runA: string, runB: string) =>
       apiFetch(`/api/v1/runs/compare?run_a=${runA}&run_b=${runB}`),
+    // Per-fill export of one formal research run. `trades` is the record the
+    // server is willing to stand behind — it carries `export_basis`, which says
+    // what an empty list means — and `tradesCsv` serialises exactly those rows.
+    // A run that failed, was cancelled, is still computing, or was published
+    // without a transaction record is refused with 409 on both, so a caller
+    // cannot read "no rows" as "no trades" when the record never said either.
+    trades: (runId: string) => apiFetch(`/api/v1/runs/${runId}/trades`),
+    tradesCsv: (runId: string) => apiFetchText(`/api/v1/runs/${runId}/trades.csv`),
   },
   // Read-only catalogue and preflight. The server derives both from the same
   // StrategySpec schema and engine rules the create/run paths use.
@@ -287,6 +314,18 @@ export const api = {
         method: 'POST',
         body: JSON.stringify(spec),
       }),
+    // Which stored bars a run built from this spec would price off. Read-only:
+    // it creates no experiment, version, run or quota reservation and contacts
+    // no provider (backend/app/api/data_manifest.py). `providerId` binds the
+    // window to one provider, which is the remedy the server names when an
+    // instrument is held by two of them.
+    dataManifest: (spec: Record<string, unknown>, providerId?: string | null) =>
+      apiFetch(
+        `/api/v1/strategy-specs/data-manifest${
+          providerId ? `?provider_id=${encodeURIComponent(providerId)}` : ''
+        }`,
+        { method: 'POST', body: JSON.stringify(spec) },
+      ),
   },
   revisions: {
     create: (
@@ -383,6 +422,8 @@ export const api = {
       apiFetch(`/api/v1/simulations/${sessionId}/advance`, { method: 'POST' }),
     decisions: (sessionId: string) =>
       apiFetch(`/api/v1/simulations/${sessionId}/decisions`),
+    dailyService: (sessionId: string) =>
+      apiFetch(`/api/v1/simulations/${sessionId}/daily-service`),
     pause: (sessionId: string) =>
       apiFetch(`/api/v1/simulations/${sessionId}/pause`, { method: 'POST' }),
     resume: (sessionId: string) =>
@@ -396,6 +437,10 @@ export const api = {
       rationale?: string;
       reflection?: string;
       expected_version?: number;
+      /** The inference this decision claims as its origin. The route refuses it
+       *  for `hold`, and refuses a row that is not the same owner's
+       *  personal-model estimate for this session's own skill account. */
+      linked_inference_id?: string | null;
     }) =>
       apiFetch(`/api/v1/simulations/${sessionId}/manual-decision`, { method: 'POST', body: JSON.stringify(data) }),
     sessionOrders: (sessionId: string) =>
@@ -423,7 +468,26 @@ export const api = {
     decisions: (id: string) => apiFetch(`/api/v1/paper-portfolio/${id}/decisions`),
     journalCsv: (id: string) => apiFetchText(`/api/v1/paper-portfolio/${id}/journal?format=csv`),
     journalJson: (id: string) => apiFetch(`/api/v1/paper-portfolio/${id}/journal?format=json`),
-    createDecision: (id: string, data: any) =>
+    decisionHistoryCsv: (id: string) =>
+      apiFetchText(`/api/v1/paper-portfolio/${id}/decision-history?format=csv`),
+    decisionHistoryJson: (id: string) =>
+      apiFetch(`/api/v1/paper-portfolio/${id}/decision-history?format=json`),
+    createDecision: (
+      id: string,
+      data: {
+        actor_type: 'human' | 'ai_draft' | 'human_approved_ai_draft' | 'system';
+        decision_type: 'no_action' | 'entry' | 'exit' | 'pause' | 'retire' | 'override_request';
+        rationale?: string | null;
+        expected_outcome?: string | null;
+        expected_timeframe_days?: number | null;
+        self_reported_confidence?: 'low' | 'medium' | 'high' | 'not_provided' | null;
+        falsification_condition?: string | null;
+        linked_inference_id?: string | null;
+        linked_experiment_version_id?: string | null;
+        simulation_session_id?: string | null;
+        risk_flags?: Record<string, unknown> | null;
+      },
+    ) =>
       apiFetch(`/api/v1/paper-portfolio/${id}/decisions`, { method: 'POST', body: JSON.stringify(data) }),
     evaluateOutcome: (portfolioId: string, decisionId: string, data: any) =>
       apiFetch(`/api/v1/paper-portfolio/${portfolioId}/decisions/${decisionId}/outcome`, { method: 'POST', body: JSON.stringify(data) }),
@@ -824,6 +888,33 @@ export const api = {
       }),
     revokePersonalizationConsent: () =>
       apiFetch('/api/v1/ml/personalization/consent', { method: 'DELETE' }),
+    dailyEstimateConsent: () => apiFetch('/api/v1/ml/personalization/daily-estimate/consent'),
+    grantDailyEstimateConsent: (
+      skillUnits: {
+        skill_unit_id: string;
+        instrument_ids: string[];
+        max_data_age_days?: number | null;
+      }[],
+    ) =>
+      apiFetch('/api/v1/ml/personalization/daily-estimate/consent', {
+        method: 'PUT',
+        body: JSON.stringify({ skill_units: skillUnits, confirm: true }),
+      }),
+    revokeDailyEstimateConsent: (skillUnitId?: string) => {
+      const qs = skillUnitId ? `?skill_unit_id=${encodeURIComponent(skillUnitId)}` : '';
+      return apiFetch(`/api/v1/ml/personalization/daily-estimate/consent${qs}`, {
+        method: 'DELETE',
+      });
+    },
+    dailyEstimateStatus: (skillUnitId?: string) => {
+      const qs = skillUnitId ? `?skill_unit_id=${encodeURIComponent(skillUnitId)}` : '';
+      return apiFetch(`/api/v1/ml/personalization/daily-estimate/status${qs}`);
+    },
+    runDailyEstimate: (skillUnitId: string) =>
+      apiFetch('/api/v1/ml/personalization/daily-estimate/run', {
+        method: 'POST',
+        body: JSON.stringify({ skill_unit_id: skillUnitId }),
+      }),
     reviewDecisions: (strategyVersionId?: string) => {
       const qs = strategyVersionId
         ? `?strategy_version_id=${encodeURIComponent(strategyVersionId)}`
@@ -879,11 +970,23 @@ export const api = {
         : '';
       return apiFetch(`/api/v1/ml/personal/models${qs}`);
     },
-    activatePersonalModel: (versionId: string) =>
-      apiFetch(`/api/v1/ml/personal/models/${versionId}/activate`, { method: 'POST' }),
+    // Without skill_unit_id this only moves the record-wide alias, which
+    // authorizes no skill account; naming the account is what makes the
+    // version the one that account is served.
+    activatePersonalModel: (
+      versionId: string,
+      data?: { skill_unit_id?: string | null },
+    ) =>
+      apiFetch(`/api/v1/ml/personal/models/${versionId}/activate`, {
+        method: 'POST',
+        body: JSON.stringify(data ?? {}),
+      }),
+    // One inference always answers for one skill account: the version is
+    // selected per account, so the account has to be named or the server
+    // refuses the call.
     predictPersonalModel: (
       versionId: string,
-      data: { instrument_id: string; as_of_date: string },
+      data: { instrument_id: string; as_of_date: string; skill_unit_id: string },
     ) =>
       apiFetch(`/api/v1/ml/personal/models/${versionId}/predict`, {
         method: 'POST',
@@ -891,7 +994,7 @@ export const api = {
       }),
     predictPersonalViaRecord: (
       recordId: string,
-      data: { instrument_id: string; as_of_date: string },
+      data: { instrument_id: string; as_of_date: string; skill_unit_id: string },
     ) =>
       apiFetch(`/api/v1/ml/personal/records/${recordId}/predict`, {
         method: 'POST',
@@ -924,12 +1027,15 @@ export const api = {
       apiFetch(`/api/v1/ml/personal/comparisons/${runId}`),
     // The active alias the caller last saw is mandatory (null = nothing active)
     // so the server can refuse a stale switch instead of silently overwriting.
+    // It is checked in the scope being switched: the skill account's own
+    // version when skill_unit_id is set, the record-wide alias when it is not.
     selectPersonalModel: (
       versionId: string,
       data: {
         rationale: string;
         comparison_run_id?: string | null;
         expected_active_version_id: string | null;
+        skill_unit_id?: string | null;
       },
     ) =>
       apiFetch(`/api/v1/ml/personal/models/${versionId}/select`, {
@@ -938,14 +1044,24 @@ export const api = {
       }),
     rollbackPersonalModel: (
       recordId: string,
-      data: { rationale?: string | null; expected_active_version_id: string | null },
+      data: {
+        rationale?: string | null;
+        expected_active_version_id: string | null;
+        skill_unit_id?: string | null;
+      },
     ) =>
       apiFetch(`/api/v1/ml/personal/records/${recordId}/rollback`, {
         method: 'POST',
         body: JSON.stringify(data),
       }),
-    listPersonalSelections: (recordId: string) =>
-      apiFetch(`/api/v1/ml/personal/records/${recordId}/selections`),
+    // Scoped to one skill account, the read also returns that account's
+    // currently-used version; unscoped, it is the record-wide alias history.
+    listPersonalSelections: (recordId: string, skillUnitId?: string) =>
+      apiFetch(
+        `/api/v1/ml/personal/records/${recordId}/selections${
+          skillUnitId ? `?skill_unit_id=${encodeURIComponent(skillUnitId)}` : ''
+        }`,
+      ),
   },
   // Isolated agent-candidate screening slice. Every write here can be refused
   // for consent, authorization or data reasons; callers show those refusals as
@@ -1025,6 +1141,30 @@ export const api = {
       ),
     getTrainingJob: (jobId: string) =>
       apiFetch(`/api/v1/agent-strategy/training/jobs/${jobId}`),
+    // Model activation is the owner's own act on one artifact. The read returns
+    // both halves of the answer: ``requirements`` is what an approval has to
+    // echo back (checksum, policy version, acknowledgement text) and ``state``
+    // is what the gate currently concludes — never a value this client may
+    // assert on its own.
+    jobActivation: (jobId: string) =>
+      apiFetch(`/api/v1/agent-strategy/training/jobs/${jobId}/activation`),
+    activateJob: (jobId: string, data: {
+      artifact_checksum: string;
+      policy_version: string;
+      acknowledgement_text_version: string;
+      acknowledgement: string;
+      skill_unit_id?: string | null;
+    }) =>
+      apiFetch(`/api/v1/agent-strategy/training/jobs/${jobId}/activation`, {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+    // Withdrawal is never gated: the owner can always switch a model back off.
+    revokeJobActivation: (jobId: string, reason?: string | null) =>
+      apiFetch(`/api/v1/agent-strategy/training/jobs/${jobId}/activation/revoke`, {
+        method: 'POST',
+        body: JSON.stringify({ reason: reason ?? null }),
+      }),
     train: (snapshotId: string) =>
       apiFetch('/api/v1/agent-strategy/training/jobs', {
         method: 'POST',
@@ -1035,6 +1175,21 @@ export const api = {
         method: 'POST',
         body: JSON.stringify({ features }),
       }),
+    // The paper door consumes the *scope* of the approval above. The body names
+    // only which of the owner's own skill accounts runs, and the answer is the
+    // durable ledger row the server wrote — never a status this client asserts.
+    paperExecution: (jobId: string, data: { skill_unit_id: string }) =>
+      apiFetch(`/api/v1/agent-strategy/training/jobs/${jobId}/paper-execution`, {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    // The read the notice has to come from: this job's ledger, as recorded.
+    paperExecutions: (jobId: string, skillUnitId?: string | null) =>
+      apiFetch(
+        `/api/v1/agent-strategy/training/jobs/${jobId}/paper-executions${
+          skillUnitId ? `?skill_unit_id=${encodeURIComponent(skillUnitId)}` : ''
+        }`,
+      ),
   },
   billing: {
     listPlans: () => apiFetch('/api/v1/plans'),

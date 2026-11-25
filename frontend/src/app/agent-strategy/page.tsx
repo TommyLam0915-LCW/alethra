@@ -1,14 +1,54 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import AppShell from '@/components/shell/AppShell';
 import { api, ApiError } from '@/lib/api';
+import {
+  acceptActivationRead,
+  activationWriteNotice,
+  beginActivationRead,
+  isDisplayedActivationJob,
+  NO_ACTIVATION_READ,
+  verificationOf,
+  type ActivationReadId,
+  type ActivationReadResult,
+} from '@/lib/activationPanel';
+import {
+  acceptPaperRead,
+  approvalScopeError,
+  approvalScopeNotice,
+  approvalScopeOf,
+  approvalScopeSentence,
+  beginPaperRead,
+  isDisplayedPaperContext,
+  ledgerOfContext,
+  NO_PAPER_READ,
+  paperContextKey,
+  paperReadbackNotice,
+  paperRefusalNotice,
+  readbackRowOf,
+  submitBlockedReason,
+  tradeLinksZH,
+  executionOutcomeZH,
+  type ApprovalChoice,
+  type PaperContext,
+  type PaperLedgerRow,
+  type PaperReadback,
+  type PaperReadId,
+} from '@/lib/paperExecutionPanel';
 import { formatDate, formatDateTime } from '@/lib/format';
 import { statusPillClass } from '@/lib/status-styles';
 
 const SUPPORTED_RULE = 'sma_crossover';
 const ACCEPT_PHRASE = 'I ACCEPT';
+
+// Mirrors the comparison the server itself makes in
+// ``model_activation._normalise_ack``: the owner has to submit the whole text,
+// spacing aside.
+function normaliseAck(text: string): string {
+  return text.replace(/\s+/g, '');
+}
 
 interface CapabilitiesPayload {
   capability: {
@@ -296,9 +336,57 @@ interface InferencePayload {
   artifact_verified: boolean;
   activation_status: string;
   model_activated: boolean;
+  activation_approval_id: string | null;
   runs_inference_for_customer: boolean;
   not_a_recommendation: boolean;
   not_a_profit_claim: boolean;
+}
+
+interface ActivationRequirements {
+  job_id: string;
+  strategy_version_id: string;
+  artifact_checksum: string | null;
+  dataset_checksum: string;
+  training_contract_version: string;
+  approval_policy_version: string;
+  acknowledgement_text_version: string;
+  acknowledgement_text_zh: string;
+  consent_status: string;
+}
+
+interface ActivationStatePayload {
+  activation_status: string;
+  reason_code: string | null;
+  approval_id: string | null;
+  bindings: Record<string, boolean>;
+  movable_to_customer_environment: boolean;
+  activation_policy_version: string;
+  job_id?: string;
+  job_status?: string;
+  approved_at?: string;
+  artifact_checksum?: string;
+  skill_unit_id?: string | null;
+  skill_unit_scope?: 'specific' | 'none';
+}
+
+interface ActivationPayload {
+  requirements: ActivationRequirements;
+  state: ActivationStatePayload;
+}
+
+/** The part of one row of ``GET /paper-portfolio`` this panel reads. */
+interface SkillUnitRow {
+  id: string;
+  status: string;
+  currency: string;
+  created_at: string;
+  current_virtual_cash: number;
+}
+
+/** The part of ``GET .../paper-executions`` the ledger read is taken from. */
+interface PaperLedgerPayload {
+  executions?: PaperLedgerRow[];
+  count?: number;
 }
 
 type Tone = 'ok' | 'warn' | 'err';
@@ -316,7 +404,7 @@ function errorMessage(err: unknown, fallback: string): string {
   return err instanceof Error ? err.message : fallback;
 }
 
-function errorTone(err: unknown): Tone {
+function errorTone(err: unknown): 'warn' | 'err' {
   if (err instanceof ApiError) {
     // A refusal is a decision, not a defect: consent, authorization and data
     // gates answer 409 with the reason the write did not happen.
@@ -362,6 +450,54 @@ function YesNo({ value, yes = 'Yes', no = 'No' }: { value: boolean; yes?: string
     <span style={{ color: value ? 'var(--positive)' : 'var(--text-secondary)' }}>
       {value ? yes : no}
     </span>
+  );
+}
+
+/**
+ * The owner's own skill accounts, read from the formal portfolio list.
+ *
+ * Nothing is preselected: an empty value is the only state in which neither the
+ * approval form nor the paper panel may act, and a list that failed to load says
+ * so instead of presenting "no accounts" as a fact.
+ */
+function SkillUnitSelect({
+  units,
+  value,
+  onChange,
+  testId,
+  error,
+}: {
+  units: SkillUnitRow[];
+  value: string;
+  onChange: (value: string) => void;
+  testId: string;
+  error: string;
+}) {
+  return (
+    <div style={{ display: 'grid', gap: '6px', maxWidth: '640px' }}>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        data-testid={testId}
+        style={{ padding: '8px 10px', border: '1px solid var(--border)', borderRadius: '4px', fontSize: '13px' }}
+      >
+        <option value="">— 還沒有明選技能帳號 —</option>
+        {units.map((unit) => (
+          <option key={unit.id} value={unit.id} data-testid={`${testId}-option-${unit.id}`}>
+            {unit.id.slice(0, 8)}… · {unit.currency} · {unit.status} · 現金 {unit.current_virtual_cash.toFixed(2)}
+          </option>
+        ))}
+      </select>
+      {error ? (
+        <p data-testid={`${testId}-error`} style={{ fontSize: '12px', color: 'var(--negative)', margin: 0 }}>
+          {error}
+        </p>
+      ) : units.length === 0 ? (
+        <p data-testid={`${testId}-empty`} style={{ fontSize: '12px', color: 'var(--text-muted)', margin: 0 }}>
+          這個帳號底下目前沒有任何技能帳號可選。這裡不會代你建立一個。
+        </p>
+      ) : null}
+    </div>
   );
 }
 
@@ -441,6 +577,28 @@ export default function AgentStrategyPage() {
   const [featureInputs, setFeatureInputs] = useState<Record<string, string>>({});
   const [inference, setInference] = useState<InferencePayload | null>(null);
 
+  const [activation, setActivation] = useState<ActivationPayload | null>(null);
+  const [activationLoading, setActivationLoading] = useState(false);
+  const [activationError, setActivationError] = useState('');
+  const [activationBusy, setActivationBusy] = useState(false);
+  const [activationNotice, setActivationNotice] = useState<Notice | null>(null);
+  const [activationRead, setActivationRead] = useState(false);
+  const [activationAck, setActivationAck] = useState('');
+  const [revokeActivationOpen, setRevokeActivationOpen] = useState(false);
+  const [revokeActivationReason, setRevokeActivationReason] = useState('');
+
+  // The paper lane's own context: which of the owner's skill accounts the next
+  // press belongs to, and what the ledger says about it. Nothing here is
+  // prefilled from the approval — an empty selection means "not chosen yet".
+  const [skillUnits, setSkillUnits] = useState<SkillUnitRow[]>([]);
+  const [skillUnitsError, setSkillUnitsError] = useState('');
+  const [skillUnitId, setSkillUnitId] = useState('');
+  const [approvalChoice, setApprovalChoice] = useState<ApprovalChoice>('job_only');
+  const [paperRows, setPaperRows] = useState<PaperLedgerRow[]>([]);
+  const [paperBusy, setPaperBusy] = useState(false);
+  const [paperNotice, setPaperNotice] = useState<Notice | null>(null);
+  const [paperReadError, setPaperReadError] = useState('');
+
   const loadStatus = useCallback(async () => {
     setStatusLoading(true);
     setStatusError('');
@@ -467,6 +625,128 @@ export default function AgentStrategyPage() {
       setJobsError(errorMessage(err, 'Could not load training jobs.'));
     }
   }, []);
+
+  // Which read the panel owes its state to: the newest one, for the artifact on
+  // screen. Anything else is dropped instead of written, so an answer about job
+  // A cannot land on job B.
+  const activationReadRef = useRef<ActivationReadId>(NO_ACTIVATION_READ);
+
+  const loadActivation = useCallback(
+    async (jobId: string): Promise<ActivationReadResult> => {
+      if (!isDisplayedActivationJob(activationReadRef.current, jobId)) {
+        // The owner has moved to another artifact. Asking for this one would
+        // retire the read that artifact is still waiting for, and its answer has
+        // no panel to write to anyway.
+        return { outcome: 'stale' };
+      }
+      const read = beginActivationRead(jobId, activationReadRef.current);
+      activationReadRef.current = read;
+      setActivationLoading(true);
+      setActivationError('');
+      try {
+        const payload = (await api.agentStrategy.jobActivation(jobId)) as ActivationPayload;
+        if (
+          !acceptActivationRead(
+            activationReadRef.current,
+            read,
+            payload?.requirements?.job_id ?? jobId,
+          )
+        ) {
+          return { outcome: 'stale' };
+        }
+        setActivation(payload);
+        return { outcome: 'loaded', state: payload.state };
+      } catch (err) {
+        // The refusal names the artifact it refused. If the owner has already
+        // moved on, its message is not this panel's business.
+        const answered = acceptActivationRead(activationReadRef.current, read);
+        if (answered) {
+          setActivation(null);
+          setActivationError(
+            errorMessage(err, 'Could not read the activation of this artifact.'),
+          );
+        }
+        return answered ? { outcome: 'failed' } : { outcome: 'stale' };
+      } finally {
+        if (acceptActivationRead(activationReadRef.current, read)) {
+          setActivationLoading(false);
+        }
+      }
+    },
+    [],
+  );
+
+  // Which read of which triple (job, skill account, artifact) the paper panel
+  // owes its state to. Same rule as the activation panel: an answer about the
+  // triple the owner has left cannot write into the one now on screen.
+  const paperReadRef = useRef<PaperReadId>(NO_PAPER_READ);
+
+  const loadSkillUnits = useCallback(async () => {
+    setSkillUnitsError('');
+    try {
+      const rows = (await api.paperPortfolio.list()) as SkillUnitRow[];
+      setSkillUnits(Array.isArray(rows) ? rows : []);
+    } catch (err) {
+      // An unreadable account list is not an empty list: the panel keeps the
+      // selection empty and says why, rather than offering nothing silently.
+      setSkillUnits([]);
+      setSkillUnitsError(errorMessage(err, '讀不到你的技能帳號清單。'));
+    }
+  }, []);
+
+  /**
+   * The formal read of one job's paper ledger.
+   *
+   * The door is per job, so the answer may legitimately name other skill
+   * accounts of the same artifact; rows of another triple are excluded locally by
+   * the identity key, which is also what makes the counted number an isolation
+   * check rather than a courtesy.
+   */
+  const loadPaperLedger = useCallback(
+    async (
+      context: PaperContext,
+      executionId: string | null = null,
+    ): Promise<PaperReadback> => {
+      if (!context.jobId) return { state: 'stale' };
+      const key = paperContextKey(context);
+      if (!isDisplayedPaperContext(paperReadRef.current, key)) {
+        return { state: 'stale' };
+      }
+      const read = beginPaperRead(key, paperReadRef.current);
+      paperReadRef.current = read;
+      setPaperReadError('');
+      try {
+        const payload = (await api.agentStrategy.paperExecutions(
+          context.jobId,
+        )) as PaperLedgerPayload;
+        const rows = Array.isArray(payload?.executions) ? payload.executions : [];
+        const jobLegs = new Set(rows.map((row) => row.job_id).filter(Boolean));
+        const answered =
+          jobLegs.size === 0
+            ? null
+            : jobLegs.size === 1 && jobLegs.has(context.jobId)
+              ? key
+              : `${context.jobId}#foreign`;
+        if (!acceptPaperRead(paperReadRef.current, read, answered)) {
+          return { state: 'stale' };
+        }
+        setPaperRows(rows);
+        return {
+          state: 'read',
+          row: readbackRowOf(rows, context, executionId),
+          counted: ledgerOfContext(rows, context).length,
+        };
+      } catch (err) {
+        const stillMine = acceptPaperRead(paperReadRef.current, read);
+        if (stillMine) {
+          setPaperRows([]);
+          setPaperReadError(errorMessage(err, '讀不回這個 job 的紙上執行 ledger。'));
+        }
+        return stillMine ? { state: 'read_failed' } : { state: 'stale' };
+      }
+    },
+    [],
+  );
 
   const loadVersions = useCallback(async () => {
     setVersionsLoading(true);
@@ -507,7 +787,8 @@ export default function AgentStrategyPage() {
     void loadStatus();
     void loadJobs();
     void loadVersions();
-  }, [loadStatus, loadJobs, loadVersions]);
+    void loadSkillUnits();
+  }, [loadStatus, loadJobs, loadVersions, loadSkillUnits]);
 
   useEffect(() => {
     if (!job || job.status !== 'completed' || !snapshot) return;
@@ -519,6 +800,54 @@ export default function AgentStrategyPage() {
     }
     setFeatureInputs(seed);
   }, [job, snapshot]);
+
+  const activationJobId = job && job.status === 'completed' ? job.job_id : '';
+
+  // One artifact on screen, one answer from the server. Switching artifacts
+  // retires the previous read first — including when nothing is on screen — so a
+  // late answer about job A cannot write job B's status, acknowledgement text or
+  // notice, and a decision typed for A can never be sent for B.
+  useEffect(() => {
+    activationReadRef.current = beginActivationRead(
+      activationJobId,
+      activationReadRef.current,
+    );
+    setActivation(null);
+    setActivationError('');
+    setActivationNotice(null);
+    setActivationRead(false);
+    setActivationAck('');
+    setActivationBusy(false);
+    setRevokeActivationOpen(false);
+    setRevokeActivationReason('');
+    if (!activationJobId) return;
+    void loadActivation(activationJobId);
+  }, [activationJobId, loadActivation]);
+
+  // The three legs one paper press is about. The artifact leg comes from the
+  // server's own read of this job, never from a value typed into this form.
+  const paperContext = useMemo<PaperContext>(
+    () => ({
+      jobId: activation?.requirements.job_id ?? '',
+      skillUnitId,
+      artifactChecksum: activation?.requirements.artifact_checksum ?? '',
+    }),
+    [activation, skillUnitId],
+  );
+
+  // Switching job, skill account or artifact retires the previous read before
+  // anything else, so an in-flight ledger answer about the old triple is dropped
+  // rather than shown as the new one's result.
+  useEffect(() => {
+    const key = paperContext.jobId ? paperContextKey(paperContext) : '';
+    paperReadRef.current = beginPaperRead(key, paperReadRef.current);
+    setPaperRows([]);
+    setPaperNotice(null);
+    setPaperReadError('');
+    setPaperBusy(false);
+    if (!key) return;
+    void loadPaperLedger(paperContext);
+  }, [paperContext, loadPaperLedger]);
 
   const selectedVersion = useMemo(
     () => versions.find((row) => row.id === versionId) ?? null,
@@ -707,6 +1036,203 @@ export default function AgentStrategyPage() {
       return 'Inference completed for the supplied values.';
     });
 
+  /**
+   * Put one recorded job on screen.
+   *
+   * The job's own snapshot is re-read so the inference prefill belongs to the
+   * artifact now selected: leaving the previous dataset in state would let the
+   * form offer numbers that never came from this run.
+   */
+  const onSelectJob = (jobId: string) =>
+    runAction('select-job', async () => {
+      const result = (await api.agentStrategy.getTrainingJob(jobId)) as TrainingJob;
+      setJob(result);
+      setInference(null);
+      setFeatureInputs({});
+      setSnapshot(null);
+      const loaded = (await api.agentStrategy.getSnapshot(result.snapshot_id)) as SnapshotPayload;
+      setSnapshot(loaded);
+      // The activation read is left to the switching effect: while this press is in
+      // flight the artifact on screen is still the previous one, and reading the
+      // new job from here would retire the read that artifact is waiting for.
+      return result.status === 'completed'
+        ? `已選取 job ${result.job_id.slice(0, 8)}…，並以該資料集第一列預填推論欄位（可自行修改）。`
+        : `已選取 job ${result.job_id.slice(0, 8)}…，狀態 ${result.status}：這個產物尚未完成，沒有可批准或可執行的模型。`;
+    });
+
+  const activationText = activation?.requirements.acknowledgement_text_zh ?? '';
+  const approveReady =
+    Boolean(activation?.requirements.artifact_checksum) &&
+    screeningEnabled &&
+    activationRead &&
+    activationText !== '' &&
+    normaliseAck(activationAck) === normaliseAck(activationText) &&
+    !activationBusy;
+
+  // What the live approval is bound to, and whether this press may leave: both
+  // come from the same functions the offline tests exercise, so the sentence
+  // beside the control and the gate in front of the request cannot disagree.
+  const approvalScope = approvalScopeOf(activation?.state);
+  const scopeChoiceError = approvalScopeError(approvalChoice, skillUnitId);
+  const paperBlockReason = submitBlockedReason(paperContext, activation?.state);
+  const paperRowsOfContext = useMemo(
+    () => ledgerOfContext(paperRows, paperContext),
+    [paperRows, paperContext],
+  );
+
+  /** A click's answer belongs to this panel only while its artifact is on screen. */
+  const stillOnActivationJob = (jobId: string) =>
+    isDisplayedActivationJob(activationReadRef.current, jobId);
+
+  const onApproveActivation = async () => {
+    if (!activation || !approveReady) return;
+    const jobId = activation.requirements.job_id;
+    // The scope is the owner's own decision, stated in this form before the
+    // request leaves: an approval never gains a skill account on the way out.
+    const scopeError = approvalScopeError(approvalChoice, skillUnitId);
+    if (scopeError) {
+      setActivationNotice({ tone: 'warn', text: `${scopeError} 這一筆沒有送出。` });
+      return;
+    }
+    setActivationBusy(true);
+    setActivationNotice(null);
+    let refusal: { message: string; tone: 'warn' | 'err' } | null = null;
+    try {
+      await api.agentStrategy.activateJob(jobId, {
+        // Both values came from the server read of this artifact, so the
+        // approval binds the checksum on screen and carries to no other.
+        artifact_checksum: activation.requirements.artifact_checksum as string,
+        policy_version: activation.requirements.approval_policy_version,
+        acknowledgement_text_version: activation.requirements.acknowledgement_text_version,
+        acknowledgement: activationAck,
+        // NULL says "no skill-unit scope", which is not "every skill unit": a
+        // job-only approval covers the artifact in isolation and authorises no
+        // paper execution on any account.
+        skill_unit_id: approvalChoice === 'skill_unit' ? skillUnitId : null,
+      });
+    } catch (err) {
+      refusal = {
+        message: errorMessage(err, 'The approval was not recorded.'),
+        tone: errorTone(err),
+      };
+    }
+    if (!stillOnActivationJob(jobId)) return;
+    if (refusal) {
+      setActivationNotice(activationWriteNotice('approve', { refused: refusal }));
+      setActivationBusy(false);
+      return;
+    }
+    setActivationRead(false);
+    setActivationAck('');
+    // A resolved write is a claim, not a state: the approval counts once this
+    // same artifact reads back as APPROVED with a record behind it.
+    const read = await loadActivation(jobId);
+    await loadJobs();
+    if (!stillOnActivationJob(jobId)) return;
+    setActivationNotice(
+      activationWriteNotice('approve', { verified: verificationOf('approve', read) }),
+    );
+    setActivationBusy(false);
+  };
+
+  const onRevokeActivation = async () => {
+    if (!activation || !activation.state.approval_id) return;
+    const jobId = activation.requirements.job_id;
+    if (!revokeActivationOpen) {
+      setRevokeActivationOpen(true);
+      return;
+    }
+    setActivationBusy(true);
+    setActivationNotice(null);
+    let refusal: { message: string; tone: 'warn' | 'err' } | null = null;
+    try {
+      await api.agentStrategy.revokeJobActivation(
+        jobId,
+        revokeActivationReason.trim() || null,
+      );
+    } catch (err) {
+      refusal = {
+        message: errorMessage(err, 'The approval was not withdrawn.'),
+        tone: errorTone(err),
+      };
+    }
+    if (!stillOnActivationJob(jobId)) return;
+    if (refusal) {
+      setActivationNotice(activationWriteNotice('withdraw', { refused: refusal }));
+      setActivationBusy(false);
+      return;
+    }
+    setRevokeActivationOpen(false);
+    setRevokeActivationReason('');
+    // Re-read after withdrawal instead of asserting the new state here: the
+    // record is kept by the server and only the gate knows what it now says.
+    const read = await loadActivation(jobId);
+    await loadJobs();
+    if (!stillOnActivationJob(jobId)) return;
+    setActivationNotice(
+      activationWriteNotice('withdraw', { verified: verificationOf('withdraw', read) }),
+    );
+    setActivationBusy(false);
+  };
+
+  /** Whether the triple one press was made on is still the one on screen. */
+  const stillOnPaperContext = (context: string) =>
+    isDisplayedPaperContext(paperReadRef.current, context);
+
+  const onRunPaperExecution = async () => {
+    if (!activation) return;
+    const jobId = activation.requirements.job_id;
+    const blocked = submitBlockedReason(paperContext, activation.state);
+    if (blocked) {
+      setPaperNotice({ tone: 'warn', text: `${blocked} 這一筆沒有送出。` });
+      return;
+    }
+    const context = paperContextKey(paperContext);
+    if (!stillOnPaperContext(context)) return;
+    setPaperBusy(true);
+    setPaperNotice(null);
+    let pressed: PaperLedgerRow | null = null;
+    let refusal: Notice | null = null;
+    let uncertain = '';
+    try {
+      pressed = (await api.agentStrategy.paperExecution(jobId, {
+        skill_unit_id: paperContext.skillUnitId,
+      })) as PaperLedgerRow;
+    } catch (err) {
+      const named = paperRefusalNotice(err instanceof ApiError ? err.detail : null);
+      if (named) {
+        refusal = named;
+      } else {
+        // No code means the door's verdict is unknown, which is not a licence to
+        // mint another intent and try again: the read below is what is reported.
+        uncertain = errorMessage(err, '這一筆紙上執行沒有可辨識的回報，結果不明。');
+      }
+    }
+    if (!stillOnPaperContext(context)) return;
+    if (refusal) {
+      // A named refusal wrote nothing, so the door's own sentence stands. The
+      // ledger is still re-read so the table below says what the book holds now.
+      setPaperNotice(refusal);
+      setPaperBusy(false);
+      await loadPaperLedger(paperContext);
+      return;
+    }
+    // Whether the door answered, threw or stayed silent, the outcome shown here is
+    // the row the formal GET returned — never a status inferred from the press.
+    const read = await loadPaperLedger(
+      paperContext,
+      pressed ? pressed.execution_id : null,
+    );
+    if (!stillOnPaperContext(context)) return;
+    const notice = paperReadbackNotice(pressed, read);
+    setPaperNotice(
+      uncertain && !pressed
+        ? { tone: notice.tone, text: `${uncertain} ${notice.text}` }
+        : notice,
+    );
+    setPaperBusy(false);
+  };
+
   const sortedCandidates = useMemo(() => {
     const rows = [...(candidates?.candidates ?? [])];
     rows.sort((a, b) => (a.signal_date < b.signal_date ? 1 : a.signal_date > b.signal_date ? -1 : 0));
@@ -760,7 +1286,7 @@ export default function AgentStrategyPage() {
               />
               <FactRow
                 label="Training and release"
-                value={`training authorized in this process: ${caps.training.authorized_in_this_process ? 'yes' : 'no'} · customer release: ${caps.training.customer_release_training} · inference release: ${caps.training.customer_release_inference} · model activation: ${caps.training.model_activation} (unavailable)`}
+                value={`training authorized in this process: ${caps.training.authorized_in_this_process ? 'yes' : 'no'} · customer release: ${caps.training.customer_release_training} · inference release: ${caps.training.customer_release_inference} · model activation: ${caps.training.model_activation} (no artifact bound here; each job row below carries its own)`}
               />
               <p style={{ fontSize: '12px', color: 'var(--text-muted)', margin: '12px 0 0' }}>
                 {caps.capability.description_zh}
@@ -1169,7 +1695,9 @@ export default function AgentStrategyPage() {
                     One bounded run fits a preprocessing pipeline on the train split only and keeps
                     the all-take and all-skip baselines on the test split. A completed job produces
                     an artifact and a version readback; inference scores one supplied feature row.
-                    The model is never activated and never serves customers here.
+                    Scoring that artifact is a second act of its own: it stays refused until the
+                    owner approves this exact checksum below, and an approval switches the model on
+                    inside this account only — it is not a customer release and places no order.
                   </p>
 
                   <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '16px' }}>
@@ -1204,7 +1732,10 @@ export default function AgentStrategyPage() {
                           <code style={{ fontSize: '11px', wordBreak: 'break-all' }}>{job.artifact_path}</code>
                         ) : '—'}
                       />
-                      <FactRow label="Activation" value={`${job.activation_status} — not activated`} />
+                      <FactRow
+                        label="Activation"
+                        value={activation ? activation.state.activation_status : job.activation_status}
+                      />
                       <FactRow label="Completed" value={formatDateTime(job.completed_at)} />
                       {job.failure_reason && (
                         <p style={{ fontSize: '12px', color: 'var(--negative)', marginTop: '8px' }}>
@@ -1218,6 +1749,267 @@ export default function AgentStrategyPage() {
                       <div style={{ marginTop: '12px' }}>
                         <h3 style={{ fontSize: '14px', marginBottom: '8px' }}>Metrics</h3>
                         <MetricGrid data={job.metrics} testId="training-metrics" />
+                      </div>
+
+                      <div
+                        data-testid="activation-panel"
+                        style={{ marginTop: '16px', borderTop: '1px solid var(--border-subtle)', paddingTop: '12px' }}
+                      >
+                        <h3 style={{ fontSize: '14px', marginBottom: '8px' }}>Model activation</h3>
+                        <NoticeBox notice={activationNotice} testId="activation-notice" />
+                        {activationLoading && !activation ? (
+                          <p data-testid="activation-loading" style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: 0 }}>
+                            Reading the activation state from the server…
+                          </p>
+                        ) : activationError ? (
+                          <NoticeBox notice={{ tone: 'err', text: activationError }} testId="activation-read-error" />
+                        ) : activation ? (
+                          <>
+                            <FactRow
+                              label="Activation status"
+                              value={
+                                <span className={statusPillClass(activation.state.activation_status)}>
+                                  {activation.state.activation_status}
+                                </span>
+                              }
+                            />
+                            <FactRow label="Reason code" value={activation.state.reason_code ?? '—'} />
+                            <FactRow
+                              label="Approval record"
+                              value={
+                                activation.state.approval_id ? (
+                                  <code style={{ fontSize: '11px' }}>{activation.state.approval_id}</code>
+                                ) : (
+                                  'none recorded for this artifact'
+                                )
+                              }
+                            />
+                            <FactRow
+                              label="Approval scope"
+                              value={
+                                <span data-testid="activation-scope">
+                                  {approvalScope === 'specific'
+                                    ? `綁定技能帳號 ${activation.state.skill_unit_id ?? '—'}：只有這個帳號可以拿這個產物紙上執行`
+                                    : approvalScope === 'job_only'
+                                      ? 'job-only（skill_unit_id 為 NULL）：綁這個產物本身，不綁任何技能帳號'
+                                      : approvalScope === 'no_approval'
+                                        ? '沒有生效中的同意'
+                                        : '讀不到綁定範圍（讀不到不等於已綁定）'}
+                                </span>
+                              }
+                            />
+                            {activation.state.approved_at && (
+                              <FactRow label="Approved at" value={formatDateTime(activation.state.approved_at)} />
+                            )}
+                            <FactRow
+                              label="Movable to a customer environment"
+                              value={<YesNo value={activation.state.movable_to_customer_environment} />}
+                            />
+                            {Object.keys(activation.state.bindings ?? {}).length > 0 && (
+                              <div style={{ marginTop: '10px' }}>
+                                <h4 style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '6px' }}>
+                                  Conditions the gate checked
+                                </h4>
+                                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                                  {Object.entries(activation.state.bindings).map(([name, met]) => (
+                                    <span
+                                      key={name}
+                                      data-testid={`activation-binding-${name}`}
+                                      style={{
+                                        fontSize: '12px',
+                                        border: `1px solid ${met ? 'var(--positive)' : 'var(--negative)'}`,
+                                        borderRadius: '4px',
+                                        padding: '3px 8px',
+                                      }}
+                                    >
+                                      {humanizeKey(name)}: {met ? 'met' : 'not met'}
+                                    </span>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+
+                            {activation.state.activation_status !== 'APPROVED' && (
+                              activation.requirements.artifact_checksum ? (
+                                <div data-testid="activation-approve-form" style={{ marginTop: '14px' }}>
+                                  <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginTop: 0 }}>
+                                    Approving records your own decision, on this account, for the one
+                                    artifact whose checksum is shown below. It does not authorize any
+                                    other run and does not place a trade. What it does cover is the
+                                    scope you choose below: a job-only approval binds the artifact and
+                                    authorises no skill account, while an account-bound approval
+                                    authorises that one account and no other.
+                                  </p>
+                                  <FactRow
+                                    label="Artifact this approval binds"
+                                    value={<code style={{ fontSize: '11px', wordBreak: 'break-all' }}>{activation.requirements.artifact_checksum}</code>}
+                                  />
+                                  <FactRow label="Dataset checksum" value={<code style={{ fontSize: '11px' }}>{activation.requirements.dataset_checksum}</code>} />
+                                  <FactRow label="Training contract" value={activation.requirements.training_contract_version} />
+                                  <FactRow label="Activation policy version" value={activation.requirements.approval_policy_version} />
+                                  <FactRow label="Acknowledgement text version" value={activation.requirements.acknowledgement_text_version} />
+                                  <div data-testid="approval-scope-choice" style={{ margin: '14px 0' }}>
+                                    <p style={{ fontSize: '13px', margin: '0 0 6px' }}>這份同意要綁到哪裡？</p>
+                                    <label style={{ display: 'flex', gap: '8px', alignItems: 'center', fontSize: '13px', marginBottom: '6px' }}>
+                                      <input
+                                        type="radio"
+                                        name="approval-scope"
+                                        value="job_only"
+                                        checked={approvalChoice === 'job_only'}
+                                        onChange={() => setApprovalChoice('job_only')}
+                                        data-testid="approval-scope-job-only"
+                                      />
+                                      <span>只綁這個產物（job-only）：可對它推論，不授權任何技能帳號紙上執行</span>
+                                    </label>
+                                    <label style={{ display: 'flex', gap: '8px', alignItems: 'center', fontSize: '13px', marginBottom: '10px' }}>
+                                      <input
+                                        type="radio"
+                                        name="approval-scope"
+                                        value="skill_unit"
+                                        checked={approvalChoice === 'skill_unit'}
+                                        onChange={() => setApprovalChoice('skill_unit')}
+                                        data-testid="approval-scope-skill-unit"
+                                      />
+                                      <span>綁定我在下面明選的那一個技能帳號：只有它可以拿這個產物紙上執行</span>
+                                    </label>
+                                    <SkillUnitSelect
+                                      units={skillUnits}
+                                      value={skillUnitId}
+                                      onChange={setSkillUnitId}
+                                      testId="approval-skill-unit"
+                                      error={skillUnitsError}
+                                    />
+                                    <p
+                                      data-testid="approval-scope-sentence"
+                                      style={{ fontSize: '12px', color: 'var(--text-secondary)', margin: '8px 0 0' }}
+                                    >
+                                      {approvalScopeSentence(approvalChoice, skillUnitId)}
+                                    </p>
+                                    {scopeChoiceError && (
+                                      <p data-testid="approval-scope-error" style={{ fontSize: '12px', color: 'var(--negative)', margin: '6px 0 0' }}>
+                                        {scopeChoiceError}
+                                      </p>
+                                    )}
+                                  </div>
+                                  <div
+                                    data-testid="activation-ack-text"
+                                    style={{
+                                      fontSize: '13px',
+                                      border: '1px solid var(--border)',
+                                      borderRadius: '4px',
+                                      padding: '10px 12px',
+                                      margin: '10px 0',
+                                      background: 'var(--surface-secondary, rgba(0,0,0,0.02))',
+                                    }}
+                                  >
+                                    {activation.requirements.acknowledgement_text_zh}
+                                  </div>
+                                  {!screeningEnabled && (
+                                    <p style={{ fontSize: '13px', color: 'var(--warning)', marginTop: 0 }}>
+                                      Screening is switched off in this process, so an approval is refused.
+                                      Ask the operator to enable it in an isolated development environment.
+                                    </p>
+                                  )}
+                                  <label style={{ display: 'flex', gap: '10px', alignItems: 'flex-start', fontSize: '13px', marginBottom: '10px' }}>
+                                    <input
+                                      type="checkbox"
+                                      checked={activationRead}
+                                      onChange={(e) => setActivationRead(e.target.checked)}
+                                      data-testid="activation-ack-checkbox"
+                                      style={{ marginTop: '3px' }}
+                                    />
+                                    <span>I have read the activation text above.</span>
+                                  </label>
+                                  <label htmlFor="activation-ack-entry" style={{ display: 'block', fontSize: '13px', marginBottom: '6px' }}>
+                                    Submit that text yourself to confirm this is your own decision.
+                                  </label>
+                                  <textarea
+                                    id="activation-ack-entry"
+                                    value={activationAck}
+                                    onChange={(e) => setActivationAck(e.target.value)}
+                                    data-testid="activation-ack-entry"
+                                    rows={3}
+                                    style={{ width: '100%', maxWidth: '640px', padding: '8px 12px', border: '1px solid var(--border)', borderRadius: '4px', fontSize: '13px', marginBottom: '12px' }}
+                                  />
+                                  <div>
+                                    <button
+                                      type="button"
+                                      className="btn btn-primary"
+                                      onClick={onApproveActivation}
+                                      disabled={!approveReady || scopeChoiceError !== null}
+                                      data-testid="activation-approve"
+                                    >
+                                      {activationBusy ? 'Recording…' : 'Record my approval'}
+                                    </button>
+                                  </div>
+                                </div>
+                              ) : (
+                                <p data-testid="activation-no-artifact" style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: 0 }}>
+                                  This job recorded no artifact checksum, so there is nothing for an
+                                  approval to bind and no approval form is offered.
+                                </p>
+                              )
+                            )}
+
+                            {activation.state.approval_id && (
+                              <div data-testid="activation-revoke-block" style={{ marginTop: '14px' }}>
+                                {!revokeActivationOpen ? (
+                                  <button
+                                    type="button"
+                                    className="btn btn-secondary"
+                                    onClick={onRevokeActivation}
+                                    disabled={activationBusy}
+                                    data-testid="activation-revoke"
+                                  >
+                                    Revoke this approval
+                                  </button>
+                                ) : (
+                                  <div style={{ border: '1px solid var(--border)', borderRadius: '4px', padding: '12px', maxWidth: '640px' }}>
+                                    <p style={{ fontSize: '13px', marginTop: 0 }}>
+                                      Withdrawal is not gated — you can always switch this model back off.
+                                      The approval record is kept as history and inference is refused again.
+                                    </p>
+                                    <label htmlFor="activation-revoke-reason" style={{ display: 'block', fontSize: '13px', marginBottom: '6px' }}>
+                                      Reason (optional, kept with the record)
+                                    </label>
+                                    <input
+                                      id="activation-revoke-reason"
+                                      type="text"
+                                      value={revokeActivationReason}
+                                      onChange={(e) => setRevokeActivationReason(e.target.value)}
+                                      data-testid="activation-revoke-reason"
+                                      maxLength={64}
+                                      autoComplete="off"
+                                      style={{ width: '100%', padding: '8px 12px', border: '1px solid var(--border)', borderRadius: '4px', fontSize: '13px', marginBottom: '10px' }}
+                                    />
+                                    <div style={{ display: 'flex', gap: '8px' }}>
+                                      <button
+                                        type="button"
+                                        className="btn btn-primary"
+                                        onClick={onRevokeActivation}
+                                        disabled={activationBusy}
+                                        data-testid="activation-revoke-confirm"
+                                      >
+                                        {activationBusy ? 'Withdrawing…' : 'Confirm withdrawal'}
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className="btn btn-secondary"
+                                        onClick={() => {
+                                          setRevokeActivationOpen(false);
+                                          setRevokeActivationReason('');
+                                        }}
+                                        disabled={activationBusy}
+                                      >
+                                        Cancel
+                                      </button>
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </>
+                        ) : null}
                       </div>
                     </div>
                   )}
@@ -1268,10 +2060,124 @@ export default function AgentStrategyPage() {
                           <FactRow label="Threshold" value={inference.threshold} />
                           <FactRow label="Lineage verified" value={<YesNo value={inference.lineage_verified} />} />
                           <FactRow label="Artifact verified" value={<YesNo value={inference.artifact_verified} />} />
-                          <FactRow label="Activation" value={`${inference.activation_status} — not activated`} />
+                          {/* The door refuses an un-activated artifact, so this can only read APPROVED. */}
+                          <FactRow
+                            label="Activation"
+                            value={`${inference.activation_status} · approval ${inference.activation_approval_id ?? '—'}`}
+                          />
                           <p style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '8px' }}>
                             This is not a recommendation and not a profit claim.
                           </p>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {activation && job && job.status === 'completed' && (
+                    <div
+                      data-testid="paper-execution-panel"
+                      style={{ borderTop: '1px solid var(--border-subtle)', marginTop: '16px', paddingTop: '16px' }}
+                    >
+                      <h3 style={{ fontSize: '14px', marginBottom: '8px' }}>Paper execution on one of your skill accounts</h3>
+                      <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: 0 }}>
+                        This door writes into your own paper book only: it reaches no broker and places
+                        no live order (runs_live_trading: no). The result shown below is the ledger row
+                        read back from the formal endpoint after your press — never a status this page
+                        computes for itself.
+                      </p>
+                      <FactRow
+                        label="Artifact this press binds"
+                        value={<code style={{ fontSize: '11px', wordBreak: 'break-all' }}>{activation.requirements.artifact_checksum ?? '—'}</code>}
+                      />
+                      <div style={{ margin: '12px 0' }}>
+                        <p style={{ fontSize: '13px', margin: '0 0 6px' }}>要在哪一個你的技能帳號上執行？</p>
+                        <SkillUnitSelect
+                          units={skillUnits}
+                          value={skillUnitId}
+                          onChange={setSkillUnitId}
+                          testId="paper-skill-unit"
+                          error={skillUnitsError}
+                        />
+                      </div>
+                      <NoticeBox
+                        notice={approvalScopeNotice(activation.state, skillUnitId)}
+                        testId="paper-scope-notice"
+                      />
+                      <NoticeBox notice={paperNotice} testId="paper-notice" />
+                      {paperReadError && (
+                        <NoticeBox notice={{ tone: 'err', text: paperReadError }} testId="paper-read-error" />
+                      )}
+                      {paperBlockReason && (
+                        <p data-testid="paper-block-reason" style={{ fontSize: '12px', color: 'var(--warning)', margin: '0 0 10px' }}>
+                          {paperBlockReason}（這一筆不會送出）
+                        </p>
+                      )}
+                      <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                        <button
+                          type="button"
+                          className="btn btn-primary"
+                          onClick={onRunPaperExecution}
+                          disabled={paperBlockReason !== null || paperBusy || busy !== null}
+                          data-testid="paper-execute"
+                        >
+                          {paperBusy ? '提交中…' : '提交一次紙上決策'}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-secondary"
+                          onClick={() => void loadPaperLedger(paperContext)}
+                          disabled={paperBusy || busy !== null}
+                          data-testid="paper-reload"
+                        >
+                          重新讀回 ledger（不重送意圖）
+                        </button>
+                      </div>
+
+                      <p data-testid="paper-ledger-summary" style={{ fontSize: '12px', color: 'var(--text-secondary)', margin: '14px 0 6px' }}>
+                        正式讀回這個 job 的 ledger 共 {paperRows.length} 列，其中屬於目前上下文（這個 job × 這個帳號 × 這個產物）的 {paperRowsOfContext.length} 列；
+                        其他帳號或其他產物的列不列入下方，也不會被這一次解讀成你的結果。
+                      </p>
+                      {paperRowsOfContext.length === 0 ? (
+                        <p data-testid="paper-ledger-empty" style={{ fontSize: '13px', color: 'var(--text-muted)', margin: 0 }}>
+                          這個上下文目前沒有紙上執行紀錄（0 列）。讀到 0 列不等於曾經執行過，也不等於執行失敗。
+                        </p>
+                      ) : (
+                        <div style={{ overflowX: 'auto' }}>
+                          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
+                            <thead>
+                              <tr style={{ textAlign: 'left', borderBottom: '1px solid var(--border-strong)' }}>
+                                <th style={{ padding: '8px' }}>Execution</th>
+                                <th style={{ padding: '8px' }}>Signal</th>
+                                <th style={{ padding: '8px' }}>Qty · price</th>
+                                <th style={{ padding: '8px' }}>What the ledger says</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {paperRowsOfContext.map((row) => (
+                                <tr
+                                  key={row.execution_id}
+                                  data-testid={`paper-ledger-row-${row.execution_id}`}
+                                  style={{ borderBottom: '1px solid var(--border-subtle)' }}
+                                >
+                                  <td style={{ padding: '8px', verticalAlign: 'top' }}>
+                                    <code style={{ fontSize: '11px' }}>{row.execution_id.slice(0, 8)}…</code>
+                                    <div style={{ color: 'var(--text-muted)' }}>{formatDateTime(row.created_at ?? null)}</div>
+                                    <span className={statusPillClass(row.execution_status)}>{row.execution_status}</span>
+                                  </td>
+                                  <td style={{ padding: '8px', verticalAlign: 'top' }}>
+                                    {row.signal_date ?? '—'}
+                                    <div>
+                                      {row.quantity ?? '—'} × {row.execution_price ?? '—'}
+                                    </div>
+                                  </td>
+                                  <td style={{ padding: '8px', verticalAlign: 'top' }}>
+                                    {executionOutcomeZH(row)}
+                                    <div style={{ color: 'var(--text-muted)', marginTop: '4px' }}>{tradeLinksZH(row)}</div>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
                         </div>
                       )}
                     </div>
@@ -1289,6 +2195,7 @@ export default function AgentStrategyPage() {
                               <th style={{ padding: '8px' }}>Snapshot</th>
                               <th style={{ padding: '8px' }}>Dataset checksum</th>
                               <th style={{ padding: '8px' }}>Activation</th>
+                              <th style={{ padding: '8px' }}>This artifact</th>
                             </tr>
                           </thead>
                           <tbody>
@@ -1301,6 +2208,19 @@ export default function AgentStrategyPage() {
                                 <td style={{ padding: '8px' }}>{row.snapshot_id.slice(0, 8)}…</td>
                                 <td style={{ padding: '8px' }}>{row.dataset_checksum?.slice(0, 12) ?? '—'}…</td>
                                 <td style={{ padding: '8px' }}>{row.activation_status}</td>
+                                <td style={{ padding: '8px' }}>
+                                  {/* Selection is the owner's act: nothing here moves the panel onto a
+                                      job by itself, and the read follows only once it is on screen. */}
+                                  <button
+                                    type="button"
+                                    className="btn btn-secondary"
+                                    onClick={() => onSelectJob(row.job_id)}
+                                    disabled={busy !== null || row.job_id === (job?.job_id ?? '')}
+                                    data-testid={`select-job-${row.job_id}`}
+                                  >
+                                    {row.job_id === (job?.job_id ?? '') ? 'On screen' : 'Review this job'}
+                                  </button>
+                                </td>
                               </tr>
                             ))}
                           </tbody>

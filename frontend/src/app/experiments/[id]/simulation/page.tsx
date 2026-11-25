@@ -3,8 +3,20 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import Link from 'next/link';
-import { api, ApiError } from '@/lib/api';
+import { api, ApiError, formatErrorDetail } from '@/lib/api';
 import { formatDateTime } from '@/lib/format';
+import DailyServicePanel from '@/components/experiments/DailyServicePanel';
+import {
+  LINEAGE_ATTACH_LABEL_ZH,
+  LINEAGE_ATTACH_NOTE_ZH,
+  LINEAGE_HOLD_NOTE_ZH,
+  LINEAGE_NO_SOURCE_NOTE_ZH,
+  LINEAGE_STATE_LABELS_ZH,
+  estimateSourceFromStatus,
+  lineageRefusalOf,
+  lineageState,
+  type EstimateSource,
+} from '@/lib/dailyEstimate';
 
 interface SimulationSession {
   id: string;
@@ -72,6 +84,20 @@ interface LinkedPortfolio {
   total_realized_pnl: number;
   total_unrealized_pnl: number | null;
   currency: string;
+}
+
+// The one payload shape POST /simulations/{id}/manual-decision accepts. The
+// retry resends it verbatim, so the claimed lineage travels with it: a retry
+// that dropped ``linked_inference_id`` would be a different request than the
+// one the backend may already have accepted.
+interface ManualDecisionPayload {
+  idempotency_key: string;
+  action: 'buy' | 'sell' | 'hold';
+  quantity?: number;
+  rationale?: string;
+  reflection?: string;
+  expected_version: number;
+  linked_inference_id?: string | null;
 }
 
 const DECISION_LABELS: Record<string, { label: string; color: string; bg: string }> = {
@@ -151,16 +177,15 @@ export default function SimulationPage() {
   const [editingReflection, setEditingReflection] = useState<string | null>(null);
   const [reflectionInput, setReflectionInput] = useState('');
   const [updatingReflection, setUpdatingReflection] = useState(false);
-  const [pendingDecision, setPendingDecision] = useState<{
-    idempotency_key: string;
-    action: 'buy' | 'sell' | 'hold';
-    quantity?: number;
-    rationale?: string;
-    reflection?: string;
-    expected_version: number;
-  } | null>(null);
+  const [pendingDecision, setPendingDecision] = useState<ManualDecisionPayload | null>(null);
   const [linkedPortfolio, setLinkedPortfolio] = useState<LinkedPortfolio | null>(null);
   const [linking, setLinking] = useState(false);
+  // The lineage picker reads the *bound skill account's* status, not any
+  // portfolio: the backend verifies the inference against the account the order
+  // settles into, so an id from another account would be refused at the door.
+  const [estimateSource, setEstimateSource] = useState<EstimateSource | null>(null);
+  const [lineageSelected, setLineageSelected] = useState(false);
+  const [lineageLoading, setLineageLoading] = useState(false);
   const [priorSessions, setPriorSessions] = useState<SimulationSession[]>([]);
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [currentVersion, setCurrentVersion] = useState<VersionSummary | null>(null);
@@ -223,6 +248,35 @@ export default function SimulationPage() {
       setLinkedPortfolio(null);
     }
   };
+
+  // Ask the estimate service, for the account this session settles into, what
+  // it last produced. The picker offers that row or says there is none; it
+  // never lets the owner paste an arbitrary id, because the page cannot know
+  // whether an id they typed belongs to them.
+  const loadEstimateSource = useCallback(async (skillUnitId: string) => {
+    setLineageLoading(true);
+    try {
+      const status = await api.ml.dailyEstimateStatus(skillUnitId);
+      setEstimateSource(estimateSourceFromStatus(status));
+      setLineageSelected(false);
+    } catch {
+      // A status route that cannot be read is not evidence that no estimate
+      // exists; the picker says so rather than offering a silent "none".
+      setEstimateSource(null);
+      setLineageSelected(false);
+    } finally {
+      setLineageLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!manualMode || !linkedPortfolio?.id) {
+      setEstimateSource(null);
+      setLineageSelected(false);
+      return;
+    }
+    loadEstimateSource(linkedPortfolio.id);
+  }, [manualMode, linkedPortfolio?.id, loadEstimateSource]);
 
   const loadVersionSessions = async (versionId: string) => {
     try {
@@ -406,14 +460,7 @@ export default function SimulationPage() {
     setSubmitting(true);
     setError('');
 
-    let payload: {
-      idempotency_key: string;
-      action: 'buy' | 'sell' | 'hold';
-      quantity?: number;
-      rationale?: string;
-      reflection?: string;
-      expected_version: number;
-    };
+    let payload: ManualDecisionPayload;
 
     if (pendingDecision) {
       payload = pendingDecision;
@@ -426,6 +473,19 @@ export default function SimulationPage() {
         rationale: manualRationale || undefined,
         reflection: manualReflection || undefined,
       };
+      // Decided here rather than from the checkbox alone: a hold with a stale
+      // tick still in state would be refused by the route, and a press that is
+      // refused has written nothing.
+      if (
+        lineageState({
+          has_source: !!estimateSource,
+          selected: lineageSelected,
+          action: manualAction,
+        }) === 'attached' &&
+        estimateSource
+      ) {
+        p.linked_inference_id = estimateSource.inference_id;
+      }
       if (manualAction === 'buy') {
         const qty = parseInt(manualQuantity);
         if (isNaN(qty) || qty <= 0) {
@@ -448,7 +508,16 @@ export default function SimulationPage() {
       setManualRationale('');
       setManualReflection('');
     } catch (err: any) {
-      if (err instanceof ApiError && err.status === 409) {
+      const refusal =
+        err instanceof ApiError ? lineageRefusalOf(err.status, err.detail) : null;
+      if (refusal) {
+        // Retrying the same payload gets the same answer, so the retry
+        // affordance is dropped and the source selection is cleared: the next
+        // press is a new request the owner chooses deliberately.
+        setPendingDecision(null);
+        setLineageSelected(false);
+        setError(`${refusal.message_zh ?? formatErrorDetail(err.detail)}（reason：${refusal.reason}）`);
+      } else if (err instanceof ApiError && err.status === 409) {
         const detail = err.message || '';
         if (detail.includes('State version conflict')) {
           // Stale-version conflict: reload state, preserve form, require explicit new submit
@@ -484,6 +553,14 @@ export default function SimulationPage() {
     if (!pendingDecision) return;
     await handleManualDecision();
   };
+
+  // One derivation, used by both the checkbox and the prose under it: the page
+  // cannot offer to attach a source the route would refuse for this action.
+  const lineage = lineageState({
+    has_source: !!estimateSource,
+    selected: lineageSelected,
+    action: manualAction,
+  });
 
   const handleUpdateReflection = async (decisionId: string) => {
     if (!session || !reflectionInput.trim()) return;
@@ -789,6 +866,11 @@ export default function SimulationPage() {
             )}
           </div>
 
+          <DailyServicePanel
+            sessionId={session.id}
+            changedAt={session.state_version}
+          />
+
           {session.current_position_json && (
             <div className="card" style={{ marginBottom: '24px', borderLeft: '4px solid var(--primary)' }}>
               <h3 style={{ marginBottom: '8px' }}>Current position</h3>
@@ -1048,6 +1130,67 @@ export default function SimulationPage() {
                   />
                 </div>
               )}
+              <div
+                data-testid="sim-lineage-picker"
+                style={{
+                  marginBottom: '16px',
+                  padding: '10px 12px',
+                  border: '1px solid var(--border)',
+                  borderRadius: '6px',
+                  background: 'var(--surface-2)',
+                }}
+              >
+                <label
+                  style={{ display: 'flex', gap: '8px', alignItems: 'center', fontSize: '13px', fontWeight: 600 }}
+                >
+                  <input
+                    type="checkbox"
+                    data-testid="sim-lineage-attach"
+                    checked={lineage === 'attached'}
+                    disabled={lineage === 'no_source' || lineage === 'hold_no_lineage' || lineageLoading}
+                    onChange={(e) => setLineageSelected(e.target.checked)}
+                  />
+                  {LINEAGE_ATTACH_LABEL_ZH}
+                </label>
+                <span
+                  data-testid="sim-lineage-state"
+                  style={{ fontSize: '12px', color: 'var(--text-secondary)' }}
+                >
+                  {LINEAGE_STATE_LABELS_ZH[lineage]}
+                  {lineageLoading ? '（讀取中）' : ''}
+                </span>
+                {estimateSource && (
+                  <div
+                    data-testid="sim-lineage-source"
+                    style={{ marginTop: '6px', fontSize: '12px', fontFamily: 'monospace' }}
+                  >
+                    inference_id: {estimateSource.inference_id}
+                    {estimateSource.instrument_id ? ` · ${estimateSource.instrument_id}` : ''}
+                    {estimateSource.as_of_date ? ` · 估計時點 ${estimateSource.as_of_date}` : ''}
+                    {' · '}
+                    {estimateSource.predicted_action
+                      ? estimateSource.predicted_action
+                      : estimateSource.verdict_durable === false
+                        ? '結論不在帳本列上'
+                        : '（此列未持有結論）'}
+                  </div>
+                )}
+                {lineage === 'no_source' && !lineageLoading && (
+                  <div data-testid="sim-lineage-none" style={{ marginTop: '6px', fontSize: '12px', color: 'var(--text-secondary)' }}>
+                    {LINEAGE_NO_SOURCE_NOTE_ZH}
+                  </div>
+                )}
+                {lineage === 'hold_no_lineage' && (
+                  <div data-testid="sim-lineage-hold" style={{ marginTop: '6px', fontSize: '12px', color: 'var(--text-secondary)' }}>
+                    {LINEAGE_HOLD_NOTE_ZH}
+                  </div>
+                )}
+                {lineage === 'attached' && (
+                  <div data-testid="sim-lineage-note" style={{ marginTop: '6px', fontSize: '12px', color: 'var(--text-secondary)' }}>
+                    {LINEAGE_ATTACH_NOTE_ZH}
+                  </div>
+                )}
+              </div>
               <div className="form-group" style={{ marginBottom: '16px' }}>
                 <label style={{ display: 'block', marginBottom: '6px', fontWeight: 600 }}>
                   Rationale (optional)
@@ -1280,6 +1423,18 @@ export default function SimulationPage() {
                             )}
                             {d.decision_detail.rationale && (
                               <div style={{ gridColumn: '1 / -1' }}><span style={{ color: 'var(--text-secondary)' }}>Rationale:</span> {d.decision_detail.rationale}</div>
+                            )}
+                            {/* Read back from the row the backend wrote, not from
+                                what this browser pressed: a decision made in
+                                another session shows here too, and one that was
+                                refused shows nothing. */}
+                            {d.decision_detail.linked_inference_id && (
+                              <div style={{ gridColumn: '1 / -1' }} data-testid="sim-decision-lineage">
+                                <span style={{ color: 'var(--text-secondary)' }}>Source inference:</span>{' '}
+                                <span style={{ fontFamily: 'monospace' }}>
+                                  {d.decision_detail.linked_inference_id}
+                                </span>
+                              </div>
                             )}
                             {d.decision_detail.reflection && (
                               <div style={{ gridColumn: '1 / -1' }}>
