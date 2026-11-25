@@ -541,7 +541,7 @@ echo "EXIT=${pipestatus[1]}"
 
 ### 18.7 仍未完成
 
-- **§10.3**：`frontend/src/components/experiments/RevisionPanel.tsx` 的 presence 導向鏡像——本轮批准開始處理，交付前該檔尚未修改，前端結果另節記錄。
+- **§10.3**：`frontend/src/components/experiments/RevisionPanel.tsx` 的 presence 導向鏡像——本輪批准開始處理，交付前該檔尚未修改，前端結果另節記錄。
 - §10.2 未涵蓋的子效應（例如 `_classify_change` 對其他欄位的標註語義、§18.4 列出的下游消費端）維持未實施／NOT RUN。
 - 真實資料閉環與 §11／§17.7 未搬移的 `~/Backups/*` evidence 目錄狀態不變。
 
@@ -601,7 +601,7 @@ echo "EXIT=${pipestatus[1]}"
 | 建置 | `NEXT_DEV_DIST_DIR=.next-build-20261114 npm run build` | `✓ Compiled successfully`，**exit 0** |
 | Lint | `npx eslint src/lib/revisionSpec.ts src/components/experiments/RevisionPanel.tsx tests/revisionSpec.test.mjs` | **無輸出，exit 0** |
 
-`NEXT_DEV_DIST_DIR` 是 `frontend/next.config.js` 既有的 per-runtime dist 隔离開關（`distDir: process.env.NEXT_DEV_DIST_DIR || '.next'`），用它只是為了不覆寫既有 `.next`，沒有引入新框架，也没有啟動 dev server。
+`NEXT_DEV_DIST_DIR` 是 `frontend/next.config.js` 既有的 per-runtime dist 隔離開關（`distDir: process.env.NEXT_DEV_DIST_DIR || '.next'`），用它只是為了不覆寫既有 `.next`，沒有引入新框架，也沒有啟動 dev server。
 
 ### 19.6 撤回：「原本已有 11 個型別錯誤」是錯的
 
@@ -703,17 +703,17 @@ owner 指示把瀏覽器安裝從「整個平台的前置條件」降為「一�
 ### 21.2 R1 改了什麼（不新增平行 demo 流程，全部落在正式路徑）
 
 1. `backend/app/services/research_runs.py`
-   - `INTERRUPTION_DETAIL`（:42，2026-11-15 收窄）：中斷終態給使用者的文字。舊版暗示「程序已停止、額度已歸還」，本輪測得兩件事都不一定成立，現文只宣稱「超過設定的 stale 視窗仍未終態 ⇒ 沒有結果記錄，可重跑」，並明寫「執行它的那條程序**未確認已停止**、它預留的研究額度**可能仍被持有**，要把這 run 当成未計費前必須先讀帳本」。「超過时限」與「確認程序死亡」是兩個陳述，目前只有前者有證據。
+   - `INTERRUPTION_DETAIL`（:42，2026-11-15 收窄）：中斷終態給使用者的文字。舊版暗示「程序已停止、額度已歸還」，本輪測得兩件事都不一定成立，現文只宣稱「超過設定的 stale 視窗仍未終態 ⇒ 沒有結果記錄，可重跑」，並明寫「執行它的那條程序**未確認已停止**、它預留的研究額度**可能仍被持有**，要把這 run 当成未計費前必須先讀帳本」。「超過時限」與「確認程序死亡」是兩個陳述，目前只有前者有證據。
    - `_reservation_is_open()`（:303）：直接讀 `quota_reservations.status` 欄位，理由同 `job_control.cancel_requested_at`——identity map 會漏掉別個 process 已提交的狀態。配套的 `_status_in_db()` 已刪除：run 的終態不再靠「先讀再看」判斷，改由寫入本身的 WHERE 條件回答（見下）。
    - 完成寫入（:163-201）：終態是**條件式** `UPDATE … WHERE id = :id AND status IN ('pending','running')`，`published = rowcount`；`published != 1` 就丟棄結果、不覆寫終態、若 reservation 仍 open 則釋放後提交並回讀（:203-213）。結算前先看 reservation 是否仍 `reserved`（:215-226），已被釋放就記 log 並讓該 run **不計費**，不改寫帳本。異常路徑同樣是條件式翻轉，`flipped != 1` 表示別人已關結，直接採它的結果（:265-284）。
    - `find_live_research_run()`（:316）、`_release_orphaned_research_reservations()`（:328）、`reclaim_abandoned_research_runs()`（:407）。
-   - 額度釋放判準（本輪修正，2026-11-15）：`quota_reservations` **沒有任何欄位連到 run**（`app/models/quota.py:38-44` 只有 id／user／quota_type／amount／status／created_at／settled_at），所以「這筆 open reservation 屬於哪個 run」在 schema 層是 **UNKNOWN**，不得宣稱時間排序能推定歸屬。現行規則因此只有一條：**該 owner 只要還有任何非終態 run，就一筆都不釋放**（:360-375）；等到沒有 live run 了，該使用者所有未被 robustness study 認領的 `research_run` open 列才全部可證明為孤兒（:377-404）。先前版本以「每個 live run 拥有其 `started_at` 之前最新那筆 open reservation」按 start 升序配對，並在文件裡寫「只会少放不會多放」——那是錯的：兩條 run 的 start 與 reserve 交錯（reserve 與蓋戳記之間没有任何時間界）時，配對會把孤兒列認給後跑的 run、再把後跑 run 真正的 reservation 當成剩餘列釋放，結果該 run 完成時 `settle_reservation()` raise（`entitlements.py:377-378`）、**執行成功卻不計費**，帳本與實際執行對不上。這條測式就在 `test_a_live_run_makes_no_reservation_provably_orphaned`。得不到的好處（少放）只是額度晚一點歸還；多放的代價是漏帳——所以選保守那一邊。真正的修法要 schema（§21.4 B2）。
+   - 額度釋放判準（本輪修正，2026-11-15）：`quota_reservations` **沒有任何欄位連到 run**（`app/models/quota.py:38-44` 只有 id／user／quota_type／amount／status／created_at／settled_at），所以「這筆 open reservation 屬於哪個 run」在 schema 層是 **UNKNOWN**，不得宣稱時間排序能推定歸屬。現行規則因此只有一條：**該 owner 只要還有任何非終態 run，就一筆都不釋放**（:360-375）；等到沒有 live run 了，該使用者所有未被 robustness study 認領的 `research_run` open 列才全部可證明為孤兒（:377-404）。先前版本以「每個 live run 拥有其 `started_at` 之前最新那筆 open reservation」按 start 升序配對，並在文件裡寫「只会少放不會多放」——那是錯的：兩條 run 的 start 與 reserve 交錯（reserve 與蓋戳記之間沒有任何時間界）時，配對會把孤兒列認給後跑的 run、再把後跑 run 真正的 reservation 當成剩餘列釋放，結果該 run 完成時 `settle_reservation()` raise（`entitlements.py:377-378`）、**執行成功卻不計費**，帳本與實際執行對不上。這條測式就在 `test_a_live_run_makes_no_reservation_provably_orphaned`。得不到的好處（少放）只是額度晚一點歸還；多放的代價是漏帳——所以選保守那一邊。真正的修法要 schema（§21.4 B2）。
    - 釋放範圍排除已被 `RobustnessStudy.authorization_reservation_id` 認領的額度：study 整份計畫只計一個授權單位，`_finalize_authorization` 對非 `reserved` 列會 raise，本輪不去碰它的帳。
-   - 審計沿用既有 `research_run_failed` 事件（前端 `EVENT_LABELS` 已认识），不另創第二套日誌詞彙。
+   - 審計沿用既有 `research_run_failed` 事件（前端 `EVENT_LABELS` 已認识），不另創第二套日誌詞彙。
 2. `backend/app/api/runs.py:88-99`：ownership 檢查之後（帳號 B 學不到 A 的 run id）若該 version 有**已提交**的非終態 run ⇒ 先對該 version 做一次延遲恢復；仍是 live ⇒ **409**＋run id，而不是新增第二列與第二筆額度預留。409 已寫進 OpenAPI（`:39`）。本輪修正的兩個過度宣稱：(a) 這是**可見性**檢查、不是鎖，也**不是跨交易互斥**——正常請求交易在運算期間沒有任何已提交的 run 列（見 §21.2a），所以「擋不住尚未提交的 in-flight 嘗試」不是併發窗口問題，而是那個狀態在 DB 裡根本不存在；(b) 真正的跨程序序列化點在 `reserve_quota` 的 `FOR UPDATE`（`auth/entitlements.py:287-326`，鎖 lifetime `QuotaCounter` 或 `User` 列，再鎖所有 `status='reserved'` 列，持有整個引擎期間）：第二條 POST 會先通過 409 檢查（看不到第一條的交易），然後在那幾把行鎖上等待，解鎖後**把同一 version 再跑一次並再計費一次**。PG 測試層 `lock_timeout='15s'`（`backend/tests/conftest.py:170`）會把這個等待轉成錯誤，不是轉成序列化保證。要讓 409 變成鎖需要 §21.4 B2 階段 3 的 partial unique index（未實作、未批准）。
 3. `backend/app/config.py:124-125`：`research_run_recovery_enabled=False`、`research_run_stale_after_seconds=900`（沿用 training lane 的 900 慣例；名稱為 env 可覆寫之正式設定，非硬編碼）。
-4. `backend/app/main.py:78-108`：`stop_orphaned_research_runs()` 啟動掃描，依 flag 才執行、只 UPDATE、失敗記 log 而不阻止 API 啟動（符合 `main.py:15-18`「啟動不得改結構」）。本輪撤回兩個宣稱：(a) 「多個 worker 同時掃描的安全性來自條件式 UPDATE＋rowcount」——rowcount 作為贏家判據這件事只在**同一條連線／同一 Session 的測試層**被驗證過（SQLite `StaticPool` 共用一條 DBAPI 連線，跨事務交錯在本層物理上不可能，`backend/tests/conftest.py:133-137`）；PG 跨程序是否如宣稱，**未測量、不宣稱**，也沒有 advisory lock 或共用鎖協定。(b) 「下一次啟動會自動把預留額度釋放乾淨」——不成立：`reclaim_abandoned_research_runs` 只對**本次真的翻成終態的那幾位 owner** 呼叫 `_release_orphaned_research_reservations`（`services/research_runs.py:407` 之後的路徑），所以「没有任何 run 列配對的 open reservation」（正常流程崩潰的實際結果，見 §21.2a）不在啟動掃描的掃描範圍，不會被自動歸還。
-5. `backend/tests/test_research_run_recovery.py`（16 條）。**證據範圍（本輪新增，先講清楚再列條目）**：这一檔裡每一個 `running`+`reserved` 配對都是 seed 寫进去的（`_seed_attempt`），因為正常請求路徑不產生這個狀態（§21.2a）；這些測試綁的是「若該狀態存在，reclaim／release 依什麼規則下決定」，**不是**「正常崩潰會漏額度」的宣稱。條目：乾淨 run 不留 open reservation（settle 在已提交狀態是 reserved→used 的原子搬移）；預設視窗取自設定；恢復關結中斷 run 並歸還額度（回讀用獨立連線）；冪等＋不碰新近 run；**有 live run 時沒有任何 reservation 可被證明是孤兒**（含交錯配對反例、Study 認領列不動、其他 quota_type 不動）；ORM 直接指派會把終態列翻回非終態（characterization，解釋為何必須用陳述式 UPDATE）與條件式發布寫入無法翻回（`published == 0`、`result_json is None`）；reserve 後、首次 commit 前死掉 ⇒ 不留 run 列也不留 open reservation（這條是正常路徑的真實測量，也是 §21.2a 的證據之一）；POST 於 in-flight ⇒ 409 且只有一列／一笔額度（seed 狀態，非請求路徑）；中斷後 POST ⇒ 先恢復再跑新 run（只計費新的一次）；已完成不阻擋獨立重跑；帳號 B 拿到 403 且看不到 run id；晚到的寫入不得讓已恢復的 run 復活或結算；啟動掃描的 flag 兩態（off 時真的不寫）；study 認領的列不動。
+4. `backend/app/main.py:78-108`：`stop_orphaned_research_runs()` 啟動掃描，依 flag 才執行、只 UPDATE、失敗記 log 而不阻止 API 啟動（符合 `main.py:15-18`「啟動不得改結構」）。本輪撤回兩個宣稱：(a) 「多個 worker 同時掃描的安全性來自條件式 UPDATE＋rowcount」——rowcount 作為贏家判據這件事只在**同一條連線／同一 Session 的測試層**被驗證過（SQLite `StaticPool` 共用一條 DBAPI 連線，跨事務交錯在本層物理上不可能，`backend/tests/conftest.py:133-137`）；PG 跨程序是否如宣稱，**未測量、不宣稱**，也沒有 advisory lock 或共用鎖協定。(b) 「下一次啟動會自動把預留額度釋放乾淨」——不成立：`reclaim_abandoned_research_runs` 只對**本次真的翻成終態的那幾位 owner** 呼叫 `_release_orphaned_research_reservations`（`services/research_runs.py:407` 之後的路徑），所以「沒有任何 run 列配對的 open reservation」（正常流程崩潰的實際結果，見 §21.2a）不在啟動掃描的掃描範圍，不會被自動歸還。
+5. `backend/tests/test_research_run_recovery.py`（16 條）。**證據範圍（本輪新增，先講清楚再列條目）**：這一檔裡每一個 `running`+`reserved` 配對都是 seed 寫進去的（`_seed_attempt`），因為正常請求路徑不產生這個狀態（§21.2a）；這些測試綁的是「若該狀態存在，reclaim／release 依什麼規則下決定」，**不是**「正常崩潰會漏額度」的宣稱。條目：乾淨 run 不留 open reservation（settle 在已提交狀態是 reserved→used 的原子搬移）；預設視窗取自設定；恢復關結中斷 run 並歸還額度（回讀用獨立連線）；冪等＋不碰新近 run；**有 live run 時沒有任何 reservation 可被證明是孤兒**（含交錯配對反例、Study 認領列不動、其他 quota_type 不動）；ORM 直接指派會把終態列翻回非終態（characterization，解釋為何必須用陳述式 UPDATE）與條件式發布寫入無法翻回（`published == 0`、`result_json is None`）；reserve 後、首次 commit 前死掉 ⇒ 不留 run 列也不留 open reservation（這條是正常路徑的真實測量，也是 §21.2a 的證據之一）；POST 於 in-flight ⇒ 409 且只有一列／一笔額度（seed 狀態，非請求路徑）；中斷後 POST ⇒ 先恢復再跑新 run（只計費新的一次）；已完成不阻擋獨立重跑；帳號 B 拿到 403 且看不到 run id；晚到的寫入不得讓已恢復的 run 復活或結算；啟動掃描的 flag 兩態（off 時真的不寫）；study 認領的列不動。
 
 ### 21.2a 正常研究流程的交易邊界（2026-11-15 逐點測量，唯讀）
 
@@ -769,7 +769,7 @@ DATA_PROVIDER=demo ALETHRA_PYTHON=$PWD/backend/.venv/bin/python \
 - `git diff --check` 乾淨（EXIT=0，2026-11-15 18:1x 重測）。首次 12 條全紅的原因（以 str id 查 UUID 欄）與 study 案例的取值順序錯誤已修正，教訓寫在測試檔註解。
 - SQLite 層的邊界（不宣稱）：`tests/conftest.py` 用 `StaticPool`，整個 process 共用同一條 DBAPI 連線，所以這層**沒有真正的跨交易並發**；它能證明的是陳述式形態與 rowcount 判定（誰取得終態）、不釋放無歸屬列的決策，以及「條件式 UPDATE 不會把終態翻回」。同一事務在 PostgreSQL 的鎖等待／EvalPlanQual 重求值行為屬 R2。
 - 未驗證層（明確標記，不宣稱）：PostgreSQL（見下一條測量）、真實 process kill＋重啟的整合證據、瀏覽器 UI（`UI_BROWSER_BLOCKED`）。帳戶隔離的 PG 端：`tests/test_ownership_integration.py` 是 **paper-trading lane**（portfolio／daily-report／replay／stop，見 `:1-12`），不是研究 run lane；它 import 時就用 `ALETHRA_TEST_DB` 做安全檢查（`:34-70`：必須 PG、必須 localhost、DB 名須含 `test`、拒絕 production 名稱）。研究 run 的雙帳號隔離在 PG 層要由 `tests/test_research_run_recovery.py` 自己跑（`conftest.py:31`／`:158` 會依 `ALETHRA_TEST_DB` 换成真正的 PG engine），尚未執行。
-- PG 層本輪的实际測量（2026-11-15，取代過去「pgvenv 已存在」的記憶）：`which postgres psql pg_ctl initdb` 全 not found、`backend/.venv` 內 `import pgserver` 為 `ModuleNotFoundError`、`pgrep -fl postgres` 無輸出。也就是這台筆電目前**沒有任何 PostgreSQL 二進位或執行中的 server**，`run_tests.sh pg`（`backend/scripts/run_tests.sh:80-129`）会在 `ALETHRA_PG_TEST_URL` 檢查就 exit 2，而不是測試失敗。PG／重啟／雙帳號三層要閉環，需要先取得 §21.5 的那一包批准（安裝＋啟動＋可丟棄 DB），不是再跑一次 SQLite 就能補上。
+- PG 層本輪的實際測量（2026-11-15，取代過去「pgvenv 已存在」的記憶）：`which postgres psql pg_ctl initdb` 全 not found、`backend/.venv` 內 `import pgserver` 為 `ModuleNotFoundError`、`pgrep -fl postgres` 無輸出。也就是這台筆電目前**沒有任何 PostgreSQL 二進位或執行中的 server**，`run_tests.sh pg`（`backend/scripts/run_tests.sh:80-129`）会在 `ALETHRA_PG_TEST_URL` 檢查就 exit 2，而不是測試失敗。PG／重啟／雙帳號三層要閉環，需要先取得 §21.5 的那一包批准（安裝＋啟動＋可丟棄 DB），不是再跑一次 SQLite 就能補上。
 
 - R2 之前的最後一次 focused 測量（本輪文案修正後，SQLite layer）：`tests/test_research_run_recovery.py` **16 passed**，兩次執行分別為 `11.67s`（文案修正後）與 `11.70s`（最終 409 detail 改成「committed run… not proof it is computing」之後），EXIT=0，2026-11-15。本輪只改文案／docstring／註解，未改控制流，因此**未**重跑 13 檔 219 條集合（依指示）。全 repo 无任何地方斷言舊 409 字串（`grep -rn "still running as run" backend/ frontend/src` → 無輸出），只有 `test_research_run_recovery.py:568` 斷言狀態碼。
 - 遠端狀態（2026-11-15 以**唯讀 fetch** 取得，非 `ls-remote` 推定）：本機 HEAD `6a220427f5cfefd29f1a6b80890d550416ac723a`，`github/live1-impl` = `b08418f2fc593791afb004134f46b3335b9ac8f4`；`git rev-list --left-right --count HEAD...FETCH_HEAD` = **`0 1`** ⇒ HEAD 是遠端的祖先，**0 ahead／1 behind，無分岔、可 ff**。那唯一一條遠端專有 commit 只動 `backend/tests/test_experiment_revisions.py` 與 `backend/tests/test_strategy_preflight.py`，與本輪 6 個未提交檔案**零重疊**。本輪不 merge／rebase／checkout／push（未批准），未提交工作原樣保留，因此**不再把遠端差異標 UNKNOWN**。
@@ -794,7 +794,7 @@ DATA_PROVIDER=demo ALETHRA_PYTHON=$PWD/backend/.venv/bin/python \
 - `backend/.venv/bin/python` = **3.12.16**，`sys.executable` = `<ROOT>/alethra/backend/.venv/bin/python`。pgserver **尚未存在於任何本機解釋器**：`backend/.venv/bin/python -c "import pgserver"` → `ModuleNotFoundError`（實測）。
 - **port 5432 目前無人監聽**（`lsof -nP -iTCP:5432 -sTCP:LISTEN` EXIT=1、0 列）、**無 postgres 程序**（`pgrep -fl postgres` EXIT=1、0 列）。所以 5432 可佔用而不碰任何既有集群；執行日若這兩條改變，`guard` 會先拒絕而不是搶佔。
 - 記憶中的 `<ROOT>/.local/pgvenv` **不存在**（`ls -d` 實測 No such file）→ 沒有現成 PG 可複用，也沒有可挪用的憑證。
-- 本包全部工作路徑**預先不存在**（實測：`ls -d <ROOT>/.r2{,/pgdata,/evidence,/venv}` 皆 No such file）。`$ROOT` = `/Users/tommylam0915/Documents/Qoder/2026-11-03/ac51e592`，**在 `alethra/` 倉庫之外**；每個寫入階段前都呼叫 `require_absent`，已存在即 FAIL（不覆寫、不复用、不刪除）。
+- 本包全部工作路徑**預先不存在**（實測：`ls -d <ROOT>/.r2{,/pgdata,/evidence,/venv}` 皆 No such file）。`$ROOT` = `/Users/tommylam0915/Documents/Qoder/2026-11-03/ac51e592`，**在 `alethra/` 倉庫之外**；每個寫入階段前都呼叫 `require_absent`，已存在即 FAIL（不覆寫、不復用、不刪除）。
 
 **(b) 目標由 guard 決定，先核對再安裝**
 
@@ -824,10 +824,10 @@ DATA_PROVIDER=demo ALETHRA_PYTHON=$PWD/backend/.venv/bin/python \
 
 - 命令：`cd backend && env <下面 12 個變數> $BACKEND_PY -m uvicorn app.main:app --host 127.0.0.1 --port 8010 --log-level info`，PID 記 `$ROOT/.r2-package/uvicorn.pid`。
 - 生效環境（逐項覆寫，理由是 `backend/.env` 會把 `DATA_PROVIDER=twelvedata`、`RESEARCH_AUTH_BYPASS_ENABLED=true`、`CANDIDATE_PASSWORDLESS_MODE=true` 和黑名單 `DATABASE_URL` 帶進來，見 §21.4 B7）：`PYTHONDONTWRITEBYTECODE=1`、`DATABASE_URL=$RUN_URL`、`DATA_PROVIDER=demo`、`ENABLE_LEARNING_SCHEDULER=false`、`AUTO_COLLECTION_ENABLED=false`、`ENABLE_LIVE_PAYMENTS=false`、`ENABLE_EXTERNAL_NOTIFICATIONS=false`、`LIVE_TRADING_ENABLED=false`、`RESEARCH_AUTH_BYPASS_ENABLED=false`、`CANDIDATE_PASSWORDLESS_MODE=false`、`RESEARCH_RUN_RECOVERY_ENABLED=true`、`RESEARCH_RUN_STALE_AFTER_SECONDS=5`。最後一項是設定不是程式改動（`config.py:125` 預設 900），目的讓重啟後的掃描在幾秒內可觀察，並隨結果一起印出。**注意：`LIVE_TRADING_ENABLED` 全 repo 無讀取點（§21.4 B7a），寫成 false 不構成「已隔絕實盤」的證據；這裡的實盤隔絕來自「不起 daemon、不給任何券商憑證、provider 為 in-process demo」。**
-- 關閉的無關面向：學習排程、自動收集、付款、外部通知皆 false；`DATA_PROVIDER=demo` 為純 in-process 資料（`app/data/demo_data.py`，`TRADE_DATES`、`DEMO-ALPHA` 已實測存在）→ 無外呼。兩個測試用免登變數显式關掉，A／B 各別走 `/api/auth/register`＋`/api/auth/login` 拿真 JWT。
-- **SIGKILL 階段**：先跑 `timeprobe`（可行性閘門，不是裝飾）——同一 version 提交 3 次，每次輪詢 `research_runs.status`，記錄「是否有任一次看見 `running`」。**本輪修正對此閘門的解讀（§21.2a）**：即使換成很大的工作負載也**不該**看見 `running`——正常請求在運算期間沒有任何已提交的 run 列，獨立連線看到的數目恆為零，所以 `INSUFFICIENT_EVIDENCE` 是**結構性結果、不是毫秒級 demo 的副作用**；補 B1 資料集或 B3 worker 都不會改變这一点，能改變的是 B2 的 durable admission。demo 工作負載只有 3 個資產 × 30 根 K 棒；**若從未觀察到 in-flight 列，腳本以 exit 3 印 `INSUFFICIENT_EVIDENCE` 並且完全不发信号**（:382 附近；這是本包預留的誠實失敗出口）。
+- 關閉的無關面向：學習排程、自動收集、付款、外部通知皆 false；`DATA_PROVIDER=demo` 為純 in-process 資料（`app/data/demo_data.py`，`TRADE_DATES`、`DEMO-ALPHA` 已實測存在）→ 無外呼。兩個測試用免登變數顯式關掉，A／B 各別走 `/api/auth/register`＋`/api/auth/login` 拿真 JWT。
+- **SIGKILL 階段**：先跑 `timeprobe`（可行性閘門，不是裝飾）——同一 version 提交 3 次，每次輪詢 `research_runs.status`，記錄「是否有任一次看見 `running`」。**本輪修正對此閘門的解讀（§21.2a）**：即使換成很大的工作負載也**不該**看見 `running`——正常請求在運算期間沒有任何已提交的 run 列，獨立連線看到的數目恆為零，所以 `INSUFFICIENT_EVIDENCE` 是**結構性結果、不是毫秒級 demo 的副作用**；補 B1 資料集或 B3 worker 都不會改變這一点，能改變的是 B2 的 durable admission。demo 工作負載只有 3 個資產 × 30 根 K 棒；**若從未觀察到 in-flight 列，腳本以 exit 3 印 `INSUFFICIENT_EVIDENCE` 並且完全不发信号**（:382 附近；這是本包預留的誠實失敗出口）。
 - 只有在 DB 出現 `status IN ('pending','running')` 的該列之後，才對**本腳本自己記錄的 uvicorn pid** 發 `SIGKILL`；`api_stop_recorded`（:266-277）在 TERM 之前先核對 `ps -o command=` 含 `uvicorn app.main:app`，不符就完全不碰該 pid。任何其他程序一律不發信號。
-- 重啟後驗收（`restart-verify` 印出的欄位，全部以被殺列的 **owner** 為範圍）：`killed_run`、`status`、`started_at`、`completed_at`、`error_head`、`owner`、`open_reservations_same_owner`、`audit_events_for_this_run`、`owner_lifetime_used`、`research_run_failed_events_all_accounts`、`stale_after_seconds`。**依 §21.2a，本輪把預期改成實際可達的樣子**：正常請求被 SIGKILL 時整條未提交交易消失，因此預期是**查不到該 run 列**（腳本於列缺席時印出並 `SystemExit`，不假裝收斂）、該 owner 的 `open_reservations` 為 **0**（不是「已歸還」，是**從未存在**）、`quota_counters.used` 未增加（同樣是從未計費，不是回收成功）。只有在 DB 真的存在被殺的 `running` 列時（seed 或未來 durable admission），「超過 stale 視窗後再掃一次變成終態 `research_run_failed`＋payload `interrupted: true`，`services/research_runs.py:519-530`」這條收斂才是被测量的東西；屆時 `reserved` 是否歸零仍以**讀帳本**為準，不預設成功。對跨帳號的預期回應碼：**B `GET /api/v1/runs/{A 的 run}` = 404**（`api/runs.py:691-707` 的 ownership filter 查不到就 404，不是 403），**B `POST /api/v1/versions/{A 的 version}/runs` = 403**（:68-73）且回應內容不得含 A 的 run id。403 與 404 是兩個不同的答案，本包分別記錄、不混寫。
+- 重啟後驗收（`restart-verify` 印出的欄位，全部以被殺列的 **owner** 為範圍）：`killed_run`、`status`、`started_at`、`completed_at`、`error_head`、`owner`、`open_reservations_same_owner`、`audit_events_for_this_run`、`owner_lifetime_used`、`research_run_failed_events_all_accounts`、`stale_after_seconds`。**依 §21.2a，本輪把預期改成實際可達的樣子**：正常請求被 SIGKILL 時整條未提交交易消失，因此預期是**查不到該 run 列**（腳本於列缺席時印出並 `SystemExit`，不假裝收斂）、該 owner 的 `open_reservations` 為 **0**（不是「已歸還」，是**從未存在**）、`quota_counters.used` 未增加（同樣是從未計費，不是回收成功）。只有在 DB 真的存在被殺的 `running` 列時（seed 或未來 durable admission），「超過 stale 視窗後再掃一次變成終態 `research_run_failed`＋payload `interrupted: true`，`services/research_runs.py:519-530`」這條收斂才是被測量的東西；屆時 `reserved` 是否歸零仍以**讀帳本**為準，不預設成功。對跨帳號的預期回應碼：**B `GET /api/v1/runs/{A 的 run}` = 404**（`api/runs.py:691-707` 的 ownership filter 查不到就 404，不是 403），**B `POST /api/v1/versions/{A 的 version}/runs` = 403**（:68-73）且回應內容不得含 A 的 run id。403 與 404 是兩個不同的答案，本包分別記錄、不混寫。
 - 已知會在本層才浮出的風險（先講明，不事後找台階）：`audit_events.entity_id` 是 `String(36)`（`app/models/audit_event.py:14`）而 `research_runs.id` 是 UUID，任何 `entity_id = r.id` 的比較在 PG 會是型別錯誤——本包的查詢已改成 `r.id::text`；同型問題若出現在正式碼，會在 PG 層爆掉，屬本包要抓的東西之一。
 
 **(g) 失敗即保存現場（不清理）**
@@ -881,7 +881,7 @@ DATA_PROVIDER=demo ALETHRA_PYTHON=$PWD/backend/.venv/bin/python \
 ### 22.4 額度聯結
 
 - `quota_reservations.research_run_id`（additive、nullable、FK→`research_runs.id` `ondelete=RESTRICT`）＋ partial index（`IS NOT NULL`）＋ partial UNIQUE `uq_quota_reservation_run_unit`（`quota_type='research_run' AND research_run_id IS NOT NULL`）＝「一個 run 一個計費單位」由約束實屬。
-- 結算／釋放一律经 `_linked_reservation()` 讀帳本；NULL＝**UNKNOWN**，不按時間推定、不回填、不由 run 結算。`charge_quota=False` 的 cell 沒有聯結 ⇒ 結構上碰不到 study 的 `authorization_reservation_id`。
+- 結算／釋放一律經 `_linked_reservation()` 讀帳本；NULL＝**UNKNOWN**，不按時間推定、不回填、不由 run 結算。`charge_quota=False` 的 cell 沒有聯結 ⇒ 結構上碰不到 study 的 `authorization_reservation_id`。
 - RESTRICT 的理由：刪 run 不得順手刪掉帳本證據。
 - migration 檔僅**撰寫**：`migrations/versions/d0e1f2a3b4c5_add_quota_reservation_run_link.py`（`down_revision='c9d0e1f2a3b4'`，原頭）。**未對任何 PG 執行 upgrade／downgrade。**
 - 原稿用的 id `e5f6a7b8c9d0` 與既有 `e5f6a7b8c9d0_add_intent_cancel_requested.py` **撞號**（Alembic 以 `DuplicateRevision` 拒絕載入，會讓之後每一次 `alembic upgrade` 直接掛掉，不是分支）。已改用驗證過未佔用的 `d0e1f2a3b4c5`，並加兩項離線 gate：`test_the_linkage_revision_is_unique_and_is_the_only_head`（掃全文找重複 id、斷言唯一 head 與 parent）與 `test_the_linkage_migration_and_the_model_declare_one_contract`（migration 常數對 `QuotaReservation.__table__` 的 index where clause、`unique`、FK target 與 `ondelete` 逐項相同）。本機直譯器**未安裝 alembic**，所以 gate 讀 migration 原始文字而非 import 它。
@@ -892,7 +892,7 @@ DATA_PROVIDER=demo ALETHRA_PYTHON=$PWD/backend/.venv/bin/python \
 - `POST /versions/{id}/runs` 的預檢＋reclaim 已移除；`main.py` 的 `stop_orphaned_research_runs` startup handler 刪除；`research_run_recovery_enabled` 設定欄位刪除（死 knob 會重演 `LIVE_TRADING_ENABLED` 的假可操作性，§21.4 B7a）。`research_run_stale_after_seconds=900` 保留，現由拒絕執行的 pass 讀取，用來決定**列出**哪些候選，不決定它對任何列做什麼。
 - `reclaim_abandoned_research_runs` 現在是唯讀：回傳 `{refused: True, reason, candidate_run_ids, run_ids: [], released_reservation_ids: []}`，函式體內已無 `.update(`／`RunStatus.failed`／`emit_event`／`db.commit()`（由 `test_no_formal_path_calls_the_recovery_pass_and_it_cannot_write` 掃該函式原始碼綁定）。「已停用」不再被回報成「成功回收」。
 - `_release_orphaned_research_reservations(db, *, user_id, closed_run_ids=())` 只認證明：釋放條件是 `research_run_id IN :closed_run_ids`（呼叫者自己剛寫掉的那些 run），無證明即回傳 `[]`；NULL 聯結＝UNKNOWN 永不釋放；study 的單元因 `research_run_id` 為 NULL 而**結構上**碰不到，原先維護特例清單的程式碼已刪除。
-- **重啟前仍缺**：lease／heartbeat 或操作者明確決定（誰寫終態、以什麼證據）。本輪不实作。
+- **重啟前仍缺**：lease／heartbeat 或操作者明確決定（誰寫終態、以什麼證據）。本輪不實作。
 - R2 包（`.r2-package/run_r2.sh`，SHA256 `00ccc1eb…`）的 `RESEARCH_RUN_RECOVERY_ENABLED=true` 現為孤立環境變數（pydantic 預設忽略，實測不影響載入），其 timeprobe／SIGKILL 預期已被 22.2 取代；依指示**不擴寫該腳本**。
 
 ### 22.6 直接驗證（sqlite 離線 lane）
@@ -950,12 +950,219 @@ DATA_PROVIDER=demo ALETHRA_PYTHON=$PWD/backend/.venv/bin/python \
 ### 23.5 Row→UUID 修正及其證據範圍
 
 - 實測：兩個直譯器（SQLAlchemy 2.0.36 與 2.1.8）對單欄 ORM query `session.query(Model.id).one_or_none()` 都回傳 **`Row`**（不是標量）；`session.query(Model.id).scalar()` 兩邊都回傳 `UUID`。
-- 後果：把 `Row` 當成 uuid 綁進 `WHERE quota_reservations.id = ?` 得到 `sqlalchemy.exc.StatementError: (builtins.AttributeError) hex`，也就是 `_reservation_is_open()` 在两种環境都會炸。第一次實跑這批檔案時是 **21 failed／19 passed**。
+- 後果：把 `Row` 當成 uuid 綁進 `WHERE quota_reservations.id = ?` 得到 `sqlalchemy.exc.StatementError: (builtins.AttributeError) hex`，也就是 `_reservation_is_open()` 在两種環境都會炸。第一次實跑這批檔案時是 **21 failed／19 passed**。
 - 修正：`_linked_reservation()` 刻意保留 `one_or_none()`（多於一個單位是約束被破壞，必須 raise）但回傳 `row[0]`；`_committed_state()` 兩處同樣拆值。`_reservation_is_open()` 的 `.scalar()` 未改語意。
 - 證據範圍：這是**第一次真正執行**這些 helper——舊測試只在 `is None` 比較上使用它們，值從未進入 bind，所以 2.1.8 的差異一直不可見。本輪**沒有**在 .venv 重現「修正前」的失敗（那需要另一次 mutation 執行，本輪指示是停止新增 mutation）；可宣稱的是修正後兩條直譯器 lane 都 40 passed。
 
 ### 23.6 尚未驗證與已知後果
 
 - NOT RUN：PG 任何執行、`alembic upgrade`／`downgrade`、FK `RESTRICT` 行為（SQLite lane `PRAGMA foreign_keys=OFF`，只在原始碼與模型層意圖核對）、行鎖／跨連線／跨程序互斥（`StaticPool` 共用一條連線，`FOR UPDATE` 為 no-op；測試中的「另一個 session」不是獨立 PG 連線）、真實 SIGKILL 中斷後的最終狀態。
-- **被中斷的 active run 會持續擋住該 version**：列保持 `running`、單位保持 `reserved`、後續接納一律 409，直到有終態被寫入。解除它需要 lease／heartbeat 或操作者明確決定，本輪不实作、也不以逾時猜測。
+- **被中斷的 active run 會持續擋住該 version**：列保持 `running`、單位保持 `reserved`、後續接納一律 409，直到有終態被寫入。解除它需要 lease／heartbeat 或操作者明確決定，本輪不實作、也不以逾時猜測。
 - **回應遺失的 idempotency 尚未實作**：沒有任何持久 key（未儲存 request 形狀、無 Idempotency-Key lane），因此 client 重提交會被當成**新工作**接納並結算**新單位**。`test_a_resubmitted_request_is_a_new_run_not_a_replay` 把這個缺口 pin 住，而不是掩蓋它。
+
+## 24. Round-16／17（2026-11-16；本節為追加，不改寫上方原始紀錄）：取消是決定不是猜測、資料選擇的 remedy 變成可執行
+
+§23.6「被中斷的 active run 會持續擋住該 version」自本節起多一條**帳號自己走得通的出口**：`POST /api/v1/runs/{run_id}/cancel`。它不是 lease、不是 heartbeat、也不是年齡推定，而是「誰決定結束這個 run」的紀錄。§21–23 其餘內容與數字保留為當時程式狀態、當時那次執行的歷史測量。
+
+### 24.1 C-1：研究 run 的正式取消入口
+
+- 路由 `app/api/runs.py:714`（`@router.post("/runs/{run_id}/cancel")`）、`app/api/runs.py:726` `cancel_run(...)`；終結本身全部委託 `app/services/research_runs.py:465` `cancel_research_run(...)`。
+- 取得權仍是同一個條件式寫入：與 `execute_backtest_run` 相同的 `LOCK_ORDER`（version → run → quota），rowcount==1 才是「關帳本的那個人」。rowcount 0 ⇒ `outcome="already_terminal"`，該 request **什麼都不動**（不釋放別人已結算的單位、不在 completed 旁邊再記一筆取消、不修自己沒關的帳），只回報看見到的終態。
+- HTTP 語意（`app/api/runs.py:736-795`）：200 回 `ResearchRunCancelResponse`（`app/api/schemas.py:267`）；409 detail `{"error": "run_finished", ...}` 且不改變任何狀態；404 對「別人的 run」與「不存在的 run」回**同一句** `Run not found`，所以 run id 不是 oracle；**不做 quota／entitlement 檢查**——放棄工作是計費以外的動作。
+- `process_stopped` 恆為 `null`（`app/api/runs.py:791`）。取消效果的原句在 `CANCEL_EFFECT_NOTE`（`app/services/research_runs.py:94`，於 `:612` 附進結果），前端與文件都引用它，不改寫。
+- 新列舉值 `RunStatus.cancelled`（`app/models/research_run.py:18`）；其 migration `migrations/versions/e1f2a3b4c5d6_add_runstatus_cancelled.py`（3,638 bytes，2026-11-16 10:06）**僅撰寫，未對任何 PostgreSQL 執行**。
+- 計費歸屬：`_run_quota_unit`（`app/services/research_runs.py:648`）以 run 聯結取回單位，取消者結算／釋放的是自己關掉的那筆。
+
+### 24.2 C-2：拒絕 recovery 的那段話現在是真話
+
+- `RECOVERY_REFUSAL_REASON`（`app/services/research_runs.py:78-87`）除了「年齡不是死亡證明」，現在指名 `POST /api/v1/runs/{run_id}/cancel` 為可用出口；`reclaim_abandoned_research_runs`（`:865`）仍是純讀取，回 `{refused: True, reason, candidate_run_ids, run_ids: [], released_reservation_ids: []}`（`:928-936`）。
+- 後果：卡住 version 的 active run 不需要 lease 假設也能解除——由帳號決定，不由逾時猜測。真實 SIGKILL 之後殘留什麼仍屬 NOT RUN（24.7）。
+
+### 24.3 E-1：前端取消對等
+
+- `frontend/src/lib/runStatus.ts:16` `isCancellable(status)`、`:62` `activeRunIdFromRefusal(detail)`、`:10` cancelled 標籤（缺它時列渲染成「Unknown status (cancelled)」）；`frontend/src/lib/api.ts:282` `runs.cancel`；`frontend/src/app/experiments/[id]/runs/[runId]/page.tsx:256` 呼叫、`:350`／`:353` 控件與提示；`frontend/src/components/experiments/RevisionPanel.tsx:315` 用被拒訊息裡的 run id 指回那條 run。
+- 測試 `frontend/tests/runCancellation.test.mjs`：11 pass。該檔檔頭已宣告底部是原始碼文字配對，**不是 rendered-UI 證據**。
+
+### 24.4 B-1：資料選擇表（data manifest）後端
+
+- 新檔 `app/api/data_manifest.py`：`router` `:45`、`@router.post` `:319`、`build_data_manifest` `:335`、`provider_id` 為具名 query 參數 `:343`；註冊於 `app/api/__init__.py:40`／`:84`。
+- 所有判定讀引擎自己用的東西（`app/engine/backtest.py` 的 `_load_stored_bars`／`_ambiguous_dataset_error`／`_compute_stored_checksum` 與 `dataset_coverage` 的 key 名），端點不改寫任何一句 server 句子。verdict：`ready`／`partial`／`blocked`／`invalid_spec`；列狀態：`stored`／`absent`／`ambiguous`；角色：`traded`／`loaded_not_traded`／`benchmark`。
+- 契約閘與 preflight 共用同一個 `check_spec_contract`（`app/api/strategy_templates.py:400`）；日期格式在 model 層 `app/api/schemas.py:83` `validate_iso_dates` 於**撰寫時**擋下，不在 run 內部爆。
+- `multiple_providers`（常數 `app/api/data_manifest.py:53`）的 blocker `instrument_id=None`，message 是引擎原句（`:422-434`）；被拒的 instrument 以 `status="ambiguous"` 加 `provider_ids` 落在列上（`:438-446`）。
+- 移除偽造聯結：`app/engine/backtest.py:650`、`:932` 現在寫 `dataset_snapshot_id: None`。先前每次 run 生成一個新 uuid4，而該欄是 `dataset_snapshots.id` 的 nullable FK（`app/models/research_run.py:26`），未查表的讀者無法與真 FK 區分。
+
+### 24.5 B-1：面板把 remedy 變成可點的東西
+
+- `frontend/src/lib/dataManifest.ts`：`STATUS_TONE_COLOUR` `:87`（tone→colour 只一處）、`specFingerprint` `:211`、`isStale` `:230`、`MULTIPLE_PROVIDERS` `:248`、`providerCandidates` `:250`。
+- **本輪發現並修正的錯誤**：候選 provider 必須讀自 `status="ambiguous"` 的列，不能讀自 blocker 的 `instrument_id`——後者是 `None`（24.4），拿它去比對字串 id 恆為空集合，「綁定一個 provider」就會維持成一句使用者無法遵守的建議。
+- `frontend/src/components/experiments/DataManifestPanel.tsx`：`boundProvider` `:130`（初始值取自 prop）、`candidates` `:138`、`check(provider)` `:140`、請求用的 fingerprint `:148`、主按鈕 `onClick={() => check()}` `:181`（`onClick={check}` 會把 click event 當成 provider 傳進去）、`:334` 每個候選一個 `exp-manifest-bind-<provider>`、`:345` `exp-manifest-bind-none`（不綁定也是可選狀態）。整組控件只在回應真的帶 `multiple_providers` 時渲染。
+- fingerprint 含綁定：重新綁定立刻讓先前 verdict 變 stale，綁定不會在背後漂移；請求失敗時不保留任何 checked 指紋（面板回到「Not checked」）。
+- 兩側 key-parity gate：後端 `tests/test_data_manifest_contract.py::test_the_json_carries_exactly_the_fields_the_frontend_types_declare`（比對 `_CONTRACT_KEYS`，含 `invalid_spec` 分支同形）；前端 `tests/dataManifest.test.mjs` 從 TS interface 文字解析同一批名稱。該 gate 先前抓出 `remedy?` 與 pydantic 恆序列化欄位的差異。
+- 認證：`test_the_manifest_route_refuses_an_unauthenticated_call` 量到 401、detail 為 `Could not validate credentials`、且不洩漏 checksum。
+
+### 24.6 實測（命令／計數／exit code）
+
+後端 venv lane（`interpreter:` 行實測為 `…/backend/.venv/bin/python`，Python 3.12.16、SQLAlchemy 2.0.36）：
+
+```
+TMPDIR=/tmp/alethra-sqlite-test-dir DATA_PROVIDER=demo \
+  ALETHRA_PYTHON=…/alethra/backend/.venv/bin/python \
+  bash ./backend/scripts/run_tests.sh sqlite tests/test_data_manifest_contract.py -q -p no:warnings
+→ 16 passed in 11.50s ，exit 0
+
+… bash ./backend/scripts/run_tests.sh sqlite tests/test_research_run_recovery.py \
+    tests/test_research_run_admission.py tests/test_platform_cancel_flow.py -q -p no:warnings
+→ 57 passed in 160.39s（26／24／7） ，exit 0
+```
+
+前端：
+
+```
+cd frontend && node22 --experimental-strip-types --import ./tests/tsResolveLoader.mjs --test tests/*.test.mjs
+→ 114 pass / 0 fail ，EXIT=0（其中 dataManifest.test.mjs 23、runCancellation.test.mjs 11）
+cd frontend && ./node_modules/.bin/tsc --noEmit → EXIT=0
+NEXT_TELEMETRY_DISABLED=1 NEXT_DEV_DIST_DIR=.next/b3-verify ./node_modules/.bin/next build
+→ 產出 BUILD_ID；.next/b3-verify/server/app/experiments/new.html = 6,005 bytes，其中 `exp-manifest-panel` 出現 0 次
+```
+
+`next build` 又一次在 `frontend/tsconfig.json` 追加 `.next/b3-verify/types/**/*.ts`；該 hunk 以編輯還原（不是 `git checkout`），scratch distDir 已刪除，`git status` 對 `frontend/tsconfig.json` 乾淨。上面那行 0 次就是「build 只是編譯／型別證據」的測量，不是推測。
+
+### 24.7 NOT RUN／BLOCKED
+
+- PG 任何執行（含 `e1f2a3b4c5d6` 與 `d0e1f2a3b4c5` 的 `upgrade`／`downgrade`）、建 role／DB、服務啟動、真實 SIGKILL、真實 import、依賴升級、資料刪除：本輪未批准，未執行。
+- 真實伺服器 HTTP：本節所有路由證據都經 TestClient，不是 8110／8111 上那個行程；那兩個 listener 與 3110／3111 屬平行 session `5062987d` 的程式快照，未探測、未重啟。
+- Rendered UI：`/experiments/new` 包在 `<Suspense>` 且用 `useSearchParams`，prerender HTML 不含任何表單（24.6 實測 6,005 bytes／0 個 panel）；chromium 不存在（`~/Library/Caches/ms-playwright/` 為空）、啟動 dev server 未批准 ⇒ `UI_BROWSER_BLOCKED`。面板與控件的正確性目前只有 unit＋型別＋文字配對等級。
+- 全 lane sqlite（197 檔，另 `--ignore` 兩檔既有無法收集者 `tests/test_acquisition_hook.py`、`tests/test_ownership_integration.py`）於本節撰寫時仍在執行，數字**不在這裡宣稱**；完成後補在 24.6，且不以 §21／§23 的舊數字代稱（先前的 857 passed 屬另一輪 46 檔的聚焦 lane，不是全 lane）。
+  - 2026-11-16 12:29 追記：上面那句話寫於該輪尚未跑完的當下，不覆蓋、不改寫；跑完後的實測數字與 57 failed／66 errors 的逐檔分解在 **24.11**。
+  - 2026-11-16 12:56 追記：D 匯出完成後另起過一次全 lane 重測，**在 28% 處被本輪主動停止**（`/tmp/alethra-full-suite-postD.log`，無終行、無 exit code）。停止的理由：接著還要改 `run_tests.sh`、兩支 candidate 脚本人舆 robustness cancel，中途改檔會讓那次計數變成「半條 lane 的數字」；因此**本節不宣稱任何 post-D 全 lane 數字**，全 lane 只在round 結束前重測一次，結果另節記錄。D 匯出的本輪證據是 24.10 的 focused lane（17＋182 passed），不是全 lane。
+- 本節不含 commit／push（本輪未批准）。HEAD 仍為 `5a34e3f`，其上有一整組未提交的工作樹變更（見 24.8 檔單）。
+
+### 24.8 尚未做、以及需要 owner 一次裁決的事
+
+- **D 匯出**：formal research run 的逐筆成交匯出目前**沒有 run 層入口**。`result_json` 已含 `transactions`（每筆 key 見 `app/engine/strategies.py:39-57`），而且 `execute_backtest_run` 在 `run_status == "error"` 時抛 `BacktestRefused` 而不是發佈空 transactions（`app/services/research_runs.py:225-230`），所以「無成交」與「計算失敗」在資料層已經可分——缺的是把這一層呈現出來的入口。現有兩條邻近路徑都不是它：experiment 整體記錄 `app/api/experiments.py:1028`；journal lane 的 `app/api/journal.py:63`／`:111` 只 JOIN `StrategyStudyRun`／`StrategyStudyTrade`（`app/services/journal_service.py:23`、`:130`），讀不到 `research_runs`。paper lane 另有 `app/api/paper_portfolio.py:1421`。兩帳號隔離（read／modify／execute／export）也尚未在 run 層匯出上留下證據。
+  - 2026-11-16 追記：此條已由 **24.10** 的 run 層匯出入口處理（sqlite lane 等級證據在該節）；PG、真實伺服器 HTTP 與 rendered UI 仍是 NOT RUN，所以本條不算「已驗收」，只算「已有正式入口＋本機回歸」。
+- **C**：回應遺失的 idempotency 仍為文件化的 NOT IMPLEMENTED（`app/api/runs.py:71-77`，「重試可能被計費兩次」）；B4 study lane 的 quota 洩漏未處理。
+- **F**：環境入口**並不是「只有開始、沒有別的」**——這句話是我先前寫錯的，實測 `git ls-files '*.sh'` 在本 checkout 有 27 支入口（`backend/scripts/run_tests.sh`、`start_candidate_stack.sh`、`stop_candidate_stack.sh`、7 支 `execute_journey_*`、5 支 `verify_*`、`deploy/{up,down,migrate,backup}.sh` 等）。真正的缺陷是四條可測量的：(1) `run_tests.sh` 與兩支 candidate 腳本在找不到 venv 時**靜默落回 `command -v python3`**，而本机系統 python 是 3.11＋pytest 9.2.0＋SQLAlchemy 2.1.8（pinned venv 為 3.12.16＋8.3.3＋2.0.36），於是可以「用別一套依賴跑出看起來像本 lane 的計數」；(2) `execute_journey_b_worker.sh`／`verify_data_persistence.sh`／`verify_quota_persistence.sh` 硬編機器 #1 的絕對路徑與 `postgresql://test:test@localhost:5434/…`＋`acceptance-test-secret-…` 明文秘密；(3) docker 那組只有 `start_acceptance_env.sh`、**沒有 stop 入口**，且其第 11 行與第 22 行對密碼的說法互相矛盾；(4) **沒有唯讀 status 入口**，於是「它還在跑嗎」只能靠啟動別的東西來回答。這四項的處理與實測證據見 **24.12**。前端部分未動：`frontend/package.json` 仍是 `dev`／`build`／`start`／`lint`／`typecheck`，沒有 status／stop 語意（程序由腳本管，不在 npm 層）。
+- 需要 owner 裁決：恆為 NULL 的 `research_runs.dataset_snapshot_id` FK 要留要撤、durable lane 的 entitlement gate、`selection_rule` 敘述、naive-UTC `utcnow()` 寫入 `timestamptz`，以及 24.9 那條已被提交進 git 的秘密檔。
+- 一次提完的擴權批准包（尚未提出、尚未批准）：PG 安裝／啟動、role／DB 建立、migration upgrade／downgrade（含 `e1f2a3b4c5d6`）、服務啟動、真實 SIGKILL、chromium 安裝；另有 commit／push 的批准，以及 24.9 的补救方式（是否改寫歷史屬 force-push 等級，絕不自行執行）。
+
+### 24.9 本輪新量到的安全缺口：`backend/.env.test` 是**被追蹤**的秘密檔，且文件說法相反
+
+本節只測量、不處置（不輸出秘密、不删檔、不改寫歷史）。
+
+- 實測：`git ls-files --error-unmatch backend/.env.test` 回 rc=0 並列出該檔 ⇒ 它**在版本控制裡**；其歷史至少到 `5af8521`（"Add isolated test environment with fail-closed safety gate"）與 `77e84ca`。
+- 檔內 `DATABASE_URL`（總長 104）的形狀為 `postgresql://alethra_test_runtime:<32 字元密碼>@localhost:5432/ai_investment_lab_test`（用 Python 重新量：user_len=20、pass_len=32、hostport=`localhost:5432`、db=`ai_investment_lab_test`；密碼本身未在任何地方輸出，也不屬於 test／password／postgres 這類明顯佔位字串）。
+- 對照：同一檔其餘可能敏感的欄位實測為**空值**——`KRAKEN_WS_URL`、`KRAKEN_API_KEY`、`KRAKEN_API_SECRET` 的 value_len 都是 0；開關欄 `LIVE_TRADING_ENABLED`／`RESEARCH_AUTH_BYPASS_ENABLED`／`ENABLE_LEARNING_SCHEDULER`／`AUTO_COLLECTION_ENABLED` 皆為 `false`，`TEST_MODE`／`TEST_ENVIRONMENT` 為 `true`。
+- 對照：`backend/.env` 由 `.gitignore:14` 忽略（`git check-ignore -v` 實測），而同一 `.gitignore` 的 `.env.local`／`.env.*.local` 兩條**不會**命中 `.env.test`（`git check-ignore backend/.env.test` rc=1）。
+- 文件說的剛好相反：`docs/handoff/TRAVEL_HANDOFF.md:314-319` 把 `backend/.env` 與 `backend/.env.test` 一起寫成「Ignored by git (contains secrets)」。就 `.env.test` 而言這句話是錯的。
+- 影響範圍：能讀 repo 的人就拿到「一台機器上 `localhost:5432` 的一個 DB 密碼」。它不是雲端／外部服務憑證，也未見於任何 app code 的載入路徑（`backend/app/config.py:428` 只讀 `.env`；repo 內引用 `.env.test` 的只有三份文件：`EXECUTION_RECORD_20261109.md`、`docs/handoff/TRAVEL_HANDOFF.md`、`ISOLATION_TEST_ENVIRONMENT_REPORT.md`）。但只要同一密碼在任一機器的 PostgreSQL role 上重複使用，它就是可用憑證。
+- 可行替代（擇一需 owner 批准，我不自行執行）：(1) 本機 `git rm --cached backend/.env.test` ＋ `.gitignore` 補一條 `.env.test`，保留工作檔不刪，另於文件改正 24.9 那句；(2) 先 rotate 那個 role 的密碼再(1)；(3) 若要連歷史一起清掉，那是 `filter-repo` ＋ force-push 等級的共享歷史改寫，屬明確未批准項目。
+- 修正先前宣稱：早前「no secrets landed in git」的檢查（本輪接手前的 task #3）與本測量不同論——那次查的是 diff 內容，這次查的是 `git ls-files` 對整個 repo 的追蹤集合；本節以測量為準，不以舊宣稱覆蓋。
+
+### 24.10 D：formal research run 的逐筆成交匯出（2026-11-16 新增）
+
+兩條 run 層入口，同一個決策來源：
+
+- `GET /api/v1/runs/{run_id}/trades` → `backend/app/api/runs.py:745`
+- `GET /api/v1/runs/{run_id}/trades.csv` → `backend/app/api/runs.py:773`（`Content-Disposition: attachment; filename="run-{run_id}-trades.csv"`）
+- 兩條都只經由 `_trades_export_payload`（`app/api/runs.py:719`）取一號，所以 CSV 不可能說出 JSON 不願意說的事；服务層為新檔 `backend/app/services/run_trades.py`。
+
+**兩條支配這個匯出的規則**（寫在 `run_trades.py` 模組 docstring，非口頭協定）：
+
+1. **欄位就是儲存 fill 自己帶的 key**。`_FILL_KEYS`（`:41`，17 個）来自 `app/engine/strategies.py::generate_transaction`，`_ATTRIBUTION_KEYS`（`:64`，8 個）来自 `app/engine/attribution.py::annotate_and_attribute`——同一批 dict 有兩個寫入者，所以 key 集合必須是兩者的聯集（`ENGINE_TRANSACTION_KEYS`，`:79`）。匯出層不改名、不從 journal lane 借名字（`net_pnl`／`trade_index`／`cost_ratio_pct`／`rule_id` 由測試明確要求**不得**出現）。多餘 key 的來源由 drift gate 同時跑兩個函式並斷言 `set(fill) == set(ENGINE_TRANSACTION_KEYS)`（`tests/test_run_trades_export.py:485`），另有一條核對實際儲存列不引入未宣告欄位（`:542`）。
+2. **空檔只有在紀錄本身說「沒有成交」時才合訂**。五種 basis：`completed_with_trades`／`completed_without_trades`（200，後者實測走 `sma_crossover` + `long_window=200` 的真零成交路徑）舆四個 409 拒答——`run_failed`、`run_cancelled`（訊息指名 `POST /api/v1/runs/{id}/cancel` 是決定，不是證據）、`run_not_finished`（pending／running）、`result_not_recorded`（completed 但 `result_json` 沒有 `transactions` 這個 key，用人工 imposed 的 legacy 列觸發）。拒答類別 `RunNotExportable`（`:121`）的 `.detail()`（`:135`）回 `{"error","run_status","message"}`。
+
+**身分（provenance）**：`PROVENANCE_KEYS`（`:84`，20 個：run／owner／experiment／version／status／basis／config_hash／engine_version／dataset_checksum／window／data_nature／data_provider／feed_mode／bars_used）**逐列**重複，不是只在檔頭出現一次；理由是離開這份回應的單一列仍然是一項關於某 run、某資料集、某帳號的主張。
+
+**兩帳號隔離與唯讀證據**：404 對「別人的 run」與「不存在的 run」給完全相同的答案與相同 body（匯出自己的 404 在 `app/api/runs.py:735`，用的是 `get_run`（`:715`）／`cancel_run` 同一條 `Experiment.owner_id` join；這與 model-research export lane 用的 403-for-foreign 是兩種不同政策，本匯出選的是 404 那一種，因為 run id 本身屬於私有資訊）；陌生人的 body 實測既不含 `transaction_id` 也不含該 run id。匯出前後以獨立 session 比對 `status`／`completed_at`／`result_json`／metrics 快照，證明匯出寫入 0 筆（`tests/test_run_trades_export.py:421`、`:448`、`:467`）。
+
+**前端**：`api.runs.trades`（JSON）舆 `api.runs.tradesCsv`（`apiFetchText`，因為 CSV 不是 JSON）在 `frontend/src/lib/api.ts:297-298`；run 詳情頁新增 `data-testid="run-export-panel"`（`frontend/src/app/experiments/[id]/runs/[runId]/page.tsx:610`），先 `checkExport`（`:289`）問過服务端才顯示下載钮（`:631` 起 gate 在 `exportSummary`），標題列由 `describeExportHeadline` 產生、`basis_note` 原文照示而非改寫（`:650`），409 走 `role="alert"`（`:666`）而非静默。`RunTradesExport` 12 個欄位與路由 body 由兩侧 key-parity gate 對齊（後端 `tests/test_run_trades_export.py:519`、前端 `tests/runTradeExport.test.mjs:133`）。
+
+**實測（sqlite lane／node22 lane，命令同 24.6 的 lane 形式）**：
+
+```
+… run_tests.sh sqlite tests/test_run_trades_export.py -q -p no:warnings --tb=line -rf
+→ 17 passed in 12.29s
+… run_tests.sh sqlite tests/test_run_trades_export.py tests/test_journal_api.py \
+    tests/test_run_comparison.py tests/test_research_run_admission.py \
+    tests/test_research_run_recovery.py tests/test_durable_run_customer_path.py \
+    tests/test_round_trip_metrics_and_risk_journal.py \
+    tests/test_paper_journal_csv_export.py tests/test_model_research_export.py \
+    -q -p no:warnings --tb=line -rf -rs
+→ 182 passed in 102.45s ，EXIT=0（log /tmp/alethra-export-lane-run.log）
+cd frontend && node22 … --test tests/runTradeExport.test.mjs → 11 pass / 0 fail
+cd frontend && node22 … --test "tests/**/*.test.mjs"        → 125 tests / 125 pass / 0 fail ，EXIT=0
+cd frontend && ./node_modules/.bin/tsc --noEmit              → EXIT=0（0 行輸出）
+```
+
+**本節未涵蓋的範圍（不得讀成「已驗收」）**：PG lane（上列 9 檔在 sqlite layer 跑，PG-only 断言未執行）、真實伺服器 HTTP（全部經 TestClient，不是 8110／8111 上那個行程）、rendered UI（`UI_BROWSER_BLOCKED` 仍成立，因此面板的正確性是 unit＋型別＋文字配對等級）、以及「formula escaping 在真實 spreadsheet 裡不執行」——後者只有 `_csv_cell` 的 unit 断言（`=SUM(A1)` → `'=SUM(A1)`、`-1.25` 保持數字、`None` → 空字串、`True` → `true`）。
+
+### 24.11 全 lane sqlite 的實測數字，舆 57 failed／66 errors 的因果分解
+
+先前 24.7 的佔位句（「仍在執行，數字不在這裡宣稱」）保留原文；數字如下。
+
+```
+TMPDIR=/tmp/alethra-sqlite-test-dir DATA_PROVIDER=demo \
+  ALETHRA_PYTHON=…/alethra/backend/.venv/bin/python \
+  bash ./backend/scripts/run_tests.sh sqlite -q -p no:warnings \
+    --ignore=tests/test_acquisition_hook.py --ignore=tests/test_ownership_integration.py
+→ 57 failed, 3068 passed, 87 skipped, 66 errors in 1877.72s (0:31:17) ，EXIT=1
+  log：/tmp/alethra-full-suite-b2.log（12:29 之前的一輪，工作樹 = 5a34e3f + 髒檔）
+```
+
+三件事必須分開講，否則這三個數字會被讀成同一件事：
+
+1. **57 個 failed 全部住在 18 個檔裡**（實測清單 `/tmp/alethra-fail-files.txt`；全 lane 與該 18 檔子集的 failed 数相同）。該子集單獨重跑：現工作樹 `57 failed, 142 passed, 9 skipped, 6 errors in 64.14s`（`/tmp/alethra-cur-rf.log`）vs pristine HEAD `5a34e3f`（`git archive HEAD | tar -x -C /private/tmp/alethra-head-check`）同子集 `54 failed, 145 passed, 9 skipped, 6 errors in 64.10s`（`/tmp/alethra-head-rf.log`）。
+2. **3 個差異的機制已被證明，不是「大概是本機環境」**。2026-11-16 12:31 在 HEAD 副本上逐字重做：
+   - 無 `backend/.env`：`3 passed in 0.56s`，EXIT=0（`/tmp/alethra-head3-noenv.log`）
+   - **只**把未追蹤的 `backend/.env` 複製進該副本同一檔名：`3 failed in 0.59s`，EXIT=1，失败點為 `tests/test_candidate_passwordless.py:124 assert 403 == 404` 舆 `tests/test_trial_passwordless.py:376`（production／staging 兩 param，`Regex pattern did not match`）（`/tmp/alethra-head3-withenv.log`）
+   - 複製用的 scratch `.env` 已删除（`ls` 實測 rc≠0），全程未輸出任何秘密值。
+   - 通路是 `backend/app/config.py:428  model_config = ConfigDict(env_file=".env")`：同一份程式碼因「工作目錄有沒有一個不被 git 追蹤的檔案」而給出不同設定。結論：本輪（含 D 匯出）對 57 這個数字的淨貢獻為 0，因為這 3 個在 HEAD 上加上 `.env` 就重現，其餘 54 個在 HEAD 上本就红。
+3. **66 errors 是 sqlite layer 的環境錯，不是產品回归**（62 個 at setup、4 個 at teardown）。log 內 `^E ` 行的分佈（一個 error 可貢獻多行）：`no such function: current_database` 37、`unrecognized token: ":"` 13、`database is locked` 9、`no such table: _test_sacrificial_` 6、`table paper_portfolios has no column named updated_at` 5、`PendingRollbackError` 2、`ProgrammingError` 1、`Error binding parameter 1: type 'UUID' is not supported` 1。前四類是 PostgreSQL-only fixture 在 sqlite lane 的必然失敗；`paper_portfolios has no column named updated_at` 舆 `UUID` binding 屬 sqlite lane 自身的 schema／型別限制，不是本輪引入；`database is locked` 9 次是 sqlite 併發上限的產物，因此在 PG lane 上這 66 個不該被預期為同一批。
+
+### 24.12 F：24.8 那四條環境入口缺陷已處理，外加本輪寫 gate 時量到的第五條（2026-11-16）
+
+**等級先講清楚**：本節的「已處理」＝本機回歸等級證據（unit 測試＋腳本文字 gate＋拒絕路徑的實際 exit code）。沒有任何服務被啟動、沒有 DB 被建立、沒有 migration 被執行、沒有 docker 容器被跑過，因此 pair 的「成功路徑起得來」仍是 NOT RUN（見本節末）。
+
+**四條缺陷各自的處置（檔:行為）**
+
+1. **靜默落回系統 python**（缺陷 (1)）——`backend/scripts/run_tests.sh:63-86`：`ALETHRA_PYTHON` 若設定就必須是「檔案且可執行」（`:66` 拒絕），未設定時只在本 checkout 的 `backend/.venv/bin/python`→`backend/venv/bin/python` 之間選，兩者皆無就 `:78` 拒絕並印出兩個被探測過的絕對路徑＋「A system python3 is not used silently: it carries its own pytest and SQLAlchemy, so its counts would be read as this lane's.」；`command -v python3` 這個候選已從該檔消失。`run_tests.sh:93-95` 新增 `print_lane_fingerprint`，在 pg（`:134`）與 sqlite（`:208`）兩條路徑都印 `lane fingerprint: python X | pytest Y | sqlalchemy Z`，計數因此綁得住一套依賴。`start_candidate_stack.sh:67-79`／`stop_candidate_stack.sh:22-34` 同樣刪除機器 #1 絕對路徑與 `command -v python3` 兩個候選，只認本 checkout 的 `.venv`/`venv`，並對 `CANDIDATE_PYTHON` 做 `-f && -x` 核對（macOS 實測：`[ -x 目錄 ]` 為真，所以必須兩個都查）。
+2. **機器 #1 路徑＋明文秘密**（缺陷 (2)）——`execute_journey_b_worker.sh`／`verify_data_persistence.sh`／`verify_quota_persistence.sh` 三支都改成：`ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"` 推本 checkout、`BASE_URL="${BASE_URL:-…}"`、先驗 venv 才 `source "$ACTIVATE"`、`DATABASE_URL`／`JWT_SECRET_KEY` 未匯出即 exit 2（訊息寫明「this script embeds no signing key」）、$BASE_URL/health 沒回應就 exit 2（三支的驗證都需要一個已在跑的後端，讓它講清楚而不是中途留下半停的棧）、重啟的 `--host 0.0.0.0` 改為 `${BACKEND_HOST:-127.0.0.1}`；`verify_quota_persistence.sh` 那個從未被讀取的 `WORKTREE=` 死變數一併刪除。`EXECUTION_RECORD_20261109.md:631` 點名的 `acceptance-test-secret-…`／`postgresql://test:test@localhost:5434/…` 字面值不再出現在這三支檔裡（本節不輸出任何秘密值；該記錄檔本身與 24.9 的 `.env.test` 仍待 owner 裁決，未動）。**這條 gate 不宣稱的事**也要寫下來：三支腳本仍各有 `PASSWORD="testpass123"`（`:40`／`:36`／`:9`），那是腳本自己建立的旅程用一次性帳號的密碼，不是 DB／簽金鑰／外部 API 憑證，檢測式刻意不把它算成違規（否則合法的 `$DB_PASSWORD` 插值形状也會一起紅）；同理，`test_env_entries.py:454-456` 仍然留著那三個被修掉的舊字面值，因為 `test_the_refusal_gates_are_not_vacuous` 需要拿它們餵給檢測式，證明 gate 會紅而不是空轉。
+3. **docker 那組沒有 stop／對密碼自我矛盾**（缺陷 (3)）——`start_acceptance_env.sh`（150 行）現在在任何東西被建立之前依序拒絕：docker 不在 PATH → 無 backend 目錄 → 無 `frontend/node_modules` → `POSTGRES_PASSWORD is not exported`（它同時是 container `:61` 與 migration URL `:84` 用的同一個密碼，故不接受「每步另擬」）→ `JWT_SECRET_KEY is not exported` → 無 venv activate → 同名 container 已存在（不重建不是自己建的 DB）。舊檔頭那組互相矛盾的密碼說法已不存在（現在只有一句：read once from the caller）。新增配對檔 `stop_acceptance_env.sh`（100 行）：參數只接受 `""|--purge`（其他印 usage、exit 2）；docker 不在 PATH 時在送任何訊號之前拒絕（實測 `REFUSED (nothing was signalled)` exit 2）；`stop_recorded <role> <pid file> <expected cmdline text>` 對 backend/frontend 分別核對 cmdline（`:74`、`:75`），紀錄過期就清掉紀錄、cmdline 不符的 process 只報告並記 `LEFT_RUNNING=1` 不動它、預設不 SIGKILL（「killing it forcibly is an explicit call, not this script's default」）；container 預設 `docker stop`（資料保留），只有 `--purge` 才 `docker rm -f`（`:78-86`）；有記錄中的程序未能核實停止時 exit 3 並印 `INCOMPLETE`（`:93`）。兩支的 `ACCEPTANCE_LOG_DIR`／`ACCEPTANCE_CONTAINER_NAME`／`ACCEPTANCE_BACKEND_PORT` 預設值實測一致（`/tmp`、`alethra-acceptance-db`、`8001`），否則 stop 會找不到 start 留下的紀錄。
+4. **沒有唯讀 status 入口**（缺陷 (4)）——新增 `candidate_status.sh`（199 行）。唯讀的依據寫在檔頭而不是口頭協定：不啟動、不停止、唯一用到的訊號是 signal 0（`backend/scripts/candidate_identity.py:330`，只問 pid 存不存在、不投遞任何东西），DB 核對走 `SET TRANSACTION READ ONLY`（同檔 `:302`）。逐角色用 `check-process` 判 `RUNNING`（pid 核對 profile 相符）／`not running`（紀錄過期）／`UNMATCHED`（該 pid 不是這個角色的，明確寫「reported as unmatched, not as stopped」＋ stop 也不會對它送訊號）；port 實際監聽者與紀錄 pid 分開報；心跳路徑從 `$STATE_DIR/runtime-identity.env` 讀（`PROFILE_KEYS` 那 19 鍵**沒有** `HEARTBEAT_FILE`，寫錯來源就會報一個不存在的路徑），unknown 時印 `NOT CHECKED` 而不是假裝查過；schema 列只在操作者自己匯出 `CANDIDATE_DB_PASSWORD` 時 probe，probe 失敗只報事實與 exit code、不回顯 driver 錯誤文字（驅動訊息可能帶連線細節），沒密碼時印 `SKIPPED` 不猜。本輪在這支裡另外修了兩條：**`:49`** `PYTHON="$(find_python)" || exit 2`（`find_python` 在 command substitution 的子 shell 裡 `exit 2`，父行程若不理會就帶著空 `$PYTHON` 繼續跑）；**`:152-157`** port 被非紀錄 pid 監聽時設 `NOT_UP=1`（readiness 是打 `BACKEND_ORIGIN` 的，誰在聽就是誰答的，否則會把別人的伺服器報成「本候選 up」）。
+
+**第五條是本輪寫 gate 的當下才量到的**：`run_tests.sh` 從不檢查 sqlite DB 檔的父目錄是否存在。`TMPDIR=/tmp/alethra-sqlite-test-dir` 是這份記錄裡所有 lane 命令的前綴，而該目錄被清掉之後，**同一條命令**給出的是 `16 errors … sqlite3.OperationalError: unable to open database file`（本輪第一次重跑實測，EXIT=1）——環境少一個目錄被表達成每個測試的 DB 失敗，讀起來像產品回归。處置：`run_tests.sh:181-202` 在 export 之前檢查 `-d`（`:194`）與 `-w`（`:200`），拒絕訊息指名這個路徑來自 `TMPDIR=…` 還是 `ALETHRA_SQLITE_DB=…`，exit 2、pytest 不啟動；`--help` 的環境區（`:29-33`）同步寫明這條要求。
+
+**文件**：README `## 測試` 原本教的是 `cd backend; pytest tests/ -v`——那是叫操作者繞過入口上所有 gate（venv、layer 標籤、可拋 DB 邊界、safety gate），已改寫為兩層命令逐字可複製的形式，並把 2026-10-12 那組分類計數明確標為「日期快照、非現況量測」（本輪沒有重量全量，因此也不在 README 宣稱任何全量數字）。`docs/first-use-usability/environment-and-accounts.md:49` 新增「狀態（唯讀）」列，寫明七種輸出與 exit 0/1/2 的意義。`start_acceptance_env.sh` 舊檔頭宣稱此棧「described in docs/deployment.md」，實測 `docs/deployment.md` 只講 `docker-compose.prod.yml` 生產棧（對 `acceptance` 0 命中），已改為說明該文件不是這組 pair 的文件。
+
+**實測（sqlite lane；每條都有 `lane fingerprint: python 3.12.16 | pytest 8.3.3 | sqlalchemy 2.0.36` 與 `interpreter: …/backend/.venv/bin/python` 兩行在前）**
+
+```
+… run_tests.sh sqlite tests/test_env_entries.py                      → 20 passed in 10.67s  EXIT=0
+… run_tests.sh sqlite tests/test_candidate_identity.py tests/test_env_entries.py
+                                                                     → 69 passed in 47.14s  EXIT=0
+env -u TMPDIR -u ALETHRA_PYTHON DATA_PROVIDER=demo …（README 那條逐字）→ 20 passed in 10.65s EXIT=0
+… run_tests.sh sqlite（24.10 的 9 檔＋test_data_manifest_contract.py，共 10 檔）
+                                                                     → 198 passed in 110.14s EXIT=0
+                                                                       （log /tmp/alethra-f-lane-regression.log）
+TMPDIR=/tmp/alethra-no-such-…                                        → refusing: … does not exist: /tmp/… (TMPDIR=…)  EXIT=2
+ALETHRA_SQLITE_DB=/tmp/alethra-absent-…/x.db                         → refusing: … (ALETHRA_SQLITE_DB=…)               EXIT=2
+TMPDIR=<chmod 500 的目錄>                                             → refusing: … is not writable                     EXIT=2
+./stop_acceptance_env.sh ／ --bogus                                  → REFUSED (nothing was signalled) ／ usage        EXIT=2 ／ EXIT=2
+./candidate_status.sh（無 profile）                                   → CANDIDATE STATUS REFUSED: … --new-candidate …   EXIT=2
+env -u DATABASE_URL -u JWT_SECRET_KEY ./execute_journey_b_worker.sh   → refusing: DATABASE_URL is not exported; … unknown database  EXIT=2
+env -u DATABASE_URL -u JWT_SECRET_KEY ./verify_data_persistence.sh／./verify_quota_persistence.sh
+                                                                     → refusing: … this check restarts a backend against it  EXIT=2
+bash -n run_tests.sh ／ candidate_status.sh                          → 無輸出（語法通過）
+```
+
+`backend/tests/test_env_entries.py`（新檔，534 行／20 條，subprocess ＋ tmp_path 合成樹，不碰 DB、不碰服務）pin 的是可測行為，不是願望：印出的 fingerprint 逐欄對上真正跑 pytest 的那個行程（`sys.executable`、`platform.python_version()`、`pytest.__version__`、`sqlalchemy.__version__`）；無標記的假 process 報 `not-this-role`、`DATABASE_URL` 指向別人 DB 的報 `identity-mismatch`，且結尾斷言兩者 `poll() is None`（status 把別人留在線上）；心跳 `state=error` 且檔內藏 `password=hunter2 for host hidden-venue.internal` 時只印 `NOT READY … state 'error'`，兩個字串都斷言不在輸出裡；status 腳本正文不得出現 `kill`/`rm`/`mkdir`/`chmod`/`docker`/`alembic`/`uvicorn`/`SIGKILL`/`git ` 這類會改狀態的動詞；`test_the_refusal_gates_are_not_vacuous` 用修正前的舊字串（機器 #1 路徑、`postgresql://test:test@…`、`JWT_SECRET_KEY="acceptance-test-secret-…"`、`kill -9`、`docker stop`）證明 gate 真的會紅、用 `$DB_PASSWORD` 插值形状與 `${POSTGRES_PASSWORD}` 證明它不會誤報；全 checkout 的 `.sh` 掃描（實測 27 支，prune `.venv`/`node_modules`/`.next`/`.git`/`.local`/`postgres` 等）斷言 `scanned >= 25` 與 `offenders == []`，前者讓「掃到 0 檔」不可能算過。
+
+**本節未涵蓋的範圍（不得讀成「已驗收」）**
+
+- **成功路徑全部未執行**：本机無 Docker daemon，`start_acceptance_env.sh` 從第一條 gate 就 refuse，因此「container 建得起、migration 跑過、/health/ready 通過」這 trio 仍是 NOT RUN；上面所有 exit code 來自拒絕路徑或本機合成樹。
+- `stop_acceptance_env.sh` 的 `docker stop`／`--purge`／`docker rm -f`、以及「SIGTERM 後仍活著 → exit 3 INCOMPLETE」這條回報路徑，因無 docker 與不啟動服務而未執行（只有 usage、未知參數、docker 缺席三條拒絕路徑被量到）。
+- `candidate_status.sh` 的完整報告以合成 profile ＋假 process ＋本機 HTTP server 驗證，七種輸出（VERIFIED／not-running／UNMATCHED／heartbeat OK／heartbeat NOT READY／probe FAILED exit 1／schema SKIPPED）都有實測文字，但未在真實候選棧上跑過：本 checkout 目前沒有 `.local/candidate/`，所以真實路徑只能走 no-profile 拒絕。
+- 3 支 journey/verify 腳本的 happy path 未執行（需要一個在 $BASE_URL 上回應 `/health` 的後端）；本輪覆蓋的是它們的四條拒絕路徑與「檔內不再有絕對路徑／明文秘密」這條文字事實。
+- 前端入口未動（`frontend/package.json` 仍只有 `dev`/`build`/`start`/`lint`/`typecheck`，程序生命週期由腳本管），理由記在 24.8 的 F 條。
+- 這 20 條屬**環境入口 lane**，不是產品閉環：帳號隔離、真實 HTTP、真實 PG 交易與 rendered UI 各級證據仍按 §四 分別標記，不因本節轉綠而升級。

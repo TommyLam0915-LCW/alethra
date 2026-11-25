@@ -20,14 +20,17 @@ HELPER="$ROOT/backend/scripts/candidate_identity.py"
 fail() { echo "CANDIDATE STOP ABORTED: $*" >&2; exit 1; }
 
 find_python() {
-  if [ -n "${CANDIDATE_PYTHON:-}" ]; then echo "$CANDIDATE_PYTHON"; return; fi
+  if [ -n "${CANDIDATE_PYTHON:-}" ]; then
+    [ -f "$CANDIDATE_PYTHON" ] && [ -x "$CANDIDATE_PYTHON" ] ||
+      fail "CANDIDATE_PYTHON='$CANDIDATE_PYTHON' is not an executable file"
+    echo "$CANDIDATE_PYTHON"; return
+  fi
   for candidate in \
-    "$ROOT/backend/venv/bin/python" \
-    "/Users/tommylam0915/Documents/Qoder/2026-10-08/alethra-integration-auto/backend/venv/bin/python" \
-    "$(command -v python3 || true)"; do
-    [ -n "$candidate" ] && [ -x "$candidate" ] && echo "$candidate" && return
+    "$ROOT/backend/.venv/bin/python" \
+    "$ROOT/backend/venv/bin/python"; do
+    [ -f "$candidate" ] && [ -x "$candidate" ] && echo "$candidate" && return
   done
-  fail "no python interpreter found; set CANDIDATE_PYTHON"
+  fail "no interpreter for this checkout: neither $ROOT/backend/.venv/bin/python nor $ROOT/backend/venv/bin/python is executable. Set CANDIDATE_PYTHON to the interpreter this lane was built with; a host python3 carries its own pytest and SQLAlchemy and would be a different lane."
 }
 PYTHON="$(find_python)"
 

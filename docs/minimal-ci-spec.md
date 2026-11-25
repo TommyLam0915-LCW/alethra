@@ -22,7 +22,7 @@
 |-------------|-------|--------|
 | Python version | 3.12 | `backend/Dockerfile` (`python:3.12-slim`) |
 | Dependency file | `requirements.txt` (17 packages, exact-pinned `==`) | `backend/requirements.txt` |
-| Test database | SQLite in-process | `conftest.py` line 2: `os.environ["DATABASE_URL"] = "sqlite:///./test.db"` |
+| Test database | SQLite in-process | `backend/scripts/run_tests.sh sqlite` (lane entry). Bare `pytest` gets a per-process file under `${TMPDIR:-/tmp}` — see `tests/conftest.py:_sqlite_default_test_db_url` — never a file in the checkout |
 | JSONB compatibility | Custom SQLAlchemy compiler | `conftest.py` lines 16-23 |
 | Table lifecycle | `autouse=True` fixture, create/drop per test | `conftest.py` lines 51-59 |
 | External network calls | None | All providers are mock/demo |
@@ -131,7 +131,7 @@ pip install -r requirements.txt
 pytest
 ```
 
-**Environment:** No special environment variables required. `conftest.py` sets `DATABASE_URL=sqlite:///./test.db` at module import.
+**Environment:** No special environment variables required. `conftest.py` sets `DATABASE_URL` at module import to a per-process SQLite file under `${TMPDIR:-/tmp}` (`tests/conftest.py:_sqlite_default_test_db_url`), so a bare `pytest` writes nothing inside the checkout. `ALETHRA_TEST_DB` overrides it; the lane runner sets it explicitly.
 
 **Expected duration:** Local verification on Python 3.14 recorded anomalously slow 2824s (47 min). GitHub Actions runners with Python 3.12 estimated ~30-60s based on historical baselines. CI timeout set to 10 minutes as starting point; adjust based on actual runner performance.
 
@@ -190,7 +190,7 @@ npm run build
 - **Database:** SQLite in-process. No external database. No credentials.
 - **Network:** No outbound network calls. All providers are mock/demo.
 - **Secrets:** No real secrets. JWT test key hardcoded in test config.
-- **Filesystem:** Tests create `test.db` in `backend/` directory. No persistent state.
+- **Filesystem:** Tests write the SQLite file named by `ALETHRA_TEST_DB`, otherwise a per-process `${TMPDIR:-/tmp}/alethra-sqlite-test-<pid>.db`. Nothing is created inside the checkout, and no persistent state is expected afterwards.
 - **Concurrency:** Safe to run in parallel across PRs. No shared state.
 
 ### Frontend Build

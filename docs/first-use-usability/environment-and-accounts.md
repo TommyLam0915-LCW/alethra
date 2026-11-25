@@ -46,6 +46,7 @@
 | --- | --- | --- |
 | 沿用候選 | `./start_candidate_stack.sh` | 只讀核對 profile 指定的 DB 存在、schema head 相符、三個 fixture 帳號存在；不遷移、不 seed、不產生憑證、不建立替代庫。process 逐一核對 cmdline 與 `DATABASE_URL` 後才重用。ready 分層確認：process 有回應（`/health`）、DB 可用（`/health/ready`）、worker 心跳狀態健康（`idle`／`working`，`error`／`stopped` 不算）、前端可開；對應 exit code 見腳本頂部。 |
 | 唯讀預檢 | `./start_candidate_stack.sh --plan` | 印出將沿用的 DB 與 `SEED=no`，不啟動 process、不寫入 repo。 |
+| 狀態（唯讀） | `./candidate_status.sh` | 不啟動、不停止、不寫入：只用 signal 0 問 pid 是否存在、在 DB 連線內用 `SET TRANSACTION READ ONLY` 核對 schema head。逐角色回報 `RUNNING`（pid 核對 profile 相符）／`not running`（紀錄過期）／`UNMATCHED`（該 pid 屬別人，不會被說成「已停止」，`stop_candidate_stack.sh` 亦不會對它送訊號）。另報 port 實際监听者是否就是紀錄中的 backend、`/health/ready`、worker 心跳（只報 `state`，不覆述心跳檔內的錯誤文字）。schema 列需要 `CANDIDATE_DB_PASSWORD` 於當次環境匯出；沒有時明確報 `SKIPPED` 而不猜。exit：0 全部核對通過且 ready；1 有元件未起（列名是哪一個）；2 在任何報告之前拒絕（無 venv、無 profile、profile 屬別的 checkout）。 |
 | 明確重設 | `./start_candidate_stack.sh --reset` | 先停本候選的已核實 process，只 drop profile 指定的 DB，重建並重新 seed。checkout schema head 與 profile 不符時拒絕。 |
 | 明確新候選 | `./start_candidate_stack.sh --new-candidate --candidate-id <id>` | 新 identity；拒絕覆寫既有 profile、憑證、log 目錄，亦拒絕共用非空 artifact 目錄（需另一個 checkout）。不因 restart 觸發。 |
 | 停止 | `./stop_candidate_stack.sh` | 先核對每個 pid 的身份才送訊號；不合的 process 只報告、不殺。DB 保留；`runtime-identity.env` 改寫為 `stopped`（有程序未核實停止則為 `stop-incomplete`）。 |

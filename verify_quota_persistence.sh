@@ -3,11 +3,35 @@
 
 set -e
 
-BASE_URL="http://localhost:8001"
+BASE_URL="${BASE_URL:-http://localhost:8001}"
 TIMESTAMP=$(date +%s)
 EMAIL="quota-persistence-${TIMESTAMP}@example.com"
 PASSWORD="testpass123"
-WORKTREE="/Users/tommylam0915/Documents/Qoder/2026-10-08/alethra-integration-auto"
+
+# This checkout, not one desktop's copy of it. WORKTREE used to name a directory
+# on another machine and was never read by anything here.
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BACKEND_DIR="$ROOT/backend"
+ACTIVATE=""
+for candidate in "$BACKEND_DIR/.venv/bin/activate" "$BACKEND_DIR/venv/bin/activate"; do
+  if [ -f "$candidate" ]; then ACTIVATE=$candidate; break; fi
+done
+[ -n "$ACTIVATE" ] || {
+  echo "refusing: no virtualenv under $BACKEND_DIR (.venv/bin/activate or venv/bin/activate)" >&2
+  exit 2
+}
+[ -n "${DATABASE_URL:-}" ] || {
+  echo "refusing: DATABASE_URL is not exported; this check restarts a backend against it" >&2
+  exit 2
+}
+[ -n "${JWT_SECRET_KEY:-}" ] || {
+  echo "refusing: JWT_SECRET_KEY is not exported; this script embeds no signing key" >&2
+  exit 2
+}
+curl -fsS "$BASE_URL/health" >/dev/null 2>&1 || {
+  echo "refusing: no backend answering $BASE_URL/health; quota survives a restart only if there is a restart to make" >&2
+  exit 2
+}
 
 echo "=== Milestone 2: Quota Persistence Verification (Actual Restart) ==="
 echo ""
@@ -115,16 +139,12 @@ if kill -0 "$PID_BEFORE" 2>/dev/null; then
   sleep 1
 fi
 
-BACKEND_DIR="/Users/tommylam0915/Documents/Qoder/2026-10-08/alethra-integration-auto/backend"
-
 cd "$BACKEND_DIR"
-source venv/bin/activate
-export DATABASE_URL="postgresql://test:test@localhost:5434/alethra_acceptance"
-export JWT_SECRET_KEY="acceptance-test-secret-minimum-32-chars-long"
+source "$ACTIVATE"
 export AI_PROVIDER="mock"
 export DATA_PROVIDER="demo"
 export APP_ENV="development"
-nohup uvicorn app.main:app --host 0.0.0.0 --port 8001 > /tmp/alethra-quota-restart.log 2>&1 &
+nohup uvicorn app.main:app --host "${BACKEND_HOST:-127.0.0.1}" --port 8001 > /tmp/alethra-quota-restart.log 2>&1 &
 NEW_PID=$!
 echo "New backend PID: $NEW_PID"
 

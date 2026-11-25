@@ -3,8 +3,38 @@
 
 set -e
 
-BASE_URL="http://localhost:8001"
-BACKEND_DIR="/Users/tommylam0915/Documents/Qoder/2026-10-08/alethra-integration-auto/backend"
+BASE_URL="${BASE_URL:-http://localhost:8001}"
+
+# This checkout, not one specific desktop's copy of it: the absolute path that
+# used to sit here made the journey unrunnable elsewhere without saying why.
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BACKEND_DIR="$ROOT/backend"
+ACTIVATE=""
+for candidate in "$BACKEND_DIR/.venv/bin/activate" "$BACKEND_DIR/venv/bin/activate"; do
+  [ -f "$candidate" ] && { ACTIVATE=$candidate; break; }
+done
+[ -n "$ACTIVATE" ] || {
+  echo "refusing: no virtualenv under $BACKEND_DIR (.venv/bin/activate or venv/bin/activate)" >&2
+  exit 2
+}
+
+# The journey starts a worker that writes to whatever DATABASE_URL points at, so
+# the destination is supplied by the operator and never embedded here — and no
+# secret string lives in this file either.
+[ -n "${DATABASE_URL:-}" ] || {
+  echo "refusing: DATABASE_URL is not exported; this journey would start a worker against an unknown database" >&2
+  exit 2
+}
+[ -n "${JWT_SECRET_KEY:-}" ] || {
+  echo "refusing: JWT_SECRET_KEY is not exported; this script embeds no signing key" >&2
+  exit 2
+}
+
+curl -fsS "$BASE_URL/health" >/dev/null 2>&1 || {
+  echo "refusing: no backend answering $BASE_URL/health; start the stack this journey belongs to, then re-run it" >&2
+  exit 2
+}
+
 TIMESTAMP=$(date +%s)
 EMAIL="journey-b-worker-${TIMESTAMP}@example.com"
 PASSWORD="testpass123"
@@ -18,9 +48,7 @@ WORKER_PID=$(pgrep -f "python.*app.workers.training_worker" | head -1)
 if [ -z "$WORKER_PID" ]; then
   echo "Starting training worker..."
   cd "$BACKEND_DIR"
-  source venv/bin/activate
-  export DATABASE_URL="postgresql://test:test@localhost:5434/alethra_acceptance"
-  export JWT_SECRET_KEY="acceptance-test-secret-minimum-32-chars-long"
+  source "$ACTIVATE"
   export AI_PROVIDER="mock"
   export DATA_PROVIDER="demo"
   export APP_ENV="development"

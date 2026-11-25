@@ -3,8 +3,34 @@
 
 set -e
 
-BASE_URL="http://localhost:8001"
-BACKEND_DIR="/Users/tommylam0915/Documents/Qoder/2026-10-08/alethra-integration-auto/backend"
+BASE_URL="${BASE_URL:-http://localhost:8001}"
+
+# This checkout, not one desktop's copy of it, and the operator supplies the
+# database and signing key: this script stops and starts a backend, so it must
+# never decide by itself which database a restart is allowed to write to.
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BACKEND_DIR="$ROOT/backend"
+ACTIVATE=""
+for candidate in "$BACKEND_DIR/.venv/bin/activate" "$BACKEND_DIR/venv/bin/activate"; do
+  if [ -f "$candidate" ]; then ACTIVATE=$candidate; break; fi
+done
+[ -n "$ACTIVATE" ] || {
+  echo "refusing: no virtualenv under $BACKEND_DIR (.venv/bin/activate or venv/bin/activate)" >&2
+  exit 2
+}
+[ -n "${DATABASE_URL:-}" ] || {
+  echo "refusing: DATABASE_URL is not exported; this check restarts a backend against it" >&2
+  exit 2
+}
+[ -n "${JWT_SECRET_KEY:-}" ] || {
+  echo "refusing: JWT_SECRET_KEY is not exported; this script embeds no signing key" >&2
+  exit 2
+}
+curl -fsS "$BASE_URL/health" >/dev/null 2>&1 || {
+  echo "refusing: no backend answering $BASE_URL/health; persistence across restart cannot be verified without one" >&2
+  exit 2
+}
+
 TIMESTAMP=$(date +%s)
 EMAIL="persistence-${TIMESTAMP}@example.com"
 PASSWORD="testpass123"
@@ -87,13 +113,11 @@ echo "Backend stopped."
 # Step 5: Restart backend with same env vars
 echo "5. Restarting backend..."
 cd "$BACKEND_DIR"
-source venv/bin/activate
-export DATABASE_URL="postgresql://test:test@localhost:5434/alethra_acceptance"
-export JWT_SECRET_KEY="acceptance-test-secret-minimum-32-chars-long"
+source "$ACTIVATE"
 export AI_PROVIDER="mock"
 export DATA_PROVIDER="demo"
 export APP_ENV="development"
-nohup uvicorn app.main:app --host 0.0.0.0 --port 8001 > /tmp/alethra-backend-restart.log 2>&1 &
+nohup uvicorn app.main:app --host "${BACKEND_HOST:-127.0.0.1}" --port 8001 > /tmp/alethra-backend-restart.log 2>&1 &
 NEW_PID=$!
 echo "New backend PID: $NEW_PID"
 

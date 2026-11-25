@@ -65,14 +65,17 @@ fail_code() {
 fail() { fail_code 1 "$@"; }
 
 find_python() {
-  if [ -n "${CANDIDATE_PYTHON:-}" ]; then echo "$CANDIDATE_PYTHON"; return; fi
+  if [ -n "${CANDIDATE_PYTHON:-}" ]; then
+    [ -f "$CANDIDATE_PYTHON" ] && [ -x "$CANDIDATE_PYTHON" ] ||
+      fail "CANDIDATE_PYTHON='$CANDIDATE_PYTHON' is not an executable file"
+    echo "$CANDIDATE_PYTHON"; return
+  fi
   for candidate in \
-    "$ROOT/backend/venv/bin/python" \
-    "/Users/tommylam0915/Documents/Qoder/2026-10-08/alethra-integration-auto/backend/venv/bin/python" \
-    "$(command -v python3 || true)"; do
-    [ -n "$candidate" ] && [ -x "$candidate" ] && echo "$candidate" && return
+    "$ROOT/backend/.venv/bin/python" \
+    "$ROOT/backend/venv/bin/python"; do
+    [ -f "$candidate" ] && [ -x "$candidate" ] && echo "$candidate" && return
   done
-  fail "no python interpreter found; set CANDIDATE_PYTHON"
+  fail "no interpreter for this checkout: neither $ROOT/backend/.venv/bin/python nor $ROOT/backend/venv/bin/python is executable. Set CANDIDATE_PYTHON to the interpreter this lane was built with; a host python3 carries its own pytest and SQLAlchemy and would be a different lane."
 }
 PYTHON="$(find_python)"
 identity() { "$PYTHON" "$HELPER" "$@"; }
@@ -619,6 +622,14 @@ new_candidate() {
 
   generate_credentials "$CREDENTIALS_FILE"
   require_credentials "$CREDENTIALS_FILE"
+  # Order matters and this line is the reason it does: alembic resolves its URL
+  # through app.config.get_settings() (``backend/migrations/env.py:18``), which
+  # falls back to ``backend/.env`` when ``DATABASE_URL`` is unset. Every DDL and
+  # every seed row below would then be written to the .env server — localhost:5432
+  # in card C's run — while ``db_admin`` above still honoured CANDIDATE_DB_PORT
+  # and created the database on the candidate server. Export first, so the new
+  # database and the schema inside it are the same database.
+  export_process_env
   import_check
   mkdir -p "$LOG_DIR" "$STATE_DIR"
   db_admin "create database \"$DB_NAME\"" >/dev/null || fail "could not create $DB_NAME"
@@ -627,6 +638,10 @@ new_candidate() {
   local head
   head="$(cd backend && "$PYTHON" -m alembic -c alembic.ini current 2>/dev/null | sed -n 's/.*\([0-9a-z]\{12\}\).*/\1/p' | head -1)"
   [ -n "$head" ] || fail "could not read the new database schema head"
+  # The profile keeps the head for the next resume, and print_ready reads it from
+  # the shell under ``set -u``. Assigning only the file left this mode's own run
+  # ending in "unbound variable" after a stack that started correctly.
+  EXPECTED_SCHEMA_HEAD="$head"
   seed_fixture
 
   local values_file

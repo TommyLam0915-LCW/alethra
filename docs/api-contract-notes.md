@@ -123,7 +123,9 @@
 ## 7. 註冊：風險披露確認（`POST /api/auth/register`）
 
 - `UserCreate` 新增 `risk_acknowledged: bool`（預設 `false`）。伺服器**在查詢 email 是否存在之前**檢查：缺欄位或 `false` 一律回 `400`，且不建立帳戶。拒絕訊息不區分「已註冊」與「未註冊」的 email，避免洩漏帳戶存在與否。
-- 成功註冊寫入一筆 append-only `AuditEvent`：`entity_type="user"`、`event_type="risk_disclosure_acknowledged"`、`actor_type="human"`、`payload` 為 `{disclosure_path: "/legal", disclosure_as_of_date: "2026-11-01", acknowledged: true}`。**不是**新的 user 欄位，因此不可按 user 直接查欄位；要查需讀事件表。
+- 成功註冊寫入一筆 append-only `AuditEvent`：`entity_type="user"`、`event_type="risk_disclosure_acknowledged"`、`actor_type="unknown"`、`payload` 為 `{disclosure_path: "/legal", disclosure_as_of_date: "2026-11-01", acknowledged: true}`。**不是**新的 user 欄位，因此不可按 user 直接查欄位；要查需讀事件表。
+- `actor_type` 只由伺服器驗證的憑證決定（`docs/personalization-contract.md` §11）。本節原寫 `human`，2026-11-17 更正為 `unknown`：註冊是**未經身分驗證**的請求——這個請求手上沒有任何 token 能指向該帳號，路由讀不到憑證就只能記 `unknown`。程式碼與 §11 一直一致，不一致的是這行與 `backend/tests/test_registration_risk_acknowledgement.py`。請求本體自報 `actor_type`／`amr` 不影響標籤：未被 schema 聲明的欄位不進入 `UserCreate`，路由只讀 `request.state`。
+- 因此這件事實在帳本上是**使用者自報**，不等於 `owner_verified`（後者定義需 `status == confirmed` 且 `provenance == human`）。要把同一事實記成憑證驗證，需要「首次密碼登入時再寫一筆核取事件」的產品能力；目前產品沒有這條路。是否新增屬 owner 裁決（見批准包 §12.4），工程上不自行補上，也不得把既有 `unknown` 列改寫為 `human`。
 - 回應只含公開帳戶欄位（`id`、`email`、`display_name`、`user_type`、`created_at`、`is_active`、`is_admin`）；不含密碼雜湊、token、金鑰。
 - 前端 `/login` 的註冊表單有必勾的披露核取方塊（連往 `/legal`），未勾時送出按鈕停用且不發請求；伺服器端檢查才是真正的門檻。
 
@@ -191,3 +193,35 @@ this version's research into a new lockable experiment, POST
 - `authorization` 只報告實測狀態：2026-11-02 的 candidate 帳號為 `training_granted=false`、`snapshot_granted=false`、`consent.status=not_configured`。
 - 環境開關（`AGENT_STRATEGY_SCREENING_ENABLED`、`AGENT_STRATEGY_OWNER_CONSENT_MODE`）只決定程式能否執行，**不是**同意。
 - 沒有調低任何既有門檻；`docs/personalization-contract.md` §6 的數值不變。
+
+---
+
+## 11. `POST /api/v1/versions/{version_id}/runs` 的 `Idempotency-Key`（2026-11-16）
+
+用途：讓「送出後沒有回應」的那一次點擊可以被識別為**同一個 request**。回測按接納次數計費（quota 預留＋結算），而端點沒有 body，因此重複request 只靠這個 header 辨認；不帶 header 的重複點擊與故意重跑在伺服端不可區分，會各自計一個單位——那是呼叫端的選擇，不是預設缺陷。
+
+| 情況 | 請求 | 回應 | 計費 |
+| --- | --- | --- | --- |
+| 1 | 同版本仍有 active run | `409`（`detail` 帶該 run id） | 不接納、不計費 |
+| 2 | 同一 version、無 header 的重複點擊 | `201`（新 run） | **兩個單位** |
+| 3 | 同一 version、同一 `Idempotency-Key` | `200`（第一次建立的同一個 run；不重跑引擎） | 一個單位 |
+| 4 | 同一 key 但請求內容不同（例如 `data_source` 不同） | `409`，`detail.error = "idempotency_key_conflict"` | 兩個都不接納 |
+| 5 | header 存在但為空白或超過 128 字元 | `400`，訊息指明 `Idempotency-Key` | 不接納（存不下的 key 無法去重，靜默丟棄反而會重複計費） |
+
+- **範圍**：key 以 `experiment_version_id` 為 scope（`research_runs` 沒有 `owner_id`，全表唯一會讓不同帳號互相干擾）。同一 key 用在别人的版本只會是其自身版本的請求或 403，不會回傳他人的 run id。
+- **保存**：`research_runs.idempotency_key`（`String(128)`）與 `idempotency_request_hash`（`String(64)`，請求參數的 canonical SHA-256）由 migration `f2a3b4c5d6e7` 新增，配 `uq_research_run_version_idempotency` 部分唯一索引（`WHERE idempotency_key IS NOT NULL`）。既有列的兩個欄位為 NULL＝未宣示，非事後補記。
+- **寫入時點**：key 與 run 列在同一個接納交易內 commit，所以在第一次回應遺失、第一次行程死掉、或 run 已終結之後送來的重試都仍能識別；並發搶同一 key 時由唯一索引決定勝者，落敗端把衝突轉為同一列的回放而非錯誤。
+- **前端政策**（`frontend/src/lib/runRetry.ts`）：只在「完全沒有 HTTP 回應」時保留 key（5xx 也是回應，一律清除，否則使用者之後每次點擊都只會拿到同一個已結束的 run）；key 不跨版本沿用；`crypto.randomUUID` 不可用時不帶 header 並將退回情況（重試會多計一個單位）保留在程式註解與本節。
+- 回歸：`backend/tests/test_research_run_admission.py`（key 行為 6 例＋migration／model 契約 1 例＋revision chain gate）；`frontend/tests/runRetry.test.mjs`（17 例，含讀 `backend/app/models/research_run.py` 把 128 釘在一起）。
+- **NOT RUN**：以上皆為離線 lane（SQLite＋TestClient）實測結果。瀏覽器實際送出 header、以及對真實 PostgreSQL 執行 `f2a3b4c5d6e7`，本輪未執行、未驗收。
+
+---
+
+## 12. `POST /api/v1/robustness/{study_id}/cancel` 的終態寫入（2026-11-16）
+
+- 取消改為**一條受狀態限制的條件 UPDATE**，由 rowcount 決定誰取消：原實作先讀 status 再寫，兩個同時到來的請求都會看到 `planned`、都寫入、都回報「我取消了」，而實際上只有一個留下了它宣稱的那次變動。
+- 已被別人關閉（另一端執行寫入終態、或雙擊的另一次）時回 `400`，`detail = {error: "study_finished", status: <儲存中的狀態>, message: "This study is already …, so cancelling it closes nothing; completed attempts and results are kept."}`；**不覆寫** `cancelled_at`，也不動 aggregate／attempts。
+- 可取消的状態是 `FINISHED_STUDY_STATUSES = ("completed", "failed", "cancelled")` 之外者；`partial` 仍可取消（尚無結局），`planned`／`running` 亦同。擁有權與 404 先於狀態判定：他人的 study 一律 `404`，不透露其狀態。
+- 執行端的終態寫入同樣受限（`app/services/robustness.py::settle_study_status`）：若 row 在本 transaction 讀取之後已被取消，則**保持 cancelled**，不把它改回 `completed`／`partial`；已完成的 attempts 與 aggregate 保留。
+- 取消不等於停止行程：`execute_study` 在 attempts 之間重讀此 row 並 `break`，那是合作而非中止；正在執行的 study 仍可能在回應之後產生 attempts。
+- 回歸：`backend/tests/test_robustness_studies.py::TestCancelTransition`（5 例，含兩個 vocabulary gate）。本機 lane 為 SQLite，**不构成**兩個真實 PostgreSQL 連線交錯的證據（NOT RUN）。

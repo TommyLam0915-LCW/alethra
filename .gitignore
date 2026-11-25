@@ -14,6 +14,12 @@ out/
 .env
 .env.local
 .env.*.local
+# Test-lane settings. Copy backend/.env.test.example to backend/.env.test and
+# fill it in; the file itself stays local. This rule is inert while the path is
+# still tracked — backend/tests/test_env_hygiene_contract.py reports which
+# state the file is actually in, so "ignored" can never be claimed from this
+# line alone.
+.env.test
 
 # Databases
 *.db

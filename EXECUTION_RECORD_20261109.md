@@ -628,7 +628,7 @@ curl http://127.0.0.1:8100/api/v1/experiments/{id}/runs ...
 
 | 項目 | 位置 | 分類與理由 |
 |---|---|---|
-| `<acceptance JWT 簽金鑰字面值：len=44、sha256[:10]=6edfc67155>`（原紀錄曾直接写出該字面值，本輪入版控前改為雜湊引用；完整路徑計數見本節 §7 更正） | `start_acceptance_env.sh:23`、`execute_journey_b_worker.sh:23`、`verify_data_persistence.sh:92`、`verify_quota_persistence.sh:123`、`NORMAL_RUNTIME_EVIDENCE.md:43` | 名稱標示為 acceptance-test 專用，屬本機一次性堆疊的簽金鑰；已隨公開 repo 外洩。**是否仍有非本機實例使用同一字面值：UNKNOWN**（Docker daemon 未運行、:8100 堆疊未運行，無法核對）。未擅自改動這 5 個檔案：替換會使既有 token 全部失效，屬影響產品狀態的動作。 |
+| acceptance JWT 簽金鑰字面值（值類別：`credential_literal`；本檔不記錄其長度、摘要或任何可回溯片段）；原紀錄曾直接写出該字面值，本輪入版控前改為值類別引用；完整路徑計數見本節 §7 更正 | `start_acceptance_env.sh:23`、`execute_journey_b_worker.sh:23`、`verify_data_persistence.sh:92`、`verify_quota_persistence.sh:123`、`NORMAL_RUNTIME_EVIDENCE.md:43` | 名稱標示為 acceptance-test 專用，屬本機一次性堆疊的簽金鑰；已隨公開 repo 外洩。**是否仍有非本機實例使用同一字面值：UNKNOWN**（Docker daemon 未運行、:8100 堆疊未運行，無法核對）。未擅自改動這 5 個檔案：替換會使既有 token 全部失效，屬影響產品狀態的動作。 |
 | `postgres:postgres@db:5432/…` | `docker-compose.yml:27`、`docker-compose.acceptance.yml:29`、`docs/minimal-ci-spec.md:255` | Compose 於本機新建的暫存容器所用官方預設憑證，非既存系統的秘密；改動會使 CI／acceptance 配方無法重現。維持原樣並披露。 |
 | `postgres:postgres@127.0.0.1:5434/alethra_e2e*` | `e2e_fullstack.py:32`、`e2e_legacy_upgrade.py:22,51` | 同上：僅連往本機暫存 e2e 容器。維持原樣並披露。 |
 | `test123456`（demo 閉環註冊／登入 payload） | 本檔 140、144 行 | 本機 demo 測試用合成帳密（`test@example.com`），非真實帳號憑證，保留以維持紀錄可追跡。 |
@@ -761,15 +761,17 @@ RuntimeError: SAFETY: test database target rejected
 
 ### 4. 提交前秘密審查（方法、結果、以及一項撤回）
 
-方法（只輸出雜湊與形態，絕不輸出值）：`git ls-files` 全數掃描工作樹，另以 `git show HEAD:<path>` 掃描已提交版本；比對 DB-URL 密碼段與 `*SECRET* / *KEY* / *TOKEN* / *PASSWORD*` 指派右側；對每個值印出 `sha256[:10]`、長度與形態標籤（ENVREF／TOKEN-CHARSET／ELIDED／SYNTHETIC-WORD／OPAQUE-CRED-SHAPE）。
+方法（只輸出形態標籤，絕不輸出值）：`git ls-files` 全數掃描工作樹，另以 `git show HEAD:<path>` 掃描已提交版本；比對 DB-URL 密碼段與 `*SECRET* / *KEY* / *TOKEN* / *PASSWORD*` 指派右側；對每個值只標形態（ENVREF／TOKEN-CHARSET／ELIDED／SYNTHETIC-WORD／OPAQUE-CRED-SHAPE）。
+
+> 本節原方法對每個值另印 `sha256[:10]` 與長度；依 2026-11-16 owner 指示「不再輸出秘密 skeleton 或低熵值的可猜測指紋」，本檔已把這些指紋改為形態標籤。**移除指紋不改變該值早已進入公開歷史的事實**，也不改變下面任何 `UNKNOWN` 判定。
 
 * HEAD 已公開發布的 credential 形態字面值：**361** 個（公開 repo 的既存狀態，非本輪造成）。
 * 本輪工作樹**未新增任何未見於 HEAD 的真實憑證字面值**；被標記的新增值經形態核對全數為佔位／引用／合成值（`${POSTGRES_PASSWORD:?…}`、`user:pass`、`not-a-real-secret`、省略號等）。
-* 扩散追蹤（同一字面值由 N 個檔案增至 N＋k 個）中，唯一需要判定的是 `sha256[:10]=4f767f043d len=32`。
+* 扩散追蹤（同一字面值由 N 個檔案增至 N＋k 個）中，唯一需要判定的是該 `TOKEN-CHARSET` 形態、跨檔重複的那一個字面值（指紋已依上方說明移除）。
 
 **撤回先前一項宣稱**：本輪曾向使用者表示「`backend/.env.test` 已被追蹤且含真實 DB 憑證字面值」。實測推翻：該檔第 7 行的密碼段為 `${ALETHRA_TEST_RUNTIME_PASSWORD}`（長度 32 的 dotenv 佔位引用），且此形態在 HEAD `88164290b4b0d29e59f58bd697966e89adb1e039` 已存在。故 `.env.test` 不含外洩密碼；此發現同時就是上第 2 節直接原因的來源。同理，本輪對 `backend/GATE1_TEST_BATCH_PROPOSAL.md:203` 的修改是把原本的 8 字元字面佔位改為同一個 `${ALETHRA_TEST_RUNTIME_PASSWORD}` 引用，屬去敏感化，而非擴散秘密。
 
-刻意不 staging 的項目（維持未追蹤）：`.qoder/`、`acceptance-results.json`、`backend/tests/test_c1_c4_safety_cases.py.bak`、`.bak2`、`package-lock.json`。兩個 `.bak` 內含既存測試合成密碼字面值（`sha256[:10]=724936cd9b len=12`，與 HEAD 已公開發布者同一值）及一組 bcrypt 雜湊（`6fadf95193 len=58`），屬本輪編輯殘留，將另行清理，不進入任何提交。
+刻意不 staging 的項目（維持未追蹤）：`.qoder/`、`acceptance-results.json`、`backend/tests/test_c1_c4_safety_cases.py.bak`、`.bak2`、`package-lock.json`。兩個 `.bak` 內含既存測試合成密碼字面值（形態 `SYNTHETIC-WORD`，與 HEAD 已公開發布者同一值）及一組 bcrypt 雜湊（形態 `OPAQUE-CRED-SHAPE`），屬本輪編輯殘留，將另行清理，不進入任何提交。
 
 ### 5. DB A 存在性：實例核對（修正本檔第 640 行）
 
@@ -833,3 +835,112 @@ RuntimeError: SAFETY: test database target rejected
 2. Docker 卷冊內容未核對（daemon 未運行），因此「DB A 在該卷冊中仍完整」為 **NOT VERIFIED**。
 3. OID `16419` 對應哪個 DB 名稱：NOT VERIFIED（需一次通過驗證的唯讀連線）。
 4. 證據檔案為本機暫存（`/tmp`），非 repo 產物：`sg_baseline.txt` `558f950b36999272`、`sg_withpw.txt` `f756dd2fc6548482`、`secret_delta.txt` `1b3dbf9f94742b4c`、`shape.txt` `39c9abbc8674bb29`、`pg_readonly.out` `f3e47efd3bb3a74a`、`cred_scope.txt` `4e99c9e6e56e809e`、`secinv_worktree.txt` `b42eb5029098460d`、`kraken_final.txt` `86f18603a0784b4b`、`guard_final.txt` `b5778aab8b262607`、`failed_two.txt` `5e5fbdb2cf567a6e`、`live_harvest_probe.py` `e14d2861c51bc600`（皆為 sha256 前 16 字元）。
+
+## `backend/.env.test` 五欄揭露與長期根因的三個產物（2026-11-16，本節為追加，不改寫上方原始紀錄）
+
+本节只輸出**鍵名、長度、雜湊與形態標籤**。不含秘密值、不含匹配片段、不含含秘密的 diff。上一節 §4 已撤回「`.env.test` 外洩真實密碼」之宣稱，該撤回仍然有效，本節不重複該錯誤。
+
+### 1. 五欄揭露
+
+**(a) 受影響鍵名（實測：該檔 29 行、13 個指派，行號 1–29）**
+
+`DATABASE_URL`、`LIVE_TRADING_ENABLED`、`RESEARCH_AUTH_BYPASS_ENABLED`、`ENABLE_LEARNING_SCHEDULER`、`AUTO_COLLECTION_ENABLED`、`DATA_PROVIDER`、`TEST_MODE`、`TEST_ENVIRONMENT`、`KRAKEN_WS_URL`、`KRAKEN_API_KEY`、`KRAKEN_API_SECRET`、`TEST_USER_EMAIL`、`TEST_ADMIN_EMAIL`。
+
+其中 **3 個鍵值為空**（實測形態 `^[A-Z_]+=$`）：`KRAKEN_WS_URL`、`KRAKEN_API_KEY`、`KRAKEN_API_SECRET` ⇒ 該檔**不含任何交易所憑證**，因此不屬於「broker API key 外洩」這一類。`DATABASE_URL` 的密碼段為 dotenv 佔位引用（見上方 §2），非字面值。
+
+**(b) 是否曾進 Git 歷史（實測：`git log --format=%h -- backend/.env.test` → 恰好 2 個提交）**
+
+以本節第 2 小節的同一個分類器逐提交重跑，只印出 `(key, kind, value_length)`：
+
+| 提交 | 該檔指派數 | 分類器結果 |
+|---|---|---|
+| `5af8521` "Add isolated test environment with fail-closed safety gate" | 13 | `[('DATABASE_URL', 'literal_url_password', 68)]` |
+| `77e84ca` "Complete vertical path: safety gate enforced + privilege separation proven" | 13 | `NONE` |
+
+⇒ **字面值只進過歷史一次**，且在下一次提交即被替換為 `${ALETHRA_TEST_RUNTIME_PASSWORD}` 引用；目前 HEAD 与工作樹皆乾净。
+該字面值不是一個私有秘密：它與**公開文件層級的出廠預設口令**逐位元組相同。判定方式寫成可重跑的比較，且**不輸出秘密值本身**：
+
+```python
+pw = <5af8521 blob 的 DATABASE_URL userinfo 密碼段>          # 只留在變數內
+candidate = "pos" + "gres"                                    # 拼接，避免值進入指令歷史
+sha256(pw) == sha256(candidate)  →  EQUAL: True
+```
+
+以上只有一個輸出：`EQUAL: True`。原紀錄在此另印 `sha256[:10] = a942b37ccf` 與 `len = 8`；依 2026-11-16 owner 指示「不再輸出秘密 skeleton 或低熵值的可猜測指紋」，本檔已移除——對一個字典字詞級的值，摘要指紋與印出值本身在攻擊者端是同一件事（猜一次、比對即可驗證），所以指紋並未比值多一層保護，只是多一條可被反向確認的線索。上面那行拼接式仍是本節的揭露事實來源，移除指紋不縮小它的曝露面。
+
+同一比較另以兩條獨立解析路徑各跑一次（掃描器的 `_url_password()` 與手寫 `split("//"/"@"/":")`），兩條路徑皆得 `EQUAL: True`。⇒ 任何讀過本 repo 或讀過 PostgreSQL 安裝文件的人本來就會嘗試它；它的曝露面不取決於 `.env.test` 這一檔。本節不重複該字串。
+
+**(c) 是否為有效或共用秘密 —— 判定：`UNKNOWN`（不猜測有效，也不猜測無害）**
+
+- 「該字面值在**任何目前存在的實例**上仍能連線」：`UNKNOWN`。要把它降為「無效」需做一次對未批准 DB 的連線嘗試，或在已批准 lane 之外簽名呼叫 — 兩者皆被 §五 禁止（「不碰未批准的舊 DB／身份」「不做付費外呼」）。
+- 可用的**正向**間接證據只有一條，且不自動推出結論：本機 `127.0.0.1:5432` cluster 的 log（上一節 §5 已記錄）**從未**成功以該字面值連線，且 `2026-11-10 10:56:38` 出現 `database "ai_investment_lab_test" does not exist`。那證明該 DB 名稱在此 cluster 不存在，不證明這個字面值在他處无效。
+- 「是否為**共用**秘密（同一字串跨多個 role／主機重複使用）」：`UNKNOWN`。本專案既有的全庫掃描只能指出「同一公開預設字串在 repo 內以 N 個檔案出現」，無從判斷實際部署是否沿用。
+- 「`alethra_test` 這個 role 的密碼是否已輪換過」：上一節已實測該 cluster 回報 `password authentication failed` ＋ `pg_hba.conf` line 91/93 相符、**無** role-absent detail ⇒ 該公開預設字面值**已不再匹配**此 cluster 中的 `alethra_test`，這是「某處已輪換」的差分證據，但輪換時間與覆蓋範圍 `UNKNOWN`。
+
+**(d) 哪些身份／服務可能受影響（實測讀取路徑）**
+
+| 事實 | 實測方式與行號 |
+|---|---|
+| **無任何程式載入 `backend/.env.test`** | `app/config.py:428` 為 `model_config = ConfigDict(env_file=".env", …)` — 只有 `.env`，無 `.env.test`；全庫對字串 `env.test` 的引用經逐一核對，落在**本節三個新產物**、`.gitignore` 註解與**四份文件**（`EXECUTION_RECORD`、`docs/handoff/TRAVEL_HANDOFF.md:316`、`ISOLATION_TEST_ENVIRONMENT_REPORT.md:191`、`docs/handoffs/2026-11-14-desktop-checkpoint.md:1049-1059`），無一為載入點 |
+| `backend/scripts/run_tests.sh` 自行組環境，不 source 該檔 | `:99` `export JWT_SECRET_KEY`（執行期產生）、`:126-131` 與 `:204-205` 導出 `DATABASE_URL`／`ALETHRA_TEST_DB` 等，全部來自 `ALETHRA_PG_TEST_URL`／`TMPDIR`，非 dotenv |
+| 該檔 13 個鍵**各自的真實消費者的確存在**（但在別處注入） | 旗標讀取點：`app/config.py`、`api/admin.py`、`services/auto_collection.py`、`services/kraken_websocket.py`、`tests/test_research_run_*`；DB 目標由 `check_db_env.analyse` 前置檢查把關（`run_tests.sh:111-112`、`:160-163`） |
+
+⇒ 因此受影響面是**「repo 讀者可見的歷史字串」＋「未來有人把真實值寫進這個被追蹤的檔案」**，不是「執行期有一條載入洩漏路徑」。第二項才是可預防的風險，也是第 2 小節三個產物的用途。
+
+**(e) 建議補救與確切副作用（分項，全部未執行）**
+
+| # | 動作 | 確切副作用 | 狀態 |
+|---|---|---|---|
+| 1 | 本節三個產物入版控：`git add backend/.env.test.example backend/scripts/check_env_hygiene.py backend/tests/test_env_hygiene_contract.py .gitignore` | 新增 4 條路徑；`.gitignore` 改 1 處；不改任何既有檔案內容；不影響執行期（無程式讀這些檔） | **需批准**（git 寫入） |
+| 2 | `git rm --cached backend/.env.test` | **停止追蹤未來的複製**；保留工作檔不刪（故本機測試環境不受影響）；**不移除 `5af8521` 的 blob**，該物件仍在歷史中；此提交會使「`backend/.env.test` 從 HEAD 消失」成為公開 diff 的一行 | **需批准** |
+| 3 | 歷史重寫（`filter-repo` ＋ force-push）以移除 `5af8521` 的 blob | 改寫**共享歷史**、使他人 clone 全部失效、需協調 force-push；且該字面值本身是公開預設，清除所得的保護近乎為零 | **不建議；明確未批准項目**（§五：不 force-push） |
+| 4 | 若 owner 判定 `alethra_test` 或其他 role 需輪換 | 所有以舊值連線的腳本／文件引用同時失效，需逐檔改注入；需一次對該 cluster 的寫入授權 | **需批准，且與 1–2 分開批准** |
+| 5 | 相鄰既存問題（本輪**未**修）：`docker-compose.yml:28` 的 `JWT_SECRET_KEY` 值是一段「change-me」指示文字，即**部署時會以預設簽金鑰上線**（fail-open） | 屬部署金鑰治理，非本節範圍；已列入 §三(5) 服務段，避免它被當成已修 | 僅記錄 |
+
+### 2. 長期根因的三個產物（依 §四「以測試設定模板、忽略規則及 fail-closed 輸入契約處理」）
+
+1. **模板**：`backend/.env.test.example`（44 行、13 鍵同序）。唯一與實體檔的差異是**故意**的 — `:22` 使用
+   `postgresql://alethra_test_runtime:${ALETHRA_TEST_RUNTIME_PASSWORD:?set ALETHRA_TEST_RUNTIME_PASSWORD before sourcing}@localhost:5432/ai_investment_lab_test`，
+   即帶 `:?` 的 fail-closed 注入；`backend/.env.test` 目前用的是**裸 `${VAR}` 形式**，未設定時展開為空字串 — 那正是上一節 §2 兩項失敗的直接原因。檔首註解明言：無任何 app module、test 或 script source 這兩個檔，實際設環境的是 `scripts/run_tests.sh`。
+2. **忽略規則**：`.gitignore:17-22`（5 行註解＋`:22` 規則）。實測 `git check-ignore -v --no-index backend/.env.test` → `.gitignore:22:.env.test`；模板本身 rc=1（必須保持可提交）。
+   規則在路徑仍被追蹤時是 **inert** 的，這句話寫在註解裡，並由 `test_tracked_state_is_reported_as_measured_not_assumed`（`backend/tests/test_env_hygiene_contract.py:310`）依**實際** `git ls-files` 結果分支，因此「已忽略」永遠無法只憑這行被宣稱。
+3. **fail-closed 輸入契約**：`backend/scripts/check_env_hygiene.py`（397 行）＋ 22 項契約測試 `backend/tests/test_env_hygiene_contract.py`（351 行）。三條規則各有明確作用域：
+   * **provider-token 形態**（Stripe `sk_live`、AWS `AKIA`、PEM header、HS256 JWT…）在任何文字檔都算，不需金鑰名；
+   * `credential_literal`：金鑰名符合 `SECRET_KEY_SHAPE` **且**值不是注入（`${VAR}`／`$VAR`／`$(…)`）、不是純數字、不是指示型佔位語（`your-*`／`change-me…`／`<…>`／`xxx`）；
+   * `literal_url_password`：URL userinfo 有字面密碼段。此規則**先於**金鑰名判定，否則原缺陷形態（`DATABASE_URL=…:pass@…`，金鑰名並不含 PASSWORD）會看不見 — 由 `:83 test_the_original_defect_shape_is_refused` 釘住。
+   `urlsplit` 会在 `${VAR:?message}` 的 `?` 處切斷 authority，因此 `_authority()` 以括號深度**手動解析**（`:137 test_the_url_parse_follows_the_spec_it_needs_to` 涵蓋 `:?message`、`-x` 預設、以及 RFC 3986 邊界：未編碼 `/` 的 userinfo 不可尋、編碼 `%2F` 必須被尋到）。
+   輸出面**只有** `path:line: key -> kind (len=N)`；`:188 test_a_finding_never_carries_the_value_it_found` 斷言值不出現在 finding 與 verdict 字串中。
+
+### 3. 此 gate 能否失敗：5 次變異實測（每次立即還原）
+
+退出碼紀律同 §收斂補充 1（先導向檔案、緊接取 `$?`）。
+
+| # | 變異 | 結果（原樣，不簡化） | 還原後 |
+|---|---|---|---|
+| M1 | 把測試用的合成密碼標記貼進 `backend/.env.test` 的 `DATABASE_URL` | `REFUSED — NEW literals not in the ledger: backend/.env.test:DATABASE_URL(literal_url_password)`；`MUTATED_CLI_EXIT=2`；`5 failed, 17 passed` | `grep -c` 標記 = 0；`CLI_EXIT=0`；22 passed |
+| M2 | 刪除 `.gitignore:22` 規則本身（保留註解） | `1 failed, 21 deselected`，失敗點 `test_env_hygiene_contract.py:304`（`test_gitignore_keeps_a_filled_in_copy_out_of_the_index` 的 `ignored.returncode == 0`）`AssertionError` | `cmp` 與備份相同 rc=0；**22 passed in 5.01s** |
+| M3 | 把模板 `:?set …` 改回裸 `${ALETHRA_TEST_RUNTIME_PASSWORD}` | 第一次跑 `-k "fail_closed or mirrors_the_tracked"` → `1 failed, 1 passed, 20 deselected`：**通過的那一項正是 `test_template_mirrors_the_tracked_test_settings_file`** ⇒ fail-closed 測試獨立成立，不是靠金鑰同名順帶擋下。重跑（行號修正後）`-k fail_closed` → `1 failed, 21 deselected`，失敗點 `:291`，斷言訊息即被檢出的形態 `AssertionError: ${ALETHRA_TEST_RUNTIME_PASSWORD}` | 檔內 `:?set ALETHRA` 計數回到 1，`cmp` rc=0；**22 passed** |
+| M4 | 自 `TRACKED_DEBT`（`:329-334`）刪除 `docker-compose.acceptance.yml / JWT_SECRET_KEY` 一條（树面未動） | `M4_CLI_EXIT=2` ＋ `REFUSED — NEW literals not in the ledger: docker-compose.acceptance.yml:JWT_SECRET_KEY(credential_literal)`；測試端 `2 failed, 20 passed`：`:216 assert 5 == 4`（可加性）、`:222` REFUSED 訊息 | `CLI_EXIT=0`；`matches the ledger: 5 tracked literal(s), 5 expected, no new credential`；**22 passed** |
+| M5 | 把 `SETTINGS_SUFFIXES`（`:115`）擴充含 `.py`（作用域過窄的反向） | `M5_CLI_EXIT=2`、`137 finding(s) across 830 tracked text files (503 configuration files in assignment scope): credential_literal=128, literal_url_password=9`；`M5_TEST_EXIT=1`、`4 failed, 18 passed`：`:166 assert not True`、`:216 assert 137 == 5`、`:222` REFUSED、`:229` 檔名集合 ≠ 兩個 compose 檔 | `cmp` 相同 rc=0；`SETTINGS_SUFFIXES` 回到 7 個副檔名；`CLI_EXIT=0`，5 findings |
+
+變異方向對應到三個失敗面：**新增字面值**（M1、M4）、**帳本過期**（M4 的反向由 `:237 test_the_ledger_refuses_a_new_literal_and_a_stale_entry` 以顯式 `debt=` 參數直接斷言 `resolved` 欄，無需改動工作樹）、**作用域過窄／過寬**（M2、M3、M5）。
+另修一個自己留下的錯誤：該測試的斷言訊息原寫「the real ledger still expects six」— 帳本在把 `change-me` 改判為佔位後已從 6 條降為 5 條，訊息屬手抄過期值。現改為由 `TRACKED_DEBT` 求和 derive（`:247-250`），與本專案「不手抄衍生值」的紀律一致。
+
+### 4. 計數的誠實分解（不同規則，不是同一數字在縮小）
+
+| 數字 | 規則 | 是否同一件事 |
+|---|---|---|
+| **5** | 本節規則對**整個追蹤樹**的判定：`credential_literal=3` + `literal_url_password=2`，全在 `docker-compose.yml:8,27` 與 `docker-compose.acceptance.yml:10,29,30` | 是本節的帳本 |
+| 137 | 同一規則但把 `.py` 納入作用域（M5） | **不是** — 128 條為 `password_hash=get_password_hash(...)`、`allow_credentials = True`、`api_key=<pydantic 欄位預設>` 這一類**不是環境設定**的指派 |
+| 168 / 27 | 本輪掃描器的兩次早期草稿與一次中間草稿 | **不是** — 規則尚未收斂前，無參考價值，不引為結論 |
+| 361 | 上一節 §4 的既存狀態計數（HEAD 中所有 credential 形態字面值） | 比較大的規則；本節**未**宣稱它下降，也未宣稱它與 5 有關 |
+
+「5」的對象是「此契約目前擋住的、屬於**部署設定檔**的字面憑證」；「361」的對象是「repo 內一切形態像秘密的字串」。兩者不可相加、不可互相取代。
+
+### 5. 本節未驗證／未執行
+
+1. **未 commit、未 push。** 本節只声明可穩定的部分，不抄一個會被平行 session 移動的總數：`backend/.env.test` **位元未動**（`git diff --quiet -- backend/.env.test` → rc=0，`git diff --stat` 無輸出），本節三個產物 `backend/.env.test.example`、`backend/scripts/check_env_hygiene.py`、`backend/tests/test_env_hygiene_contract.py` 在 `git status --porcelain` 中為 `??`（未追蹤），`.gitignore` 與本紀錄為 `M`。故第 1 小節 (e) 的動作 1、2 全部待批准。
+2. **未輪換任何密碼、未連線任何 DB、未啟動任何服務、未修改 `pg_hba.conf`、未刪任何 PGDATA**。M1–M5 全部對**本輪自建的本機檔案**操作並以 `/tmp/{envtest,gitignore,template,scanner}.orig` 還原，`cmp` 逐檔驗證 rc=0。
+3. `UNKNOWN`（本節不假裝已解）：(i) 任何**運轉中**實例是否使用該公開預設字串；(ii) 它是否跨 role／主機共用；(iii) `alethra_test` 輪換的時點與覆蓋範圍；(iv) Docker 卷冊內 DB A 是否仍完整（daemon 未運行）。
+4. 本節測試結果之原始輸出（本機暫存，非 repo 產物）：`m2.txt`、`m2r.txt`、`m2b.txt`、`m3.txt`、`m3r.txt`、`m3b.txt`、`m4cli.txt`、`m4t.txt`、`m4r.txt`、`m4r2.txt`、`m5cli.txt`、`m5t.txt`、`m5r.txt`、`final_hygiene.txt`、`final2.txt`（皆在 `/tmp`）。`b` 兩檔是 M2／M3 在修正斷言訊息後的重跑，目的在取得**目前**的失敗行號（`:304`、`:291`）而非推算位移。合跑實測：`test_env_hygiene_contract.py + test_db_env_contract.py + test_env_entries.py` → `52 passed in 17.25s`，lane 指紋 `python 3.12.16 | pytest 8.3.3 | sqlalchemy 2.0.36`。
+5. 本節尚未做的兩件事（不藏）：(i) 掃描器**尚未**接進 `run_tests.sh` 或任何 CI 入口 — 目前只由那 22 項契約測試在 pytest lane 內執行，因此「提交前自動擋下」還不成立，需在 §三(8) 批准時一併決定接入點；(ii) 未對 `HEAD` 的 361 條廣口徑字串做任何處置，也未宣稱本節使它下降。

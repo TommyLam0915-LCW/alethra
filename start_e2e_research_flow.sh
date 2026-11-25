@@ -59,17 +59,38 @@ IMAGE="$PROJECT/backend:local"
 COMPOSE="docker compose -p $PROJECT -f docker-compose.e2e.yml --env-file $ENV_FILE"
 FREE_DB_BUILD_MIB=10240   # 10 GiB operational line: below it, no image builds
 # The revision a fresh upgrade ends on, and therefore the revision a volume
-# carrying the seeded schema must report. Kept next to the fresh path's grep so
-# the two cannot drift apart silently.
+# carrying the seeded schema must report, is named by
+# backend/scripts/check_migration_tail.py: a pinned tail this file does not
+# restate, verified against a DAG parsed out of the revision modules and against
+# alembic's own resolution, which have to agree. Deriving it from one source and
+# comparing that source with itself would catch nothing.
 #
 # RESUME upgrades a volume seeded at an older head through the backend
 # entrypoint's `alembic upgrade head`, so the head is asserted only AFTER the
 # backend answers /health: reading it earlier would race the upgrade.
-EXPECTED_ALEMBIC_HEAD="z0a1b2c3d4e5"
 IDENTITY_FILE="$LOG_DIR/runtime-identity.env"
 RESUME_LOG="$LOG_DIR/resume-check.log"
 
 fail() { echo "E2E SETUP ABORTED: $*" >&2; exit 1; }
+
+derive_alembic_head() {
+  local py="${E2E_PYTHON:-$ROOT/backend/.venv/bin/python}"
+  if [ ! -x "$py" ]; then
+    echo "E2E SETUP: cannot read the migration tree: $py is not executable - set E2E_PYTHON to a Python that has alembic" >&2
+    return 1
+  fi
+  "$py" "$ROOT/backend/scripts/check_migration_tail.py" --with-alembic
+}
+
+# Derived in a substitution, so a refusal here cannot exit: the status is read
+# from the assignment and turned into the abort in the parent shell.
+EXPECTED_ALEMBIC_HEAD="$(derive_alembic_head)" || fail "no expected alembic head (see the error above); refusing to start or resume a stack whose schema it cannot name"
+[ -n "$EXPECTED_ALEMBIC_HEAD" ] || fail "derived an empty alembic head"
+
+if [ "${1:-}" = "--show-head" ]; then
+  echo "EXPECTED_ALEMBIC_HEAD=$EXPECTED_ALEMBIC_HEAD"
+  exit 0
+fi
 
 RESET=0
 [ "${1:-}" = "--reset" ] && RESET=1
@@ -364,9 +385,12 @@ fresh_runtime() {
   echo "waiting for backend on 127.0.0.1:$BACKEND_PORT (alembic upgrade head runs first)..."
   wait_for_backend
   $COMPOSE logs --no-color backend >"$LOG_DIR/backend-upgrade.log" 2>&1
-  grep -q "Running upgrade y9z0a1b2c3d4 -> z0a1b2c3d4e5" "$LOG_DIR/backend-upgrade.log" \
-    || fail "expected final migration step (y9z0a1b2c3d4 -> z0a1b2c3d4e5) not observed in $LOG_DIR/backend-upgrade.log"
-  echo "migrations applied to head $EXPECTED_ALEMBIC_HEAD (log: $LOG_DIR/backend-upgrade.log)"
+  # The database's own stamp, not a log line: a transition string hardcodes one
+  # revision pair, and the pair it hardcoded was sixteen revisions back.
+  head_fresh="$(db_sql "$db_id" "select version_num from alembic_version")"
+  [ "$head_fresh" = "$EXPECTED_ALEMBIC_HEAD" ] \
+    || fail "fresh upgrade of '$BACKEND_DB' ended on head '$head_fresh', expected '$EXPECTED_ALEMBIC_HEAD' (log: $LOG_DIR/backend-upgrade.log) - the seed below would describe a schema this work does not define"
+  echo "migrations applied to head $head_fresh (log: $LOG_DIR/backend-upgrade.log)"
 
   # --- deterministic synthetic seed (guarded to the alethra_e2e database) ---
   $COMPOSE exec -T backend python scripts/seed_e2e_research_flow.py | tee "$LOG_DIR/seed.log"

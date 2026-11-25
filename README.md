@@ -196,12 +196,35 @@ Phase 1 包含 3 個示範資產：
 
 ## 測試
 
+The entry is `backend/scripts/run_tests.sh`, not bare `pytest`. Bare `pytest` runs
+whatever interpreter happens to be active and opens whatever `DATABASE_URL` points
+at; the entry picks this checkout's venv (and refuses if it is absent, instead of
+silently using a system python with a different pytest/SQLAlchemy), prints the
+layer and the dependency versions a count belongs to, and refuses a database that
+is not a disposable one before the first test writes.
+
 ```bash
-cd backend
-pytest tests/ -v
+# from the repository root — sqlite layer (the default suite)
+DATA_PROVIDER=demo bash ./backend/scripts/run_tests.sh sqlite tests/test_env_entries.py
+
+# the recorded runs in docs/handoffs/ use a fixed scratch directory instead of the
+# system default, which the entry checks exists and is writable before starting:
+TMPDIR=/tmp/alethra-sqlite-test-dir DATA_PROVIDER=demo \
+  bash ./backend/scripts/run_tests.sh sqlite tests/test_env_entries.py
+
+# PostgreSQL layer — needs a disposable database, never printed by the entry
+ALETHRA_PG_TEST_URL=postgresql://<user>@127.0.0.1:54321/alethra_pg_test \
+  bash ./backend/scripts/run_tests.sh pg tests/<pg-required files>
+
+bash ./backend/scripts/run_tests.sh --help   # exit codes, variables, layers
 ```
 
-**Current (2026-10-12 Phase 2A review corrections)**: 253 tests, all passing.
+A count is only comparable to another count made in the same layer with the same
+lane fingerprint; the two lines the entry prints are what make that check possible.
+
+**Counts below are a dated snapshot (2026-10-12 Phase 2A review corrections), not a
+current measurement** — see `docs/handoffs/2026-11-14-desktop-checkpoint.md` §24.11
+for the last full-suite run recorded here.
 - 49 個研究草稿測試（Phase 2A 後端 + 21 個審查修正回歸測試）
 - 51 個試點運營與產品驗證測試
 - 29 個引擎測試
