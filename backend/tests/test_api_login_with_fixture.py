@@ -14,6 +14,16 @@ Requirements covered:
 Environment:
 - Database: PostgreSQL ai_investment_lab_test (ALETHRA_TEST_DB / ALETHRA_PG_TEST_URL)
 - Runtime role: alethra_test_runtime (limited permissions)
+
+All three nodes are PostgreSQL-only, and the reason is a product line rather
+than a query dialect: ``create_paper_portfolio`` binds ``Decimal`` straight
+into ``INSERT INTO paper_portfolios (... initial_virtual_cash ...)`` at
+app/services/paper_trading.py:76, and Python 3.12's sqlite3 has no default
+Decimal adapter. On the SQLite lane the formal "create a portfolio" API call
+answers 500 before any of this file's assertions can be reached, so the whole
+login -> create -> replay -> status -> daily-report chain has no offline
+coverage. Registering an adapter would be a change to what the offline lane is
+able to prove and is put to the owner rather than done here.
 """
 import pytest
 from datetime import datetime, timezone, timedelta
@@ -24,6 +34,15 @@ from sqlalchemy import text
 
 from tests.api_test_fixtures import api_test_fixtures
 from tests.conftest import TestSession
+from tests.postgresql_only import requires_postgresql
+
+
+@pytest.fixture(autouse=True)
+def _postgres_required():
+    requires_postgresql(
+        "drives the formal portfolio API, whose Decimal money bindings the "
+        "SQLite driver in this lane refuses"
+    )
 
 
 FIXED_NOW = datetime(2026, 11, 7, 12, 0, 0, tzinfo=timezone.utc)

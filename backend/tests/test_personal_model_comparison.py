@@ -46,6 +46,7 @@ from tests.test_personal_strategy_learning import (
     _build_snapshot,
     _create_experiment,
     _grant_consent,
+    _open_skill_unit,
     _personal_artifacts,
     _quota_state,
     _run_worker_job,
@@ -834,23 +835,42 @@ def test_rollback_returns_previous_version_and_requires_history(
 # ---------------------------------------------------------------------------
 
 
-def test_prediction_alias_follows_switch_and_old_versions_stay_usable(
+def test_prediction_scope_follows_the_skill_switch_and_old_versions_stay_readable(
     pair, client, auth_headers
 ):
+    """A switch changes what a skill is served, not what it owns.
+
+    The version behind the switch stops authorizing inference — that is the
+    point of switching — while its artifact, evaluation and the inferences
+    already recorded against it stay untouched and readable.
+    """
     record_id = pair["record_id"]
     model_a_id = pair["model_a"]["model_version_id"]
     model_b_id = pair["model_b"]["model_version_id"]
+    skill_unit_id = _open_skill_unit(client, auth_headers)
     as_of = BARS[80].isoformat()
-    payload = {"instrument_id": INSTRUMENT, "as_of_date": as_of}
+    payload = {
+        "instrument_id": INSTRUMENT,
+        "as_of_date": as_of,
+        "skill_unit_id": skill_unit_id,
+    }
 
-    assert (
-        client.post(
-            f"/api/v1/ml/personal/models/{model_a_id}/select",
+    def _select(version_id, expected, rationale):
+        resp = client.post(
+            f"/api/v1/ml/personal/models/{version_id}/select",
             headers=auth_headers,
-            json={"rationale": "先用 A。", "expected_active_version_id": None},
-        ).status_code
-        == 200
-    )
+            json={
+                "rationale": rationale,
+                "expected_active_version_id": expected,
+                "skill_unit_id": skill_unit_id,
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        return resp.json()
+
+    first_switch = _select(model_a_id, None, "先用 A。")
+    assert first_switch["skill_unit_id"] == skill_unit_id
+
     first = client.post(
         f"/api/v1/ml/personal/records/{record_id}/predict",
         headers=auth_headers,
@@ -858,17 +878,10 @@ def test_prediction_alias_follows_switch_and_old_versions_stay_usable(
     )
     assert first.status_code == 200, first.text
     assert first.json()["resolved_version"]["model_version_id"] == model_a_id
-    assert first.json()["resolved_version"]["resolved_from_active_alias"] is True
+    assert first.json()["resolved_version"]["resolved_from"] == "skill_unit_selection"
     frozen_first = first.json()
 
-    assert (
-        client.post(
-            f"/api/v1/ml/personal/models/{model_b_id}/select",
-            headers=auth_headers,
-            json={"rationale": "改用 B。", "expected_active_version_id": model_a_id},
-        ).status_code
-        == 200
-    )
+    _select(model_b_id, model_a_id, "改用 B。")
     second = client.post(
         f"/api/v1/ml/personal/records/{record_id}/predict",
         headers=auth_headers,
@@ -877,14 +890,28 @@ def test_prediction_alias_follows_switch_and_old_versions_stay_usable(
     assert second.status_code == 200, second.text
     assert second.json()["resolved_version"]["model_version_id"] == model_b_id
 
-    explicit_old = client.post(
+    stale = client.post(
         f"/api/v1/ml/personal/models/{model_a_id}/predict",
         headers=auth_headers,
         json=payload,
     )
-    assert explicit_old.status_code == 200, explicit_old.text
-    assert (
-        explicit_old.json()["resolved_version"]["model_version_id"] == model_a_id
-    )
-    assert explicit_old.json()["resolved_version"]["resolved_from_active_alias"] is False
-    assert explicit_old.json()["artifact_sha256"] == frozen_first["artifact_sha256"]
+    assert stale.status_code == 403, stale.text
+    detail = stale.json()["detail"]
+    assert detail["reason_code"] == "superseded_skill_unit_selection"
+    assert detail["context"]["currently_selected_version_id"] == model_b_id
+
+    # A is still the owner's, unchanged and readable, with its own artifact.
+    listed = client.get(
+        "/api/v1/ml/personal/models",
+        headers=auth_headers,
+        params={"strategy_version_id": pair["strategy_version_id"]},
+    ).json()["models"]
+    row_a = [m for m in listed if m["model_version_id"] == model_a_id]
+    assert len(row_a) == 1
+    assert row_a[0]["artifact_id"] == pair["model_a"]["artifact_id"]
+    assert row_a[0]["artifact_sha256"] == pair["model_a"]["artifact_sha256"]
+    assert row_a[0]["evaluation"] is not None
+
+    # The inference recorded while A was in use keeps naming A.
+    assert frozen_first["artifact_sha256"] == pair["model_a"]["artifact_sha256"]
+    assert frozen_first["resolved_version"]["model_version_id"] == model_a_id

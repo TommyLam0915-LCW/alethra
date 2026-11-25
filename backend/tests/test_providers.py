@@ -4,6 +4,24 @@ from app.providers.demo_provider import DemoDataProvider
 from app.providers.provider_registry import get_data_provider, get_provider_info, register_provider
 
 
+@pytest.fixture(autouse=True)
+def settings_cache_isolated():
+    """`get_settings` is an lru_cache, so it is process state, not test state.
+
+    Four cases below call `cache_clear()` to make their `monkeypatch.setenv`
+    visible, and monkeypatch then restores the environment without restoring
+    the cache. Every later test in the same process kept reading the Settings
+    this file built — including a `DATA_PROVIDER=nonexistent` one that resolves
+    to the unconfigured stub. Clearing on both sides makes each test start from
+    the ambient environment and leave nothing behind.
+    """
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
 class TestDemoDataProvider:
     def setup_method(self):
         self.provider = DemoDataProvider()
@@ -249,8 +267,13 @@ class TestProviderRegistry:
 
         register_provider("mock", MockProvider())
         from app.providers.provider_registry import _PROVIDERS
-        assert "mock" in _PROVIDERS
-        del _PROVIDERS["mock"]
+        try:
+            assert "mock" in _PROVIDERS
+        finally:
+            # The registry is a module-level dict shared by the whole process;
+            # a bare `del` after the assert left "mock" registered for every
+            # later test whenever the assert was the thing that failed.
+            _PROVIDERS.pop("mock", None)
 
 
 class TestBacktestWithProvider:

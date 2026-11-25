@@ -11,6 +11,8 @@ Covers:
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -45,10 +47,16 @@ def _make_user_and_get_headers(client, email: str = "learning-api@alethra.io"):
 
 def _get_user_id(headers: dict) -> uuid.UUID:
     """Extract user_id from auth headers by decoding the JWT."""
-    import jwt
+    # Same library, key and algorithm the issuer uses (app/auth/jwt.py), so the
+    # signature is verified rather than skipped — and PyJWT, which is neither in
+    # requirements.txt nor installed here, is not needed.
+    from jose import jwt
 
+    from app.config import get_settings
+
+    settings = get_settings()
     token = headers["Authorization"].split(" ")[1]
-    payload = jwt.decode(token, options={"verify_signature": False})
+    payload = jwt.decode(token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm])
     return uuid.UUID(payload["sub"])
 
 
@@ -160,6 +168,13 @@ def _make_proposal(user_id: uuid.UUID, *, status: str = "validated") -> uuid.UUI
             rationale_json={
                 "pattern": "high_win_rate_low_pnl",
                 "baseline_metrics": {"win_rate": 0.6, "avg_pnl": -5.0},
+                # The deploy route allow-lists evidence_status=='validated_candidate'
+                # (api/learning.py:277); only a validated proposal carries that stamp.
+                **(
+                    {"evidence_status": "validated_candidate"}
+                    if status == "validated"
+                    else {}
+                ),
             },
             validation_result={
                 "passed": True,
@@ -214,16 +229,159 @@ class TestListLearningJobs:
 
 
 class TestTriggerLearningJob:
-    def test_creates_job(self, client, auth_headers):
+    """The trigger's two outcomes, both of which end in the ledger.
+
+    The endpoint used to answer 201 with a ``pending`` row and the message
+    "It will run on the next scheduler tick or immediately if the scheduler is
+    active". Neither half was true: a scheduled tick writes its own records and
+    reads no pending ones, and the dispatch (when it happened) called
+    ``run_scheduled_research(scope="manual")`` with no ``user_id`` — so it
+    studied for whichever user the old ``select(User).limit(1)`` returned and
+    wrote a *second* row. A request in an account with no scheduler left a row
+    nothing would ever advance.
+    """
+
+    def test_refuses_and_records_when_no_learning_service_runs(
+        self, client, auth_headers
+    ):
         resp = client.post(
             "/api/v1/learning/jobs/trigger",
             json={"job_type": "scheduled_study"},
             headers=auth_headers,
         )
-        assert resp.status_code == 201
-        data = resp.json()
-        assert data["job"]["status"] == "pending"
-        assert data["job"]["job_type"] == "scheduled_study"
+        assert resp.status_code == 503
+        detail = resp.json()["detail"]
+        assert detail["error"] == "learning_service_not_running"
+        job_id = uuid.UUID(detail["job"]["id"])
+
+        db = TestSession()
+        try:
+            row = db.query(LearningJob).filter(LearningJob.id == job_id).first()
+            assert row.status == "failed", row.status
+            assert row.started_at is None, "a refused request must not look started"
+            assert row.completed_at is not None
+            assert "ENABLE_LEARNING_SCHEDULER" in row.error_details
+            assert row.result_json is None
+        finally:
+            db.close()
+
+    def test_dispatch_names_the_requesting_account_and_its_own_row(
+        self, client, auth_headers
+    ):
+        user_id = _get_user_id(auth_headers)
+
+        with patch("app.main._learning_scheduler", SimpleNamespace(running=True)), \
+             patch("app.workers.learning_scheduler.run_scheduled_research") as research, \
+             patch("app.workers.learning_scheduler.run_pattern_analysis_job") as analysis, \
+             patch("threading.Thread") as thread:
+            resp = client.post(
+                "/api/v1/learning/jobs/trigger",
+                json={
+                    "job_type": "scheduled_study",
+                    "instruments": ["CRYPTO:KRAKEN:BTC-USD"],
+                    "intervals": [1440],
+                },
+                headers=auth_headers,
+            )
+
+        assert resp.status_code == 201, resp.text
+        body = resp.json()
+        assert body["job"]["status"] == "pending"
+        # What the caller asked for is what the record says was asked for.
+        assert body["job"]["config_json"]["instruments"] == ["CRYPTO:KRAKEN:BTC-USD"]
+        assert body["job"]["config_json"]["intervals"] == [1440]
+
+        kwargs = thread.call_args.kwargs
+        assert kwargs["target"] is research
+        assert kwargs["kwargs"] == {
+            "scope": "manual",
+            "user_id": user_id,
+            "job_id": uuid.UUID(body["job"]["id"]),
+            "instruments": ["CRYPTO:KRAKEN:BTC-USD"],
+            "intervals": [1440],
+        }
+        thread.return_value.start.assert_called_once()
+        # Nothing runs inside the request itself: the row stays the caller's to
+        # follow, and the worker owns every later write.
+        assert research.call_count == 0
+        assert analysis.call_count == 0
+
+    def test_the_analysis_trigger_dispatches_the_analysis_tick(
+        self, client, auth_headers
+    ):
+        user_id = _get_user_id(auth_headers)
+
+        with patch("app.main._learning_scheduler", SimpleNamespace(running=True)), \
+             patch("app.workers.learning_scheduler.run_scheduled_research") as research, \
+             patch("app.workers.learning_scheduler.run_pattern_analysis_job") as analysis, \
+             patch("threading.Thread") as thread:
+            resp = client.post(
+                "/api/v1/learning/jobs/trigger",
+                json={"job_type": "pattern_analysis"},
+                headers=auth_headers,
+            )
+
+        assert resp.status_code == 201, resp.text
+        kwargs = thread.call_args.kwargs
+        assert kwargs["target"] is analysis
+        assert kwargs["kwargs"] == {
+            "scope": "manual",
+            "user_id": user_id,
+            "job_id": uuid.UUID(resp.json()["job"]["id"]),
+        }
+        assert research.call_count == 0
+
+    def test_the_replay_trigger_dispatches_the_replay_tick(self, client, auth_headers):
+        """The third job type steps the caller's own sessions, not a named grid.
+
+        ``instruments``/``intervals`` are deliberately absent from the dispatch:
+        a replay reads the dataset bound to each of its own sessions, so a
+        request that named another instrument would have the record claim a
+        parameter the tick cannot honour.
+        """
+        user_id = _get_user_id(auth_headers)
+
+        with patch("app.main._learning_scheduler", SimpleNamespace(running=True)), \
+             patch("app.workers.learning_scheduler.run_scheduled_research") as research, \
+             patch("app.workers.learning_scheduler.run_pattern_analysis_job") as analysis, \
+             patch("app.workers.learning_scheduler.run_scheduled_simulations") as replay, \
+             patch("threading.Thread") as thread:
+            resp = client.post(
+                "/api/v1/learning/jobs/trigger",
+                json={
+                    "job_type": "simulation_daily",
+                    "instruments": ["CRYPTO:KRAKEN:BTC-USD"],
+                },
+                headers=auth_headers,
+            )
+
+        assert resp.status_code == 201, resp.text
+        body = resp.json()
+        kwargs = thread.call_args.kwargs
+        assert kwargs["target"] is replay
+        assert kwargs["kwargs"] == {
+            "scope": "manual",
+            "user_id": user_id,
+            "job_id": uuid.UUID(body["job"]["id"]),
+        }
+        assert "instruments" not in body["job"]["config_json"]
+        assert "intervals" not in body["job"]["config_json"]
+        assert research.call_count == 0
+        assert analysis.call_count == 0
+
+    def test_a_replay_request_is_refused_the_same_way_when_nothing_will_run(
+        self, client, auth_headers
+    ):
+        resp = client.post(
+            "/api/v1/learning/jobs/trigger",
+            json={"job_type": "simulation_daily"},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 503
+        detail = resp.json()["detail"]
+        assert detail["error"] == "learning_service_not_running"
+        assert detail["job"]["job_type"] == "simulation_daily"
+        assert detail["job"]["status"] == "failed"
 
     def test_rejects_invalid_job_type(self, client, auth_headers):
         resp = client.post(

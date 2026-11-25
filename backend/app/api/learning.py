@@ -33,7 +33,7 @@ class TriggerLearningRequest(BaseModel):
 
     job_type: str = Field(
         default="scheduled_study",
-        pattern="^(scheduled_study|pattern_analysis)$",
+        pattern="^(scheduled_study|pattern_analysis|simulation_daily)$",
     )
     instruments: Optional[list[str]] = None
     intervals: Optional[list[int]] = None
@@ -139,21 +139,37 @@ def trigger_learning_job(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> dict:
-    """Manually trigger a research + analysis cycle.
+    """Run one research, analysis or replay-step cycle for the calling account.
 
-    Creates a LearningJob record and dispatches the work to the scheduler
-    worker. If the scheduler is not running, the job stays in ``pending``
-    until the next scheduler tick or a manual run.
+    The row created here is the row the worker advances: one request, one
+    record. It is not a queue entry — a scheduled tick writes its own records
+    and reads no pending ones, so if this process does not run the learning
+    service the request is refused and the row says so, instead of looking
+    queued forever behind a 201.
     """
-    config = {
-        "job_type": payload.job_type,
-        "instruments": payload.instruments or [
-            "CRYPTO:KRAKEN:BTC-USD",
-            "CRYPTO:KRAKEN:ETH-USD",
-            "CRYPTO:KRAKEN:SOL-USD",
-        ],
-        "intervals": payload.intervals or [1440, 240, 60, 15],
-    }
+    import threading
+
+    from app.main import _learning_scheduler
+    from app.workers.learning_scheduler import (
+        SCHEDULED_INSTRUMENTS,
+        SCHEDULED_INTERVALS,
+        run_pattern_analysis_job,
+        run_scheduled_research,
+        run_scheduled_simulations,
+    )
+
+    instruments = list(payload.instruments or SCHEDULED_INSTRUMENTS)
+    intervals = list(payload.intervals or SCHEDULED_INTERVALS)
+
+    config: dict = {"scope": "manual", "job_type": payload.job_type}
+    if payload.job_type == "scheduled_study":
+        config["instruments"] = instruments
+        config["intervals"] = intervals
+    elif payload.job_type == "pattern_analysis":
+        config["lookback_runs"] = 50
+    # ``simulation_daily`` adds nothing here on purpose: a replay reads the
+    # dataset bound to each of its own sessions, so a grid or a lookback named
+    # by the caller would describe work this lane cannot do.
 
     job = LearningJob(
         user_id=current_user.id,
@@ -172,36 +188,43 @@ def trigger_learning_job(
         payload.job_type,
     )
 
-    # Try to run immediately if scheduler is available
-    try:
-        from app.main import _learning_scheduler
+    if _learning_scheduler is None or not _learning_scheduler.running:
+        job.status = "failed"
+        job.completed_at = utcnow_aware()
+        job.error_details = (
+            "refused: the learning service is not running in this process "
+            "(ENABLE_LEARNING_SCHEDULER=false). Nothing was run."
+        )
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "error": "learning_service_not_running",
+                "message": (
+                    "This process runs no learning scheduler, so the request "
+                    "was recorded as refused rather than queued. Start the "
+                    "service with ENABLE_LEARNING_SCHEDULER=true."
+                ),
+                "job": _serialize_job(job),
+            },
+        )
 
-        if _learning_scheduler is not None and _learning_scheduler.running:
-            from app.workers.learning_scheduler import (
-                run_scheduled_research,
-                run_pattern_analysis_job,
-            )
-            import threading
-
-            if payload.job_type == "scheduled_study":
-                thread = threading.Thread(
-                    target=run_scheduled_research,
-                    kwargs={"scope": "manual"},
-                    daemon=True,
-                )
-                thread.start()
-            elif payload.job_type == "pattern_analysis":
-                thread = threading.Thread(
-                    target=run_pattern_analysis_job,
-                    daemon=True,
-                )
-                thread.start()
-    except Exception as exc:
-        logger.warning("Could not dispatch job %s immediately: %s", job.id, exc)
+    kwargs: dict = {"scope": "manual", "user_id": current_user.id, "job_id": job.id}
+    if payload.job_type == "scheduled_study":
+        kwargs.update(instruments=instruments, intervals=intervals)
+        target = run_scheduled_research
+    elif payload.job_type == "simulation_daily":
+        target = run_scheduled_simulations
+    else:
+        target = run_pattern_analysis_job
+    threading.Thread(target=target, kwargs=kwargs, daemon=True).start()
 
     return {
         "job": _serialize_job(job),
-        "message": "Job created. It will run on the next scheduler tick or immediately if the scheduler is active.",
+        "message": (
+            "Dispatched in this process. Follow it with "
+            "GET /api/v1/learning/jobs: running, then completed, partial or failed."
+        ),
     }
 
 

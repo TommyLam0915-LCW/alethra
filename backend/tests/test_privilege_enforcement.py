@@ -6,12 +6,34 @@ This test demonstrates that the safety gate enforces privilege separation:
 
 All DDL rejection tests use the sacrificial table _test_sacrificial_ (owned by postgres),
 not core tables like users. All tests assert specific SQLSTATE 42501 (insufficient_privilege).
+
+Every node here is PostgreSQL-only: the subject is the role privilege model,
+which SQLite does not have. Offline, ``CREATE TABLE`` cannot be refused because
+there is no grant to withhold, so the rejection tests would report a pass for
+the absence of a mechanism rather than for the presence of a control. They
+skip instead, and the skip names the command that runs them.
+
+Two names in ``test_limited_role_can_select`` -- the database
+``ai_investment_lab_test`` and the role ``alethra_test_runtime`` -- are
+hard-coded from the environment this file was first written against. They are
+not read from the target guard's approved target, so the file needs that exact
+identity to go green on the PostgreSQL lane; nothing here has been executed.
 """
 import os
 import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import ProgrammingError
 from app.database import get_db
+
+from tests.postgresql_only import requires_postgresql
+
+
+@pytest.fixture(autouse=True)
+def _postgres_required():
+    requires_postgresql(
+        "enforces GRANT/REVOKE on a named role and expects SQLSTATE 42501, which "
+        "only a real PostgreSQL role model can refuse"
+    )
 
 
 @pytest.fixture

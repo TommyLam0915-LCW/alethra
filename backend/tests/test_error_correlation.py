@@ -42,10 +42,17 @@ def raw_client():
     from app.database import get_db as orig_get_db
     from tests.conftest import override_get_db
 
+    # Restore what was there, in finally: clearing the whole dict would also
+    # remove overrides installed by other modules, and teardown after `yield`
+    # does not run when the test fails - which is when the leak matters.
+    saved_overrides = dict(app.dependency_overrides)
     app.dependency_overrides[orig_get_db] = override_get_db
-    with TestClient(app, raise_server_exceptions=False) as c:
-        yield c
-    app.dependency_overrides.clear()
+    try:
+        with TestClient(app, raise_server_exceptions=False) as c:
+            yield c
+    finally:
+        app.dependency_overrides.clear()
+        app.dependency_overrides.update(saved_overrides)
 
 
 @pytest.mark.parametrize(

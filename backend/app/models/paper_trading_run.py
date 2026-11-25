@@ -5,9 +5,9 @@ which track individual replay/execution runs and their daily performance aggrega
 """
 import uuid
 from datetime import datetime, date
-from sqlalchemy import Column, String, Integer, DateTime, Date, Numeric, ForeignKey, Index, UniqueConstraint
+from sqlalchemy import Column, String, Integer, DateTime, Date, Numeric, ForeignKey, Index, UniqueConstraint, Boolean
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.sql import func
+from sqlalchemy.sql import false, func
 from app.database import Base
 
 
@@ -24,6 +24,10 @@ class PaperTradingRun(Base):
     start_date = Column(DateTime(timezone=False), nullable=False)
     end_date = Column(Date, nullable=True)
     status = Column(String, default="running")
+    # Mirrors migration c9d0e1f2a3b4 (BOOLEAN NOT NULL DEFAULT false). The replay's
+    # cancel poll and its completion guard both read this column in raw SQL, so a
+    # schema built from this model has to carry it or the two definitions disagree.
+    cancel_requested = Column(Boolean, nullable=False, server_default=false())
     initial_capital = Column(Numeric(15, 2), nullable=False)
     final_capital = Column(Numeric(15, 2), nullable=True)
     total_pnl = Column(Numeric(15, 2), default=0)
@@ -34,10 +38,17 @@ class PaperTradingRun(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     run_type = Column(String(50), default="historical_simulation")
+    # Unified skill model: trace which strategy version and dataset this run uses.
+    # Both nullable because existing runs predate the concept and cannot be backfilled.
+    # No FK at DB level — application validates at write time (see paper_trading.py API).
+    strategy_version_id = Column(UUID(as_uuid=True), nullable=True)
+    dataset_id = Column(UUID(as_uuid=True), nullable=True)
 
     __table_args__ = (
         Index("idx_paper_trading_runs_portfolio", "portfolio_id"),
         Index("idx_paper_trading_runs_status", "status"),
+        Index("ix_paper_trading_runs_strategy_version_id", "strategy_version_id"),
+        Index("ix_paper_trading_runs_dataset_id", "dataset_id"),
     )
 
 

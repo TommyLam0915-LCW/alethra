@@ -12,23 +12,32 @@ Two-Phase Cancel Contract:
   * Worker atomically sets status='cancelled'
   * Only now is run truly cancelled
 
-Test Coverage (12 methods implemented):
-- Valid UUID user with complete FK chain (users → portfolios → runs)
-- Running state: two-phase contract with worker polling (5 tests)
-- Queued/pending/failed: immediate completion without worker (3 tests)
-- Completion/failure handlers don't override cancel status (2 tests)
-- Race conditions with barrier control (2 tests)
-- Explicit session factory injection (no global SessionLocal override)
-- Comprehensive FK-safe cleanup (fills → orders → positions → decisions → metrics → runs → portfolios → users)
+Lane split, as measured on the SQLite lane rather than as claimed here: 53
+nodes collect, 21 run offline and 32 skip through ``session_factory`` because
+they hold real rows across sessions, take real ``FOR UPDATE`` row locks, or
+both. A skip is a node that did not run, not a pass; ``-rs`` prints the
+command that runs them.
 
-Additional tests needed (not yet implemented):
-- Actual execute_historical_replay (requires historical trades setup)
-- <100 events, polling boundary, pre-final-commit cancel
-- Worker interruption recovery policy
-- Complete ledger and cash consistency verification
+What the offline 21 cover: the session-factory contract itself, the target
+guard's rejection of a wrong database / role / address / port / socket, and
+the residual-aggregation and reverse-ownership helpers.
 
-Status: 12 tests WRITTEN, NOT YET EXECUTED (requires PostgreSQL test DB migration)
+What the PostgreSQL 32 cover: the two-phase cancel contract end to end
+(request accepted, worker stops, terminal state), immediate completion for
+queued / pending / failed runs, the completion and failure handlers not
+overriding a cancel, thread-barrier races, FK-safe cleanup with an
+independent verification connection, and replay integration.
+
+Still not written anywhere, in this file or another:
+- the cancel boundary just below 100 events and the pre-final-commit cancel
+- the worker-interruption recovery policy
+- ledger and cash consistency across a whole replay
+
+This file has never been executed against PostgreSQL. The migration and the
+disposable database it would run on are not approved operations.
 """
+
+import os
 
 import pytest
 import threading
@@ -66,39 +75,44 @@ def test_run_id():
     return str(uuid.uuid4())
 
 
-import sys
-import os
-sys.path.insert(0, os.path.dirname(__file__))
-from test_target_guard import verify_test_target, TargetGuardError, get_test_db_url
+from tests.postgresql_only import postgresql_test_url
 
 
 @pytest.fixture
 def session_factory():
-    """Create explicit session factory for test isolation.
+    """Explicit session factory for the PostgreSQL-backed nodes in this file.
 
-    P1 C Commit: Actually use shared verified factory from test_target_guard.
-    Both atomic and historical fixtures use this same entry point.
+    Tests must NOT override global SessionLocal. This factory is passed to the
+    engine under test so concurrent operations get independent sessions.
 
-    Tests must NOT override global SessionLocal. Use this factory to create
-    independent sessions for concurrent operations.
+    Two refusals sit between a node and a database, and they answer different
+    questions:
 
-    FAIL CLOSED: No fallback URL. If ALETHRA_PG_TEST_URL not set, test fails.
-    This ensures tests never accidentally use wrong database.
+    * ``postgresql_test_url`` asks whether this lane was pointed at a
+      PostgreSQL server at all. On the SQLite lane the answer is no, so the
+      node is recorded as skipped-with-a-reason rather than as an error, and
+      the reason carries the command that would run it.
+    * ``create_verified_session_factory`` then asks whether the server behind
+      that name is the approved disposable one, and raises ``TargetGuardError``
+      if it is not.
 
-    TARGET GUARD: Verifies actual DB/role/server before any write.
-    Stops if target doesn't match approved test environment.
+    Only the first may skip. A named-but-unapproved database is a real result
+    for a safety check and must surface as a failure, so this fixture does not
+    catch that error on the way past.
     """
-    from test_target_guard import create_verified_session_factory
-    
-    db_url = get_test_db_url()
-    
-    # P1 C Commit 1: Actually call shared verified factory
+    from tests.test_target_guard import create_verified_session_factory
+
+    db_url = postgresql_test_url(
+        "holds real rows across sessions, takes real FOR UPDATE row locks and "
+        "commits or rolls them back, none of which the SQLite file provides"
+    )
+
     guarded_factory, engine = create_verified_session_factory(db_url)
     
     try:
         yield guarded_factory
     finally:
-        # P1 C Commit 2: Complete resource release on both success and failure
+        # Resource release on both success and failure.
         engine.dispose()
 
 
@@ -110,7 +124,7 @@ def db_session(session_factory):
     session.close()
 
 
-from test_cleanup_utils import unified_cleanup_user_data
+from tests.test_cleanup_utils import unified_cleanup_user_data
 
 
 @pytest.fixture
@@ -926,7 +940,7 @@ class TestCleanupSafety:
         
         # Cleanup happens in fixture finalizer, but we can verify the pattern
         # by manually calling unified_cleanup_user_data
-        from test_cleanup_utils import unified_cleanup_user_data, collect_user_resource_ids
+        from tests.test_cleanup_utils import unified_cleanup_user_data, collect_user_resource_ids
         
         # Collect IDs first
         collect_session = session_factory()
@@ -953,7 +967,7 @@ class TestCleanupSafety:
 
     def test_cleanup_with_setup_failure_still_deletes_partial(self, request, session_factory, test_user_id):
         """Setup failure: cleanup still attempts to delete partial resources."""
-        from test_cleanup_utils import unified_cleanup_user_data
+        from tests.test_cleanup_utils import unified_cleanup_user_data
         
         # Register finalizer BEFORE any writes
         def cleanup():
@@ -1005,7 +1019,7 @@ class TestCleanupSafety:
 
     def test_cleanup_helper_rollback_on_injected_failure(self, request, session_factory, test_user_id, monkeypatch):
         """Cleanup helper rollback: inject error during delete, verify all data restored."""
-        from test_cleanup_utils import unified_cleanup_user_data, delete_user_resources_in_transaction
+        from tests.test_cleanup_utils import unified_cleanup_user_data, delete_user_resources_in_transaction
         
         # Setup complete FK chain with child data
         setup_session = session_factory()
@@ -1155,7 +1169,7 @@ class TestCleanupSafety:
 
     def test_cleanup_detects_residual_orders(self, request, session_factory, test_user_id):
         """Residual detection: verify phase catches undeleted orders."""
-        from test_cleanup_utils import (
+        from tests.test_cleanup_utils import (
             collect_user_resource_ids,
             unified_cleanup_user_data,
         )
@@ -1231,7 +1245,7 @@ class TestCleanupSafety:
 
     def test_cleanup_detects_residual_fills(self, request, session_factory, test_user_id):
         """Residual detection: verify phase catches undeleted fills."""
-        from test_cleanup_utils import (
+        from tests.test_cleanup_utils import (
             collect_user_resource_ids,
             unified_cleanup_user_data,
         )
@@ -1316,7 +1330,7 @@ class TestCleanupSafety:
 
     def test_cleanup_aborts_on_cross_user_decision_order(self, request, session_factory):
         """Cross-user association: order's decision belongs to different user's portfolio."""
-        from test_cleanup_utils import collect_user_resource_ids
+        from tests.test_cleanup_utils import collect_user_resource_ids
         
         user1_id = str(uuid.uuid4())
         user2_id = str(uuid.uuid4())
@@ -1442,7 +1456,7 @@ class TestCleanupSafety:
 
     def test_cleanup_user2_does_not_affect_user1_data(self, request, session_factory):
         """User2 cleanup: verify it doesn't touch user1's data."""
-        from test_cleanup_utils import collect_user_resource_ids, unified_cleanup_user_data
+        from tests.test_cleanup_utils import collect_user_resource_ids, unified_cleanup_user_data
         
         user1_id = str(uuid.uuid4())
         user2_id = str(uuid.uuid4())
@@ -1786,7 +1800,7 @@ class TestTargetGuard:
     def test_target_guard_rejects_wrong_db(self):
         """Target guard rejects wrong database name."""
         from unittest.mock import Mock
-        from test_target_guard import verify_test_target, TargetGuardError
+        from tests.test_target_guard import verify_test_target, TargetGuardError
         
         # Mock session that returns wrong DB name
         mock_session = Mock()
@@ -1801,7 +1815,7 @@ class TestTargetGuard:
     def test_target_guard_rejects_wrong_role(self):
         """Target guard rejects wrong database role."""
         from unittest.mock import Mock
-        from test_target_guard import verify_test_target, TargetGuardError
+        from tests.test_target_guard import verify_test_target, TargetGuardError
         
         # Mock session that returns wrong role
         mock_session = Mock()
@@ -1816,7 +1830,7 @@ class TestTargetGuard:
     def test_target_guard_rejects_wrong_address(self):
         """Target guard rejects wrong server IP address."""
         from unittest.mock import Mock
-        from test_target_guard import verify_test_target, TargetGuardError
+        from tests.test_target_guard import verify_test_target, TargetGuardError
         
         # Mock session that returns wrong server IP
         mock_session = Mock()
@@ -1831,7 +1845,7 @@ class TestTargetGuard:
     def test_target_guard_rejects_wrong_port(self):
         """Target guard rejects wrong port."""
         from unittest.mock import Mock
-        from test_target_guard import verify_test_target, TargetGuardError
+        from tests.test_target_guard import verify_test_target, TargetGuardError
         
         # Mock session that returns wrong port
         mock_session = Mock()
@@ -1846,7 +1860,7 @@ class TestTargetGuard:
     def test_target_guard_accepts_correct_target(self):
         """Target guard accepts correct DB/role/server_ip/port."""
         from unittest.mock import Mock
-        from test_target_guard import verify_test_target
+        from tests.test_target_guard import verify_test_target
         
         # P0 FIX: Mock returns realistic data (IP address, not hostname)
         mock_session = Mock()
@@ -1864,7 +1878,7 @@ class TestTargetGuard:
     def test_target_guard_rejects_ipv6_variant(self):
         """Target guard rejects ::1 (IPv6 loopback, only 127.0.0.1 approved)."""
         from unittest.mock import Mock
-        from test_target_guard import verify_test_target, TargetGuardError
+        from tests.test_target_guard import verify_test_target, TargetGuardError
         
         # Mock session that returns ::1 (IPv6 loopback)
         mock_session = Mock()
@@ -1879,7 +1893,7 @@ class TestTargetGuard:
     def test_target_guard_rejects_null_port(self):
         """Target guard rejects NULL port (TCP mode requires explicit port)."""
         from unittest.mock import Mock
-        from test_target_guard import verify_test_target, TargetGuardError
+        from tests.test_target_guard import verify_test_target, TargetGuardError
         
         # Mock session that returns NULL port (Unix socket)
         mock_session = Mock()
@@ -1894,7 +1908,7 @@ class TestTargetGuard:
     def test_target_guard_zero_writes_before_verification(self):
         """No writes happen before guard verification passes."""
         from unittest.mock import Mock, call
-        from test_target_guard import verify_test_target, TargetGuardError
+        from tests.test_target_guard import verify_test_target, TargetGuardError
         
         # Mock session that will fail verification
         mock_session = Mock()
@@ -1914,7 +1928,7 @@ class TestTargetGuard:
 
     def test_get_test_db_url_fails_closed(self):
         """get_test_db_url raises if ALETHRA_PG_TEST_URL not set."""
-        from test_target_guard import get_test_db_url
+        from tests.test_target_guard import get_test_db_url
         
         # Temporarily unset the environment variable
         original = os.environ.pop("ALETHRA_PG_TEST_URL", None)
@@ -1925,19 +1939,6 @@ class TestTargetGuard:
             # Restore if it was set
             if original is not None:
                 os.environ["ALETHRA_PG_TEST_URL"] = original
-
-
-# Test count: 38 + 7 (new target guard tests) = 45 methods across 10 classes
-# - TestSessionFactoryContract: 5 tests (no DB)
-# - TestTwoPhaseCancelContract: 5 tests (DB)
-# - TestCancelConvergence: 3 tests (DB)
-# - TestCompletionFailureProtection: 2 tests (DB)
-# - TestRaceConditionsWithBarrier: 2 tests (DB)
-# - TestCleanupSafety: 5 tests (DB)
-# - TestWorkerAtomicTerminalState: 4 tests (DB)
-# - TestTargetGuard: 7 tests (6 no DB, 1 DB)
-# - TestReplayBarrierIntegration: 7 tests (DB)
-# - TestThreadPrecision: 1 test (DB)
 
 
 class TestReplayBarrierIntegration:
@@ -2291,7 +2292,7 @@ class TestResidualAggregation:
     def test_aggregation_collects_all_residuals(self):
         """Mock all table counts, verify aggregation collects all residuals."""
         from unittest.mock import Mock
-        from test_cleanup_utils import verify_zero_residual_readonly
+        from tests.test_cleanup_utils import verify_zero_residual_readonly
         
         # Mock session that returns non-zero counts for all tables
         mock_session = Mock()
@@ -2330,7 +2331,7 @@ class TestResidualAggregation:
     def test_aggregation_all_zeros_no_error(self):
         """Mock all table counts as zero, verify no error raised."""
         from unittest.mock import Mock
-        from test_cleanup_utils import verify_zero_residual_readonly
+        from tests.test_cleanup_utils import verify_zero_residual_readonly
         
         # Mock session that returns zero counts for all tables
         mock_session = Mock()
@@ -2367,7 +2368,7 @@ class TestBatchAReverseOwnership:
         - Cleanup user2: Should ABORT (order references user1's decision)
         - After each abort, verify both sides' data unchanged
         """
-        from test_cleanup_utils import collect_user_resource_ids, unified_cleanup_user_data
+        from tests.test_cleanup_utils import collect_user_resource_ids, unified_cleanup_user_data
         
         user1_id = str(uuid.uuid4())
         user2_id = str(uuid.uuid4())
@@ -2574,7 +2575,7 @@ class TestBatchCGuardPrecision:
     
     def test_guard_with_recording_fake_verifies_identity_query(self):
         """Recording fake verifies guard executes actual identity query statement."""
-        from test_target_guard import verify_test_target, TargetGuardError
+        from tests.test_target_guard import verify_test_target, TargetGuardError
         from unittest.mock import Mock
         
         # Create recording fake that tracks all execute calls
@@ -2615,7 +2616,7 @@ class TestBatchCGuardPrecision:
     
     def test_verified_factory_rejection_asserts_teardown(self):
         """P1 C7-8: No-DB test calls formal entry point with fake engine, asserts teardown on rejection."""
-        from test_target_guard import create_verified_session_factory, TargetGuardError
+        from tests.test_target_guard import create_verified_session_factory, TargetGuardError
         from unittest.mock import Mock, patch
         
         # P1 C7: Inject fake engine/sessionmaker
@@ -2651,7 +2652,7 @@ class TestBatchCGuardPrecision:
     
     def test_verified_factory_success_path_with_teardown(self):
         """P1 C9: Success path verifies can create session, with explicit teardown/dispose."""
-        from test_target_guard import create_verified_session_factory
+        from tests.test_target_guard import create_verified_session_factory
         from unittest.mock import Mock, patch
         
         # Track session creation and closure
@@ -2699,7 +2700,7 @@ class TestBatchCGuardPrecision:
     
     def test_verified_factory_flow_shared_between_fixtures(self):
         """Both test fixtures use the same formal entry point with verified factory flow."""
-        from test_target_guard import verify_test_target, TargetGuardError
+        from tests.test_target_guard import verify_test_target, TargetGuardError
         from unittest.mock import Mock
         
         # Test 1: Guard passes with correct IP
@@ -2746,7 +2747,7 @@ class TestBatchBMinimalIntegration:
         Requirement 四: Unconditional assertions — no if results.get(...) skipping
         Requirement 五: Stop worker before cleanup — join → assert stopped → cleanup
         """
-        from test_cleanup_utils import collect_user_resource_ids, verify_zero_residual_readonly, unified_cleanup_user_data
+        from tests.test_cleanup_utils import collect_user_resource_ids, verify_zero_residual_readonly, unified_cleanup_user_data
         from app.services.paper_trading import PaperTradingEngine
         from app.services.paper_trading_exceptions import InvalidStateError
         from datetime import datetime, timezone, timedelta
@@ -2842,7 +2843,7 @@ class TestBatchBMinimalIntegration:
             setup_session.execute(
                 text("""
                 INSERT INTO strategy_study_runs (id, user_id, lane, research_version, instrument_id, interval_minutes, provider_id, data_nature, bar_count, first_open_time, last_open_time, settings_json, walk_forward_json, bars_json, trade_count, created_at)
-                VALUES (:id, :user_id, 'strategy_research_simulated', 'v1.0', 'BTC-USD', 60, 'kraken', 'historical', 100, :first_time, :last_time, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, 1, CURRENT_TIMESTAMP)
+                VALUES (:id, :user_id, 'strategy_research_simulated', 'v1.0', 'BTC-USD', 60, 'kraken', 'historical', 100, :first_time, :last_time, '{}', '{}', '{}', 1, CURRENT_TIMESTAMP)
             """),
                 {
                     "id": study_run_id, 

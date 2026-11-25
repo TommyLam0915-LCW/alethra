@@ -32,6 +32,7 @@ against PostgreSQL. The foreign key is not exercised either: this lane turns
 ``PRAGMA foreign_keys`` off, so ``RESTRICT`` is asserted as schema intent only.
 """
 
+import importlib.util
 import re
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -659,6 +660,49 @@ def test_the_linkage_index_allows_exactly_one_unit_per_run(
 _MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations" / "versions"
 LINKAGE_REVISION = "d0e1f2a3b4c5"
 LINKAGE_FILE = f"{LINKAGE_REVISION}_add_quota_reservation_run_link.py"
+# The revision that gives the ``runstatus`` enum its ``cancelled`` label, so
+# that a run closed by decision can be written at all. It is a child of the
+# linkage revision, which made it the head until the revision below.
+CANCEL_REVISION = "e1f2a3b4c5d6"
+CANCEL_FILE = f"{CANCEL_REVISION}_add_runstatus_cancelled.py"
+# The revision that lets ``POST /versions/{id}/runs`` recognise a retry: two
+# columns and the scoped unique index that makes the second request resolve to
+# the first attempt. Child of the cancel revision.
+IDEMPOTENCY_REVISION = "f2a3b4c5d6e7"
+IDEMPOTENCY_FILE = f"{IDEMPOTENCY_REVISION}_add_research_run_idempotency.py"
+# The revision that adds skill-unit association columns for the unified skill
+# model: strategy_version_id and dataset_id on paper_trading_runs, skill_unit_id
+# on personal_model_selections and agent_model_activation_approvals. Child of
+# the idempotency revision, so it was the head until the revision below.
+SKILL_UNIT_REVISION = "b2c3d4e5f6g7"
+SKILL_UNIT_FILE = f"{SKILL_UNIT_REVISION}_add_skill_unit_associations.py"
+# The revision that gives a recorded decision the inference it was made on:
+# ``decision_records.linked_inference_id`` and the FK that keeps it honest. Child
+# of the skill-unit revision, so it was the head until the revision below.
+INFERENCE_LINK_REVISION = "c3d4e5f6g7h8"
+INFERENCE_LINK_FILE = f"{INFERENCE_LINK_REVISION}_add_decision_inference_link.py"
+# The revision that gives the *other* decision ledger the same column:
+# ``human_decision_events.linked_inference_id``, so the row the learning lane
+# counts is not the one row that cannot say what it answered. Child of the
+# inference link above.
+HUMAN_LINEAGE_REVISION = "d4e5f6g7h8i9"
+HUMAN_LINEAGE_FILE = f"{HUMAN_LINEAGE_REVISION}_add_human_decision_inference_link.py"
+# The revision that creates the ledger joining an approved artifact to the paper
+# trade it produced (``agent_paper_executions``), so an activation approval has a
+# consumable effect a formal read can show. Child of the human lineage above,
+# which makes it the head this chain ends at.
+PAPER_EXECUTION_REVISION = "e5f6g7h8i9j0"
+PAPER_EXECUTION_FILE = f"{PAPER_EXECUTION_REVISION}_add_agent_paper_executions.py"
+
+# The one place the approved tail is written by hand. Nothing here is derived
+# from it: both files declare their own literals, and the assertion below only
+# refuses the two drifting apart — which is exactly what happened on 2026-11-17,
+# when the two lineage revisions were written without extending either the pin
+# or this node, and each later reader found a different head.
+_MIGRATION_CHECKER = Path(__file__).resolve().parents[1] / "scripts" / "check_migration_tail.py"
+_checker_spec = importlib.util.spec_from_file_location("check_migration_tail", _MIGRATION_CHECKER)
+migration_tail = importlib.util.module_from_spec(_checker_spec)
+_checker_spec.loader.exec_module(migration_tail)
 
 
 def _revision_rows():
@@ -675,13 +719,23 @@ def _revision_rows():
     return rows
 
 
-def test_the_linkage_revision_is_unique_and_is_the_only_head():
+def test_the_linkage_revision_is_unique_and_the_chain_has_one_head():
     """Two files sharing a revision id is not a branch — it is a load failure.
 
     The id this revision first shipped with (``e5f6a7b8c9d0``) was already used
     mid-chain by ``add_intent_cancel_requested``, which would have made every
     ``alembic upgrade`` die on ``DuplicateRevision`` before touching the
     database. Nothing in the suite caught that until this test existed.
+
+    The head this test pinned has moved six times since: writing ``cancelled``
+    needs a value of the native ``runstatus`` type, a retry needs the two columns
+    de-duplication reads, the unified skill model needs the association columns,
+    a recorded decision needs the inference column it points at, the ledger
+    that counts owner decisions needs the same column for the same press, and an
+    approved artifact needs a row that says which paper trade it produced. All
+    are single children, so what is checked is the tail of the chain — each
+    revision descends from the one before it and nothing else branches, so one
+    ``alembic upgrade`` still reaches all seven.
     """
     rows = _revision_rows()
     assert rows, "no migration scripts found: this test would pass on an empty scan"
@@ -692,14 +746,83 @@ def test_the_linkage_revision_is_unique_and_is_the_only_head():
 
     referenced = {parent for _, _, parents in rows for parent in parents}
     heads = sorted(set(ids) - referenced)
-    assert heads == [LINKAGE_REVISION], (
-        f"expected one head, the linkage revision; got {heads}"
+    assert heads == [PAPER_EXECUTION_REVISION], (
+        "expected one head, the revision that creates the agent-model paper "
+        f"execution ledger; got {heads}"
     )
 
-    parents = [row for row in rows if row[1] == LINKAGE_REVISION][0][2]
-    assert parents == ["c9d0e1f2a3b4"], (
+    by_id = {revision: parents for _, revision, parents in rows}
+    assert by_id[LINKAGE_REVISION] == ["c9d0e1f2a3b4"], (
         "the linkage revision must sit on the head this branch started from, "
-        f"not branch off it: {parents}"
+        f"not branch off it: {by_id[LINKAGE_REVISION]}"
+    )
+    assert by_id[CANCEL_REVISION] == [LINKAGE_REVISION], (
+        "the enum value the cancel entry writes must ship from the same upgrade "
+        f"that adds the linkage, after it: {by_id[CANCEL_REVISION]}"
+    )
+    assert by_id[IDEMPOTENCY_REVISION] == [CANCEL_REVISION], (
+        "the columns a retry is recognised from must ship after the cancel "
+        f"revision, on one chain, not beside it: {by_id[IDEMPOTENCY_REVISION]}"
+    )
+    assert by_id[SKILL_UNIT_REVISION] == [IDEMPOTENCY_REVISION], (
+        "the skill-unit association columns must ship after the idempotency "
+        f"revision, on one chain, not beside it: {by_id[SKILL_UNIT_REVISION]}"
+    )
+    assert by_id[INFERENCE_LINK_REVISION] == [SKILL_UNIT_REVISION], (
+        "the column a decision's lineage is read from must ship after the "
+        "skill-unit associations, on one chain, not beside it: "
+        f"{by_id[INFERENCE_LINK_REVISION]}"
+    )
+    assert by_id[HUMAN_LINEAGE_REVISION] == [INFERENCE_LINK_REVISION], (
+        "the second ledger of the same act must ship after the first one's "
+        f"column, on one chain, not beside it: {by_id[HUMAN_LINEAGE_REVISION]}"
+    )
+    assert by_id[PAPER_EXECUTION_REVISION] == [HUMAN_LINEAGE_REVISION], (
+        "the ledger that joins an approval to the trade it produced must ship "
+        "after the last lineage column, on one chain, not beside it: "
+        f"{by_id[PAPER_EXECUTION_REVISION]}"
+    )
+
+    assert list(migration_tail.EXPECTED_TAIL) == [
+        SKILL_UNIT_REVISION,
+        INFERENCE_LINK_REVISION,
+        HUMAN_LINEAGE_REVISION,
+        PAPER_EXECUTION_REVISION,
+    ], (
+        "this node names the tail it depends on and check_migration_tail.py names "
+        "the tail the deployment was approved against; both are hand-written, so "
+        "one migration added without editing both reads as two different heads — "
+        f"{list(migration_tail.EXPECTED_TAIL)} versus the four above"
+    )
+
+
+def test_the_cancel_migration_and_the_model_declare_one_enum_value():
+    """The label the migration adds is the label the model writes, by name.
+
+    ``create_all`` (this lane) builds the column from ``RunStatus``; PostgreSQL
+    takes the type as the initial schema made it and this revision alters it. A
+    type name or label that differs between the two means the upgrade adds a
+    value to a type nobody reads while the column still refuses ``cancelled`` —
+    and a cancel request would then fail at the database instead of here.
+    """
+    source = (_MIGRATIONS_DIR / CANCEL_FILE).read_text()
+    const = {
+        match.group(1): match.group(3)
+        for match in re.finditer(r"^([A-Z_]+)\s*=\s*([\"'])(.*?)\2$", source, re.M)
+    }
+    column = ResearchRun.__table__.c.status
+
+    assert const["ENUM_TYPE"] == column.type.name, (
+        "the migration alters a type named by the model's own column, not one "
+        f"it invented: {const['ENUM_TYPE']} != {column.type.name}"
+    )
+    assert const["NEW_VALUE"] == RunStatus.cancelled.value
+    assert const["NEW_VALUE"] in column.type.enums, (
+        "the model column must accept the label the migration adds, or the two "
+        "lanes write different states"
+    )
+    assert "ADD VALUE" in source and "UPDATE research_runs" not in source, (
+        "adding a label is not a backfill: this revision must not rewrite rows"
     )
 
 
@@ -750,6 +873,73 @@ def test_the_linkage_migration_and_the_model_declare_one_contract():
         "the upgrade must add structure and attribute nothing; a statement that "
         "moves existing rows would be claiming ownership the ledger never recorded"
     )
+
+
+# ── 二c、the request de-duplication contract in both files ──────────────────
+
+
+def test_the_idempotency_migration_and_the_model_declare_one_contract():
+    """The key, its scope and its length are equal in both files, or fail.
+
+    ``create_all`` builds this from ``app/models/research_run.py`` and
+    ``alembic upgrade`` from the migration, and the two decide different things
+    in production than they decide here: the scope of the index is what stops
+    one account's key from resolving another's run, and a column narrower in the
+    database than in the API's validation would reject — or truncate — the key
+    the caller was promised de-duplication for. A drift between the files is a
+    different contract, so it has to be a test failure and not an upgrade error.
+    """
+    source = (_MIGRATIONS_DIR / IDEMPOTENCY_FILE).read_text()
+    const = {
+        match.group(1): match.group(3)
+        for match in re.finditer(r"^([A-Z_]+)\s*=\s*([\"'])(.*?)\2$", source, re.M)
+    }
+    numbers = {
+        match.group(1): int(match.group(2))
+        for match in re.finditer(r"^([A-Z_]+)\s*=\s*(\d+)\s*$", source, re.M)
+    }
+    table = ResearchRun.__table__
+    by_name = {index.name: index for index in table.indexes}
+
+    assert const["TABLE"] == table.name
+    for name_key, length_key in (
+        ("KEY_COLUMN", "KEY_LENGTH"),
+        ("HASH_COLUMN", "HASH_LENGTH"),
+    ):
+        column = table.c[const[name_key]]
+        assert column.nullable is True, (
+            "a row written without a key must stay legal, or this revision turns "
+            "every deliberate re-run into an error"
+        )
+        assert column.type.length == numbers[length_key], (
+            f"{const[name_key]}: the model gives {column.type.length} characters, "
+            f"the migration gives {numbers[length_key]}"
+        )
+    assert numbers["HASH_LENGTH"] == 64, "a sha256 hexdigest is 64 characters"
+
+    index = by_name[const["UNIQUE_NAME"]]
+    assert index.unique is True
+    assert [c.name for c in index.columns] == ["experiment_version_id", "idempotency_key"], (
+        "the key is scoped to the version; an index over the key alone would be "
+        "shared across accounts"
+    )
+    for dialect in ("postgresql_where", "sqlite_where"):
+        assert str(index.dialect_kwargs[dialect]) == const["KEYED_ROW_PREDICATE"], (
+            f"the model declares {str(index.dialect_kwargs[dialect])!r} for "
+            f"{dialect}, the migration writes {const['KEYED_ROW_PREDICATE']!r}"
+        )
+
+    upgrade_body = source.split("def upgrade()", 1)[1].split("def downgrade()", 1)[0]
+    assert not re.search(r"\bUPDATE\b|\bDELETE\b|backfill", upgrade_body, re.I), (
+        "existing rows keep a NULL key, which is an honest UNKNOWN: no past "
+        "request can be given a key after the fact"
+    )
+    assert upgrade_body.count("op.add_column") == 2, (
+        "this revision adds exactly the two columns named above"
+    )
+    assert "CREATE UNIQUE INDEX" in upgrade_body and upgrade_body.count(
+        "CREATE UNIQUE INDEX"
+    ) == 1
 
 
 # ── 三、the terminal transaction is one transaction ─────────────────────────
@@ -1237,17 +1427,14 @@ def test_a_terminal_run_leaves_the_version_admittable_again(
 def test_a_resubmitted_request_is_a_new_run_not_a_replay(
     db, client, auth_headers, stored_dataset
 ):
-    """Persisted idempotency is NOT IMPLEMENTED in this slice, said out loud.
+    """No key, no de-duplication: a repeat is billed as new work, by design.
 
-    A client that lost the response and repeats an identical request cannot be
-    recognised — nothing about the request is stored as a key — so the second
-    call admits a new run and bills a new unit. This test pins that gap rather
-    than papering over it. The three duplicate shapes are therefore: an active
-    run → 409 (the test above); a terminal run then an intentional re-run → new
-    run, new unit; a lost response then a resubmit → new run, new unit, which is
-    what is measured here and is indistinguishable from the second case without
-    a durable Idempotency-Key lane. That lane is a separate bounded work item,
-    not something this slice quietly builds.
+    This is the shape the endpoint had before the ``Idempotency-Key`` lane and
+    keeps for requests that send no header — a caller that retries without a key
+    pays twice, and is not silently protected. What the test binds is that
+    adding de-duplication did not turn every second request into a replay: the
+    version still admits, the two runs are two rows with two units, and neither
+    carries a key. With a key, see section 六.
     """
     version_id = _create_experiment(client, auth_headers)
     user_id = _user_id(db)
@@ -1264,8 +1451,14 @@ def test_a_resubmitted_request_is_a_new_run_not_a_replay(
     assert replay.status_code == 201, replay.text
     assert replay.json()["id"] != first.json()["id"]
     assert get_quota_used(db, user_id, _QUOTA) == 2, (
-        "no key is persisted, so a replay is billed as new work"
+        "no key was sent, so a replay is billed as new work"
     )
+    assert [
+        row.idempotency_key
+        for row in db.query(ResearchRun).filter(
+            ResearchRun.experiment_version_id == version_id
+        ).all()
+    ] == [None, None], "a request without a header is not filed under a key"
 
 
 def test_another_account_cannot_read_an_active_run_id(
@@ -1355,3 +1548,358 @@ def test_only_the_admission_constructs_a_run_row():
         assert "execute_backtest_run(" in inspect.getsource(lane), (
             f"{name} no longer reaches the admission it is billed by"
         )
+
+
+# ── 六、a repeated request that carries a key is the same attempt ────────────
+
+
+def _keyed_post(client, headers, version_id, key, **overrides):
+    """One POST of a run with an ``Idempotency-Key``, query params and all."""
+    query = {"data_source": "stored", "provider_id": _PROVIDER}
+    query.update(overrides)
+    return client.post(
+        f"/api/v1/versions/{version_id}/runs",
+        params=query,
+        headers={**headers, "Idempotency-Key": key},
+    )
+
+
+def _counted_engine(monkeypatch):
+    """The real engine, with every entry recorded.
+
+    A replay has to be proven by the absence of work, not by the shape of a
+    response: two identical metrics would look the same whether or not the
+    engine ran twice.
+    """
+    original = research_run_service.run_backtest
+    seen = []
+
+    def counting(spec, *args, **kwargs):
+        seen.append(spec)
+        return original(spec, *args, **kwargs)
+
+    monkeypatch.setattr(research_run_service, "run_backtest", counting)
+    return seen
+
+
+def _started_events(run_id):
+    def read(session):
+        return session.query(AuditEvent.id).filter(
+            AuditEvent.entity_type == "run",
+            AuditEvent.entity_id == str(run_id),
+            AuditEvent.event_type == "research_run_started",
+        ).count()
+
+    return _elsewhere(read)
+
+
+def test_a_retry_with_the_same_key_returns_the_first_run_and_bills_once(
+    db, client, auth_headers, stored_dataset, monkeypatch
+):
+    """The lost-response case, which used to cost a second unit.
+
+    The second request is answered from the row the first one committed: the
+    same run id, no second attempt, one unit settled, one ``research_run_started``
+    and the engine entered once. 200 rather than 201 because this request
+    admitted nothing.
+    """
+    calls = _counted_engine(monkeypatch)
+    version_id = _create_experiment(client, auth_headers)
+    user_id = _user_id(db)
+
+    first = _keyed_post(client, auth_headers, version_id, "retry-1")
+    again = _keyed_post(client, auth_headers, version_id, "retry-1")
+
+    assert first.status_code == 201, first.text
+    assert again.status_code == 200, again.text
+    assert again.json()["id"] == first.json()["id"]
+    run_id = UUID(first.json()["id"])
+
+    assert len(calls) == 1, "a replay must not recompute the answer"
+    assert len(_runs_for(version_id)) == 1
+    assert get_quota_used(db, user_id, _QUOTA) == 1, (
+        "one request, one unit: this is the defect the key exists to close"
+    )
+    assert _get_reserved(db, user_id, _QUOTA) == 0
+    assert _started_events(run_id) == 1, "a replay writes no second admission audit"
+    unit = _linked_unit(run_id)
+    assert unit is not None and unit.status == "settled"
+
+    row = db.get(ResearchRun, run_id)
+    assert row.idempotency_key == "retry-1"
+    assert re.fullmatch(r"[0-9a-f]{64}", row.idempotency_request_hash)
+
+
+def test_a_retry_of_a_still_running_attempt_is_answered_by_the_row(
+    db, client, auth_headers, stored_dataset, monkeypatch
+):
+    """The window a lost response actually lands in: the first one is still going.
+
+    The retry arrives while the first process is inside the engine, so the row it
+    finds is ``running``. Returning it is the only honest answer — the work is
+    happening — and the active-run 409 must not fire first, because for a caller
+    holding the key this is not a second request for new work. The decision is
+    made inside the admission transaction, which is what the other session below
+    reaches while the first attempt holds the version row.
+    """
+    version_id = _create_experiment(client, auth_headers)
+    user_id = _user_id(db)
+    original = research_run_service.run_backtest
+    seen = {}
+
+    def probe(spec, *args, **kwargs):
+        nested = TestSession()
+        try:
+            user = nested.query(User).filter(User.id == user_id).one()
+            version = nested.query(ExperimentVersion).filter(
+                ExperimentVersion.id == version_id
+            ).one()
+            experiment = nested.query(Experiment).filter(
+                Experiment.id == version.experiment_id
+            ).one()
+            run = execute_backtest_run(
+                nested,
+                user=user,
+                version=version,
+                experiment=experiment,
+                data_source="stored",
+                provider_id=_PROVIDER,
+                idempotency_key="lost-response",
+            )
+            seen.update(
+                run_id=str(run.id),
+                replayed=getattr(run, "idempotent_replay", False),
+                status=run.status,
+                rows=len(_runs_for(version_id)),
+                reserved=_get_reserved(nested, user_id, _QUOTA),
+            )
+        finally:
+            nested.close()
+        return original(spec, *args, **kwargs)
+
+    monkeypatch.setattr(research_run_service, "run_backtest", probe)
+
+    resp = _keyed_post(client, auth_headers, version_id, "lost-response")
+
+    assert resp.status_code == 201, resp.text
+    assert seen["run_id"] == resp.json()["id"], "the retry got the running attempt"
+    assert seen["replayed"] is True
+    assert seen["status"] == RunStatus.running
+    assert seen["rows"] == 1, "a replay admits nothing"
+    assert seen["reserved"] == 1, "and holds no second unit"
+    assert len(_runs_for(version_id)) == 1
+    assert get_quota_used(db, user_id, _QUOTA) == 1
+    assert _get_reserved(db, user_id, _QUOTA) == 0
+
+
+def test_the_same_key_on_a_different_request_is_refused_and_neither_runs(
+    db, client, auth_headers, stored_dataset, monkeypatch
+):
+    """A reused key is a caller bug, not a second opinion about the same work.
+
+    The key alone cannot tell a retry from a different request wearing it, so
+    running either body would invent an answer for one of them: the first would
+    be replaced by an outcome nobody asked to record, the second would be
+    reported as done while nothing computed it. The hash stored at admission is
+    what distinguishes them, and the refusal names the run that owns the key.
+    """
+    calls = _counted_engine(monkeypatch)
+    version_id = _create_experiment(client, auth_headers)
+    user_id = _user_id(db)
+
+    first = _keyed_post(client, auth_headers, version_id, "reuse-me")
+    other = _keyed_post(
+        client, auth_headers, version_id, "reuse-me", data_source="auto"
+    )
+
+    assert first.status_code == 201, first.text
+    assert other.status_code == 409, other.text
+    detail = other.json()["detail"]
+    assert detail["error"] == "idempotency_key_conflict"
+    assert detail["existing_run_id"] == first.json()["id"]
+    assert len(calls) == 1, "the refused request never reached the engine"
+    assert len(_runs_for(version_id)) == 1
+    assert get_quota_used(db, user_id, _QUOTA) == 1
+    assert _get_reserved(db, user_id, _QUOTA) == 0
+
+
+def test_a_key_is_scoped_to_the_version_and_cannot_reach_another_account(
+    db, client, auth_headers, stored_dataset
+):
+    """The same string on another version, or another account, is another request.
+
+    ``research_runs`` has no owner column: ownership is the version's, and so is
+    the key namespace. A table-wide unique key would let one account's retry
+    collide with — and its response carry — a stranger's run, which is why the
+    index is over (version, key) and this test drives both escapes.
+    """
+    mine = _create_experiment(client, auth_headers)
+    sibling_version = _create_experiment(client, auth_headers)
+    user_id = _user_id(db)
+
+    first = _keyed_post(client, auth_headers, mine, "shared-string")
+    sibling = _keyed_post(client, auth_headers, sibling_version, "shared-string")
+    assert first.status_code == 201, first.text
+    assert sibling.status_code == 201, sibling.text
+    assert sibling.json()["id"] != first.json()["id"]
+    assert get_quota_used(db, user_id, _QUOTA) == 2
+
+    other = _headers(client, "other-key@alethra.io")
+    other_id = _user_id(db, "other-key@alethra.io")
+    theirs = _create_experiment(client, other)
+    as_other = _keyed_post(client, other, theirs, "shared-string")
+
+    assert as_other.status_code == 201, as_other.text
+    for taken in (first.json()["id"], sibling.json()["id"]):
+        assert taken not in as_other.text, "another account's run leaked into a response"
+    assert len(_runs_for(theirs)) == 1
+    assert get_quota_used(db, other_id, _QUOTA) == 1
+    assert get_quota_used(db, user_id, _QUOTA) == 2
+    assert len(_runs_for(mine)) == 1
+
+
+def test_an_unusable_idempotency_key_is_refused_before_anything_is_admitted(
+    db, client, auth_headers, stored_dataset
+):
+    """A key that cannot be stored cannot de-duplicate, so it is not accepted.
+
+    A blank header silently behaves as no header — the caller believes its retry
+    is protected and is not — and an over-long one would be cut off or rejected
+    by the database after the request was described as de-duplicated. Both are
+    answered with 400, no run row and no reservation. A key exactly at the limit
+    is admitted, because that boundary is the column, not a guess.
+    """
+    version_id = _create_experiment(client, auth_headers)
+    user_id = _user_id(db)
+
+    for label, key in (("blank", ""), ("spaces", "   "), ("over-long", "k" * 129)):
+        resp = client.post(
+            f"/api/v1/versions/{version_id}/runs",
+            params={"data_source": "stored", "provider_id": _PROVIDER},
+            headers={**auth_headers, "Idempotency-Key": key},
+        )
+        assert resp.status_code == 400, f"{label}: {resp.status_code} {resp.text}"
+        assert "Idempotency-Key" in resp.text, f"{label} said nothing about the key"
+
+    boundary = _keyed_post(client, auth_headers, version_id, "k" * 128)
+    assert boundary.status_code == 201, boundary.text
+
+    assert len(_runs_for(version_id)) == 1, "three refusals admitted nothing"
+    assert get_quota_used(db, user_id, _QUOTA) == 1
+    assert _get_reserved(db, user_id, _QUOTA) == 0
+
+
+def test_the_unique_index_decides_when_the_lookup_misses_the_key(
+    db, client, auth_headers, stored_dataset, monkeypatch
+):
+    """Last resort, not first line: the index, then the rollback, then the replay.
+
+    On PostgreSQL the version row lock makes this race hard to reach; on this
+    lane ``FOR UPDATE`` is a no-op, so the lookup is made to miss once — which is
+    exactly what two connections that both read before either committed produce.
+    What is measured is the consequence: the losing INSERT raises, its own
+    attempt is rolled back, and the caller gets the run that exists instead of a
+    database error and instead of a second unit left reserved.
+    """
+    version_id = _create_experiment(client, auth_headers)
+    user_id = _user_id(db)
+
+    first = _keyed_post(client, auth_headers, version_id, "racing")
+    assert first.status_code == 201, first.text
+    assert _get_reserved(db, user_id, _QUOTA) == 0
+
+    calls = _counted_engine(monkeypatch)
+    real_lookup = research_run_service.find_run_by_idempotency_key
+    lookups = {"n": 0}
+
+    def blind_lookup(session, **kwargs):
+        lookups["n"] += 1
+        if lookups["n"] == 1:
+            return None
+        return real_lookup(session, **kwargs)
+
+    monkeypatch.setattr(
+        research_run_service, "find_run_by_idempotency_key", blind_lookup
+    )
+
+    user, version, experiment = _objects(db, version_id, user_id)
+    run = execute_backtest_run(
+        db,
+        user=user,
+        version=version,
+        experiment=experiment,
+        data_source="stored",
+        provider_id=_PROVIDER,
+        idempotency_key="racing",
+    )
+
+    assert str(run.id) == first.json()["id"], "the row that won answers the retry"
+    assert getattr(run, "idempotent_replay", False) is True
+    assert lookups["n"] == 2, "once to miss, once to read the row the index chose"
+    assert len(calls) == 0, "the losing attempt never computed anything"
+    assert len(_runs_for(version_id)) == 1, "the losing attempt left no row"
+    assert get_quota_used(db, user_id, _QUOTA) == 1
+    assert _get_reserved(db, user_id, _QUOTA) == 0, (
+        "and no unit of its own is holding the allowance"
+    )
+
+
+def test_the_index_race_does_not_decide_for_a_different_request(
+    db, client, auth_headers, stored_dataset, monkeypatch
+):
+    """The last-resort branch reads the hash too, or it invents an answer.
+
+    Same shape as the race above — the step-2 lookup is made to miss once — but
+    the losing body is a different request: ``charge_quota=False`` is not a
+    retry of the billed POST, it is a request that would have left the unit
+    unreserved. Returning the winner's row there reports a run for a request
+    that never ran and never got billed, and the caller has no way to notice.
+    The conflict is what the read would have said, so the race must say it too.
+    """
+    version_id = _create_experiment(client, auth_headers)
+    user_id = _user_id(db)
+
+    first = _keyed_post(client, auth_headers, version_id, "racing-different")
+    assert first.status_code == 201, first.text
+
+    calls = _counted_engine(monkeypatch)
+    real_lookup = research_run_service.find_run_by_idempotency_key
+    lookups = {"n": 0}
+
+    def blind_lookup(session, **kwargs):
+        lookups["n"] += 1
+        if lookups["n"] == 1:
+            return None
+        return real_lookup(session, **kwargs)
+
+    monkeypatch.setattr(
+        research_run_service, "find_run_by_idempotency_key", blind_lookup
+    )
+
+    user, version, experiment = _objects(db, version_id, user_id)
+    with pytest.raises(HTTPException) as raised:
+        execute_backtest_run(
+            db,
+            user=user,
+            version=version,
+            experiment=experiment,
+            data_source="stored",
+            provider_id=_PROVIDER,
+            idempotency_key="racing-different",
+            charge_quota=False,
+        )
+
+    assert raised.value.status_code == 409, raised.value.detail
+    detail = raised.value.detail
+    assert detail["error"] == "idempotency_key_conflict"
+    assert detail["existing_run_id"] == first.json()["id"]
+    assert lookups["n"] == 2, (
+        "the miss, then the row the index chose — the conflict is raised by "
+        "the race branch, not by the read ahead of it"
+    )
+    assert len(calls) == 0, "the refused request never reached the engine"
+    assert len(_runs_for(version_id)) == 1, "and it left no run row"
+    assert get_quota_used(db, user_id, _QUOTA) == 1
+    assert _get_reserved(db, user_id, _QUOTA) == 0, (
+        "nothing was reserved, so nothing is left holding the allowance"
+    )

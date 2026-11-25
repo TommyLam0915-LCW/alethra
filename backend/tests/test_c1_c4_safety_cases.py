@@ -24,6 +24,7 @@ branches, but it cannot demonstrate real row-level locking; that belongs to the
 PostgreSQL-gated suite.
 """
 import os
+import shutil
 import threading
 from datetime import date, datetime
 from tempfile import mkdtemp
@@ -91,6 +92,22 @@ def override_get_db():
         yield db
     finally:
         db.close()
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _release_module_harness():
+    """The engine and the directory above are module globals, so someone has
+    to hand them back.
+
+    Nothing did: every full-suite run left a `c1c4-XXXX/` tree in `$TMPDIR` with
+    a SQLite file in it, and the engine object stayed bound for the rest of the
+    session. `isolated_app_db` already restores the dependency override per
+    test; this is the rest of the teardown.
+    """
+    yield
+    client.close()
+    engine.dispose()
+    shutil.rmtree(_DB_DIR, ignore_errors=True)
 
 
 @pytest.fixture(autouse=True)

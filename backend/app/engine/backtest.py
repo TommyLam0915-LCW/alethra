@@ -1,6 +1,5 @@
 import hashlib
 import json
-import uuid
 from datetime import datetime, date
 from typing import Dict, List, Any, Optional, Tuple
 
@@ -644,7 +643,11 @@ def run_backtest(
     return {
         "run_status": "completed",
         "strategy_spec_snapshot": strategy_spec,
-        "dataset_snapshot_id": str(uuid.uuid4()),
+        # No snapshot row is created by this path, so the id column that points
+        # at dataset_snapshots stays None. It used to carry a fresh uuid4 on
+        # every run, which was indistinguishable from a real foreign key to any
+        # reader that had not checked the table.
+        "dataset_snapshot_id": None,
         "dataset_checksum": dataset_checksum,
         "dataset_coverage": dataset_coverage,
         "bars_used": trading_days,

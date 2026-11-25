@@ -22,7 +22,7 @@ module never grants on its own: it only reports what the recorded facts say.
 
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -106,6 +106,226 @@ def approval_for_job(db: Session, owner_id: uuid.UUID, job_id: uuid.UUID
     return approval
 
 
+def approval_covers_skill_unit(
+    approval: Optional[AgentModelActivationApproval],
+    skill_unit_id: Optional[uuid.UUID],
+) -> bool:
+    """Check if an approval covers a specific skill unit.
+
+    Returns True only if:
+    - approval exists AND
+    - (approval.skill_unit_id matches skill_unit_id OR both are None)
+
+    An approval with NULL skill_unit_id does NOT cover any skill unit — it only
+    authorizes the artifact in isolation. An approval with a specific
+    skill_unit_id covers only that skill unit. This prevents old NULL-scope
+    approvals from being misinterpreted as "all skills" authorization.
+    """
+    if approval is None:
+        return False
+    if approval.skill_unit_id is None and skill_unit_id is None:
+        # Both NULL: approval covers artifact in isolation, no skill-unit scope.
+        # This is NOT "all skills" — it's "no skill unit specified".
+        return True
+    if approval.skill_unit_id is None or skill_unit_id is None:
+        # One is NULL, the other is not: no match.
+        return False
+    # Both non-NULL: must match exactly.
+    return str(approval.skill_unit_id) == str(skill_unit_id)
+
+
+def check_skill_unit_activation(
+    db: Session,
+    owner_id: uuid.UUID,
+    job_id: uuid.UUID,
+    skill_unit_id: Optional[uuid.UUID],
+) -> Dict[str, Any]:
+    """Verify that an activation approval covers the specified skill unit.
+
+    Returns a dict with:
+    - authorized: bool
+    - reason_code: str (if not authorized)
+    - approval_id: str (if exists)
+    - skill_unit_match: bool
+
+    This is the inference-time gate: even if a job is activated, the activation
+    must cover the specific skill unit being used. An approval with NULL
+    skill_unit_id does NOT authorize all skill units.
+    """
+    approval = live_approval(db, job_id)
+    if approval is None:
+        return {
+            "authorized": False,
+            "reason_code": "no_approval",
+            "approval_id": None,
+            "skill_unit_match": False,
+        }
+    if str(approval.owner_id) != str(owner_id):
+        return {
+            "authorized": False,
+            "reason_code": "approval_not_owned",
+            "approval_id": str(approval.id),
+            "skill_unit_match": False,
+        }
+    covers = approval_covers_skill_unit(approval, skill_unit_id)
+    return {
+        "authorized": covers,
+        "reason_code": None if covers else "skill_unit_mismatch",
+        "approval_id": str(approval.id),
+        "skill_unit_match": covers,
+        "approval_skill_unit_id": str(approval.skill_unit_id) if approval.skill_unit_id else None,
+        "requested_skill_unit_id": str(skill_unit_id) if skill_unit_id else None,
+    }
+
+
+def check_model_version_inference_authorization(
+    db: Session,
+    owner_id: uuid.UUID,
+    model_version_id: uuid.UUID,
+    model_spec: dict,
+    skill_unit_id: uuid.UUID,
+) -> Dict[str, Any]:
+    """Verify that a personal model version is authorized for inference.
+
+    Personal model authorization chain (NOT agent strategy):
+    1. ModelVersion has training_job_id in its spec
+    2. PersonalModelSelection links skill_unit_id -> this version, as the latest
+       selection that skill unit made for this model record
+    3. TrainingJob (general table) exists, is owned by the caller, and completed
+    4. Artifact checksum matches (if present in both)
+
+    This function verifies the SPECIFIC skill_unit_id provided in the request.
+    The request must specify which skill unit is being used, and we verify that
+    specific skill unit has a selection for this model version.
+
+    Personal models do NOT require AgentModelActivationApproval — that is for
+    agent strategy models only. Personal models rely on:
+    - Owner's consent (checked at training time, not inference time)
+    - Completed training job
+    - Valid selection for the skill unit
+
+    Returns a dict with:
+    - authorized: bool
+    - reason_code: str (if not authorized)
+    - training_job_id: str (if present)
+    - skill_unit_id: str (the specific skill unit being verified)
+    """
+    from app.models.model_research import ModelVersion
+    from app.models.personal_model_selection import PersonalModelSelection
+    from app.models.training import TrainingJob, TrainingJobStatus
+
+    training_job_id_str = model_spec.get("training_job_id")
+    artifact_sha256 = model_spec.get("artifact_sha256")
+
+    if not training_job_id_str:
+        return {
+            "authorized": False,
+            "reason_code": "no_training_job",
+            "training_job_id": None,
+            "skill_unit_id": str(skill_unit_id),
+        }
+
+    try:
+        training_job_id = uuid.UUID(training_job_id_str)
+    except (ValueError, AttributeError):
+        return {
+            "authorized": False,
+            "reason_code": "invalid_training_job_id",
+            "training_job_id": training_job_id_str,
+            "skill_unit_id": str(skill_unit_id),
+        }
+
+    # The version must be the one this skill unit is currently using, not merely
+    # one it used once. Selecting a newer version for the same skill is how the
+    # owner stops the older one, so a stale row cannot keep authorizing inference.
+    version_row = (
+        db.query(ModelVersion).filter(ModelVersion.id == model_version_id).first()
+    )
+    if version_row is None:
+        return {
+            "authorized": False,
+            "reason_code": "version_not_found",
+            "training_job_id": str(training_job_id),
+            "skill_unit_id": str(skill_unit_id),
+        }
+
+    selection = (
+        db.query(PersonalModelSelection)
+        .filter(
+            PersonalModelSelection.owner_id == owner_id,
+            PersonalModelSelection.record_id == version_row.model_research_record_id,
+            PersonalModelSelection.skill_unit_id == skill_unit_id,
+        )
+        .order_by(
+            PersonalModelSelection.created_at.desc(),
+            PersonalModelSelection.id.desc(),
+        )
+        .first()
+    )
+
+    if selection is None:
+        return {
+            "authorized": False,
+            "reason_code": "no_skill_unit_selection",
+            "training_job_id": str(training_job_id),
+            "skill_unit_id": str(skill_unit_id),
+        }
+
+    if selection.version_id != model_version_id:
+        return {
+            "authorized": False,
+            "reason_code": "superseded_skill_unit_selection",
+            "training_job_id": str(training_job_id),
+            "skill_unit_id": str(skill_unit_id),
+            "currently_selected_version_id": str(selection.version_id),
+        }
+
+    # Verify the training job exists, is completed, and belongs to this owner
+    training_job = (
+        db.query(TrainingJob)
+        .filter(
+            TrainingJob.id == training_job_id,
+            TrainingJob.user_id == owner_id,
+        )
+        .first()
+    )
+
+    if training_job is None:
+        return {
+            "authorized": False,
+            "reason_code": "training_job_not_found",
+            "training_job_id": str(training_job_id),
+            "skill_unit_id": str(skill_unit_id),
+        }
+
+    if training_job.status != TrainingJobStatus.completed:
+        return {
+            "authorized": False,
+            "reason_code": "training_job_not_completed",
+            "training_job_id": str(training_job_id),
+            "skill_unit_id": str(skill_unit_id),
+            "job_status": training_job.status.value if training_job.status else None,
+        }
+
+    # Verify artifact checksum matches (if present in training job results)
+    if artifact_sha256 and training_job.results:
+        job_artifact_sha256 = training_job.results.get("artifact_sha256")
+        if job_artifact_sha256 and job_artifact_sha256 != artifact_sha256:
+            return {
+                "authorized": False,
+                "reason_code": "artifact_mismatch",
+                "training_job_id": str(training_job_id),
+                "skill_unit_id": str(skill_unit_id),
+            }
+
+    return {
+        "authorized": True,
+        "reason_code": None,
+        "training_job_id": str(training_job_id),
+        "skill_unit_id": str(skill_unit_id),
+    }
+
+
 def activation_state(db: Session, job: Optional[AgentStrategyTrainingJob]
                      ) -> Dict[str, Any]:
     """Report the activation of one artifact, reading only recorded facts."""
@@ -182,6 +402,11 @@ def activation_state(db: Session, job: Optional[AgentStrategyTrainingJob]
         "bindings": conditions,
         "approved_at": _as_utc(approval.approved_at).isoformat(),
         "artifact_checksum": approval.artifact_checksum,
+        # Unified skill model: report the skill-unit scope of this approval.
+        # NULL means "artifact in isolation, no skill-unit scope" — NOT "all
+        # skill units". Inference-time checks must verify the scope matches.
+        "skill_unit_id": str(approval.skill_unit_id) if approval.skill_unit_id else None,
+        "skill_unit_scope": "specific" if approval.skill_unit_id else "none",
     }
 
 
@@ -244,6 +469,7 @@ def record_activation_approval(
     policy_version: str,
     acknowledgement_text_version: str,
     acknowledgement: str,
+    skill_unit_id: Optional[uuid.UUID] = None,
 ) -> Dict[str, Any]:
     """Persist the authenticated owner's own decision to switch one artifact on.
 
@@ -251,8 +477,24 @@ def record_activation_approval(
     the route supplies the authenticated user and this function is the owner-UI
     path, so neither can be claimed on someone else's behalf or by another
     provenance.
+
+    When ``skill_unit_id`` is provided, the approval is scoped to that portfolio
+    (skill unit). An approval with NULL ``skill_unit_id`` does NOT authorize all
+    skill units — it only covers the artifact in isolation, without any
+    skill-unit scope. Inference-time checks must verify the approval covers the
+    specific skill unit being used.
     """
     job = owned_job(db, owner_id, job_id)
+
+    # Lock the job row to prevent concurrent approval creation.
+    # This serializes approval attempts for the same job, ensuring the
+    # "one active approval per job" policy holds under concurrency.
+    job = db.scalars(
+        select(AgentStrategyTrainingJob)
+        .where(AgentStrategyTrainingJob.id == job_id)
+        .with_for_update()
+    ).first()
+
     if job.status != "completed":
         _refused("agent_activation_job_not_completed",
                  "只有已完成的訓練紀錄可以被啟用，未記錄任何同意。",
@@ -308,7 +550,9 @@ def record_activation_approval(
         acknowledgement=ACTIVATION_ACK_TEXT_ZH,
         channel=CHANNEL_OWNER_UI,
         decision="approved",
-        gate_snapshot_json={**requirements(job), "recorded_through": __name__},
+        skill_unit_id=skill_unit_id,
+        gate_snapshot_json={**requirements(job), "recorded_through": __name__,
+                           "skill_unit_id": str(skill_unit_id) if skill_unit_id else None},
     )
     db.add(approval)
     db.flush()
@@ -327,14 +571,26 @@ def revoke_activation_approval(
     db: Session, owner_id: uuid.UUID, *, approval_id: uuid.UUID, reason: Optional[str] = None
 ) -> Dict[str, Any]:
     approval = db.scalars(
-        select(AgentModelActivationApproval).where(
+        select(AgentModelActivationApproval)
+        .where(
             AgentModelActivationApproval.id == approval_id,
             AgentModelActivationApproval.owner_id == owner_id,
         )
+        .with_for_update()
     ).first()
     if approval is None:
         _refused("agent_activation_approval_not_found",
                  "找不到屬於此 owner 的啟用同意。", {"approval_id": str(approval_id)})
+    if approval.decision == "revoked":
+        # Already revoked, idempotent return
+        job = db.scalars(
+            select(AgentStrategyTrainingJob).where(
+                AgentStrategyTrainingJob.id == approval.job_id
+            )
+        ).first()
+        return {"revoked": True, "approval_id": str(approval.id),
+                "activation_status": job.activation_status if job else NOT_APPROVED,
+                "already_revoked": True}
     approval.decision = "revoked"
     approval.revoked_at = datetime.now(timezone.utc)
     approval.revoke_reason = (reason or "owner_revoked")[:64]
@@ -363,3 +619,117 @@ def refresh_job_activation(db: Session, job: AgentStrategyTrainingJob) -> Dict[s
         db.commit()
         db.refresh(job)
     return state
+
+
+def list_activations_by_skill_unit(
+    db: Session,
+    owner_id: uuid.UUID,
+    skill_unit_id: Optional[uuid.UUID],
+) -> List[Dict[str, Any]]:
+    """List all activation approvals for a specific skill unit.
+
+    Returns approvals where skill_unit_id matches exactly. An approval with NULL
+    skill_unit_id is NOT included when querying for a specific skill unit, and
+    vice versa — NULL-scope approvals only appear when querying with
+    skill_unit_id=None.
+
+    This prevents old NULL-scope approvals from being misinterpreted as "all
+    skills" authorization. Each approval covers exactly the skill unit it was
+    recorded for (or no skill unit at all, if NULL).
+    """
+    if skill_unit_id is None:
+        # Query for approvals with NULL skill_unit_id (artifact-only scope).
+        approvals = db.scalars(
+            select(AgentModelActivationApproval).where(
+                AgentModelActivationApproval.owner_id == owner_id,
+                AgentModelActivationApproval.decision == "approved",
+                AgentModelActivationApproval.skill_unit_id.is_(None),
+            ).order_by(AgentModelActivationApproval.approved_at.desc())
+        ).all()
+    else:
+        # Query for approvals scoped to this specific skill unit.
+        approvals = db.scalars(
+            select(AgentModelActivationApproval).where(
+                AgentModelActivationApproval.owner_id == owner_id,
+                AgentModelActivationApproval.decision == "approved",
+                AgentModelActivationApproval.skill_unit_id == skill_unit_id,
+            ).order_by(AgentModelActivationApproval.approved_at.desc())
+        ).all()
+
+    return [
+        {
+            "approval_id": str(a.id),
+            "job_id": str(a.job_id),
+            "skill_unit_id": str(a.skill_unit_id) if a.skill_unit_id else None,
+            "artifact_checksum": a.artifact_checksum,
+            "approved_at": _as_utc(a.approved_at).isoformat() if a.approved_at else None,
+            "activation_status": ACTIVATED,
+        }
+        for a in approvals
+    ]
+
+
+def revoke_activations_for_skill_unit(
+    db: Session,
+    owner_id: uuid.UUID,
+    skill_unit_id: uuid.UUID,
+    reason: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Revoke all activation approvals scoped to a specific skill unit.
+
+    This is a precise-scope revocation: only approvals with skill_unit_id
+    matching the parameter are revoked. Approvals with NULL skill_unit_id or
+    with a different skill_unit_id are not affected.
+
+    Returns the count of revoked approvals and their IDs.
+    """
+    approvals = db.scalars(
+        select(AgentModelActivationApproval).where(
+            AgentModelActivationApproval.owner_id == owner_id,
+            AgentModelActivationApproval.decision == "approved",
+            AgentModelActivationApproval.skill_unit_id == skill_unit_id,
+        )
+    ).all()
+
+    revoked_ids = []
+    affected_job_ids = set()
+    for approval in approvals:
+        approval.decision = "revoked"
+        approval.revoked_at = datetime.now(timezone.utc)
+        approval.revoke_reason = (reason or "skill_unit_revoked")[:64]
+        revoked_ids.append(str(approval.id))
+        affected_job_ids.add(approval.job_id)
+
+    if not revoked_ids:
+        return {
+            "revoked": False,
+            "reason_code": "no_matching_approvals",
+            "message_zh": "此技能單元沒有生效中的啟用同意可撤回。",
+            "skill_unit_id": str(skill_unit_id),
+            "revoked_count": 0,
+            "revoked_approval_ids": [],
+        }
+
+    # Refresh activation status for all affected jobs.
+    for job_id in affected_job_ids:
+        job = db.scalars(
+            select(AgentStrategyTrainingJob).where(
+                AgentStrategyTrainingJob.id == job_id
+            )
+        ).first()
+        if job is not None:
+            job.activation_status = activation_state(db, job)["activation_status"]
+
+    db.flush()
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    return {
+        "revoked": True,
+        "skill_unit_id": str(skill_unit_id),
+        "revoked_count": len(revoked_ids),
+        "revoked_approval_ids": revoked_ids,
+    }

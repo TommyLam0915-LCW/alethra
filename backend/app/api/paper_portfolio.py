@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 from app.database import get_db
+from app.lib.uuid_spelling import dashed_text, stored_as
 from app.models.user import User
 from app.models.paper_portfolio import (
     PaperPortfolio,
@@ -29,6 +30,7 @@ from app.models.paper_portfolio import (
     HypothesisStatus,
     decision_actor_type,
 )
+from app.models.paper_trading_run import PaperTradingRun
 from app.auth.jwt import get_current_user
 from app.auth.api_keys import check_api_key_scope
 from app.auth.rate_limit import api_key_rate_limit_dependency
@@ -36,8 +38,10 @@ from app.auth.safety import safety_control
 from app.auth.provenance import request_actor_provenance
 from app.config import get_settings
 from app.models.kill_switch import KillSwitchScope
+from app.models.billing import UsageRecord
 from app.models.market_data import MarketDataBar
 from app.models.simulation import SimulationSession
+from app.models.experiment_version import ExperimentVersion
 from app.api.schemas import (
     PaperPortfolioCreate,
     PaperPortfolioResponse,
@@ -55,7 +59,10 @@ from app.api.schemas import (
 )
 from app.data.demo_data import get_demo_ohlcv, get_date_range
 from app.services import emit_event
+from app.services.decision_lineage import validate_linked_inference
+from app.services.strategy_versions import validate_strategy_version
 from app.services.paper_execution import PaperExecutionError, book_fill
+from app.services.skill_units import SkillUnitLimitReached, assert_slot_available
 from app.services.risk_policy import (
     RiskInputs,
     count_entries_on_utc_date,
@@ -95,6 +102,20 @@ def _get_portfolio_with_ownership(
     portfolio_id: UUID, db: Session, current_user: User
 ) -> PaperPortfolio:
     portfolio = db.query(PaperPortfolio).filter(PaperPortfolio.id == portfolio_id).first()
+    if portfolio is None:
+        # An account written by this product's own creation paths —
+        # POST /paper-trading/create and the live daemon insert with raw SQL and
+        # keep ``str(uuid4())``, the dashed 36-character form — is not found by
+        # the filter above on the lane where UUID columns are text, because an
+        # ORM identity key renders 32 characters with no dashes. Asking for the
+        # dashed spelling loads the same row, and PostgreSQL resolves either
+        # spelling through the indexed key above, so this only adds a second
+        # query for a row the first one already could not name.
+        portfolio = (
+            db.query(PaperPortfolio)
+            .filter(dashed_text(PaperPortfolio.id, portfolio_id))
+            .first()
+        )
     if not portfolio:
         raise HTTPException(status_code=404, detail="Portfolio not found")
     if portfolio.owner_id != current_user.id:
@@ -109,6 +130,24 @@ def _lock_portfolio(
 
     ``populate_existing()`` is required because SQLAlchemy would otherwise hand
     back the already-loaded instance without refreshing it under the lock.
+
+    Deliberately a single indexed identity comparison, with no dashed retry:
+    both callers go on to *write* this row, and on the lane where UUID columns
+    are text an instance loaded by the dashed spelling cannot be written at all
+    -- the UPDATE statement SQLAlchemy emits carries the 32-character identity
+    key and matches nothing, raising ``StaleDataError``. Loading such a row a
+    second way would therefore turn this ``Portfolio not found`` into a 500 for
+    the same request.
+
+    That gap no longer describes an account this product makes: the raw-SQL
+    writers now bind the column's own UUID type (``app/lib/uuid_bind.py``), so a
+    create-lane account is stored in the spelling this read already uses and the
+    owner's manual order on it is measurable on the lane -- see
+    ``tests/test_paper_create_engine_consistency.py``, P6. What is still true is
+    the case this function refuses: a row already stored dashed predates that
+    normalisation, answers 404 here rather than 500, and whether any deployed
+    database holds one has not been measured, because the protected databases
+    were not touched.
     """
     portfolio = (
         db.query(PaperPortfolio)
@@ -173,6 +212,29 @@ def _bound_session(db: Session, portfolio: PaperPortfolio) -> Optional[Simulatio
         .filter(SimulationSession.id == portfolio.simulation_session_id)
         .first()
     )
+
+
+def require_session_for_owner(db: Session, owner_id: UUID, session_id: UUID) -> None:
+    """Refuse a replay session this owner may not name, before anything is written.
+
+    ``simulation_sessions.id`` is a real foreign key on both ``paper_portfolios``
+    and ``decision_records``, so an id nobody checked turns the insert into a
+    database error on PostgreSQL. Stated once because two doors — opening an
+    account and recording a decision — accept the same column, and a rule only
+    one of them holds lets the same id be a link here and a 500 there.
+    """
+    named = (
+        db.query(SimulationSession.id)
+        .filter(
+            SimulationSession.id == session_id,
+            SimulationSession.owner_id == owner_id,
+        )
+        .first()
+    )
+    if named is None:
+        raise HTTPException(
+            status_code=404, detail="Simulation session not found for this user"
+        )
 
 
 def _session_cursor(session: SimulationSession):
@@ -472,7 +534,21 @@ def _simulate_fill(
         raise _FillRefused(exc.message, exc.code)
 
 
-@router.post("", response_model=PaperPortfolioResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=PaperPortfolioResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Open a skill unit (paper portfolio)",
+    description=(
+        "A skill unit is the isolated account: it carries its own virtual cash "
+        "and, through `portfolio_id`, its positions, orders, fills and "
+        "decisions. `PAPER_SKILL_UNIT_MAX_PER_USER` caps how many one main "
+        "account may hold open at once and the cap is enforced here, not in the "
+        "UI: the 11th create returns 409 `skill_unit_limit_reached` and names "
+        "the retire entrypoint that releases a slot. Retired and completed "
+        "accounts do not hold a slot; paused ones do."
+    ),
+)
 def create_portfolio(
     payload: PaperPortfolioCreate,
     request: Request,
@@ -484,14 +560,14 @@ def create_portfolio(
         # The link is what lets a replay's rules trade this account, so a session
         # that is missing or belongs to someone else must be refused here rather
         # than stored as a link that silently never executes.
-        linked_session = db.query(SimulationSession).filter(
-            SimulationSession.id == payload.simulation_session_id,
-            SimulationSession.owner_id == current_user.id,
-        ).first()
-        if linked_session is None:
-            raise HTTPException(
-                status_code=404, detail="Simulation session not found for this user"
-            )
+        require_session_for_owner(
+            db, current_user.id, payload.simulation_session_id
+        )
+
+    try:
+        assert_slot_available(db, current_user.id)
+    except SkillUnitLimitReached as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.detail())
 
     portfolio = PaperPortfolio(
         owner_id=current_user.id,
@@ -522,7 +598,11 @@ def list_portfolios(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    portfolios = db.query(PaperPortfolio).filter(PaperPortfolio.owner_id == current_user.id).all()
+    portfolios = (
+        db.query(PaperPortfolio)
+        .filter(stored_as(PaperPortfolio.owner_id, current_user.id))
+        .all()
+    )
     return [_portfolio_response(p, db) for p in portfolios]
 
 
@@ -891,6 +971,64 @@ def cancel_order_route(
     )
 
 
+def _require_usable_and_bound_version(
+    db: Session, *, portfolio: PaperPortfolio, version_id: UUID, owner_id: UUID
+) -> None:
+    """Refuse a version this decision may not record, whether claimed or derived.
+
+    The version row has neither an owner nor a status: ownership is the parent
+    experiment's, usability is the freeze stamp. Then the account itself gets a
+    say, because a decision recorded against a strategy the account does not run
+    is a journal entry about research nobody here is trading.
+
+    This is the one statement of that rule. The desk reaches it both when the
+    request names a version and when the inference's own metadata does — a
+    version arrived at by reading someone else's row cannot be a version exempt
+    from the checks, or omitting the field would become the way to skip them.
+    """
+    validate_strategy_version(db, version_id=version_id, owner_id=owner_id)
+
+    # Consistency with what this account is actually running: if any run
+    # for this portfolio names a strategy version, it must be the one
+    # claimed. The indexed identity key answers on PostgreSQL, so it stays
+    # first; on the lane where UUID columns are text it sees only rows an
+    # ORM write inserted (32 characters, no dashes), while this product's
+    # own creation paths insert the dashed 36-character form with raw SQL.
+    # Both forms are therefore consulted, and the comparison is made on
+    # parsed UUIDs so the spelling a row happens to be stored in cannot
+    # decide whether the account's binding was contradicted.
+    from sqlalchemy import text as sql_text
+
+    portfolio_run = db.query(PaperTradingRun).filter(
+        PaperTradingRun.portfolio_id == portfolio.id,
+        PaperTradingRun.strategy_version_id.isnot(None),
+    ).first()
+    bound_version = (
+        portfolio_run.strategy_version_id
+        if portfolio_run is not None
+        else db.execute(
+            sql_text(
+                "SELECT strategy_version_id FROM paper_trading_runs "
+                "WHERE replace(CAST(portfolio_id AS TEXT), '-', '') "
+                "= :portfolio_hex AND strategy_version_id IS NOT NULL "
+                "LIMIT 1"
+            ),
+            {"portfolio_hex": str(portfolio.id).replace("-", "")},
+        ).scalar()
+    )
+    if bound_version is not None and uuid.UUID(str(bound_version)) != version_id:
+        run_version = str(uuid.UUID(str(bound_version)))
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "reason": "version_mismatch",
+                "run_version": run_version,
+                "decision_version": str(version_id),
+                "message": "Decision's linked version does not match the portfolio run's strategy version.",
+            },
+        )
+
+
 @router.post("/{portfolio_id}/decisions", response_model=DecisionRecordResponse, status_code=status.HTTP_201_CREATED)
 def create_decision(
     portfolio_id: UUID,
@@ -913,13 +1051,52 @@ def create_decision(
     # caller cannot label an agent-written row as a human decision.
     actor_type = request_actor_provenance(request)
 
+    # The version this decision records, and the checks it has to survive. Either
+    # the request names one, or the inference it names does: a decision that
+    # points at a model execution cannot leave the strategy that execution ran on
+    # unstated when the execution itself says, because the journal would then show
+    # an origin with a version beside a decision with none and let a reader assume
+    # they were different. What is derived is held to exactly what is claimed.
+    claimed_version = payload.linked_experiment_version_id
+    if claimed_version is None and payload.linked_inference_id is not None:
+        claimed_version = validate_linked_inference(
+            db,
+            owner_id=current_user.id,
+            inference_id=payload.linked_inference_id,
+            portfolio_id=portfolio.id,
+        )
+
+    if claimed_version is not None:
+        _require_usable_and_bound_version(
+            db, portfolio=portfolio, version_id=claimed_version, owner_id=current_user.id
+        )
+
+    # Validate linked_inference_id if provided — must exist, belong to same owner, and contain model-execution metadata
+    if payload.linked_inference_id is not None:
+        validate_linked_inference(
+            db,
+            owner_id=current_user.id,
+            inference_id=payload.linked_inference_id,
+            portfolio_id=portfolio.id,
+            # Whatever version this decision records — claimed or derived — the
+            # inference has to come from a model trained from that same version.
+            # Checked after the version's own ownership/freeze/run checks above, so
+            # the two sides of the lineage are never allowed to name different
+            # research.
+            strategy_version_id=claimed_version,
+        )
+
+    if payload.simulation_session_id is not None:
+        require_session_for_owner(db, current_user.id, payload.simulation_session_id)
+
     decision = DecisionRecord(
         owner_id=current_user.id,
         paper_portfolio_id=portfolio.id,
         simulation_session_id=payload.simulation_session_id,
         actor_type=decision_actor_type(actor_type),
         decision_type=PaperDecisionType(payload.decision_type),
-        linked_experiment_version_id=payload.linked_experiment_version_id,
+        linked_experiment_version_id=claimed_version,
+        linked_inference_id=payload.linked_inference_id,
         rationale=payload.rationale,
         expected_outcome=payload.expected_outcome,
         expected_timeframe_days=payload.expected_timeframe_days,
@@ -940,12 +1117,39 @@ def create_decision(
             "decision_type": payload.decision_type,
             "actor_type": actor_type,
             "client_declared_actor_type": payload.actor_type,
+            # Which of the two a recorded version was: only the audit trail can
+            # still say so once the row exists, and "the account was trading this"
+            # is a different claim from "the user said this account was trading it".
+            "version_source": (
+                "claimed"
+                if payload.linked_experiment_version_id is not None
+                else "inference_origin"
+                if claimed_version is not None
+                else None
+            ),
         },
     )
 
     db.commit()
     db.refresh(decision)
     return decision
+
+
+def _decisions_in_scope(db: Session, portfolio: PaperPortfolio, owner_id: UUID):
+    """The one decision scope both decision surfaces read.
+
+    Rows recorded before ``paper_portfolio_id`` existed cannot be attributed;
+    they stay visible rather than silently vanishing from the journal. Keeping
+    the filter in one place is what makes the JSON read and the CSV export able
+    to be the same set of decisions under different renderings.
+    """
+    return db.query(DecisionRecord).filter(
+        DecisionRecord.owner_id == owner_id,
+        or_(
+            DecisionRecord.paper_portfolio_id == portfolio.id,
+            DecisionRecord.paper_portfolio_id.is_(None),
+        ),
+    ).order_by(DecisionRecord.decision_time.desc())
 
 
 @router.get("/{portfolio_id}/decisions", response_model=List[DecisionRecordResponse])
@@ -955,15 +1159,7 @@ def list_decisions(
     current_user: User = Depends(get_current_user),
 ):
     portfolio = _get_portfolio_with_ownership(portfolio_id, db, current_user)
-    # Rows recorded before paper_portfolio_id existed cannot be attributed; they
-    # stay visible rather than silently vanishing from the journal.
-    return db.query(DecisionRecord).filter(
-        DecisionRecord.owner_id == current_user.id,
-        or_(
-            DecisionRecord.paper_portfolio_id == portfolio.id,
-            DecisionRecord.paper_portfolio_id.is_(None),
-        ),
-    ).order_by(DecisionRecord.decision_time.desc()).all()
+    return _decisions_in_scope(db, portfolio, current_user.id).all()
 
 
 @router.post(
@@ -1097,7 +1293,6 @@ def pause_portfolio(
         raise HTTPException(status_code=400, detail="Can only pause an active portfolio")
 
     portfolio.status = PortfolioStatus.paused
-    portfolio.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
     emit_event(
         db,
@@ -1133,7 +1328,6 @@ def resume_portfolio(
         raise HTTPException(status_code=400, detail="Can only resume a paused portfolio")
 
     portfolio.status = PortfolioStatus.active
-    portfolio.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
     emit_event(
         db,
@@ -1174,7 +1368,6 @@ def retire_portfolio(
 
     portfolio.status = PortfolioStatus.retired
     portfolio.closed_at = datetime.now(timezone.utc).replace(tzinfo=None)
-    portfolio.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
     emit_event(
         db,
@@ -1206,6 +1399,8 @@ JOURNAL_COLUMNS = [
     "order_id",
     "fill_id",
     "decision_id",
+    "linked_experiment_version_id",
+    "linked_inference_id",
     "asset_id",
     "side",
     "order_type",
@@ -1263,6 +1458,8 @@ JOURNAL_COLUMN_SEMANTICS = {
     "order_state": "'pending' while the order can still execute; 'terminal' once it is filled, cancelled or rejected. This describes the order, not the position.",
     "position_status": "'open' or 'closed' for the portfolio's position in this row's asset at export time; empty when no position row exists. A terminal order can still leave its position open, and a closed position does not rewrite the order's history.",
     "currency": "ISO-4217 code that applies to every monetary column in the row (the portfolio currency).",
+    "linked_experiment_version_id": "Decision lineage: the research version this decision was recorded under, exactly as the create call stored it and the decisions read returns. Empty = the decision carried no version, or no decision row is attached to this order.",
+    "linked_inference_id": "Decision lineage: the usage_records.id of the model execution behind the decision. Creating a decision refuses an inference that is not this owner's, not a personal-model prediction, not generated for this skill account, or — when the decision names a strategy version — not produced by a model trained from that version, so a value here was verified at write time. The link carries no schema foreign key, so nothing at the database keeps that billing row or takes it away with the decision: GET /{portfolio_id}/decision-history reports whether each id still reads back. No job in this build deletes usage_records — measured 2026-11-18, the only DELETE against the table is a seed script's own cleanup — so a row that has gone went out of band, not on a schedule. Empty = a human/rule decision with no model execution.",
     "data_cutoff_at": "Calendar date YYYY-MM-DD, no timezone: the replay/pricing cut-off, not an instant.",
     "execution_date": "Calendar date YYYY-MM-DD, no timezone: the simulated trade date of the fill.",
     "bar_timestamp": "ISO-8601 naive exchange-local instant of the intraday bar the fill executed on (e.g. 2024-03-04T09:50:00). Empty for daily fills, which carry no intraday bar time.",
@@ -1359,6 +1556,19 @@ def _journal_rows(
             "currency": portfolio.currency,
             "order_id": str(order.id),
             "decision_id": str(order.decision_id) if order.decision_id else None,
+            # The same two identities the create call accepted and the decisions
+            # read returns, so one exported row can be traced back to the version
+            # and the inference without the application.
+            "linked_experiment_version_id": (
+                str(decision.linked_experiment_version_id)
+                if decision and decision.linked_experiment_version_id
+                else None
+            ),
+            "linked_inference_id": (
+                str(decision.linked_inference_id)
+                if decision and decision.linked_inference_id
+                else None
+            ),
             "asset_id": order.asset_id,
             "side": order.side,
             "order_type": order.order_type,
@@ -1408,12 +1618,12 @@ def _journal_rows(
     return rows
 
 
-def _journal_csv(rows: List[Dict[str, Any]]) -> str:
+def _journal_csv(rows: List[Dict[str, Any]], columns: List[str] = JOURNAL_COLUMNS) -> str:
     buf = io.StringIO()
     writer = csv.writer(buf, quoting=csv.QUOTE_MINIMAL, lineterminator="\r\n")
-    writer.writerow(JOURNAL_COLUMNS)
+    writer.writerow(columns)
     for row in rows:
-        writer.writerow([_journal_cell(col, row.get(col)) for col in JOURNAL_COLUMNS])
+        writer.writerow([_journal_cell(col, row.get(col)) for col in columns])
     return buf.getvalue()
 
 
@@ -1441,17 +1651,7 @@ def export_trade_journal(
         .order_by(PaperOrder.created_at)
         .all()
     )
-    decisions = (
-        db.query(DecisionRecord)
-        .filter(
-            DecisionRecord.owner_id == current_user.id,
-            or_(
-                DecisionRecord.paper_portfolio_id == portfolio.id,
-                DecisionRecord.paper_portfolio_id.is_(None),
-            ),
-        )
-        .all()
-    )
+    decisions = _decisions_in_scope(db, portfolio, current_user.id).all()
     decision_map = {d.id: d for d in decisions}
     rows = _journal_rows(db, portfolio, orders, decision_map)
 
@@ -1467,6 +1667,250 @@ def export_trade_journal(
 
     csv_text = _journal_csv(rows)
     filename = f"trade-journal-{portfolio.id}.csv"
+    return Response(
+        content=csv_text,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ── Decision-history export (CSV + JSON) ───────────────────────────────
+#
+# A second file with its own contract, not extra rows inside the trade journal.
+# The journal answers "what did this account trade" and is built from orders, so
+# by construction it cannot show a decision that never carried an order. This one
+# answers "what did this account decide, and on what source", over exactly the
+# decision rows GET /{portfolio_id}/decisions returns.
+
+DECISION_HISTORY_COLUMNS = [
+    "record_type",
+    "decision_id",
+    "portfolio_id",
+    "decision_scope",
+    "decision_type",
+    "actor_type",
+    "decision_time",
+    "data_cutoff_at",
+    "outcome_status",
+    "linked_experiment_version_id",
+    "linked_inference_id",
+    "inference_source_state",
+    "inference_model_version_id",
+    "inference_strategy_version_id",
+    "inference_artifact_sha256",
+    "inference_as_of_date",
+    "inference_skill_unit_id",
+    "simulation_session_id",
+    "has_order",
+    "order_count",
+    "order_ids",
+    "fill_count",
+    "source_run_id",
+    "source_trade_id",
+    "source_rule_id",
+    "rationale",
+    "expected_outcome",
+    "self_reported_confidence",
+    "expected_timeframe_days",
+]
+
+# Copied off the inference usage row at export time, so a reader can tell these
+# apart from the two linked_* columns, which are what the create call stored —
+# and, for a row written before the two were compared, whether they agree.
+_INFERENCE_METADATA_COLUMNS = {
+    "inference_model_version_id": "model_version_id",
+    "inference_strategy_version_id": "strategy_version_id",
+    "inference_artifact_sha256": "artifact_sha256",
+    "inference_as_of_date": "as_of_date",
+    "inference_skill_unit_id": "skill_unit_id",
+}
+
+DECISION_HISTORY_COLUMN_SEMANTICS = {
+    "record_type": "Always 'decision': one row per recorded decision. This file has no fill and no order rows, so it cannot be read as a trade ledger and does not replace the trade journal.",
+    "decision_id": "decision_records.id, in canonical dashed text regardless of how the row is stored.",
+    "portfolio_id": "The skill account this file was asked for (paper_portfolios.id).",
+    "decision_scope": "'this_portfolio' = the decision row names this account. 'unattributed' = recorded before the account link existed, so it cannot be attributed and stays visible instead of disappearing. Same inclusion rule as GET /{id}/decisions and the trade journal.",
+    "decision_type": "Controlled vocabulary (entry, exit, no_action, pause, retire, override_request).",
+    "actor_type": "The authentication channel that wrote the row, decided server-side from the credential: 'human' for a password session. A client's declared actor in the request body is not what lands here.",
+    "decision_time": "ISO-8601 naive UTC instant the decision was recorded. Rows are newest first, the order the decisions read returns.",
+    "outcome_status": "Controlled vocabulary of the outcome-evaluation state (pending until an evaluation is recorded).",
+    "linked_experiment_version_id": "The research version this decision was recorded under, exactly as the decisions read returns it. It is the version the create call named, or — when the call named none and named an inference that does — the version that inference recorded, after the same checks a named version is held to (this account owns it, it is frozen, it does not contradict the version bound to the account's run). Empty means neither side named one: a row written before either source could, or a decision with no lineage to reconcile. An empty cell here is not a verified absence and never means the version was confirmed — for a decision that names an inference, read inference_strategy_version_id below, which is what the origin itself says.",
+    "linked_inference_id": "The usage_records.id this decision names as its origin, exactly as stored. Validated at write time (app/services/decision_lineage.py) against the version column above: a decision that names both is refused unless the inference came from a model trained from that version. There is deliberately no schema foreign key behind it, so read inference_source_state.",
+    "inference_source_state": "'none' = no inference was named (a human or rule decision). 'present' = the usage row is still readable. 'missing' = the decision names an inference whose usage row cannot be read now. usage_records is the billing ledger and nothing in the schema links the two, so a lineage id can outlive the row it points at; this column says so rather than leaving an id that reads back nothing. This build runs no job that ages billing rows out, so 'missing' is reachable today only through a deletion made outside the application — the state is a guard, not a described lifecycle.",
+    "inference_model_version_id": "The model version the inference itself recorded, read from the usage row now. Empty unless inference_source_state is 'present'.",
+    "inference_strategy_version_id": "The strategy version the inference's own model was trained from, read from the usage row now — the origin's statement, not the decision's. A decision written by a door that compares the two cannot disagree with linked_experiment_version_id above; a row written before that comparison existed can, and this column is how the difference stays visible instead of being read as agreement.",
+    "inference_artifact_sha256": "The artifact digest the inference ran on, read from the usage row now: the pinned build behind this decision, not the currently selected one.",
+    "inference_as_of_date": "YYYY-MM-DD data cut-off the inference was computed at, read from the usage row now.",
+    "inference_skill_unit_id": "The skill account the inference was generated for, read from the usage row now. Creating the decision refuses a mismatch, so equality with portfolio_id is the expected case; a difference is exported rather than hidden.",
+    "simulation_session_id": "The session the decision was recorded against, when the create call named one.",
+    "has_order": "true when at least one order names this decision through paper_orders.decision_id (a schema foreign key), false when the decision carried no order.",
+    "order_count": "How many orders name this decision. 0 = a decision with no order, which is precisely the row the trade journal cannot carry.",
+    "order_ids": "decision_records ← paper_orders.decision_id, ';' joined in order-creation time. Empty when order_count is 0.",
+    "fill_count": "How many simulated fills those orders produced in total. Empty price/quantity facts stay in the trade journal, which is fill-grained.",
+    "source_run_id": "Set by the execution lane when a run produced the decision; empty for a decision the owner typed.",
+    "source_trade_id": "Set by the execution lane to identify the traded item the decision came from; empty for a typed decision. Note the per-account uniqueness on (paper_portfolio_id, source_trade_id, decision_type) does not constrain rows whose source_trade_id is NULL.",
+    "source_rule_id": "Which rule fired, when a rule produced the decision.",
+    "rationale": "Free text; may contain commas, quotes, newlines and non-ASCII. Spreadsheet-formula guarded.",
+    "expected_outcome": "What the owner expected to happen, in their own words, as recorded.",
+    "self_reported_confidence": "Controlled vocabulary (low, medium, high, not_provided).",
+    "expected_timeframe_days": "Integer days the owner expected the outcome within. Empty = not provided.",
+}
+
+DECISION_HISTORY_COLUMN_SEMANTICS.update(
+    {key: JOURNAL_COLUMN_SEMANTICS[key] for key in
+     ("data_cutoff_at", "_null", "_encoding", "_formula_guard")}
+)
+
+
+def _decision_history_rows(
+    db: Session,
+    portfolio: PaperPortfolio,
+    decisions: List[DecisionRecord],
+) -> List[Dict[str, Any]]:
+    """One row per decision, with its orders counted and its source resolved."""
+    inference_ids = [
+        d.linked_inference_id for d in decisions if d.linked_inference_id is not None
+    ]
+    usage_by_id: Dict[Any, UsageRecord] = {}
+    if inference_ids:
+        # Typed IN on a UUID-as-UUID column: the bind uses the column's own type,
+        # so this matches whether the lane stores the id as hex or as text.
+        # Bounded by owner as well as by id. The create door already refused an
+        # inference that is not this owner's, so under writes made through the API
+        # the two bounds agree; this one is what stops a lineage id that arrived
+        # any other way — a backfill, a direct write, a row whose owner changed —
+        # from having another account's billing metadata rendered into this
+        # owner's history. It reads back as ``missing``, which is the state the
+        # contract already reserves for a source this caller may not see.
+        usage_by_id = {
+            usage.id: usage
+            for usage in db.query(UsageRecord)
+            .filter(
+                UsageRecord.id.in_(inference_ids),
+                UsageRecord.user_id == portfolio.owner_id,
+            )
+            .all()
+        }
+
+    decision_ids = [d.id for d in decisions]
+    orders_by_decision: Dict[Any, List[PaperOrder]] = {}
+    if decision_ids:
+        for order in (
+            db.query(PaperOrder)
+            .filter(PaperOrder.decision_id.in_(decision_ids))
+            .order_by(PaperOrder.created_at)
+            .all()
+        ):
+            orders_by_decision.setdefault(order.decision_id, []).append(order)
+
+    rows: List[Dict[str, Any]] = []
+    for decision in decisions:
+        orders = orders_by_decision.get(decision.id, [])
+        usage = (
+            usage_by_id.get(decision.linked_inference_id)
+            if decision.linked_inference_id is not None
+            else None
+        )
+        if decision.linked_inference_id is None:
+            source_state = "none"
+        elif usage is not None:
+            source_state = "present"
+        else:
+            source_state = "missing"
+        metadata = usage.metadata_json if (usage is not None and isinstance(usage.metadata_json, dict)) else {}
+
+        row = {
+            "record_type": "decision",
+            "decision_id": str(decision.id),
+            "portfolio_id": str(portfolio.id),
+            "decision_scope": (
+                "this_portfolio"
+                if decision.paper_portfolio_id == portfolio.id
+                else "unattributed"
+            ),
+            "decision_type": decision.decision_type,
+            "actor_type": decision.actor_type,
+            "decision_time": (
+                decision.decision_time.isoformat() if decision.decision_time else None
+            ),
+            "data_cutoff_at": decision.data_cutoff_at,
+            "outcome_status": decision.outcome_status,
+            "linked_experiment_version_id": (
+                str(decision.linked_experiment_version_id)
+                if decision.linked_experiment_version_id
+                else None
+            ),
+            "linked_inference_id": (
+                str(decision.linked_inference_id)
+                if decision.linked_inference_id
+                else None
+            ),
+            "inference_source_state": source_state,
+            "simulation_session_id": (
+                str(decision.simulation_session_id)
+                if decision.simulation_session_id
+                else None
+            ),
+            "has_order": bool(orders),
+            "order_count": len(orders),
+            "order_ids": ";".join(str(order.id) for order in orders) or None,
+            "fill_count": sum(len(list(order.fills)) for order in orders),
+            "source_run_id": (
+                str(decision.source_run_id) if decision.source_run_id else None
+            ),
+            "source_trade_id": (
+                str(decision.source_trade_id) if decision.source_trade_id else None
+            ),
+            "source_rule_id": decision.source_rule_id,
+            "rationale": decision.rationale,
+            "expected_outcome": decision.expected_outcome,
+            "self_reported_confidence": decision.self_reported_confidence,
+            "expected_timeframe_days": decision.expected_timeframe_days,
+        }
+        for column, metadata_key in _INFERENCE_METADATA_COLUMNS.items():
+            value = metadata.get(metadata_key)
+            row[column] = value if isinstance(value, (str, int, float)) else None
+        rows.append(row)
+    return rows
+
+
+@router.get("/{portfolio_id}/decision-history")
+def export_decision_history(
+    portfolio_id: UUID,
+    format: str = "csv",
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Owner-authorized export of every recorded decision, order or no order.
+
+    ``format=csv`` returns the attachment; ``format=json`` returns the same rows
+    plus ``column_semantics``. The row set is exactly the one
+    ``GET /{portfolio_id}/decisions`` returns, in the same order.
+
+    This is deliberately a separate file from ``GET /{portfolio_id}/journal``:
+    that one is built from this account's orders and answers what was traded.
+    Adding decision rows to it would change what its rows mean.
+    """
+    if format not in ("csv", "json"):
+        raise HTTPException(status_code=400, detail="format must be 'csv' or 'json'")
+
+    portfolio = _get_portfolio_with_ownership(portfolio_id, db, current_user)
+    decisions = _decisions_in_scope(db, portfolio, current_user.id).all()
+    rows = _decision_history_rows(db, portfolio, decisions)
+
+    if format == "json":
+        return {
+            "portfolio_id": str(portfolio.id),
+            "currency": portfolio.currency,
+            "scope": "decisions",
+            "columns": DECISION_HISTORY_COLUMNS,
+            "column_semantics": DECISION_HISTORY_COLUMN_SEMANTICS,
+            "row_count": len(rows),
+            "records": rows,
+        }
+
+    csv_text = _journal_csv(rows, DECISION_HISTORY_COLUMNS)
+    filename = f"decision-history-{portfolio.id}.csv"
     return Response(
         content=csv_text,
         media_type="text/csv; charset=utf-8",

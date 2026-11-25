@@ -19,6 +19,17 @@ from app.database import SessionLocal
 from app.models.strategy_study import StrategyStudyRun, StrategyStudyTrade
 from app.models.user import User
 from app.services.paper_trading import PaperTradingEngine
+from tests.conftest import TEST_ENGINE
+
+# The formal path is the production replay worker over real rows, and both sides
+# of that fixture speak PostgreSQL: the seed binds uuid.UUID and Decimal objects
+# into raw SQL (only psycopg2 adapts those), and the worker reaches a
+# `SELECT ... FOR UPDATE` row lock (paper_trading.py:874) that SQLite cannot
+# parse. A skip here is a statement about the lane, not a pass.
+pytestmark = pytest.mark.skipif(
+    TEST_ENGINE.dialect.name == "sqlite",
+    reason="formal path needs PostgreSQL: psycopg2 type adaptation and FOR UPDATE row lock",
+)
 
 
 INSTRUMENT = "XBT/USD"
@@ -132,15 +143,17 @@ def formal_path_setup():
         )
         db.add(trade2)
 
-        # Create paper portfolio
+        # Create paper portfolio. paper_portfolios has no updated_at in either
+        # definition (model PaperPortfolio and the initial-schema migration both
+        # stop at closed_at), so this column list must not name it.
         db.execute(
             text("""
             INSERT INTO paper_portfolios (
                 id, owner_id, currency, initial_virtual_cash, current_virtual_cash,
-                status, created_at, updated_at
+                status, created_at
             ) VALUES (
                 :id, :owner_id, 'USD', 100000.0, 100000.0, 'active',
-                CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                CURRENT_TIMESTAMP
             )
         """),
             {"id": portfolio_id, "owner_id": user_id},

@@ -4,9 +4,13 @@ Both endpoints answer from the contract the create path already uses: the
 StrategySpec schema for fields and the engine's signal-parameter rules for
 template parameters. Neither endpoint writes a row, consumes AI usage,
 dispatches a job, calls a provider, or executes a strategy.
+
+``check_spec_contract`` is the gate they answer through, and the data manifest
+(api/data_manifest.py) calls the same function rather than restating it, so no
+surface can decide on its own what a runnable spec is.
 """
 import typing
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from fastapi import APIRouter, Body, Depends
 from pydantic import BaseModel, ValidationError
@@ -388,6 +392,77 @@ def _result(status: str, template_type: Optional[str], errors=None, reason=None)
     return payload
 
 
+ContractCheck = Tuple[
+    str, Optional[str], List[Dict[str, str]], Optional[str], Optional[StrategySpec]
+]
+
+
+def check_spec_contract(spec: Dict[str, Any]) -> ContractCheck:
+    """The one gate a spec must pass before anything can be read out of it.
+
+    Returns ``(status, template_type, errors, reason, parsed_spec)``. Preflight
+    answers through it and so does the data manifest, so the two discovery
+    surfaces cannot publish different meanings of "a spec this engine can run".
+
+    Capability is judged before field-level validation: an intraday grain is
+    "not implemented on this path", not a malformed spec, so it must stay
+    unsupported even though the schema validator only accepts 1d.
+    """
+    template_type = spec.get("template_type")
+    if isinstance(template_type, str) and template_type not in ALLOWED_TEMPLATES:
+        return (
+            "unsupported",
+            template_type,
+            [],
+            f"Template '{template_type}' is not implemented, so no run can use it.",
+            None,
+        )
+
+    timeframe = str(spec.get("timeframe", "1d"))
+    if timeframe in INTRADAY_TIMEFRAMES:
+        return (
+            "unsupported",
+            template_type if isinstance(template_type, str) else None,
+            [
+                {
+                    "field": "timeframe",
+                    "message": (
+                        "The batch backtest does not execute intraday specs; use the "
+                        "per-bar forward replay instead."
+                    ),
+                }
+            ],
+            "This capability is not supported on this path.",
+            None,
+        )
+
+    try:
+        parsed = StrategySpec.model_validate(spec)
+    except ValidationError as exc:
+        return (
+            "invalid",
+            template_type if isinstance(template_type, str) else None,
+            _validation_errors(exc),
+            None,
+            None,
+        )
+
+    signal_errors = validate_signal_parameters(parsed.template_type, parsed.signal_parameters)
+    if signal_errors:
+        return (
+            "invalid",
+            parsed.template_type,
+            [
+                {"field": "signal_parameters", "message": message}
+                for message in signal_errors
+            ],
+            None,
+            None,
+        )
+
+    return ("valid", parsed.template_type, [], None, parsed)
+
+
 @router.get(
     "/strategy-templates",
     response_model=TemplateListResponse,
@@ -434,53 +509,5 @@ def preflight_strategy_spec(
     ),
     user: User = Depends(get_current_user),
 ):
-    template_type = spec.get("template_type")
-    if isinstance(template_type, str) and template_type not in ALLOWED_TEMPLATES:
-        return _result(
-            "unsupported",
-            template_type,
-            reason=f"Template '{template_type}' is not implemented, so no run can use it.",
-        )
-
-    # Capability is judged before field-level validation, as it already is for
-    # template_type above: an intraday grain is "not implemented on this path",
-    # not a malformed spec, so it must stay unsupported even though the schema
-    # validator only accepts 1d.
-    timeframe = str(spec.get("timeframe", "1d"))
-    if timeframe in INTRADAY_TIMEFRAMES:
-        return _result(
-            "unsupported",
-            template_type if isinstance(template_type, str) else None,
-            errors=[
-                {
-                    "field": "timeframe",
-                    "message": (
-                        "The batch backtest does not execute intraday specs; use the "
-                        "per-bar forward replay instead."
-                    ),
-                }
-            ],
-            reason="This capability is not supported on this path.",
-        )
-
-    try:
-        parsed = StrategySpec.model_validate(spec)
-    except ValidationError as exc:
-        return _result(
-            "invalid",
-            template_type if isinstance(template_type, str) else None,
-            errors=_validation_errors(exc),
-        )
-
-    signal_errors = validate_signal_parameters(parsed.template_type, parsed.signal_parameters)
-    if signal_errors:
-        return _result(
-            "invalid",
-            parsed.template_type,
-            errors=[
-                {"field": "signal_parameters", "message": message}
-                for message in signal_errors
-            ],
-        )
-
-    return _result("valid", parsed.template_type)
+    status, template_type, errors, reason, _parsed = check_spec_contract(spec)
+    return _result(status, template_type, errors=errors, reason=reason)

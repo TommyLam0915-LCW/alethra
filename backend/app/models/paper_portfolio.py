@@ -218,6 +218,7 @@ class DecisionRecord(Base):
     data_cutoff_at = Column(String(10), nullable=True)
     linked_experiment_version_id = Column(UUID(as_uuid=True), nullable=True)
     linked_model_research_record_id = Column(UUID(as_uuid=True), nullable=True)
+    linked_inference_id = Column(UUID(as_uuid=True), nullable=True, index=True)  # References usage_records.id for model-execution decisions
     rationale = Column(Text, nullable=True)
     expected_outcome = Column(Text, nullable=True)
     expected_timeframe_days = Column(Integer, nullable=True)

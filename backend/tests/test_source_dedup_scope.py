@@ -19,6 +19,17 @@ from sqlalchemy.exc import IntegrityError
 
 from app.database import engine as db_engine, SessionLocal
 from app.services.paper_trading import PaperTradingEngine
+from tests.conftest import TEST_ENGINE
+
+# Both cases open a real portfolio through the production worker, and that entry
+# point is PostgreSQL-only: create_portfolio() binds a Decimal into raw SQL
+# (paper_trading.py:74), which only psycopg2 adapts, and the replay that follows
+# takes a `SELECT ... FOR UPDATE` row lock (paper_trading.py:874). A skip here is
+# a statement about the lane, not a pass.
+pytestmark = pytest.mark.skipif(
+    TEST_ENGINE.dialect.name == "sqlite",
+    reason="source dedup scope is proven over the real paper-trading vertical, which needs PostgreSQL",
+)
 
 
 @pytest.fixture
@@ -46,7 +57,7 @@ def seed_source_trade():
                 ) VALUES (
                     :id, :user_id, 'strategy_research_simulated', 'v1.0', 'TEST/USD', 60,
                     'test_provider', 'simulated', 100, :now, :now,
-                    '{}'::jsonb, '{}'::jsonb, '[]'::jsonb, 1, :now
+                    '{}', '{}', '[]', 1, :now
                 )
             """),
             {"id": study_run_id, "user_id": user_id, "now": now}

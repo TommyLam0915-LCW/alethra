@@ -28,11 +28,19 @@ COLLECTION_ENDPOINTS = [
 
 
 def _mock_scheduler_status(*args, **kwargs):
-    return {"enabled": False, "running": False, "interval_hours": 4, "next_run": None}
+    return {
+        "enabled": False,
+        "running": False,
+        "interval_hours": 4,
+        "timezone": "UTC",
+        "job_type": "auto_collection",
+        "next_run": None,
+    }
 
 
 def _mock_collection_result(*args, **kwargs):
-    return {"runs": 0, "trades": 0, "errors": [], "completed_at": "2026-11-06T00:00:00Z"}
+    """The tick outcome shape: what ran, and the reason when nothing did."""
+    return {"skipped": None, "jobs": []}
 
 
 def _mock_collection_history(*args, **kwargs):

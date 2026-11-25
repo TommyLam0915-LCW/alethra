@@ -35,6 +35,7 @@ from app.models.agent_strategy import (
     AgentCandidate,
     AgentCandidateOutcome,
     AgentDatasetSnapshot,
+    AgentModelActivationApproval,
     AgentStrategyConsent,
     AgentStrategyTrainingJob,
 )
@@ -89,6 +90,9 @@ from app.services.personal_dataset import (
 
 INSTRUMENT = "DEMO-ALPHA"
 EXPENSIVE = "DEMO-BETA"
+# A second asset the strategy schema accepts, so a test can hold two artifacts
+# at once instead of two spellings of one.
+SECOND_ARTIFACT_INSTRUMENT = EXPENSIVE
 START = date(2024, 1, 1)
 PROVIDER = "synthetic"
 
@@ -2073,12 +2077,28 @@ def _regime_series(count=180, base=50.0):
     ]
 
 
-def _ready_fixture_snapshot(client, headers, monkeypatch, tmp_path):
-    """Produce one ready snapshot under both fixtures, with mixed labels."""
+def _ready_fixture_snapshot(
+    client,
+    headers,
+    monkeypatch,
+    tmp_path,
+    *,
+    instrument=INSTRUMENT,
+    title="Training fixture",
+    bars=180,
+):
+    """Produce one ready snapshot under both fixtures, with mixed labels.
+
+    ``instrument``/``title``/``bars`` exist so a test can build a *second*
+    artifact rather than a second copy of the first: the strategy is locked on
+    that asset and the series is a different length, so the frozen dataset, the
+    fitted scaler and the artifact checksum all move with it. A name that is
+    already trained on cannot prove an approval binds one artifact.
+    """
     _enable_test_training_authorization(monkeypatch, tmp_path)
-    _seed_bars(INSTRUMENT, _regime_series(180))
+    _seed_bars(instrument, _regime_series(bars))
     version_id = _create_locked_strategy(
-        client, headers, title="Training fixture", window_days=180
+        client, headers, instrument=instrument, title=title, window_days=bars
     )
     body = {"strategy_version_id": str(version_id)}
     for route in (
@@ -2110,6 +2130,13 @@ def _ready_fixture_snapshot(client, headers, monkeypatch, tmp_path):
     return snapshot
 
 
+def _test_row_features(snapshot):
+    """One held-out row of a frozen snapshot, as the scoring door takes it."""
+    test_ids = set(snapshot["split_manifest"]["splits"]["test"]["candidate_ids"])
+    row = next(r for r in snapshot["rows"] if r["candidate_id"] in test_ids)
+    return {name: float(row["features"][name]) for name in snapshot["feature_names"]}
+
+
 def _consent_document(client, headers):
     resp = client.get(
         "/api/v1/agent-strategy/consent-policy", headers=headers
@@ -2131,6 +2158,29 @@ def _accept_consent(client, headers):
     )
 
 
+def _activate_artifact(client, headers, job_id):
+    """Record the owner's activation for exactly the artifact this job produced.
+
+    The four echoed values are read back from ``GET .../activation`` rather than
+    restated here, so a helper that approves the wrong checksum fails loudly
+    instead of quietly approving something else.
+    """
+    route = f"/api/v1/agent-strategy/training/jobs/{job_id}/activation"
+    requirements = client.get(route, headers=headers).json()["requirements"]
+    return client.put(
+        route,
+        headers=headers,
+        json={
+            "artifact_checksum": requirements["artifact_checksum"],
+            "policy_version": requirements["approval_policy_version"],
+            "acknowledgement_text_version": requirements[
+                "acknowledgement_text_version"
+            ],
+            "acknowledgement": requirements["acknowledgement_text_zh"],
+        },
+    )
+
+
 def _consent_rows(owner_id):
     db = TestSession()
     try:
@@ -2147,6 +2197,23 @@ def _training_job_rows():
     db = TestSession()
     try:
         return db.query(AgentStrategyTrainingJob).all()
+    finally:
+        db.close()
+
+
+def _activation_approval_rows():
+    """Every approval row on the database, live or revoked.
+
+    A refusal that leaves this empty is a refusal that wrote nothing: the
+    scoring door may not invent the consent it is asking for.
+    """
+    db = TestSession()
+    try:
+        return (
+            db.query(AgentModelActivationApproval)
+            .order_by(AgentModelActivationApproval.approved_at)
+            .all()
+        )
     finally:
         db.close()
 
@@ -2474,7 +2541,10 @@ class TestFixtureTrainingChain:
         assert read.status_code == 200, read.text
         assert read.json()["job_id"] == job["job_id"]
 
-        # Inference scores one frozen row and re-verifies both checksums.
+        # Inference scores one frozen row and re-verifies both checksums — but
+        # only for an artifact the owner has activated. The refusal below is the
+        # no-side-effect half of that contract: it is raised before the model
+        # file is opened, so an un-activated artifact cannot be scored at all.
         test_ids = set(
             snapshot["split_manifest"]["splits"]["test"]["candidate_ids"]
         )
@@ -2482,10 +2552,32 @@ class TestFixtureTrainingChain:
         features = {
             name: float(row["features"][name]) for name in snapshot["feature_names"]
         }
+        inference_route = (
+            f"/api/v1/agent-strategy/training/jobs/{job['job_id']}/inference"
+        )
+
+        refused = client.post(
+            inference_route, headers=auth_headers, json={"features": features}
+        )
+        assert refused.status_code == 409, refused.text
+        detail = refused.json()["detail"]
+        assert detail["code"] == "agent_model_not_activated"
+        assert detail["details"]["activation_reason_code"] == "no_recorded_approval"
+        assert detail["details"]["approval_id"] is None
+        assert detail["details"]["artifact_checksum"] == job["artifact_checksum"]
+        # The refusal invented no approval, moved no job row and left the
+        # artifact bytes as training wrote them.
+        assert _activation_approval_rows() == []
+        assert len(_training_job_rows()) == 1
+        with open(os.path.join(artifact_dir, "metadata.json")) as fh:
+            assert json.load(fh)["model_activation"] == "NOT_APPROVED"
+
+        approved = _activate_artifact(client, auth_headers, job["job_id"])
+        assert approved.status_code == 200, approved.text
+        assert approved.json()["activation_status"] == "APPROVED"
+
         inference = client.post(
-            f"/api/v1/agent-strategy/training/jobs/{job['job_id']}/inference",
-            headers=auth_headers,
-            json={"features": features},
+            inference_route, headers=auth_headers, json={"features": features}
         )
         assert inference.status_code == 200, inference.text
         decision = inference.json()
@@ -2493,19 +2585,30 @@ class TestFixtureTrainingChain:
         assert 0.0 <= decision["positive_probability"] <= 1.0
         assert decision["lineage_verified"] is True
         assert decision["artifact_verified"] is True
-        assert decision["activation_status"] == "NOT_APPROVED"
-        assert decision["model_activated"] is False
+        assert decision["activation_status"] == "APPROVED"
+        assert decision["model_activated"] is True
         assert decision["runs_inference_for_customer"] is False
         assert decision["not_a_recommendation"] is True
         assert decision["not_a_profit_claim"] is True
-        assert decision["inference_policy_version"] == "snapshot-artifact-verified-v1"
+        assert (
+            decision["inference_policy_version"]
+            == "snapshot-artifact-activation-verified-v2"
+        )
+        # The body names the approval that admitted this score, and it is the
+        # owner's own row. Only the approval and revocation routes write the
+        # job's mirrored column; the score itself leaves the stored facts alone.
+        assert decision["activation_approval_id"] == str(
+            _activation_approval_rows()[0].id
+        )
 
         # Scoring is read-only: no job or snapshot row moved.
         assert len(_training_job_rows()) == 1
+        assert len(_activation_approval_rows()) == 1
         db = TestSession()
         try:
             stored = db.get(AgentStrategyTrainingJob, uuid.UUID(job["job_id"]))
             assert stored.metrics_json == metrics
+            assert stored.artifact_checksum == job["artifact_checksum"]
         finally:
             db.close()
 
@@ -2565,6 +2668,379 @@ class TestFixtureTrainingChain:
             inference.json()["detail"]["code"]
             == "agent_strategy_training_not_authorized"
         )
+
+    def test_the_scoring_door_refuses_until_the_owner_activates(
+        self, client, auth_headers, monkeypatch, tmp_path
+    ):
+        """The recorded approval is a precondition of scoring, not a caption.
+
+        ``test_model_activation.py`` proves an approval flips the gate on the
+        capabilities and activation routes. This is the third consumer of the
+        same row: ``POST .../inference`` itself, which now refuses on it. The
+        earlier version of this node pinned the opposite — it asserted an
+        un-activated artifact was still scored, because nothing on that path
+        asked the activation question. Closing the gap is what this line is now
+        for, so the gap assertion is gone rather than softened.
+
+        Three things are checked, in the order the door reaches them:
+
+        * before any approval exists the call is refused, and the refusal
+          writes no approval: the door may not invent the act it is asking for;
+        * once the owner records it, the same features score, and the score does
+          not move between states — an activation switches permission for one
+          artifact rather than retraining it, so any drift here means the gate
+          was paid for by changing the model;
+        * after the owner revokes it the same call is refused again. The reason
+          code is ``no_recorded_approval`` rather than a revocation code because
+          the gate looks up *live* approvals and finds none either way; the
+          revocation itself is the audit row below, whose ``decision`` flips to
+          ``revoked`` and stays readable.
+        """
+        snapshot = _ready_fixture_snapshot(client, auth_headers, monkeypatch, tmp_path)
+        assert _accept_consent(client, auth_headers).status_code == 200
+        trained = client.post(
+            "/api/v1/agent-strategy/training/jobs",
+            headers=auth_headers,
+            json={"snapshot_id": snapshot["id"]},
+        )
+        assert trained.status_code == 200, trained.text
+        job = trained.json()
+
+        test_ids = set(
+            snapshot["split_manifest"]["splits"]["test"]["candidate_ids"]
+        )
+        row = next(r for r in snapshot["rows"] if r["candidate_id"] in test_ids)
+        features = {
+            name: float(row["features"][name]) for name in snapshot["feature_names"]
+        }
+        inference_route = (
+            f"/api/v1/agent-strategy/training/jobs/{job['job_id']}/inference"
+        )
+        activation_route = (
+            f"/api/v1/agent-strategy/training/jobs/{job['job_id']}/activation"
+        )
+
+        def attempt():
+            return client.post(
+                inference_route, headers=auth_headers, json={"features": features}
+            )
+
+        def refusal():
+            resp = attempt()
+            assert resp.status_code == 409, resp.text
+            return resp.json()["detail"]
+
+        def score():
+            resp = attempt()
+            assert resp.status_code == 200, resp.text
+            return resp.json()
+
+        first = refusal()
+        assert first["code"] == "agent_model_not_activated"
+        assert first["details"]["activation_reason_code"] == "no_recorded_approval"
+        assert first["details"]["approval_id"] is None
+        assert _activation_approval_rows() == []
+
+        approved = _activate_artifact(client, auth_headers, job["job_id"])
+        assert approved.status_code == 200, approved.text
+        assert approved.json()["activation_status"] == "APPROVED"
+
+        activated = score()
+        assert activated["activation_status"] == "APPROVED"
+        assert activated["model_activated"] is True
+        assert activated["activation_reason_code"] is None
+        assert activated["artifact_checksum"] == job["artifact_checksum"]
+        approval_rows = _activation_approval_rows()
+        assert len(approval_rows) == 1
+        assert approval_rows[0].decision == "approved"
+        assert activated["activation_approval_id"] == str(approval_rows[0].id)
+
+        revoked = client.post(
+            f"{activation_route}/revoke",
+            headers=auth_headers,
+            json={"reason": "owner_revoked_after_reading_the_score"},
+        )
+        assert revoked.status_code == 200, revoked.text
+
+        after = refusal()
+        assert after["code"] == "agent_model_not_activated"
+        assert after["details"]["activation_reason_code"] == "no_recorded_approval"
+        # The revocation is an audit fact, not a deletion: the row the owner
+        # signed is still there, marked revoked, and the door reads it as absent.
+        after_rows = _activation_approval_rows()
+        assert len(after_rows) == 1
+        assert after_rows[0].decision == "revoked"
+        assert after_rows[0].id == approval_rows[0].id
+        assert after["details"]["approval_id"] is None
+
+        # Re-activating the same artifact scores the same row again: the number
+        # is a property of the frozen artifact, and only the permission moved.
+        again = _activate_artifact(client, auth_headers, job["job_id"])
+        assert again.status_code == 200, again.text
+        rescored = score()
+        assert rescored["decision"] == activated["decision"]
+        assert (
+            rescored["positive_probability"] == activated["positive_probability"]
+        )
+        assert rescored["artifact_checksum"] == activated["artifact_checksum"]
+        assert rescored["activation_approval_id"] != activated["activation_approval_id"]
+        assert len(_training_job_rows()) == 1
+
+    def test_an_approval_for_one_artifact_does_not_score_a_second_artifact(
+        self, client, auth_headers, monkeypatch, tmp_path
+    ):
+        """One signed approval binds one artifact; a second artifact stays shut.
+
+        The gate keys on the *job*, and the job keys on the artifact bytes, so
+        the interesting case is not two owners or two checksums in one row — it
+        is two real artifacts this owner trained in the same account. A second
+        snapshot is trained here on its own asset and series length, because a
+        copy of the first rows would produce the same scaler, the same model
+        bytes and therefore the same artifact checksum: identical bytes cannot
+        show that an approval does not travel.
+
+        What is asserted is the pair a reviewer cannot get from either door
+        alone: the approved artifact scores, and the un-approved one is refused
+        *with its own checksum in the refusal* — the door names what it
+        compared, so a match against the neighbour's approval would be visible
+        as a 200 here rather than argued away afterwards.
+        """
+        snapshot_a = _ready_fixture_snapshot(client, auth_headers, monkeypatch, tmp_path)
+        snapshot_b = _ready_fixture_snapshot(
+            client,
+            auth_headers,
+            monkeypatch,
+            tmp_path,
+            instrument=SECOND_ARTIFACT_INSTRUMENT,
+            title="Training fixture (second artifact)",
+            bars=210,
+        )
+        assert _accept_consent(client, auth_headers).status_code == 200
+
+        jobs = {}
+        for label, snapshot in (("a", snapshot_a), ("b", snapshot_b)):
+            trained = client.post(
+                "/api/v1/agent-strategy/training/jobs",
+                headers=auth_headers,
+                json={"snapshot_id": snapshot["id"]},
+            )
+            assert trained.status_code == 200, (label, trained.text)
+            assert trained.json()["status"] == "completed", trained.json()
+            jobs[label] = trained.json()
+        job_a, job_b = jobs["a"], jobs["b"]
+
+        # The premise of the whole node, stated rather than assumed: two
+        # artifacts, not one artifact seen through two rows.
+        assert job_a["artifact_checksum"] != job_b["artifact_checksum"]
+        assert job_a["dataset_checksum"] != job_b["dataset_checksum"]
+        assert job_a["job_id"] != job_b["job_id"]
+
+        approved = _activate_artifact(client, auth_headers, job_a["job_id"])
+        assert approved.status_code == 200, approved.text
+        assert approved.json()["activation_status"] == "APPROVED"
+
+        scored = client.post(
+            f"/api/v1/agent-strategy/training/jobs/{job_a['job_id']}/inference",
+            headers=auth_headers,
+            json={"features": _test_row_features(snapshot_a)},
+        )
+        assert scored.status_code == 200, scored.text
+
+        refused = client.post(
+            f"/api/v1/agent-strategy/training/jobs/{job_b['job_id']}/inference",
+            headers=auth_headers,
+            json={"features": _test_row_features(snapshot_b)},
+        )
+        assert refused.status_code == 409, refused.text
+        detail = refused.json()["detail"]
+        assert detail["code"] == "agent_model_not_activated"
+        assert detail["details"]["activation_reason_code"] == "no_recorded_approval"
+        assert detail["details"]["approval_id"] is None
+        assert detail["details"]["artifact_checksum"] == job_b["artifact_checksum"]
+
+        read = client.get(
+            f"/api/v1/agent-strategy/training/jobs/{job_b['job_id']}/activation",
+            headers=auth_headers,
+        )
+        assert read.status_code == 200, read.text
+        body = read.json()
+        assert body["state"]["activation_status"] == "NOT_APPROVED"
+        assert body["state"]["reason_code"] == "no_recorded_approval"
+        assert body["state"]["approval_id"] is None
+        # The requirements B echoes are B's own — an approval form cannot be
+        # filled from A's readback and land on B.
+        assert body["requirements"]["job_id"] == job_b["job_id"]
+        assert (
+            body["requirements"]["artifact_checksum"] == job_b["artifact_checksum"]
+        )
+
+        rows = _activation_approval_rows()
+        assert len(rows) == 1
+        assert str(rows[0].job_id) == job_a["job_id"]
+        assert str(rows[0].artifact_checksum) == job_a["artifact_checksum"]
+        # B's artifact is still what training wrote; refusing B wrote nothing
+        # anywhere, and the mirrored column on B never moved.
+        with open(
+            os.path.join(os.path.dirname(job_b["artifact_path"]), "metadata.json")
+        ) as fh:
+            assert json.load(fh)["model_activation"] == "NOT_APPROVED"
+        assert len(_training_job_rows()) == 2
+        db = TestSession()
+        try:
+            stored_b = db.get(AgentStrategyTrainingJob, uuid.UUID(job_b["job_id"]))
+            assert stored_b.activation_status == "NOT_APPROVED"
+        finally:
+            db.close()
+
+    def test_the_approval_door_refuses_to_bind_another_artifacts_checksum(
+        self, client, auth_headers, monkeypatch, tmp_path
+    ):
+        """Presenting a neighbour's checksum at the approval door records nothing.
+
+        This is the borrow attempt itself, taken through the same formal route
+        the owner uses: A is approved, and the owner's account then asks for B
+        while holding A's ``artifact_checksum``. The refusal is only worth
+        anything if the server answered about the pairing it saw, so the
+        expected/received pair is asserted as returned, the approval table is
+        counted rather than trusted, and B is still refused at scoring after.
+        """
+        snapshot_a = _ready_fixture_snapshot(client, auth_headers, monkeypatch, tmp_path)
+        snapshot_b = _ready_fixture_snapshot(
+            client,
+            auth_headers,
+            monkeypatch,
+            tmp_path,
+            instrument=SECOND_ARTIFACT_INSTRUMENT,
+            title="Training fixture (second artifact)",
+            bars=210,
+        )
+        assert _accept_consent(client, auth_headers).status_code == 200
+        jobs = {}
+        for label, snapshot in (("a", snapshot_a), ("b", snapshot_b)):
+            trained = client.post(
+                "/api/v1/agent-strategy/training/jobs",
+                headers=auth_headers,
+                json={"snapshot_id": snapshot["id"]},
+            )
+            assert trained.status_code == 200, (label, trained.text)
+            jobs[label] = trained.json()
+        job_a, job_b = jobs["a"], jobs["b"]
+        assert _activate_artifact(client, auth_headers, job_a["job_id"]).status_code == 200
+
+        route_b = f"/api/v1/agent-strategy/training/jobs/{job_b['job_id']}/activation"
+        requirements_b = client.get(route_b, headers=auth_headers).json()[
+            "requirements"
+        ]
+        borrowed = client.put(
+            route_b,
+            headers=auth_headers,
+            json={
+                "artifact_checksum": job_a["artifact_checksum"],
+                "policy_version": requirements_b["approval_policy_version"],
+                "acknowledgement_text_version": requirements_b[
+                    "acknowledgement_text_version"
+                ],
+                "acknowledgement": requirements_b["acknowledgement_text_zh"],
+            },
+        )
+        assert borrowed.status_code == 409, borrowed.text
+        detail = borrowed.json()["detail"]
+        assert detail["code"] == "agent_activation_artifact_mismatch"
+        assert detail["details"] == {
+            "expected": job_b["artifact_checksum"],
+            "received": job_a["artifact_checksum"],
+        }
+        # Nothing was persisted for B, and A's own approval is untouched: the
+        # refused act may not spend or duplicate the live one either.
+        rows = _activation_approval_rows()
+        assert len(rows) == 1
+        assert str(rows[0].job_id) == job_a["job_id"]
+        assert client.get(route_b, headers=auth_headers).json()["state"][
+            "activation_status"
+        ] == "NOT_APPROVED"
+
+        refused = client.post(
+            f"{route_b.replace('/activation', '/inference')}",
+            headers=auth_headers,
+            json={"features": _test_row_features(snapshot_b)},
+        )
+        assert refused.status_code == 409, refused.text
+        assert refused.json()["detail"]["code"] == "agent_model_not_activated"
+
+    def test_an_approval_bound_to_a_superseded_artifact_is_read_as_stale(
+        self, client, auth_headers, monkeypatch, tmp_path
+    ):
+        """A live approval for an older artifact does not authorize a newer one.
+
+        The history row is the owner's act and is never rewritten, so when the
+        artifact a job points at is replaced the approval does not travel to the
+        new bytes. The replacement is written directly onto this process's own
+        temporary database row — a retrain that keeps its job identity is what
+        the gate has to survive, and no formal door offers that write.
+
+        Two doors answer, and they answer differently: the activation read says
+        ``approval_artifact_mismatch`` because it still finds the signed row and
+        compares it, while scoring is refused one step earlier — the artifact
+        bytes no longer match the record — so the approval is never even reached.
+        Neither answer is a pass, and the node says which door produced which.
+        """
+        snapshot = _ready_fixture_snapshot(client, auth_headers, monkeypatch, tmp_path)
+        assert _accept_consent(client, auth_headers).status_code == 200
+        trained = client.post(
+            "/api/v1/agent-strategy/training/jobs",
+            headers=auth_headers,
+            json={"snapshot_id": snapshot["id"]},
+        )
+        assert trained.status_code == 200, trained.text
+        job = trained.json()
+        route = f"/api/v1/agent-strategy/training/jobs/{job['job_id']}"
+        assert _activate_artifact(client, auth_headers, job["job_id"]).status_code == 200
+        scored = client.post(
+            f"{route}/inference",
+            headers=auth_headers,
+            json={"features": _test_row_features(snapshot)},
+        )
+        assert scored.status_code == 200, scored.text
+        approval_id = str(_activation_approval_rows()[0].id)
+
+        superseded_checksum = job["artifact_checksum"]
+        db = TestSession()
+        try:
+            stored = db.get(AgentStrategyTrainingJob, uuid.UUID(job["job_id"]))
+            stored.artifact_checksum = "f" * 64
+            db.commit()
+        finally:
+            db.close()
+
+        state = client.get(f"{route}/activation", headers=auth_headers).json()["state"]
+        assert state["activation_status"] == "NOT_APPROVED"
+        assert state["reason_code"] == "approval_artifact_mismatch"
+        # The stale approval is still found and still named; it is read as not
+        # covering this artifact rather than silently disappearing.
+        assert state["approval_id"] == approval_id
+        assert state["bindings"]["artifact_bound"] is False
+        assert state["bindings"]["dataset_bound"] is True
+        assert state["bindings"]["contract_bound"] is True
+
+        refused = client.post(
+            f"{route}/inference",
+            headers=auth_headers,
+            json={"features": _test_row_features(snapshot)},
+        )
+        assert refused.status_code == 409, refused.text
+        detail = refused.json()["detail"]
+        assert detail["code"] == "artifact_checksum_mismatch"
+        assert detail["details"]["stored"] == "f" * 64
+        assert detail["details"]["recomputed"] == superseded_checksum
+
+        # The owner's act and the artifact it named both survive: the approval
+        # row keeps the checksum that was signed, and the file on disk is the
+        # same bytes scoring just read.
+        rows = _activation_approval_rows()
+        assert len(rows) == 1
+        assert rows[0].decision == "approved"
+        assert rows[0].artifact_checksum == superseded_checksum
+        assert os.path.isfile(job["artifact_path"])
 
     def test_tampered_snapshot_refuses_training(
         self, client, auth_headers, monkeypatch, tmp_path

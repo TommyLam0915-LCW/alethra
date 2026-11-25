@@ -38,7 +38,13 @@ def _settings(**overrides) -> Settings:
         trial_passwordless_session_minutes=90,
     )
     values.update(overrides)
-    return Settings(**values)
+    # `_env_file=None` is this repo's own convention for a Settings that means
+    # what the test says (tests/test_config.py:14). Without it a developer
+    # `backend/.env` that sets CANDIDATE_PASSWORDLESS_MODE=TRUE reaches every
+    # object built here, and the candidate validator — which runs first
+    # (app/config.py:158) — answers for the trial gate, so the fail-closed
+    # assertions below measure a flag this file never set.
+    return Settings(_env_file=None, **values)
 
 
 _LOOP = None
@@ -49,6 +55,16 @@ def _loop():
     if _LOOP is None:
         _LOOP = asyncio.new_event_loop()
     return _LOOP
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _close_shared_loop():
+    """Close the module loop; see tests/test_candidate_passwordless.py."""
+    yield
+    global _LOOP
+    if _LOOP is not None:
+        _LOOP.close()
+        _LOOP = None
 
 
 def _call(app, method: str, path: str, *, peer="127.0.0.1", json=None, token=None):
@@ -81,9 +97,16 @@ def trial_app(client, token_file):
     from app.main import app
 
     settings = _settings(trial_passwordless_token_file=str(token_file))
+    saved_overrides = dict(app.dependency_overrides)
     app.dependency_overrides[get_settings] = lambda: settings
-    yield app
-    app.dependency_overrides.pop(get_settings, None)
+    try:
+        yield app
+    finally:
+        # A body that raised used to leave `get_settings` overridden for every
+        # later test: `pop` never ran, and the whole app kept answering from
+        # this fixture's throwaway Settings.
+        app.dependency_overrides.clear()
+        app.dependency_overrides.update(saved_overrides)
 
 
 def _register(client, email: str = TRIAL_EMAIL, password: str = PASSWORD):
@@ -117,7 +140,7 @@ class TestDisabledByDefault:
             database_url="sqlite:///./test-trial-login.db",
             jwt_secret_key=STRONG_SECRET,
         )
-        settings = Settings(**values)
+        settings = Settings(_env_file=None, **values)
         assert settings.trial_passwordless_enabled is False
 
 

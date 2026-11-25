@@ -7,14 +7,33 @@ For PostgreSQL with limited-permission runtime role, we cannot drop/recreate tab
 between tests (no DDL permission). Instead, we rely on transaction rollback.
 
 This test suite proves the isolation mechanism works correctly.
+
+Every node is PostgreSQL-only. It writes to ``_test_sacrificial_``, a table a
+migration creates on the PostgreSQL test database and which the SQLite lane
+does not have, and it uses ``ON CONFLICT``. Offline the three nodes fail with
+"no such table", a statement about the missing table rather than about whether
+rollback isolates one test from the next.
+
+The steps are numbered because they depend on each other: step 2 asserts what
+step 1 left behind, so this file is only meaningful run in file order.
 """
 import pytest
 from sqlalchemy import text
 import app.database
 
+from tests.postgresql_only import requires_postgresql
+
 
 # Shared state to track data across tests
 _test_data_marker = "isolation_test_marker_999"
+
+
+@pytest.fixture(autouse=True)
+def _postgres_required():
+    requires_postgresql(
+        "writes to the migration-created _test_sacrificial_ table with "
+        "ON CONFLICT, neither of which exists on the SQLite lane"
+    )
 
 
 def test_isolation_step1_insert_data():

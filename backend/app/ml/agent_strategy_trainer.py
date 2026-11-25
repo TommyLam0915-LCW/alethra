@@ -12,8 +12,10 @@ The chain has three explicit steps and each one re-verifies the previous:
    stays ``NOT_APPROVED`` until the owner records an approval for this exact
    artifact checksum. This module grants nothing itself.
 3. ``run_inference`` re-verifies the artifact checksum, the dataset checksum
-   and the full lineage before returning a take/skip estimate. It writes
-   nothing.
+   and the full lineage, and then requires the owner's own live activation for
+   this exact artifact, before returning a take/skip estimate. It writes
+   nothing, and an artifact the owner has not activated (or has revoked) is
+   refused before the model is loaded.
 
 Two independent authorizations are required to reach step 1: the development
 training fixture and the owner's own recorded consent. Neither is a customer
@@ -49,14 +51,16 @@ from app.services.agent_strategy import (
     training_authorization,
 )
 from app.services.model_activation import (
+    ACTIVATED,
     activation_report,
+    activation_state,
     refresh_job_activation,
 )
 
 AGENT_ARTIFACTS_DIR = os.path.join(ARTIFACTS_DIR, "agent_strategy")
 TRAINING_CONTRACT_VERSION = "agent-strategy-training-contract-v1"
 DERIVED_LABEL_VERSION = "positive-net-return-v1"
-INFERENCE_POLICY_VERSION = "snapshot-artifact-verified-v1"
+INFERENCE_POLICY_VERSION = "snapshot-artifact-activation-verified-v2"
 TASK_TYPE = PURPOSE
 
 HYPERPARAMETERS: Dict[str, Any] = {
@@ -660,6 +664,24 @@ def run_inference(
             {"job_id": str(job_id)},
         )
 
+    # The owner's own live approval is the last precondition, and it is checked
+    # here — after every identity above has been re-read from the database and
+    # from disk, and before a single byte of the model is loaded. Reading the
+    # bindings after the re-verification is what makes a revoked, expired or
+    # foreign-signed approval impossible to smuggle past by naming a stale value.
+    activation = activation_state(db, job)
+    if activation["activation_status"] != ACTIVATED:
+        raise AgentStrategyRefused(
+            "agent_model_not_activated",
+            "這個產物沒有生效中的本人啟用同意，拒絕執行模型推論。",
+            {
+                "job_id": str(job.id),
+                "activation_reason_code": activation["reason_code"],
+                "approval_id": activation["approval_id"],
+                "artifact_checksum": job.artifact_checksum,
+            },
+        )
+
     feature_names = list(metadata.get("feature_names") or [])
     missing = [name for name in feature_names if name not in features]
     if missing:
@@ -700,7 +722,9 @@ def run_inference(
         if probability >= HYPERPARAMETERS["positive_probability_threshold"]
         else "skip"
     )
-    activation = activation_report(db, job)
+    # The activation fields below describe the same read that admitted this call,
+    # not a second one: a revocation landing between the gate and the response
+    # must not turn a score that was executed into a body that says NOT_APPROVED.
     return {
         "job_id": str(job.id),
         "snapshot_id": str(job.snapshot_id),
@@ -714,9 +738,10 @@ def run_inference(
         "artifact_checksum": job.artifact_checksum,
         "lineage_verified": lineage_check["valid"],
         "artifact_verified": True,
-        "activation_status": activation["model_activation"],
-        "model_activated": activation["activation_available"],
-        "activation_reason_code": activation["activation_reason_code"],
+        "activation_status": activation["activation_status"],
+        "model_activated": activation["activation_status"] == ACTIVATED,
+        "activation_reason_code": activation["reason_code"],
+        "activation_approval_id": activation["approval_id"],
         "runs_inference_for_customer": False,
         "not_a_recommendation": True,
         "not_a_profit_claim": True,

@@ -1,6 +1,6 @@
 from typing import List, Optional
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.user import User
@@ -10,6 +10,7 @@ from app.models.research_run import ResearchRun, RunStatus
 from app.auth.jwt import get_current_user
 from app.auth.provenance import request_actor_provenance
 from app.api.schemas import (
+    ResearchRunCancelResponse,
     ResearchRunResponse,
     VersionDiffResponse,
     VersionDiffEntry,
@@ -23,10 +24,22 @@ from app.engine.backtest import compute_config_hash
 from app.auth.entitlements import require_entitlement
 from app.auth.api_keys import check_api_key_scope
 from app.services.research_runs import (
+    cancel_research_run,
     execute_backtest_run,
+)
+from app.services.run_trades import (
+    RunNotExportable,
+    build_run_trades_export,
+    get_owned_run,
+    run_trades_csv_content,
 )
 
 router = APIRouter(tags=["runs"])
+
+# Read off the column, not retyped: a header longer than the column would be
+# rejected or cut by the database after the caller was promised de-duplication,
+# and the number that decides that is the one the schema carries.
+IDEMPOTENCY_KEY_MAX_LENGTH = ResearchRun.__table__.c.idempotency_key.type.length
 
 
 @router.post(
@@ -36,18 +49,28 @@ router = APIRouter(tags=["runs"])
     responses={
         status.HTTP_409_CONFLICT: {
             "description": (
-                "This version already has a committed, still-active run; its "
-                "run id is in the detail. The refusal is re-read inside the "
-                "admission transaction, under the version row lock, so an "
-                "admission that committed in between cannot be missed — but an "
-                "active row is not proof the process is alive."
+                "Either this version already has a committed, still-active run "
+                "(its run id is in the detail), or the Idempotency-Key sent here "
+                "was already used on this version for a different request (the "
+                "run that owns the key is in the detail). The active-run refusal "
+                "is re-read inside the admission transaction, under the version "
+                "row lock, so an admission that committed in between cannot be "
+                "missed — but an active row is not proof the process is alive."
             )
-        }
+        },
+        status.HTTP_400_BAD_REQUEST: {
+            "description": (
+                "An Idempotency-Key header was sent but is not usable (blank or "
+                "longer than 128 characters). The request was refused before any "
+                "attempt was admitted."
+            )
+        },
     },
 )
 def create_run(
     version_id: UUID,
     request: Request,
+    response: Response,
     data_source: str = Query("auto", pattern="^(auto|stored|provider)$"),
     provider_id: Optional[str] = Query(None, max_length=50),
     db: Session = Depends(get_db),
@@ -63,17 +86,30 @@ def create_run(
     computes and survives the death of this process. The outcome, its
     settlement and its audit event are committed together afterwards.
 
-    Three repeat shapes, which this endpoint answers differently:
+    Four repeat shapes, which this endpoint answers differently:
 
     1. the same version while its run is still active → 409, nothing written;
     2. a finished run, then a deliberate re-run → a new run and a new unit;
-    3. **the same request repeated because the response was lost → also a new
-       run and a new unit.** Persistent request de-duplication (an
-       ``Idempotency-Key`` stored beside the attempt) is NOT IMPLEMENTED: this
-       slice stores no key, so shape 3 is indistinguishable from shape 2 here,
-       and a caller that retries can be billed twice. That gap is stated
-       rather than papered over; closing it is a separate bounded item.
+    3. **the same request repeated with the same ``Idempotency-Key`` → the run
+       the first request produced, answered 200 instead of 201, with no second
+       unit.** The key is stored on the attempt inside the admission
+       transaction, so this holds even when the first response was lost, the
+       first process died, or the retry arrives after the run closed; a replay
+       never re-executes the engine.
+    4. the same ``Idempotency-Key`` reused for a *different* request on this
+       version → 409, neither request runs. The key alone cannot tell shape 3
+       from this one, so the admission stores what the original request was
+       (data source, provider, config hash, billing mode) and compares.
+
+    Without a header, shape 3 is indistinguishable from shape 2 and a retry
+    costs a second unit — that is the caller's choice, not a default. The key is
+    scoped to the version: the same key on another version, or another
+    account's version, is a separate request. A header that is present but blank
+    or over-long is refused: a key that cannot be stored cannot deduplicate
+    anything, and silently dropping it would bill the retry.
     """
+    idempotency_key = _idempotency_key_from(request)
+
     version = db.query(ExperimentVersion).filter(
         ExperimentVersion.id == version_id
     ).first()
@@ -93,7 +129,7 @@ def create_run(
     # committed row and can be answered by an admission that commits in between.
     # The ownership check above still runs first, so another account cannot use
     # a 409 to read this user's run ids.
-    return execute_backtest_run(
+    run = execute_backtest_run(
         db,
         user=current_user,
         version=version,
@@ -101,7 +137,44 @@ def create_run(
         data_source=data_source,
         provider_id=provider_id,
         actor_type=request_actor_provenance(request),
+        idempotency_key=idempotency_key,
     )
+    if getattr(run, "idempotent_replay", False):
+        # 201 would claim an attempt was admitted by this request. The first
+        # one created it; this request was answered.
+        response.status_code = status.HTTP_200_OK
+    return run
+
+
+def _idempotency_key_from(request: Request) -> Optional[str]:
+    """The ``Idempotency-Key`` header, or a refusal to use an unusable one.
+
+    HTTP headers are attacker- and typo-shaped text; the column is String(128)
+    and a key that does not fit would be truncated or rejected by the database
+    *after* the caller was told the request was de-duplicated.
+    """
+    raw = request.headers.get("Idempotency-Key")
+    if raw is None:
+        return None
+    key = raw.strip()
+    if not key:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Idempotency-Key was sent but is blank. Send a non-empty key, "
+                "or no Idempotency-Key header at all — the latter means this "
+                "request may be billed again if it is retried."
+            ),
+        )
+    if len(key) > IDEMPOTENCY_KEY_MAX_LENGTH:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Idempotency-Key is {len(key)} characters; the maximum is "
+                f"{IDEMPOTENCY_KEY_MAX_LENGTH}. Shorten it and retry."
+            ),
+        )
+    return key
 
 
 # Every execution-affecting setting a revision can change. Metadata the authoring
@@ -706,6 +779,166 @@ def get_run(
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
     return run
+
+
+def _trades_export_payload(
+    run_id: UUID,
+    db: Session,
+    current_user: User,
+) -> dict:
+    """One basis decision for both export routes.
+
+    The 404 is the same answer ``get_run`` and ``cancel_run`` give, so a run id
+    stays a private thing: another account's export request cannot tell whether
+    the run exists. The 409 carries the state that made an export impossible —
+    failed, cancelled, still computing, or completed without a transaction
+    record — each of which would otherwise read back as a strategy that filled
+    nothing.
+    """
+    owned = get_owned_run(db, run_id=run_id, user_id=current_user.id)
+    if not owned:
+        raise HTTPException(status_code=404, detail="Run not found")
+    run, version, experiment = owned
+    try:
+        return build_run_trades_export(run, version, experiment)
+    except RunNotExportable as refused:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=refused.detail()
+        )
+
+
+@router.get(
+    "/runs/{run_id}/trades",
+    responses={
+        status.HTTP_409_CONFLICT: {
+            "description": (
+                "The run's own record cannot answer the question: it failed, "
+                "was cancelled, has not published an outcome yet, or was "
+                "published without a transaction record. The state and the "
+                "reason are in the detail."
+            )
+        }
+    },
+)
+def get_run_trades(
+    run_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    """Every fill one completed research run recorded, with its identity.
+
+    ``trades`` uses the engine's own field names — no journal-lane renaming —
+    and ``export_basis`` states what an empty list would mean. ``provenance``
+    repeats on each row, because a row detached from this response is still a
+    claim about a run, a dataset and an account.
+    """
+    return _trades_export_payload(run_id, db, current_user)
+
+
+@router.get("/runs/{run_id}/trades.csv")
+def get_run_trades_csv(
+    run_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Response:
+    """The same rows as ``/trades``, as one CSV download.
+
+    Both routes call the same builder, so the CSV cannot say something the JSON
+    refuses to say. Cells are escaped so a value starting with ``=``, ``+``,
+    ``-``, ``@`` or a tab cannot be executed by the spreadsheet that opens it.
+    """
+    payload = _trades_export_payload(run_id, db, current_user)
+    return Response(
+        content=run_trades_csv_content(payload),
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="run-{run_id}-trades.csv"'
+        },
+    )
+
+
+@router.post(
+    "/runs/{run_id}/cancel",
+    response_model=ResearchRunCancelResponse,
+    responses={
+        status.HTTP_409_CONFLICT: {
+            "description": (
+                "The run already carries an outcome published by another writer, "
+                "so this request closed nothing, released nothing and wrote no "
+                "event; the status on record is in the detail."
+            )
+        }
+    },
+)
+def cancel_run(
+    run_id: UUID,
+    request: Request,
+    reason: Optional[str] = Query(None, max_length=500),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope("write")),
+):
+    """Close an active research run by decision — the entry a timeout cannot be.
+
+    An admitted run holds its version: while its row is active, admission answers
+    409 and its quota unit stays held. Recovery refuses to end that state from
+    age, because a slow backtest and a killed one are the same row. This is the
+    other remedy, and the one a person can actually take: it flips the row to
+    ``cancelled`` under the same conditional write that publishes any other
+    outcome, so the request that wins it is the one that hands the quota unit
+    back and records the decision.
+
+    Answers 200 with what changed, 409 when the run already has an outcome
+    (nothing is moved in that case), 404 for a run this account does not own —
+    the same answer as one that does not exist, so a run id is not an oracle —
+    and no quota or entitlement check, because giving up work is not a billable
+    action.
+
+    It does not claim the computing process stopped. There is nothing to signal:
+    the answer is ``process_stopped: null`` always, because what voids that
+    process's result is this row no longer being active, which its own terminal
+    write cannot match. If it was still running, its result is discarded and it
+    is billed nothing.
+    """
+    run = db.query(ResearchRun).join(
+        ExperimentVersion, ResearchRun.experiment_version_id == ExperimentVersion.id
+    ).join(
+        Experiment, ExperimentVersion.experiment_id == Experiment.id
+    ).filter(
+        ResearchRun.id == run_id,
+        Experiment.owner_id == current_user.id
+    ).first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    result = cancel_research_run(
+        db,
+        run=run,
+        user=current_user,
+        actor_type=request_actor_provenance(request),
+        reason=reason,
+    )
+
+    if result["outcome"] != "cancelled":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "run_finished",
+                "message": result["note"],
+                "run_id": str(run_id),
+                "status": result["status_after"],
+            },
+        )
+
+    return ResearchRunCancelResponse(
+        run=result["run"],
+        outcome=result["outcome"],
+        status_before=result["status_before"],
+        status_after=result["status_after"],
+        quota=result["quota"],
+        process_stopped=None,
+        note=result["note"],
+    )
 
 
 @router.get("/experiments/{experiment_id}/runs", response_model=List[ResearchRunResponse])

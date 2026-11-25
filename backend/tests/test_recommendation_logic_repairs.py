@@ -319,7 +319,13 @@ class TestLiveTradingDaemonValidationOrdering:
         
         # Mock database session
         mock_db = MagicMock()
-        
+        # The skill-unit ceiling counts held slots with a scalar query, so the
+        # double has to answer that count the way a session with no open skill
+        # unit does. Left as a bare MagicMock it returns a MagicMock, and the
+        # comparison raises inside the daemon's broad except -- which then
+        # reports "no portfolios created" for an account that has a free slot.
+        mock_db.query.return_value.filter.return_value.scalar.return_value = 0
+
         with patch("app.services.live_trading_daemon.SessionLocal", return_value=mock_db):
             # Create daemon with one valid and one invalid skill
             daemon = LivePaperTradingDaemon(
@@ -671,6 +677,10 @@ class TestDaemonStartupState:
         with patch("app.services.live_trading_daemon.SessionLocal") as mock_session_class:
             mock_db = MagicMock()
             mock_session_class.return_value = mock_db
+            # Same as above: the ceiling count must read as an int, or the
+            # daemon swallows a TypeError and returns 0 for an account that
+            # still has free slots.
+            mock_db.query.return_value.filter.return_value.scalar.return_value = 0
             
             # Call _create_portfolios
             created_count = daemon._create_portfolios()
@@ -683,6 +693,99 @@ class TestDaemonStartupState:
             assert len(daemon.portfolio_ids) == 1
             assert "valid_skill_BTC/USD" in daemon.portfolio_ids
             assert "invalid_skill_BTC/USD" not in daemon.portfolio_ids
+
+
+class TestDaemonCreationFailureDisclosure:
+    """A failed DB write is neither a validation rejection nor a ceiling refusal.
+
+    ``_create_portfolios`` commits each skill's rows as it goes, so an exception
+    on the third skill leaves two skill units open. The lane used to return 0
+    from that branch, which made ``start()`` abort and announce that every
+    requested skill had been rejected during validation -- false in both
+    directions, because validation had accepted them and the rows the daemon had
+    just written stayed in the database with status 'running' with nothing
+    serving them.
+    """
+
+    @staticmethod
+    def _three_skills():
+        return LivePaperTradingDaemon(
+            symbols=["XBT/USD"],
+            skills=[
+                {
+                    "skill": f"s{i}",
+                    "instrument_id": "CRYPTO:KRAKEN:BTC-USD",
+                    "interval_minutes": 60,
+                    "rule_id": StrategyType.RSI_BASIC.value,
+                    "exit_config": {},
+                    "user_id": str(uuid4()),
+                }
+                for i in (1, 2, 3)
+            ],
+        )
+
+    @staticmethod
+    def _session(side_effect):
+        mock_db = MagicMock()
+        # The skill-unit ceiling counts held slots with a scalar query; the
+        # double answers the way a session with no open skill unit does.
+        mock_db.query.return_value.filter.return_value.scalar.return_value = 0
+        mock_db.execute.side_effect = side_effect
+        return mock_db
+
+    def test_a_late_write_failure_reports_the_units_that_exist(self):
+        daemon = self._three_skills()
+        # Two inserts per skill (portfolio, then run), so the third call is the
+        # second skill's portfolio row: s1 is committed, s3 is never attempted.
+        mock_db = self._session([None, None, RuntimeError("connection lost")])
+
+        with patch("app.services.live_trading_daemon.SessionLocal", return_value=mock_db):
+            created = daemon._create_portfolios()
+
+        assert created == 1, (
+            "A skill whose rows are already committed is open, and the caller has "
+            f"to be told it exists; the write failed on skill 2 and got {created}"
+        )
+        assert list(daemon.portfolio_ids) == ["s1_BTC/USD"]
+        assert daemon.creation_failure == "s2_BTC/USD"
+        assert daemon.unattempted_skills == ["s3_BTC/USD"]
+
+    def test_a_first_write_failure_names_the_write_not_validation(self):
+        import asyncio
+        import logging
+        from unittest.mock import AsyncMock
+
+        daemon = self._three_skills()
+        mock_db = self._session(RuntimeError("connection lost"))
+
+        with patch(
+            "app.services.live_trading_daemon.SessionLocal", return_value=mock_db
+        ), patch("app.services.live_trading_daemon.KrakenWebSocketClient") as ws_class:
+            ws = MagicMock()
+            ws.start = AsyncMock()
+            ws_class.return_value = ws
+
+            records = []
+            handler = logging.Handler()
+            handler.emit = lambda record: records.append(record.getMessage())
+            daemon_logger = logging.getLogger("app.services.live_trading_daemon")
+            daemon_logger.addHandler(handler)
+            try:
+                asyncio.run(daemon.start())
+            finally:
+                daemon_logger.removeHandler(handler)
+
+        assert daemon.creation_failure == "s1_BTC/USD"
+        assert daemon.unattempted_skills == ["s2_BTC/USD", "s3_BTC/USD"]
+        assert daemon.running is False
+        ws.start.assert_not_awaited()
+        assert not any(
+            "rejected during validation" in message for message in records
+        ), f"a DB write failure was narrated as a validation rejection: {records}"
+        assert any(
+            "database write" in message and "s1_BTC/USD" in message
+            for message in records
+        ), f"the failed write is not named in the abort report: {records}"
 
 
 if __name__ == "__main__":

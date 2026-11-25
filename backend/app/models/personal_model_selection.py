@@ -67,6 +67,9 @@ class PersonalModelSelection(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     owner_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    # Unified skill model: which portfolio this selection serves.
+    # Nullable because existing selections predate the concept and cannot be backfilled.
+    skill_unit_id = Column(UUID(as_uuid=True), nullable=True)
     record_id = Column(
         UUID(as_uuid=True),
         ForeignKey("model_research_records.id"),

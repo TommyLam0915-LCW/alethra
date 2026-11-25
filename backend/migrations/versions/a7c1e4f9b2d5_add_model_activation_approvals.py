@@ -65,6 +65,13 @@ def upgrade() -> None:
         ["job_id"],
         unique=True,
         postgresql_where=sa.text("decision = 'approved'"),
+        # The model (app/models/agent_strategy.py:349-355) declares the predicate
+        # for SQLite too. Without this kwarg the SQLite build is a plain
+        # UNIQUE(job_id), so a withdrawn approval would keep occupying the slot
+        # and re-approval of the same job would collide here but not under
+        # create_all -- the tested schema and the migrated schema enforcing
+        # different things.
+        sqlite_where=sa.text("decision = 'approved'"),
     )
     op.create_index(
         "ix_agent_activation_approval_owner",

@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Literal, Optional, List, Dict
 from uuid import UUID
 import math
@@ -76,6 +76,23 @@ class StrategySpec(BaseModel):
     def validate_benchmark_id(cls, v):
         if v is not None and v != "" and not _is_valid_asset_id(v):
             raise ValueError(f"Unknown benchmark_id: {v}. Allowed: demo assets or MARKET:SYMBOL format")
+        return v
+
+    @field_validator("start_date", "end_date")
+    @classmethod
+    def validate_iso_dates(cls, v, info):
+        # Both readers of these two strings call date.fromisoformat on them
+        # (engine/backtest.py :: _load_stored_bars), so a value that
+        # date.fromisoformat refuses is a window no path can open. It must be
+        # refused while authoring, not raise inside a run that was already
+        # admitted and billed.
+        try:
+            date.fromisoformat(v)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"{info.field_name} must be a date that date.fromisoformat accepts "
+                "(YYYY-MM-DD); no reader can open this window"
+            )
         return v
 
     @field_validator("end_date")
@@ -245,6 +262,28 @@ class ResearchRunResponse(BaseModel):
     completed_at: Optional[datetime]
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class ResearchRunCancelResponse(BaseModel):
+    """What a cancellation did to a run, to its quota and to the work behind it."""
+
+    run: ResearchRunResponse
+    # "cancelled" when this request closed the row, "already_terminal" when
+    # somebody already had and this request changed nothing.
+    outcome: str
+    status_before: Optional[str]
+    status_after: str
+    # "released" | "not_billed" | "left_used" | "left_released" |
+    # "unattributable" | "unchanged" — what happened to the quota unit the
+    # admission attributed to this run, read from the ledger rather than
+    # assumed from this request having started the work.
+    quota: str
+    # None, always, including for a successful cancellation: this platform
+    # closes rows, it cannot observe processes. A cancelled run whose engine is
+    # still computing has its result refused by the terminal write, which is not
+    # the same claim as having stopped it.
+    process_stopped: Optional[bool] = None
+    note: str
 
 
 class AdHocDurableRunHint(BaseModel):
@@ -514,12 +553,70 @@ class SimulationAdvanceResponse(BaseModel):
     decision: SimulationDecisionResponse
 
 
+class DailyServiceRun(BaseModel):
+    """What the last daily replay tick did to one session.
+
+    Read out of the ``simulation_daily`` ledger row rather than stored again:
+    the tick's own record stays the only place an outcome is written.
+    """
+
+    job_id: UUID
+    job_status: str
+    scope: Optional[str] = None
+    scheduled_for: Optional[str] = None
+    completed_at: Optional[str] = None
+    # "advanced" | "completed" | "skipped" | "failed"; None when the row ran but
+    # never reached this session (a tick that died mid-way).
+    outcome: Optional[str] = None
+    step_number: Optional[int] = None
+    snapshot_date: Optional[str] = None
+    detail: Optional[str] = None
+
+
+class DailyServiceStatus(BaseModel):
+    """The background replay service as this session can actually see it."""
+
+    session_id: UUID
+    session_status: Optional[str] = None
+    timeframe: Optional[str] = None
+    cadence_hour_utc: int
+    cadence_timezone: str
+    job_type: str
+    # True when the session's own row is one the tick would step.
+    enrolled: bool
+    enrolment_reason: Optional[str] = None
+    # Position among this account's eligible sessions, and the per-account
+    # number of steps one tick takes. Beyond the limit defers the session to a
+    # later day; it is not a refusal.
+    queue_position: Optional[int] = None
+    batch_limit: int
+    in_next_batch: bool
+    # "inactive" | "active" | "unreadable" — the last means the switch could not
+    # be read, which stops the tick rather than letting it guess.
+    kill_switch: str
+    # Only this process can answer this. A deployment with several API workers
+    # reports False in the ones that did not start the scheduler.
+    runs_in_this_process: bool
+    next_run_at: Optional[str] = None
+    in_flight: bool
+    last_run: Optional[DailyServiceRun] = None
+    # The statuses the tick serves, so the UI names the same set the worker
+    # filters on instead of paraphrasing it.
+    statuses_served: List[str] = []
+
+
 class ManualDecisionRequest(BaseModel):
     action: str = Field(..., pattern="^(buy|sell|hold)$")
     quantity: Optional[int] = Field(None, ge=1)
     idempotency_key: str = Field(..., min_length=1, max_length=100)
     rationale: Optional[str] = Field(None, max_length=1000)
     reflection: Optional[str] = Field(None, max_length=2000)
+    # The model execution this submission answers, recorded on the same lineage
+    # column the paper desk's own decision route uses and verified by the same
+    # refusals. A buy/sell only; a hold creates no decision row here, so it has
+    # nothing to carry the inference and the request is refused rather than
+    # silently dropping the lineage.
+    linked_inference_id: Optional[UUID] = None
     expected_version: Optional[int] = Field(None, ge=0, description="Expected state version for optimistic locking")
 
 
@@ -658,6 +755,7 @@ class DecisionRecordCreate(BaseModel):
     )
     simulation_session_id: Optional[UUID] = None
     linked_experiment_version_id: Optional[UUID] = None
+    linked_inference_id: Optional[UUID] = None  # References usage_records.id for model-execution decisions
     rationale: Optional[str] = None
     expected_outcome: Optional[str] = None
     expected_timeframe_days: Optional[int] = Field(None, gt=0)
@@ -678,6 +776,7 @@ class DecisionRecordResponse(BaseModel):
     data_cutoff_at: Optional[str]
     linked_experiment_version_id: Optional[UUID]
     linked_model_research_record_id: Optional[UUID]
+    linked_inference_id: Optional[UUID]
     rationale: Optional[str]
     expected_outcome: Optional[str]
     expected_timeframe_days: Optional[int]
@@ -1577,6 +1676,11 @@ class HumanDecisionResponse(BaseModel):
     owner_verified: bool = False
     execution_status: str
     supersedes_event_id: Optional[UUID]
+    # The inference this ledger row was written with, read straight off the
+    # column (d4e5f6g7h8i9). Nothing on this door accepts it: the value is only
+    # ever the one an earlier write validated and stored, so showing it here adds
+    # a read of what was recorded, not a way to claim one.
+    linked_inference_id: Optional[UUID] = None
     metadata_json: Optional[Dict[str, Any]]
     created_at: datetime
     updated_at: datetime

@@ -15,6 +15,7 @@ from app.models.human_decision import (
 )
 from app.auth.jwt import get_current_user
 from app.auth.provenance import request_actor_provenance
+from app.api.conflicts import HUMAN_DECISION_IDEMPOTENCY, expected_unique_violation
 from app.api.schemas import (
     HumanDecisionCreate,
     HumanDecisionCorrect,
@@ -122,6 +123,7 @@ def _event_to_response(
         execution_status=event.execution_status.value if isinstance(event.execution_status, HumanDecisionExecutionStatus) else event.execution_status,
         actor_type=event.actor_type or "unknown",
         supersedes_event_id=event.supersedes_event_id,
+        linked_inference_id=event.linked_inference_id,
         metadata_json=event.metadata_json,
         confirmation_status=confirmation["status"],
         confirmed_by=confirmation["confirmed_by"],
@@ -207,8 +209,10 @@ def create_human_decision(
             data_cutoff_at=ctx["data_cutoff_at"],
         )
         db.commit()
-    except IntegrityError:
+    except IntegrityError as exc:
         db.rollback()
+        if expected_unique_violation(exc) != HUMAN_DECISION_IDEMPOTENCY:
+            raise
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Idempotency key conflict (concurrent)",
@@ -303,6 +307,11 @@ def correct_human_decision(
         metadata_json={**(body.metadata or {}), "correction_reason": body.correction_reason},
         supersedes_event_id=original.id,
         actor_type=actor_type,
+        # The corrected row re-narrates the same act, so it keeps the same origin:
+        # the inference the owner was reacting to does not change because their
+        # rationale did. Dropping it here would make the newest reading of a
+        # decision answer "no model execution" for a press that named one.
+        linked_inference_id=original.linked_inference_id,
     )
     db.add(correction)
     try:
@@ -325,8 +334,14 @@ def correct_human_decision(
             data_cutoff_at=ctx["data_cutoff_at"],
         )
         db.commit()
-    except IntegrityError:
+    except IntegrityError as exc:
+        # The correction key carries the superseded row's id and a timestamp, so
+        # this block almost cannot collide on it. Narrowing the mapping matters
+        # most here: without it, a foreign key or NOT NULL failure on the audit
+        # row was reported to the owner as a clash between their own two clicks.
         db.rollback()
+        if expected_unique_violation(exc) != HUMAN_DECISION_IDEMPOTENCY:
+            raise
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Idempotency key conflict (concurrent)",

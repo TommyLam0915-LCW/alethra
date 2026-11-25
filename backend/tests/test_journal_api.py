@@ -21,6 +21,14 @@ from decimal import Decimal
 import pytest
 
 from tests.conftest import TestSession
+from app.models.paper_portfolio import (
+    OrderSide,
+    OrderStatus,
+    PaperFill,
+    PaperOrder,
+    PaperPortfolio,
+    PortfolioStatus,
+)
 from app.models.strategy_study import StrategyStudyRun, StrategyStudyTrade
 from app.models.user import User
 
@@ -468,3 +476,205 @@ class TestFilterOptions:
         data = resp.json()
         assert data["instruments"] == []
         assert data["rule_ids"] == []
+
+
+class TestUnifiedJournal:
+    """GET /api/v1/journal/unified — the research half and the paper half.
+
+    Both halves are raw ``text()`` reads, so the route declares no column types
+    and the driver returns whatever the writer stored. That is exactly where a
+    UUID keyed read goes wrong quietly: a bind spelled one way and a column
+    written the other produce an empty list rather than an error, and an owner
+    reading their own history cannot tell "no trades" from "not your trades".
+    Each half is therefore pinned against the writer it actually has -- the
+    research rows are written by the ORM, the paper account by ``POST
+    /api/v1/paper-trading/create`` -- and the ids and timestamps are asserted in
+    the one form the caller is given, because a 32-character key or a
+    space-separated instant in a customer-facing list is a different answer
+    depending on which database served it.
+
+    The paper fill is attached with the product's own models instead of by
+    running a replay: the replay's final commit guard takes ``SELECT ... FOR
+    UPDATE`` on the run row, so making a fill through that path is a PostgreSQL
+    measurement. What these nodes measure is the read, and they say so.
+    """
+
+    def test_the_research_half_names_the_owner_own_trades(self, client, user_id):
+        db = TestSession()
+        try:
+            run = _run(db, user_id, instrument=INSTRUMENT_BTC, interval=1440,
+                       starting_cash="10000", trade_count=1)
+            trade = _trade(db, run, index=0, rule_id="breakout_trend",
+                           net_pnl="150", entry_day_offset=0)
+            db.commit()
+            run_id, trade_id = run.id, trade.id
+        finally:
+            db.close()
+
+        resp = client.get(
+            "/api/v1/journal/unified?source=research",
+            headers=_auth_headers(client, user_id),
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["summary"]["research_count"] == 1, body["summary"]
+        row = body["trades"][0]
+        assert row["id"] == str(trade_id), row
+        assert row["run_id"] == str(run_id), row
+        # The caller is given one instant: ISO with a T, on this lane too, not
+        # the space-separated text the column actually holds here.
+        assert row["entry_time"].startswith("2026-10-01T"), row
+        assert " " not in row["entry_time"], row
+
+    def test_the_paper_half_names_the_account_the_create_route_made(
+        self, client
+    ):
+        """A create-lane account's fill appears in the unified list.
+
+        ``POST /api/v1/paper-trading/create`` writes the account with its own
+        raw SQL, and this read reaches the fill through that account
+        (``paper_fills`` → ``paper_orders`` → ``paper_portfolios.owner_id``).
+        The account therefore has to be named in the spelling the route stores
+        it in, which is what the shared UUID bind contract settles.
+        """
+        email = "journalunified@alethra.io"
+        registered = client.post(
+            "/api/auth/register",
+            json={
+                "risk_acknowledged": True,
+                "email": email,
+                "password": "testpass123",
+                "display_name": "journal unified",
+                "user_type": "individual",
+            },
+        )
+        assert registered.status_code in (200, 201), registered.text
+        login = client.post(
+            "/api/auth/login", json={"email": email, "password": "testpass123"}
+        )
+        assert login.status_code == 200, login.text
+        headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+
+        created = client.post(
+            "/api/v1/paper-trading/create",
+            headers=headers,
+            json={
+                "skill": "fisherman",
+                "instrument_id": INSTRUMENT_BTC,
+                "interval_minutes": 1440,
+                "exit_config": "exit_atr_2x",
+                "initial_capital": 100000.0,
+            },
+        )
+        assert created.status_code == 200, created.text
+        portfolio_id = uuid.UUID(created.json()["portfolio_id"])
+
+        bar_time = ANCHOR + timedelta(hours=9)
+        with TestSession() as db:
+            order = PaperOrder(
+                portfolio_id=portfolio_id,
+                asset_id=INSTRUMENT_BTC,
+                side=OrderSide.BUY,
+                quantity=1.0,
+                actor_type="human",
+                status=OrderStatus.filled,
+            )
+            db.add(order)
+            db.flush()
+            db.add(
+                PaperFill(
+                    paper_order_id=order.id,
+                    execution_date=bar_time.date().isoformat(),
+                    observed_price=50000.0,
+                    execution_price_before_costs=49990.0,
+                    slippage_amount=10.0,
+                    commission_amount=5.0,
+                    quantity=1.0,
+                    gross_amount=49990.0,
+                    net_cash_change=-50000.0,
+                    bar_timestamp=bar_time,
+                )
+            )
+            db.commit()
+            order_id, fill_id = order.id, order.fills[0].id
+
+        resp = client.get(
+            "/api/v1/journal/unified?source=paper", headers=headers
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["summary"]["paper_count"] == 1, body["summary"]
+        row = body["trades"][0]
+        assert row["id"] == str(fill_id), row
+        assert row["order_id"] == str(order_id), row
+        assert row["entry_time"].startswith("2026-10-01T09:00:00"), row
+        assert " " not in row["entry_time"], row
+        # ``order.created_at`` is a DateTime column read through text(), so this
+        # is the second half of the same rule: one instant form on either
+        # backend, not a PostgreSQL answer and a SQLite answer.
+        assert "T" in row["created_at"], row
+
+    def test_another_owner_reads_an_empty_unified_list(self, client, user_id):
+        """The owner filter is the reason the lists are non-empty, not a label.
+
+        With the account and a research run of their own in the database, a
+        second user must get nothing from either half; otherwise a bind that
+        matches no row and a filter that matches every row look identical here.
+        """
+        db = TestSession()
+        try:
+            run = _run(db, user_id, instrument=INSTRUMENT_BTC, interval=1440,
+                       starting_cash="10000", trade_count=1)
+            _trade(db, run, index=0, rule_id="breakout_trend", net_pnl="150",
+                   entry_day_offset=0)
+            portfolio = PaperPortfolio(
+                id=uuid.uuid4(),
+                owner_id=user_id,
+                currency="USD",
+                initial_virtual_cash=100000.0,
+                current_virtual_cash=100000.0,
+                status=PortfolioStatus.active,
+            )
+            db.add(portfolio)
+            db.flush()
+            order = PaperOrder(
+                portfolio_id=portfolio.id,
+                asset_id=INSTRUMENT_BTC,
+                side=OrderSide.BUY,
+                quantity=1.0,
+                actor_type="human",
+                status=OrderStatus.filled,
+            )
+            db.add(order)
+            db.flush()
+            db.add(
+                PaperFill(
+                    paper_order_id=order.id,
+                    execution_date="2026-10-01",
+                    observed_price=50000.0,
+                    execution_price_before_costs=50000.0,
+                    slippage_amount=0.0,
+                    commission_amount=0.0,
+                    quantity=1.0,
+                    gross_amount=50000.0,
+                    net_cash_change=-50000.0,
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        other = TestSession()
+        try:
+            stranger = _new_user(other)
+            other.commit()
+        finally:
+            other.close()
+
+        resp = client.get(
+            "/api/v1/journal/unified", headers=_auth_headers(client, stranger)
+        )
+        assert resp.status_code == 200, resp.text
+        summary = resp.json()["summary"]
+        assert summary["research_count"] == 0, summary
+        assert summary["paper_count"] == 0, summary

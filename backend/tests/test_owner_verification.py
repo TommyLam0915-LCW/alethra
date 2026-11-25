@@ -14,6 +14,19 @@ from sqlalchemy import text
 from app.database import engine as db_engine, SessionLocal
 from app.services.paper_trading import PaperTradingEngine
 from app.services.paper_trading_exceptions import AuthorizationError
+from tests.conftest import TEST_ENGINE
+
+# Ownership is checked against rows the production worker seeds, and that seed
+# path is PostgreSQL-only: create_portfolio() binds a Decimal into raw SQL
+# (paper_trading.py:74), which only psycopg2 adapts, and the accepted branch
+# reaches a `SELECT ... FOR UPDATE` row lock (paper_trading.py:874). The same
+# ownership rule is exercised on the SQLite lane by
+# test_replay_credibility.TestReplayOwnership. A skip here is a statement about
+# the lane, not a pass.
+pytestmark = pytest.mark.skipif(
+    TEST_ENGINE.dialect.name == "sqlite",
+    reason="owner verification over real rows requires a PostgreSQL backend",
+)
 
 
 @pytest.fixture
@@ -77,7 +90,7 @@ def seed_strategy_study_data(test_users):
                 ) VALUES (
                     :id, :user_id, 'strategy_research_simulated', 'v1.0', 'TEST/USD', 60,
                     'test_provider', 'simulated', 100, :now, :now,
-                    '{}'::jsonb, '{}'::jsonb, '[]'::jsonb, 1, :now
+                    '{}', '{}', '[]', 1, :now
                 )
             """),
             {

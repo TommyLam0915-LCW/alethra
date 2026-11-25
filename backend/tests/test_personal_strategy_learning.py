@@ -266,6 +266,42 @@ def _build_snapshot(client, headers, version_id):
     return resp.json()
 
 
+def _open_skill_unit(client, headers):
+    """Open one skill account through the formal portfolio endpoint.
+
+    A skill unit *is* a paper portfolio, so the product's own create route is
+    the only honest way to make one in a test.
+    """
+    resp = client.post(
+        "/api/v1/paper-portfolio",
+        headers=headers,
+        json={"initial_virtual_cash": 100000.0, "currency": "USD"},
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json()["id"]
+
+
+def _select_for_skill(
+    client, headers, version_id, skill_unit_id, expected=None
+):
+    """Switch one skill account onto a version, through the formal select route.
+
+    The switch is what authorizes that account's inference, so no prediction in
+    these tests is reached without it.
+    """
+    resp = client.post(
+        f"/api/v1/ml/personal/models/{version_id}/select",
+        headers=headers,
+        json={
+            "rationale": "測試：此技能帳號使用此版本。",
+            "expected_active_version_id": expected,
+            "skill_unit_id": str(skill_unit_id),
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()
+
+
 def _second_user_headers(client):
     payload = {
         "email": "other-owner@alethra.io",
@@ -934,16 +970,26 @@ def test_job_artifact_version_api_identity_chain(
     assert activated.status_code == 200, activated.text
     assert activated.json()["is_active"] is True
 
+    # The record alias alone serves nobody. The skill account that wants
+    # predictions has to be switched onto this version itself.
+    skill_unit_id = _open_skill_unit(client, auth_headers)
+    _select_for_skill(client, auth_headers, str(version.id), skill_unit_id)
+
     as_of = BARS[120].isoformat()
     prediction = client.post(
         f"/api/v1/ml/personal/records/{model['record_id']}/predict",
         headers=auth_headers,
-        json={"instrument_id": INSTRUMENT, "as_of_date": as_of},
+        json={
+            "instrument_id": INSTRUMENT,
+            "as_of_date": as_of,
+            "skill_unit_id": skill_unit_id,
+        },
     )
     assert prediction.status_code == 200, prediction.text
     body = prediction.json()
+    assert body["skill_unit_id"] == skill_unit_id
     assert body["resolved_version"]["model_version_id"] == str(version.id)
-    assert body["resolved_version"]["resolved_from_active_alias"] is True
+    assert body["resolved_version"]["resolved_from"] == "skill_unit_selection"
     assert body["artifact_sha256"] == spec["artifact_sha256"]
     assert body["snapshot"]["snapshot_id"] == snapshot["snapshot_id"]
     assert body["training_job_id"] == job_id
@@ -953,13 +999,20 @@ def test_job_artifact_version_api_identity_chain(
     assert body["as_of"]["feature_bar_date"] <= as_of
 
     # The immutable-version endpoint resolves the same identity explicitly.
+    # Naming the version does not name a skill: the same authorization has to
+    # hold for whatever skill account is asking.
     explicit = client.post(
         f"/api/v1/ml/personal/models/{version.id}/predict",
         headers=auth_headers,
-        json={"instrument_id": INSTRUMENT, "as_of_date": as_of},
+        json={
+            "instrument_id": INSTRUMENT,
+            "as_of_date": as_of,
+            "skill_unit_id": skill_unit_id,
+        },
     )
     assert explicit.status_code == 200, explicit.text
-    assert explicit.json()["resolved_version"]["resolved_from_active_alias"] is False
+    assert explicit.json()["skill_unit_id"] == skill_unit_id
+    assert explicit.json()["resolved_version"]["resolved_from"] == "explicit_version_id"
     assert (
         explicit.json()["predicted_action"] == body["predicted_action"]
     )
@@ -1280,12 +1333,17 @@ def test_switching_active_version_resolves_correct_version(
 
     as_of = BARS[120].isoformat()
     record_id = v1["record_id"]
-    payload = {"instrument_id": INSTRUMENT, "as_of_date": as_of}
+    # One skill account is the thing being served; switching it is what the
+    # customer does, and the record-wide alias is a different scope that must
+    # not be what this assertion is really measuring.
+    skill_unit_id = _open_skill_unit(client, auth_headers)
+    payload = {
+        "instrument_id": INSTRUMENT,
+        "as_of_date": as_of,
+        "skill_unit_id": skill_unit_id,
+    }
 
-    assert client.post(
-        f"/api/v1/ml/personal/models/{v1['model_version_id']}/activate",
-        headers=auth_headers,
-    ).status_code == 200
+    _select_for_skill(client, auth_headers, v1["model_version_id"], skill_unit_id)
     served_v1 = client.post(
         f"/api/v1/ml/personal/records/{record_id}/predict",
         headers=auth_headers,
@@ -1296,10 +1354,10 @@ def test_switching_active_version_resolves_correct_version(
     assert served_v1.json()["artifact_sha256"] == v1["artifact_sha256"]
     assert served_v1.json()["snapshot"]["snapshot_id"] == first_snapshot["snapshot_id"]
 
-    assert client.post(
-        f"/api/v1/ml/personal/models/{v2['model_version_id']}/activate",
-        headers=auth_headers,
-    ).status_code == 200
+    _select_for_skill(
+        client, auth_headers, v2["model_version_id"], skill_unit_id,
+        expected=v1["model_version_id"],
+    )
     served_v2 = client.post(
         f"/api/v1/ml/personal/records/{record_id}/predict",
         headers=auth_headers,
@@ -1310,15 +1368,27 @@ def test_switching_active_version_resolves_correct_version(
     assert served_v2.json()["artifact_sha256"] == v2["artifact_sha256"]
     assert served_v2.json()["snapshot"]["snapshot_id"] == second_snapshot["snapshot_id"]
 
-    # An explicit version request is served as-is, never silently swapped.
-    explicit = client.post(
+    # The version this skill account superseded is refused, not silently served.
+    stale = client.post(
         f"/api/v1/ml/personal/models/{v1['model_version_id']}/predict",
         headers=auth_headers,
         json=payload,
     )
+    assert stale.status_code == 403, stale.text
+    detail = stale.json()["detail"]
+    assert detail["reason_code"] == "superseded_skill_unit_selection"
+    assert detail["skill_unit_id"] == skill_unit_id
+    assert detail["context"]["currently_selected_version_id"] == v2["model_version_id"]
+
+    # An explicit version request is served as-is, never silently swapped.
+    explicit = client.post(
+        f"/api/v1/ml/personal/models/{v2['model_version_id']}/predict",
+        headers=auth_headers,
+        json=payload,
+    )
     assert explicit.status_code == 200, explicit.text
-    assert explicit.json()["resolved_version"]["model_version_id"] == v1["model_version_id"]
-    assert explicit.json()["resolved_version"]["resolved_from_active_alias"] is False
+    assert explicit.json()["resolved_version"]["model_version_id"] == v2["model_version_id"]
+    assert explicit.json()["resolved_version"]["resolved_from"] == "explicit_version_id"
 
     # Two settled trainings plus three settled predictions.
     quota = _quota_state(owner_id)

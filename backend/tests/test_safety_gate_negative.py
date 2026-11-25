@@ -17,7 +17,6 @@ import subprocess
 import pytest
 from unittest.mock import patch, MagicMock
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from test_safety_gate import (
     verify_test_database,
     TestDatabaseGateError,
@@ -42,8 +41,6 @@ import os
 os.environ['ALETHRA_TEST_DB'] = '{url_with_password}'
 os.environ['ALETHRA_PG_TEST_URL'] = 'postgresql://user@localhost:5432/other_db'
 try:
-    import sys
-    sys.path.insert(0, '{os.path.dirname(os.path.dirname(os.path.abspath(__file__)))}')
     import tests.conftest
 except RuntimeError as e:
     print(str(e))
@@ -75,8 +72,6 @@ class TestEnvVarConflict:
 import os
 os.environ['ALETHRA_TEST_DB'] = 'postgresql://user@localhost:5432/test_a'
 os.environ['ALETHRA_PG_TEST_URL'] = 'postgresql://user@localhost:5432/test_b'
-import sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath('__file__'))))
 import tests.conftest
 """],
             capture_output=True,
@@ -101,8 +96,6 @@ import os
 os.environ['ALETHRA_TEST_DB'] = '{test_db_url}'
 os.environ['ALETHRA_PG_TEST_URL'] = '{test_db_url}'
 os.environ['TEST_MODE'] = 'true'
-import sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath('__file__'))))
 import tests.conftest
 # Verify both are still set to the same value
 assert os.environ.get('ALETHRA_TEST_DB') == os.environ.get('ALETHRA_PG_TEST_URL')
@@ -117,24 +110,29 @@ print("MATCHING_OK")
         assert result.returncode == 0, f"Should accept matching env vars. stderr: {result.stderr}"
         assert "MATCHING_OK" in result.stdout, "Should verify aliasing succeeded"
 
-    def test_conftest_aliases_single_env_var(self):
-        """If only one env var set, the other should be aliased."""
-        # Use the actual test DB URL from environment
-        test_db_url = os.environ.get("ALETHRA_TEST_DB", "postgresql://alethra_test_runtime@localhost:5432/ai_investment_lab_test?host=/tmp")
-        
-        # Use subprocess to verify actual aliasing behavior
+    def test_conftest_aliases_postgresql_env_var(self):
+        """Only a PostgreSQL ALETHRA_TEST_DB is carried into ALETHRA_PG_TEST_URL.
+
+        The database name does not exist on any host, so the safety gate that
+        runs after the alias refuses the connection before it can write
+        anywhere; the node observes the alias, not a database.
+        """
+        pg_url = "postgresql+psycopg2://alethra_test_runtime@localhost:5432/alethra_test_alias_probe"
+
         result = subprocess.run(
             [sys.executable, "-c", f"""
 import os
-os.environ['ALETHRA_TEST_DB'] = '{test_db_url}'
+os.environ['ALETHRA_TEST_DB'] = '{pg_url}'
 os.environ.pop('ALETHRA_PG_TEST_URL', None)
 os.environ['TEST_MODE'] = 'true'
-import sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath('__file__'))))
-import tests.conftest
-# Verify ALETHRA_PG_TEST_URL was aliased from ALETHRA_TEST_DB
+try:
+    import tests.conftest
+except Exception as exc:
+    # Offline, the safety gate cannot reach the server named above. The alias
+    # runs before any connection, so the assertion below still observes it.
+    print("IMPORT_REFUSED: {{}}".format(type(exc).__name__))
 aliased = os.environ.get('ALETHRA_PG_TEST_URL')
-assert aliased == '{test_db_url}', f"Expected alias to be set, got {{aliased}}"
+assert aliased == '{pg_url}', f"Expected alias to be set, got {{aliased}}"
 print("ALIAS_OK")
 """],
             capture_output=True,
@@ -142,9 +140,47 @@ print("ALIAS_OK")
             cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             env={**os.environ, "TEST_MODE": "true"}
         )
-        
-        assert result.returncode == 0, f"Should alias single env var. stderr: {result.stderr}"
-        assert "ALIAS_OK" in result.stdout, "Should verify aliasing succeeded"
+
+        assert "ALIAS_OK" in result.stdout, f"Should alias a PG env var. {result.stdout}{result.stderr}"
+
+    def test_conftest_does_not_alias_sqlite_into_the_postgresql_name(self):
+        """A SQLite ALETHRA_TEST_DB must leave ALETHRA_PG_TEST_URL unset.
+
+        The alias used to copy any value, so the SQLite lane named a PostgreSQL
+        target it did not have. Everything that asks that variable "is
+        PostgreSQL configured?" -- get_test_db_url(), the target-guard tests --
+        was told yes, and either wrote to the SQLite file or produced a
+        confusing failure inside a real PostgreSQL query.
+        """
+        sqlite_url = os.environ.get("ALETHRA_TEST_DB", "sqlite:///./alias_probe.db")
+        assert sqlite_url.startswith("sqlite"), (
+            "this node proves the SQLite lane's own behaviour; run it under "
+            "run_tests.sh sqlite, not against PostgreSQL"
+        )
+
+        result = subprocess.run(
+            [sys.executable, "-c", f"""
+import os
+os.environ['ALETHRA_TEST_DB'] = '{sqlite_url}'
+os.environ.pop('ALETHRA_PG_TEST_URL', None)
+os.environ['TEST_MODE'] = 'true'
+import tests.conftest
+leaked = os.environ.get('ALETHRA_PG_TEST_URL')
+assert leaked is None, f"SQLite URL leaked into ALETHRA_PG_TEST_URL: {{leaked}}"
+from tests.postgresql_only import postgresql_available
+assert not postgresql_available(), "the SQLite lane must not look PostgreSQL-ready"
+print("NO_ALIAS")
+"""],
+            capture_output=True,
+            text=True,
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            env={**os.environ, "TEST_MODE": "true"}
+        )
+
+        assert "NO_ALIAS" in result.stdout, (
+            f"SQLite URL must not populate the PostgreSQL-only variable. "
+            f"{result.stdout}{result.stderr}"
+        )
 
 
 class TestSafetyGateRejection:

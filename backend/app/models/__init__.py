@@ -129,6 +129,7 @@ from app.models.agent_strategy import (
     AgentStrategyConsent,
     AgentStrategyTrainingJob,
 )
+from app.models.agent_paper_execution import AgentPaperExecution
 from app.models.strategy_study import StrategyStudyRun, StrategyStudyTrade
 from app.models.learning_job import LearningJob, LearningProposal
 from app.models.paper_trading_run import PaperTradingRun, PaperTradingDailyMetric
@@ -262,6 +263,7 @@ __all__ = [
     "AgentModelActivationApproval",
     "AgentStrategyConsent",
     "AgentStrategyTrainingJob",
+    "AgentPaperExecution",
     "StrategyStudyRun",
     "StrategyStudyTrade",
     "LearningJob",

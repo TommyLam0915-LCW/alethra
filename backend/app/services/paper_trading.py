@@ -12,10 +12,12 @@ from datetime import datetime, timedelta, date, timezone
 from decimal import Decimal
 from typing import Optional, Callable
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import Float, Numeric, bindparam, create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import SessionLocal
+from app.lib.timeutil import iso_from_stored
+from app.lib.uuid_bind import to_uuid, uuid_binds
 from app.services.paper_trading_exceptions import (
     AuthorizationError,
     ResourceNotFoundError,
@@ -23,6 +25,40 @@ from app.services.paper_trading_exceptions import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ``get_status`` names the columns it answers from instead of reading ``SELECT *``.
+# The untyped star read handed back what the driver stored -- a ``datetime`` or
+# ``date`` on PostgreSQL, TEXT on SQLite -- and ``start_date.isoformat()`` raised
+# AttributeError on the SQLite row, a 500 for a run its own database has. The two
+# date columns are converted with :func:`iso_from_stored` at that boundary.
+#
+# Both reads bind their id with the column's own UUID type (:mod:`app.lib.uuid_bind`)
+# rather than as free text: this is the lane's own row, written by the same
+# contract as ``create_portfolio`` below, and an untyped string bind would only
+# match whichever spelling it happened to be given.
+_STATUS_RUN_READ = text(
+    "SELECT portfolio_id, status, skill, instrument_id, initial_capital, "
+    "total_pnl, total_trades, win_rate, start_date, end_date "
+    "FROM paper_trading_runs WHERE id = :id"
+).bindparams(*uuid_binds("id"))
+_STATUS_PORTFOLIO_READ = text(
+    "SELECT current_virtual_cash FROM paper_portfolios WHERE id = :id"
+).bindparams(*uuid_binds("id"))
+
+# Same contract for the daily-report reads: ``paper_trading_runs.id``,
+# ``paper_trading_daily_metrics.run_id`` and ``paper_portfolios.id`` are all
+# mapped UUID columns, so each identity key is typed and parsed rather than
+# handed over as whatever text the caller happened to hold.
+_REPORT_RUN_READ = text(
+    "SELECT * FROM paper_trading_runs WHERE id = :id"
+).bindparams(*uuid_binds("id"))
+_REPORT_METRICS_READ = text(
+    "SELECT * FROM paper_trading_daily_metrics WHERE run_id = :run_id AND date = :date"
+).bindparams(*uuid_binds("run_id"))
+_REPORT_PORTFOLIO_READ = text(
+    "SELECT * FROM paper_portfolios WHERE id = :id"
+).bindparams(*uuid_binds("id"))
 
 
 class PaperTradingEngine:
@@ -63,40 +99,82 @@ class PaperTradingEngine:
         interval_minutes: int,
         exit_config: str,
         initial_capital: Decimal = Decimal("100000.00"),
+        session: Optional[Session] = None,
+        strategy_version_id=None,
+        dataset_id=None,
     ) -> dict:
-        """Create a new paper trading portfolio and run."""
-        db = self.session_factory()
+        """Create a new strategy + run.
+        
+        Args:
+            session: Optional SQLAlchemy session. If provided, the insert happens
+                in this session (and the caller controls commit/rollback). If not
+                provided, a new session is created and committed internally.
+                Passing the same session that holds the skill-unit quota lock
+                ensures atomicity: lock + count + insert happen in one transaction.
+            strategy_version_id: Optional UUID of the experiment version this run uses.
+            dataset_id: Optional UUID of the dataset this run uses.
+        """
+        owns_session = session is None
+        db = session if session is not None else self.session_factory()
         try:
-            # Create portfolio
-            portfolio_id = str(uuid.uuid4())
+            # The money binds carry their column's own type (Float on the
+            # portfolio, Numeric(15, 2) on the run) because ``initial_capital``
+            # arrives as a Decimal and an untyped bind hands it to the driver
+            # unchanged: sqlite3 refuses it ("Error binding parameter: type
+            # 'decimal.Decimal' is not supported"), so every create answered 500
+            # creation_failed offline. PostgreSQL was never affected, and still
+            # receives the same Decimal.
+            #
+            # The UUID binds carry the column's own UUID type for the same kind
+            # of reason and a worse consequence. Untyped, ``str(uuid4())`` landed
+            # in ``paper_portfolios.id``/``owner_id`` as dashed 36-character text
+            # while every ORM write to the same columns -- ``users.id``, and the
+            # account the portfolio panel makes -- lands as 32-character hex, so
+            # this account's owner did not equal any row of ``users`` as stored
+            # and the account was invisible to the identity key, the owner join
+            # and any ORM update. Typed, each dialect renders what its own column
+            # type renders: hex on this lane, a native uuid on PostgreSQL, where
+            # the two spellings were always the same value.
+            portfolio_id = uuid.uuid4()
             portfolio_name = f"Live Paper Test - {skill} - {instrument_id}"
 
             db.execute(
                 text("""
                 INSERT INTO paper_portfolios (id, owner_id, currency, initial_virtual_cash, current_virtual_cash, status, created_at)
                 VALUES (:id, :owner_id, 'USD', :initial, :current, 'active', CURRENT_TIMESTAMP)
-            """),
+            """).bindparams(
+                    *uuid_binds("id", "owner_id"),
+                    bindparam("initial", type_=Float),
+                    bindparam("current", type_=Float),
+                ),
                 {
                     "id": portfolio_id,
-                    "owner_id": user_id,
+                    "owner_id": to_uuid(user_id),
                     "initial": initial_capital,
                     "current": initial_capital,
                 },
             )
 
             # Create run
-            run_id = str(uuid.uuid4())
+            run_id = uuid.uuid4()
             db.execute(
                 text("""
                 INSERT INTO paper_trading_runs (
                     id, portfolio_id, skill, instrument_id, interval_minutes, exit_config,
-                    start_date, status, initial_capital, total_pnl, total_trades
+                    start_date, status, initial_capital, total_pnl, total_trades,
+                    strategy_version_id, dataset_id
                 )
                 VALUES (
                     :id, :portfolio_id, :skill, :instrument, :interval, :exit_config,
-                    CURRENT_TIMESTAMP, 'queued', :initial, 0, 0
+                    CURRENT_TIMESTAMP, 'queued', :initial, 0, 0,
+                    :strategy_version_id, :dataset_id
                 )
-            """),
+            """).bindparams(
+                    *uuid_binds(
+                        "id", "portfolio_id", "strategy_version_id", "dataset_id"
+                    ),
+                    bindparam("initial", type_=Numeric(15, 2)),
+                ),
                 {
                     "id": run_id,
                     "portfolio_id": portfolio_id,
@@ -105,16 +183,30 @@ class PaperTradingEngine:
                     "interval": interval_minutes,
                     "exit_config": exit_config,
                     "initial": initial_capital,
+                    "strategy_version_id": to_uuid(strategy_version_id),
+                    "dataset_id": to_uuid(dataset_id),
                 },
             )
 
-            db.commit()
+            # Only commit if we own the session. When the caller passes a session,
+            # they control the transaction boundary (e.g., to keep the skill-unit
+            # quota lock + insert atomic in one transaction).
+            if owns_session:
+                db.commit()
+            else:
+                # Flush to make the inserts visible within the transaction (e.g.,
+                # for subsequent queries in the same session), but don't commit.
+                db.flush()
 
             logger.info(f"Created paper trading portfolio {portfolio_id} for {skill}")
 
             return {
-                "portfolio_id": portfolio_id,
-                "run_id": run_id,
+                # The ids a caller is handed stay the dashed text every other
+                # route reports (``str(uuid.UUID)``, which is what a Pydantic
+                # ``str`` field renders for the ORM rows too). Only the text the
+                # column stores changed; readers parse this value before binding.
+                "portfolio_id": str(portfolio_id),
+                "run_id": str(run_id),
                 "skill": skill,
                 "instrument_id": instrument_id,
                 "interval_minutes": interval_minutes,
@@ -123,11 +215,13 @@ class PaperTradingEngine:
             }
 
         except Exception as exc:
-            db.rollback()
+            if owns_session:
+                db.rollback()
             logger.exception("Failed to create portfolio")
             raise
         finally:
-            db.close()
+            if owns_session:
+                db.close()
 
     def check_cancel_requested(self, run_id: str) -> bool:
         """Check if cancellation has been requested for a run.
@@ -148,8 +242,8 @@ class PaperTradingEngine:
                 SELECT cancel_requested, status
                 FROM paper_trading_runs
                 WHERE id = :id
-            """),
-                {"id": run_id},
+            """).bindparams(*uuid_binds("id")),
+                {"id": to_uuid(run_id)},
             ).fetchone()
 
             if not result:
@@ -202,8 +296,9 @@ class PaperTradingEngine:
         try:
             # Get run details
             run = db.execute(
-                text("SELECT * FROM paper_trading_runs WHERE id = :id"),
-                {"id": run_id},
+                text("SELECT * FROM paper_trading_runs WHERE id = :id").bindparams(
+                    *uuid_binds("id")),
+                {"id": to_uuid(run_id)},
             ).fetchone()
 
             if not run:
@@ -211,11 +306,15 @@ class PaperTradingEngine:
 
             # Cross-user rejection: validate ownership via portfolio
             portfolio = db.execute(
-                text("SELECT owner_id FROM paper_portfolios WHERE id = :id"),
-                {"id": run.portfolio_id},
+                text("SELECT owner_id FROM paper_portfolios WHERE id = :id").bindparams(
+                    *uuid_binds("id")),
+                {"id": to_uuid(run.portfolio_id)},
             ).fetchone()
 
-            if not portfolio or str(portfolio.owner_id) != user_id:
+            # Parsed, not text-compared: the caller names the owner in the
+            # dashed spelling and the column stores this lane's own, so an
+            # ``!=`` on the two strings would refuse the owner's own run.
+            if not portfolio or to_uuid(portfolio.owner_id) != to_uuid(user_id):
                 owner_id = str(portfolio.owner_id) if portfolio else "unknown"
                 raise AuthorizationError(user_id, "run", run_id, owner_id)
 
@@ -240,6 +339,11 @@ class PaperTradingEngine:
             # Use rule_id (stable identifier) instead of rule_label_zh (display name)
             # Include source pinning fields: trade_id, run_id, rule_id, exit_id, data_version
             # Constrain by as_of: only trades where exit_time <= as_of (completed before replay start)
+            # ``user_id`` arrives from the route as dashed text while the runs it
+            # filters are ORM-written, so the column's own type has to render the
+            # bind -- an untyped string here matches no row on the text-UUID lane
+            # and the replay reports "0 historical trades" for an owner who has
+            # plenty.
             trades = db.execute(
                 text("""
                 SELECT
@@ -265,12 +369,12 @@ class PaperTradingEngine:
                   AND t.entry_time >= :cutoff
                   AND t.exit_time <= :as_of
                 ORDER BY t.entry_time ASC
-            """),
+            """).bindparams(*uuid_binds("user_id")),
                 {
                     "instrument": instrument,
                     "interval": interval,
                     "rule_id": skill,  # skill parameter now contains rule_id, not display name
-                    "user_id": user_id,
+                    "user_id": to_uuid(user_id),
                     "cutoff": cutoff,
                     "as_of": as_of,
                 },
@@ -297,8 +401,8 @@ class PaperTradingEngine:
                 WHERE id = :id AND status IN ('queued', 'pending', 'failed')
                   AND cancel_requested = FALSE
                 RETURNING id
-            """),
-                {"id": run_id},
+            """).bindparams(*uuid_binds("id")),
+                {"id": to_uuid(run_id)},
             )
             acquired_row = result.fetchone()
 
@@ -356,14 +460,22 @@ class PaperTradingEngine:
                         db.rollback()
                         # Worker sets status='cancelled' after confirming it stopped
                         # This is the atomic transition from "cancel requested" to "cancel completed"
-                        db.execute(
+                        cancelled = db.execute(
                             text("""
                             UPDATE paper_trading_runs
                             SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP
                             WHERE id = :id AND status = 'running'
-                        """),
-                            {"id": run_id},
+                        """).bindparams(*uuid_binds("id")),
+                            {"id": to_uuid(run_id)},
                         )
+                        if cancelled.rowcount == 0:
+                            # No row left 'running' to close, so returning
+                            # status='cancelled' here would report a terminal
+                            # state this write did not write.
+                            db.rollback()
+                            raise InvalidStateError(
+                                "Run", run_id, run.status, ["running"]
+                            )
                         db.commit()
                         return {
                             "run_id": run_id,
@@ -423,9 +535,9 @@ class PaperTradingEngine:
                     cash_flows.append((event_time, "exit_slippage", -exit_slippage))
 
                     # Create exit decision, order, and fill (mirror entry logic)
-                    exit_decision_id = str(uuid.uuid4())
-                    exit_order_id = str(uuid.uuid4())
-                    exit_fill_id = str(uuid.uuid4())
+                    exit_decision_id = uuid.uuid4()
+                    exit_order_id = uuid.uuid4()
+                    exit_fill_id = uuid.uuid4()
                     exit_side = "SELL" if is_long else "BUY"  # Close position: sell long, buy short
 
                     # Create exit decision record with source pinning
@@ -443,15 +555,15 @@ class PaperTradingEngine:
                             :source_rule_id, :source_exit_config, :source_data_version,
                             :cutoff, :as_of
                         )
-                    """),
+                    """).bindparams(*uuid_binds("id", "owner_id", "portfolio_id", "source_trade_id", "source_run_id")),
                         {
                             "id": exit_decision_id,
-                            "owner_id": user_id,
+                            "owner_id": to_uuid(user_id),
                             "time": exit_time,
                             "rationale": f"Exit {exit_reason or 'signal'}: gross PnL ${realized_pnl:.2f}, net PnL ${full_net_pnl:.2f}",
-                            "portfolio_id": run.portfolio_id,
-                            "source_trade_id": source_trade_id,
-                            "source_run_id": source_run_id,
+                            "portfolio_id": to_uuid(run.portfolio_id),
+                            "source_trade_id": to_uuid(source_trade_id),
+                            "source_run_id": to_uuid(source_run_id),
                             "source_rule_id": source_rule_id,
                             "source_exit_config": source_exit_id,
                             "source_data_version": source_data_version,
@@ -471,10 +583,10 @@ class PaperTradingEngine:
                             :id, :portfolio_id, :decision_id, :asset_id, :side, :quantity,
                             'market', :exit_time, 'filled', 'paper_trading'
                         )
-                    """),
+                    """).bindparams(*uuid_binds("id", "portfolio_id", "decision_id")),
                         {
                             "id": exit_order_id,
-                            "portfolio_id": run.portfolio_id,
+                            "portfolio_id": to_uuid(run.portfolio_id),
                             "decision_id": exit_decision_id,
                             "asset_id": instrument,
                             "side": exit_side,
@@ -503,7 +615,7 @@ class PaperTradingEngine:
                             :exec_price, :slippage, :commission,
                             :quantity, :gross, :net, 'exit_signal', :timestamp
                         )
-                    """),
+                    """).bindparams(*uuid_binds("id", "order_id")),
                         {
                             "id": exit_fill_id,
                             "order_id": exit_order_id,
@@ -527,7 +639,7 @@ class PaperTradingEngine:
                             realized_pnl = :realized_pnl,
                             status = 'closed'
                         WHERE id = :position_id
-                    """),
+                    """).bindparams(*uuid_binds("position_id")),
                         {
                             "closed_at": exit_time,
                             "realized_pnl": full_net_pnl,
@@ -677,9 +789,9 @@ class PaperTradingEngine:
                     cash_flows.append((event_time, "entry_commission", -entry_commission))
                     cash_flows.append((event_time, "entry_slippage", -entry_slippage))
 
-                    order_id = str(uuid.uuid4())
-                    fill_id = str(uuid.uuid4())
-                    decision_id = str(uuid.uuid4())
+                    order_id = uuid.uuid4()
+                    fill_id = uuid.uuid4()
+                    decision_id = uuid.uuid4()
 
                     # Create decision record with source pinning
                     db.execute(
@@ -696,15 +808,15 @@ class PaperTradingEngine:
                             :source_rule_id, :source_exit_config, :source_data_version,
                             :cutoff, :as_of
                         )
-                    """),
+                    """).bindparams(*uuid_binds("id", "owner_id", "portfolio_id", "source_trade_id", "source_run_id")),
                         {
                             "id": decision_id,
-                            "owner_id": user_id,
+                            "owner_id": to_uuid(user_id),
                             "time": entry_time,
                             "rationale": f"Paper trading entry from source trade {source_trade_id}",
-                            "portfolio_id": run.portfolio_id,
-                            "source_trade_id": source_trade_id,
-                            "source_run_id": source_run_id,
+                            "portfolio_id": to_uuid(run.portfolio_id),
+                            "source_trade_id": to_uuid(source_trade_id),
+                            "source_run_id": to_uuid(source_run_id),
                             "source_rule_id": source_rule_id,
                             "source_exit_config": source_exit_id,
                             "source_data_version": source_data_version,
@@ -723,10 +835,10 @@ class PaperTradingEngine:
                             :id, :portfolio_id, :decision_id, :asset_id, :side, :quantity,
                             'market', :entry_time, 'filled', 'paper_trading'
                         )
-                    """),
+                    """).bindparams(*uuid_binds("id", "portfolio_id", "decision_id")),
                         {
                             "id": order_id,
-                            "portfolio_id": run.portfolio_id,
+                            "portfolio_id": to_uuid(run.portfolio_id),
                             "decision_id": decision_id,
                             "asset_id": instrument,
                             "side": side,
@@ -747,7 +859,7 @@ class PaperTradingEngine:
                             :exec_price, :slippage, :commission,
                             :quantity, :gross, :net, 'entry_signal', :timestamp
                         )
-                    """),
+                    """).bindparams(*uuid_binds("id", "order_id")),
                         {
                             "id": fill_id,
                             "order_id": order_id,
@@ -764,7 +876,7 @@ class PaperTradingEngine:
                     )
 
                     # Create PaperPosition record in DB with Decimal precision
-                    position_id = str(uuid.uuid4())
+                    position_id = uuid.uuid4()
                     db.execute(
                         text("""
                         INSERT INTO paper_positions (
@@ -775,15 +887,15 @@ class PaperTradingEngine:
                             :id, :portfolio_id, :asset_id, :quantity, :entry_price,
                             :opened_at, 'open', :source_trade_id
                         )
-                    """),
+                    """).bindparams(*uuid_binds("id", "portfolio_id", "source_trade_id")),
                         {
                             "id": position_id,
-                            "portfolio_id": run.portfolio_id,
+                            "portfolio_id": to_uuid(run.portfolio_id),
                             "asset_id": instrument,
                             "quantity": trade_quantity,
                             "entry_price": entry_price_dec,
                             "opened_at": entry_time,
-                            "source_trade_id": source_trade_id,
+                            "source_trade_id": to_uuid(source_trade_id),
                         },
                     )
 
@@ -877,8 +989,8 @@ class PaperTradingEngine:
                 FROM paper_trading_runs
                 WHERE id = :id
                 FOR UPDATE
-            """),
-                {"id": run_id},
+            """).bindparams(*uuid_binds("id")),
+                {"id": to_uuid(run_id)},
             ).fetchone()
 
             # Check if cancel was requested while we were processing
@@ -886,14 +998,22 @@ class PaperTradingEngine:
                 logger.info(f"Cancel requested detected during final commit, worker stopping")
                 db.rollback()
                 # Worker sets status='cancelled' after confirming it stopped
-                db.execute(
+                cancelled = db.execute(
                     text("""
                     UPDATE paper_trading_runs
                     SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP
                     WHERE id = :id AND status = 'running'
-                """),
-                    {"id": run_id},
+                """).bindparams(*uuid_binds("id")),
+                    {"id": to_uuid(run_id)},
                 )
+                if cancelled.rowcount == 0:
+                    # The row left 'running' under the lock, so no terminal
+                    # state was written here and 'cancelled' would be a claim
+                    # no row supports. Same signal as the completion write above.
+                    db.rollback()
+                    raise InvalidStateError(
+                        "Run", run_id, locked_run.status, ["running"]
+                    )
                 db.commit()
                 return {
                     "run_id": run_id,
@@ -924,10 +1044,10 @@ class PaperTradingEngine:
                         losses = EXCLUDED.losses,
                         daily_pnl = EXCLUDED.daily_pnl,
                         cumulative_pnl = EXCLUDED.cumulative_pnl
-                """),
+                """).bindparams(*uuid_binds("metric_id", "run_id")),
                     {
-                        "metric_id": str(uuid.uuid4()),
-                        "run_id": run_id,
+                        "metric_id": uuid.uuid4(),
+                        "run_id": to_uuid(run_id),
                         "date": trade_date,
                         "trades": metrics["trades"],
                         "wins": metrics["wins"],
@@ -946,10 +1066,15 @@ class PaperTradingEngine:
                 else 0
             )
 
-            # Final completion: only set status='completed' if cancel was NOT requested.
-            # If cancel was requested, worker already set status='cancelled' in the cancel check block.
-            # This prevents completion handler from overriding cancel status.
-            db.execute(
+            # Final completion. ``cancel_requested = FALSE`` alone is not the
+            # ownership predicate this lane uses everywhere else (execution
+            # acquisition, both cancel writes, the exception handler). A run
+            # another writer had already moved to 'cancelled' or 'failed' still
+            # answers FALSE, and the replay would republish it as 'completed'
+            # over a terminal state somebody else recorded. Requiring
+            # status = 'running' is the claim that the row is still this
+            # worker's to close; no row matched means it is not.
+            completion = db.execute(
                 text("""
                 UPDATE paper_trading_runs
                 SET status = 'completed',
@@ -959,16 +1084,24 @@ class PaperTradingEngine:
                     total_trades = :trades,
                     win_rate = :wr,
                     updated_at = CURRENT_TIMESTAMP
-                WHERE id = :id AND cancel_requested = FALSE
-            """),
+                WHERE id = :id AND status = 'running' AND cancel_requested = FALSE
+            """).bindparams(*uuid_binds("id")),
                 {
                     "final": float(total_equity),
                     "pnl": float(total_pnl),
                     "trades": total_trades,
                     "wr": win_rate,
-                    "id": run_id,
+                    "id": to_uuid(run_id),
                 },
             )
+            if completion.rowcount == 0:
+                # Nothing above is published: the daily metrics and the
+                # portfolio close roll back with the refusal, so a replay that
+                # did not win the write leaves no outcome attached to the run.
+                db.rollback()
+                raise InvalidStateError(
+                    "Run", run_id, getattr(locked_run, "status", None), ["running"]
+                )
 
             # Update portfolio
             db.execute(
@@ -976,8 +1109,8 @@ class PaperTradingEngine:
                 UPDATE paper_portfolios
                 SET current_virtual_cash = :capital, closed_at = CURRENT_TIMESTAMP
                 WHERE id = :id
-            """),
-                {"capital": float(total_equity), "id": run.portfolio_id},
+            """).bindparams(*uuid_binds("id")),
+                {"capital": float(total_equity), "id": to_uuid(run.portfolio_id)},
             )
 
             db.commit()
@@ -1021,8 +1154,8 @@ class PaperTradingEngine:
                             updated_at = CURRENT_TIMESTAMP
                         WHERE id = :id AND status = 'running'
                         RETURNING id, status, cancel_requested
-                    """),
-                        {"id": run_id},
+                    """).bindparams(*uuid_binds("id")),
+                        {"id": to_uuid(run_id)},
                     )
 
                     row = result.fetchone()
@@ -1070,8 +1203,9 @@ class PaperTradingEngine:
         try:
             # Get run and validate ownership
             run = db.execute(
-                text("SELECT * FROM paper_trading_runs WHERE id = :id"),
-                {"id": run_id},
+                text("SELECT * FROM paper_trading_runs WHERE id = :id").bindparams(
+                    *uuid_binds("id")),
+                {"id": to_uuid(run_id)},
             ).fetchone()
 
             if not run:
@@ -1079,11 +1213,12 @@ class PaperTradingEngine:
 
             # Cross-user rejection: validate ownership via portfolio
             portfolio = db.execute(
-                text("SELECT owner_id FROM paper_portfolios WHERE id = :id"),
-                {"id": run.portfolio_id},
+                text("SELECT owner_id FROM paper_portfolios WHERE id = :id").bindparams(
+                    *uuid_binds("id")),
+                {"id": to_uuid(run.portfolio_id)},
             ).fetchone()
 
-            if not portfolio or str(portfolio.owner_id) != user_id:
+            if not portfolio or to_uuid(portfolio.owner_id) != to_uuid(user_id):
                 owner_id = str(portfolio.owner_id) if portfolio else "unknown"
                 raise AuthorizationError(user_id, "run", run_id, owner_id)
 
@@ -1104,8 +1239,8 @@ class PaperTradingEngine:
                     WHERE id = :id AND status IN ('queued', 'pending', 'failed')
                       AND cancel_requested = FALSE
                     RETURNING id
-                """),
-                    {"id": run_id},
+                """).bindparams(*uuid_binds("id")),
+                    {"id": to_uuid(run_id)},
                 )
 
                 cancelled_row = result.fetchone()
@@ -1113,8 +1248,9 @@ class PaperTradingEngine:
                 if not cancelled_row:
                     # Another cancel succeeded or status changed
                     current_run = db.execute(
-                        text("SELECT status, cancel_requested FROM paper_trading_runs WHERE id = :id"),
-                        {"id": run_id},
+                        text("SELECT status, cancel_requested FROM paper_trading_runs WHERE id = :id").bindparams(
+                            *uuid_binds("id")),
+                        {"id": to_uuid(run_id)},
                     ).fetchone()
 
                     if current_run and current_run.status == "cancelled":
@@ -1154,8 +1290,8 @@ class PaperTradingEngine:
                 WHERE id = :id AND status = 'running'
                   AND cancel_requested = FALSE
                 RETURNING id
-            """),
-                {"id": run_id},
+            """).bindparams(*uuid_binds("id")),
+                {"id": to_uuid(run_id)},
             )
 
             cancelled_row = result.fetchone()
@@ -1163,8 +1299,9 @@ class PaperTradingEngine:
             if not cancelled_row:
                 # Another cancel request succeeded, or status changed to terminal
                 current_run = db.execute(
-                    text("SELECT status, cancel_requested FROM paper_trading_runs WHERE id = :id"),
-                    {"id": run_id},
+                    text("SELECT status, cancel_requested FROM paper_trading_runs WHERE id = :id").bindparams(
+                        *uuid_binds("id")),
+                    {"id": to_uuid(run_id)},
                 ).fetchone()
 
                 if current_run:
@@ -1481,10 +1618,12 @@ class PaperTradingEngine:
 
         db = self.session_factory()
         try:
-            # Get run details
+            # Get run details. Every identity column below is a mapped
+            # ``UUID(as_uuid=True)``, so the reads that must find a row created
+            # by the ORM carry a typed bind and a parsed value.
             run = db.execute(
-                text("SELECT * FROM paper_trading_runs WHERE id = :id"),
-                {"id": run_id},
+                _REPORT_RUN_READ,
+                {"id": to_uuid(run_id)},
             ).fetchone()
 
             if not run:
@@ -1492,17 +1631,14 @@ class PaperTradingEngine:
 
             # Get daily metrics
             metrics = db.execute(
-                text("""
-                SELECT * FROM paper_trading_daily_metrics
-                WHERE run_id = :id AND date = :date
-            """),
-                {"id": run_id, "date": report_date},
+                _REPORT_METRICS_READ,
+                {"run_id": to_uuid(run_id), "date": report_date},
             ).fetchone()
 
             # Get portfolio
             portfolio = db.execute(
-                text("SELECT * FROM paper_portfolios WHERE id = :id"),
-                {"id": run.portfolio_id},
+                _REPORT_PORTFOLIO_READ,
+                {"id": to_uuid(run.portfolio_id)},
             ).fetchone()
 
             report = {
@@ -1537,31 +1673,31 @@ class PaperTradingEngine:
         """Get current status of a paper trading run."""
         db = self.session_factory()
         try:
-            run = db.execute(
-                text("SELECT * FROM paper_trading_runs WHERE id = :id"),
-                {"id": run_id},
-            ).fetchone()
+            run = db.execute(_STATUS_RUN_READ, {"id": to_uuid(run_id)}).mappings().first()
 
-            if not run:
+            if run is None:
                 raise ResourceNotFoundError("Run", run_id)
 
-            portfolio = db.execute(
-                text("SELECT * FROM paper_portfolios WHERE id = :id"),
-                {"id": run.portfolio_id},
-            ).fetchone()
+            portfolio = None
+            if run["portfolio_id"] is not None:
+                portfolio = db.execute(
+                    _STATUS_PORTFOLIO_READ, {"id": to_uuid(run["portfolio_id"])}
+                ).mappings().first()
 
             return {
                 "run_id": run_id,
-                "status": run.status,
-                "skill": run.skill,
-                "instrument_id": run.instrument_id,
-                "initial_capital": float(run.initial_capital),
-                "current_capital": float(portfolio.current_virtual_cash) if portfolio else 0,
-                "total_pnl": float(run.total_pnl) if run.total_pnl else 0,
-                "total_trades": run.total_trades,
-                "win_rate": float(run.win_rate) if run.win_rate else 0,
-                "start_date": run.start_date.isoformat() if run.start_date else None,
-                "end_date": run.end_date.isoformat() if run.end_date else None,
+                "status": run["status"],
+                "skill": run["skill"],
+                "instrument_id": run["instrument_id"],
+                "initial_capital": float(run["initial_capital"]),
+                "current_capital": (
+                    float(portfolio["current_virtual_cash"]) if portfolio else 0
+                ),
+                "total_pnl": float(run["total_pnl"]) if run["total_pnl"] else 0,
+                "total_trades": run["total_trades"],
+                "win_rate": float(run["win_rate"]) if run["win_rate"] else 0,
+                "start_date": iso_from_stored(run["start_date"]),
+                "end_date": iso_from_stored(run["end_date"]),
             }
 
         finally:

@@ -34,16 +34,19 @@ killed one are the same row. It follows that this module has no release entry at
 all — the only "proof" such an entry could be handed is a caller-supplied run
 id, and that is a claim about a transaction, not evidence of one. An interrupted
 attempt therefore keeps its version blocked and its quota unit held until an
-outcome is written by the writer that owns it or by a recorded human decision.
+outcome is written by the writer that owns it or by ``cancel_research_run``,
+which is the recorded human decision the refusal tells the caller to use.
 """
 
+import hashlib
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.auth.entitlements import (
@@ -68,14 +71,33 @@ logger = logging.getLogger(__name__)
 
 RESEARCH_QUOTA_TYPE = "research_run"
 NON_TERMINAL_RUN_STATUSES = (RunStatus.pending, RunStatus.running)
-TERMINAL_RUN_STATUSES = (RunStatus.completed, RunStatus.failed)
+TERMINAL_RUN_STATUSES = (
+    RunStatus.completed,
+    RunStatus.failed,
+    RunStatus.cancelled,
+)
 
 RECOVERY_REFUSAL_REASON = (
     "Age-based recovery refused to act: an aged non-terminal row is not proof "
     "its process died, and this lane has no lease or heartbeat to check. No run "
     "was closed and no reservation was released. The row stays active and its "
     "version keeps refusing new admissions until an outcome is written by the "
-    "writer that owns it or by an explicit, recorded operator decision."
+    "writer that owns it. To end it by decision instead of by guess, cancel it: "
+    "POST /api/v1/runs/{run_id}/cancel closes the row, answers for its quota "
+    "unit and records who decided, and it is that record — not a timeout — that "
+    "the platform accepts as the run's outcome."
+)
+
+# What a cancellation did and did not achieve, in the caller's own words. The
+# row is closed and the ledger is answered for; the process that was computing
+# is a thing this platform cannot observe, so no cancellation may claim it
+# stopped. Its late result is refused by the terminal write, which can no longer
+# match a row that is already terminal.
+CANCEL_EFFECT_NOTE = (
+    "The run is closed as cancelled and its quota unit has been answered for. "
+    "The process computing it is not confirmed stopped: if it finishes and "
+    "tries to publish, that write matches no active row, so its result is "
+    "discarded, it is billed nothing and it adds no second outcome."
 )
 
 
@@ -98,7 +120,9 @@ def active_run_conflict_detail(run_id: UUID) -> str:
         f"{run_id}. Admission is serialised on the version row, so a second "
         "run would double-bill the same work; it is not proof the first "
         "process is alive — the platform cannot see processes, only rows. "
-        "Wait for an outcome on that run before starting another."
+        f"Wait for an outcome on run {run_id}, or cancel it "
+        f"(POST /api/v1/runs/{run_id}/cancel) to close it by decision, which "
+        "releases its quota unit and lets this version admit again."
     )
 
 
@@ -131,6 +155,54 @@ def _run_failure_detail(exc: BaseException) -> str:
     return safe_error_message(exc)
 
 
+def idempotency_request_hash(
+    *,
+    version_id: Any,
+    data_source: str,
+    provider_id: Optional[str],
+    config_hash: str,
+    charge_quota: bool,
+) -> str:
+    """What the admitted request actually was, hashed.
+
+    A key alone cannot tell a retry from a different request that reused the key.
+    This hash covers the inputs that change the outcome or the billing, so a
+    collision is answered with a conflict instead of by ignoring one of the two
+    bodies.
+    """
+    canonical = json.dumps(
+        {
+            "version_id": str(version_id),
+            "data_source": data_source,
+            "provider_id": provider_id,
+            "config_hash": config_hash,
+            "charge_quota": bool(charge_quota),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def find_run_by_idempotency_key(
+    db: Session, *, version_id: UUID, idempotency_key: str
+) -> Optional[ResearchRun]:
+    """The committed attempt this (version, key) already produced, if any.
+
+    Scoped to the version, which is what the caller retries and what already
+    belongs to one owner: a table-wide lookup would let one account's key
+    resolve another account's run.
+    """
+    return (
+        db.query(ResearchRun)
+        .filter(
+            ResearchRun.experiment_version_id == version_id,
+            ResearchRun.idempotency_key == idempotency_key,
+        )
+        .first()
+    )
+
+
 def execute_backtest_run(
     db: Session,
     *,
@@ -143,6 +215,7 @@ def execute_backtest_run(
     event_payload: Optional[Dict[str, Any]] = None,
     actor_type: str = "unknown",
     charge_quota: bool = True,
+    idempotency_key: Optional[str] = None,
 ) -> ResearchRun:
     """Run one backtest, billed against the user's research_run quota.
 
@@ -150,6 +223,17 @@ def execute_backtest_run(
     the engine starts), execution (no writes), terminal (outcome plus
     settlement or release plus audit, one commit). See
     ``_admit_research_run`` for the lock and what a refusal leaves behind.
+
+    ``idempotency_key`` makes a lost response survivable: the key is stored on
+    the attempt inside the admission transaction, so the same (version, key)
+    never produces a second run or a second unit. A repeat is answered with the
+    stored row and the engine is not called again - including when that row is
+    still ``running`` (another process owns it; the recovery and cancel entries
+    are how it gets closed) or already terminal. The instance returned then
+    carries ``idempotent_replay = True`` so the caller can say so, and a key
+    reused for a different request is a 409, not a silent choice of one body.
+    Without a key nothing changes: a deliberate re-run is a new run and a new
+    unit, and a retry with no key cannot be told apart from one.
 
     ``strategy_spec`` overrides the version's stored spec for this one run
     (a study cell changes costs, parameters or the period). The run row stays
@@ -179,7 +263,7 @@ def execute_backtest_run(
 
     # Everything the caller is billed for is decided and made durable here, in
     # one transaction that commits before a single bar is read.
-    run = _admit_research_run(
+    run, replayed = _admit_research_run(
         db,
         user=user,
         version=version,
@@ -189,7 +273,25 @@ def execute_backtest_run(
         event_payload=event_payload,
         actor_type=actor_type,
         charge_quota=charge_quota,
+        idempotency_key=idempotency_key,
+        request_hash=(
+            None
+            if idempotency_key is None
+            else idempotency_request_hash(
+                version_id=version.id,
+                data_source=data_source,
+                provider_id=provider_id,
+                config_hash=config_hash,
+                charge_quota=charge_quota,
+            )
+        ),
     )
+    if replayed:
+        # The attempt this key already produced is the answer. Recomputing it
+        # would bill a second unit for one request, and publishing a second
+        # outcome for the same window would read as two experiments.
+        run.idempotent_replay = True
+        return run
 
     try:
         data_provider = get_data_provider()
@@ -440,6 +542,157 @@ def execute_backtest_run(
         return run
 
 
+def cancel_research_run(
+    db: Session,
+    *,
+    run: ResearchRun,
+    user: User,
+    actor_type: str = "unknown",
+    reason: Optional[str] = None,
+) -> Dict[str, Any]:
+    """End an active research run by decision, which is what a timeout cannot be.
+
+    This is the entry that makes ``RECOVERY_REFUSAL_REASON`` a true statement:
+    recovery declines to guess whether a process died, and here the account that
+    started the work says what it wants instead, and that record — not an age —
+    becomes the run's outcome. One transaction, in the admission's lock order
+    (``LOCK_ORDER``): version row, then run row, then the quota row. The version
+    lock is what serialises a cancellation against an admission of the same
+    version, so a cancel cannot land between an admission re-reading its active
+    run and committing a new one.
+
+    The conditional status write carries the whole authority, exactly as in
+    ``execute_backtest_run``: rowcount 1 means this transaction closed the row
+    and is therefore the one that answers for its quota unit and records the
+    decision. Rowcount 0 means somebody already published an outcome; this
+    request then changes nothing at all — no release of a unit another writer
+    already settled, no cancellation event beside a completed run, no repair of
+    a ledger it did not close — and reports what it found instead.
+
+    Cancelling is not the same claim as stopping. There is no worker to signal:
+    the computation lives in another request's process, and what voids its result
+    is this row being terminal, which that process's own write can no longer
+    match. Whether it is still running is not knowable from here, so the answer
+    carries ``process_stopped: null`` rather than a reassurance.
+    """
+    run_id = run.id
+    version_id = run.experiment_version_id
+
+    try:
+        db.query(ExperimentVersion.id).filter(
+            ExperimentVersion.id == version_id
+        ).with_for_update().first()
+
+        status_before = db.query(ResearchRun.status).filter(
+            ResearchRun.id == run_id
+        ).scalar()
+
+        flipped = (
+            db.query(ResearchRun)
+            .filter(
+                ResearchRun.id == run_id,
+                ResearchRun.status.in_(NON_TERMINAL_RUN_STATUSES),
+            )
+            .update(
+                {
+                    "status": RunStatus.cancelled,
+                    "completed_at": datetime.now(timezone.utc).replace(tzinfo=None),
+                },
+                synchronize_session=False,
+            )
+        )
+
+        if flipped != 1:
+            # Somebody else closed this run first, and their outcome is the
+            # record. The rollback discards the zero-row UPDATE and the reads
+            # above; what is reported is the committed state, read again so this
+            # session holds no write of its own.
+            db.rollback()
+            current, unit_state = _committed_state(db, run_id)
+            logger.info(
+                "Cancellation of run %s did nothing: the row is already %s and "
+                "its attributed quota unit is %s.",
+                run_id,
+                current if current is not None else "gone",
+                unit_state if unit_state is not None else "unattributed",
+            )
+            db.refresh(run)
+            return {
+                "outcome": "already_terminal",
+                "run": run,
+                "status_before": None,
+                "status_after": current,
+                "quota": "unchanged",
+                "note": (
+                    f"Run {run_id} is already {current}, so cancelling it would "
+                    "not close anything. Its recorded outcome and its quota unit "
+                    "are left exactly as they are."
+                ),
+            }
+
+        version = db.get(ExperimentVersion, version_id)
+        experiment = db.get(Experiment, version.experiment_id)
+
+        unit = _run_quota_unit(db, run_id=run_id)
+        if unit is None:
+            # An unbilled run: a study cell whose authorization unit belongs to
+            # the study, or a ledger predating the linkage. There is no unit
+            # here to hand back, which is what keeps this lane away from a
+            # study's billing.
+            quota = "not_billed"
+        elif unit[1] != user.id:
+            quota = "unattributable"
+            logger.error(
+                "Run %s was cancelled but the unit attributing itself to it "
+                "belongs to account %s, not to %s, so nothing was released — "
+                "reported, not repaired here.",
+                run_id, unit[1], user.id,
+            )
+        elif unit[2] != "reserved":
+            quota = f"left_{unit[2]}"
+            logger.error(
+                "Run %s was cancelled but its quota unit %s is %s rather than "
+                "reserved, so nothing was released — a writer that did not close "
+                "this row already answered for it. Reported, not repaired here.",
+                run_id, unit[0], unit[2],
+            )
+        else:
+            release_reservation(db, unit[0])
+            quota = "released"
+
+        emit_event(
+            db,
+            entity_type="run",
+            entity_id=run_id,
+            event_type="research_run_cancelled",
+            actor_id=user.id,
+            actor_type=actor_type,
+            payload={
+                "status_before": status_before.value if status_before else None,
+                "quota": quota,
+                "reason": reason[:500] if reason else None,
+                "process_stopped": None,
+            },
+            rules_locked=experiment.status == "locked",
+            data_cutoff_at=(version.strategy_spec or {}).get("end_date"),
+        )
+
+        db.commit()
+    except BaseException:
+        db.rollback()
+        raise
+
+    db.refresh(run)
+    return {
+        "outcome": "cancelled",
+        "run": run,
+        "status_before": status_before.value if status_before else None,
+        "status_after": run.status.value,
+        "quota": quota,
+        "note": CANCEL_EFFECT_NOTE,
+    }
+
+
 def _committed_state(db: Session, run_id: UUID) -> Tuple[Optional[str], Optional[str]]:
     """The run's committed status, and the state of the unit attributed to it.
 
@@ -463,10 +716,38 @@ def _committed_state(db: Session, run_id: UUID) -> Tuple[Optional[str], Optional
         )
         .one_or_none()
     )
+    status_value = row[0] if row is not None else None
+    # The column yields the enum; every caller puts it in a sentence a person
+    # reads, and ``str(RunStatus.failed)`` is not that sentence.
     return (
-        row[0] if row is not None else None,
+        status_value.value if isinstance(status_value, RunStatus) else status_value,
         unit_row[0] if unit_row is not None else None,
     )
+
+
+def _run_quota_unit(
+    db: Session, *, run_id: UUID
+) -> Optional[Tuple[UUID, UUID, str]]:
+    """The unit that attributes itself to this run, as ``(id, owner, status)``.
+
+    Read by run alone, so a unit owned by another account is *seen* rather than
+    quietly skipped, and ``one_or_none()`` is kept on purpose: the partial unique
+    index over ``research_run_id`` for this quota type makes a second row a broken
+    constraint, which must raise instead of letting a cancellation pick a winner.
+    """
+    row = (
+        db.query(
+            QuotaReservation.id,
+            QuotaReservation.user_id,
+            QuotaReservation.status,
+        )
+        .filter(
+            QuotaReservation.research_run_id == run_id,
+            QuotaReservation.quota_type == RESEARCH_QUOTA_TYPE,
+        )
+        .one_or_none()
+    )
+    return None if row is None else (row[0], row[1], row[2])
 
 
 def _reservation_is_open(db: Session, reservation_id: UUID) -> bool:
@@ -557,7 +838,9 @@ def _admit_research_run(
     event_payload: Optional[Dict[str, Any]],
     actor_type: str,
     charge_quota: bool,
-) -> ResearchRun:
+    idempotency_key: Optional[str] = None,
+    request_hash: Optional[str] = None,
+) -> Tuple[ResearchRun, bool]:
     """Commit the attempt, then and only then let the engine start.
 
     One transaction, in this order:
@@ -578,6 +861,18 @@ def _admit_research_run(
     audit event — nothing for a later commit in this session to publish. The
     engine is not called until this returns, which is what makes the committed
     row a true statement about the window in which it is being computed.
+
+    With ``idempotency_key``, step 2 first answers a repeat of this request from
+    the row the first one committed, before the active-run check can mistake it
+    for a second run: the key is scoped to the version, and the stored
+    ``request_hash`` is what tells a retry from a different request wearing the
+    same key. A replay returns ``(stored row, True)`` with no writes and no
+    unit; the read-only transaction is rolled back, which is also what releases
+    the version lock. The unique index is the last resort when two connections
+    pass that read together — the insertion that loses rolls its own attempt
+    back and reports the row that won instead of raising, provided the stored
+    hash still says the same request; a different body wearing the same key is
+    a conflict there exactly as it is at the read.
     """
     started_payload: Dict[str, Any] = {
         "version_id": str(version.id),
@@ -592,6 +887,18 @@ def _admit_research_run(
             ExperimentVersion.id == version.id
         ).with_for_update().first()
 
+        if idempotency_key is not None:
+            existing = find_run_by_idempotency_key(
+                db, version_id=version.id, idempotency_key=idempotency_key
+            )
+            if existing is not None:
+                if existing.idempotency_request_hash != request_hash:
+                    raise idempotency_conflict(
+                        idempotency_key=idempotency_key, existing=existing
+                    )
+                db.rollback()
+                return existing, True
+
         live = find_live_research_run(db, version_id=version.id)
         if live is not None:
             raise HTTPException(
@@ -605,6 +912,8 @@ def _admit_research_run(
             config_hash=config_hash,
             status=RunStatus.running,
             started_at=datetime.now(timezone.utc).replace(tzinfo=None),
+            idempotency_key=idempotency_key,
+            idempotency_request_hash=request_hash,
         )
         db.add(run)
         db.flush()
@@ -628,14 +937,59 @@ def _admit_research_run(
         )
 
         db.commit()
-    except BaseException:
+    except BaseException as exc:
         # Covers the 409, a 429 from reserve_quota, a linkage refusal and a
         # commit failure alike: an attempt that was not admitted leaves no
         # rows behind, and no lock is held while the caller responds.
         db.rollback()
+        if idempotency_key is not None and isinstance(exc, IntegrityError):
+            raced = find_run_by_idempotency_key(
+                db, version_id=version.id, idempotency_key=idempotency_key
+            )
+            if raced is not None:
+                # The index, not this process, decided which of two concurrent
+                # admissions with the same key owns the row. Reporting the
+                # violation would tell the caller their request failed when the
+                # attempt it asked for exists and is running.
+                #
+                # That reasoning only holds for the request the key describes.
+                # The read at step 2 compared the hash; skipping the comparison
+                # here would answer a different body with the row that won the
+                # race — a 201 for a backtest that never computed what was
+                # asked, and no signal that the second request was dropped.
+                if raced.idempotency_request_hash != request_hash:
+                    raise idempotency_conflict(
+                        idempotency_key=idempotency_key, existing=raced
+                    ) from exc
+                return raced, True
         raise
 
-    return run
+    return run, False
+
+
+def idempotency_conflict(
+    *, idempotency_key: str, existing: ResearchRun
+) -> HTTPException:
+    """The 409 for a key that already admits a *different* request.
+
+    Silently running the second body would bill one unit for a request the
+    caller never sent; silently returning the first would ignore it. The
+    response names the run that holds the key so the caller can decide.
+    """
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            "error": "idempotency_key_conflict",
+            "idempotency_key": idempotency_key,
+            "existing_run_id": str(existing.id),
+            "message": (
+                "This Idempotency-Key was already used for a different backtest "
+                f"request on this version (run {existing.id}). Retry the request "
+                "exactly as it was to get that run back, or send the new request "
+                "under a new key."
+            ),
+        },
+    )
 
 
 def find_live_research_run(db: Session, *, version_id: UUID) -> Optional[ResearchRun]:

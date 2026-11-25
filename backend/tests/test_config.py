@@ -444,3 +444,32 @@ class TestIsProductionLike:
             DATABASE_URL="postgresql://db.example.com/test",
         )
         assert s.is_production_like is True
+
+
+class TestBackgroundServiceControls:
+    """The knobs the controlled daily service reads, refused before boot.
+
+    Both names feed a scheduler that only exists when its service is opted in,
+    so a bad value used to surface as an APScheduler argument error mid-startup
+    (or, for the interval, as a dedup key that changed on every call and a
+    service that quietly stopped deduplicating).
+    """
+
+    def test_zero_collection_interval_is_refused(self):
+        with pytest.raises(ValueError) as exc_info:
+            _fresh_settings(AUTO_COLLECTION_INTERVAL_HOURS="0")
+        assert "AUTO_COLLECTION_INTERVAL_HOURS" in str(exc_info.value)
+
+    def test_negative_collection_interval_is_refused(self):
+        with pytest.raises(ValueError) as exc_info:
+            _fresh_settings(AUTO_COLLECTION_INTERVAL_HOURS="-3")
+        assert "at least 1" in str(exc_info.value)
+
+    def test_collection_interval_accepts_a_whole_hour(self):
+        s = _fresh_settings(AUTO_COLLECTION_INTERVAL_HOURS="6")
+        assert s.auto_collection_interval_hours == 6
+
+    def test_zero_owner_ceiling_is_refused(self):
+        with pytest.raises(ValueError) as exc_info:
+            _fresh_settings(LEARNING_SCHEDULER_MAX_OWNERS="0")
+        assert "LEARNING_SCHEDULER_MAX_OWNERS" in str(exc_info.value)

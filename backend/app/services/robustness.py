@@ -743,7 +743,15 @@ def _run_cell(
     )
 
     attempt.run_id = run.id
-    attempt.status = "completed" if run.status == RunStatus.completed else "failed"
+    if run.status == RunStatus.completed:
+        attempt.status = "completed"
+    elif run.status == RunStatus.cancelled:
+        # A run closed by decision is not a computation that failed. Recording
+        # it as failed would put an outcome in the study's aggregate that no
+        # backtest produced, and would hide the fact that someone cancelled it.
+        attempt.status = "cancelled"
+    else:
+        attempt.status = "failed"
     attempt.metrics = run.metrics
     attempt.dataset_checksum = run.dataset_checksum
     result = run.result_json or {}
@@ -905,7 +913,7 @@ def compute_aggregate(
     ]
     counts = {
         status: sum(1 for a in attempts if a.status == status)
-        for status in ("pending", "completed", "failed", "skipped")
+        for status in ("pending", "completed", "failed", "cancelled", "skipped")
     }
 
     stats = None
@@ -979,6 +987,35 @@ def compute_aggregate(
         ),
         "folds": folds,
     }
+
+
+def settle_study_status(db: Session, study: RobustnessStudy, final_status: str) -> str:
+    """Write the outcome the attempts produced, unless the row was cancelled.
+
+    The transition is a conditional UPDATE restricted by the status stored in the
+    row, because the caller read that status earlier: a cancellation committed
+    since then has a claim on the study that the outcome computed from the
+    attempts that ran before it cannot override. The row stays cancelled and the
+    attempts keep their results, which is exactly what the cancel entry promises
+    when it refuses to close a finished study.
+
+    Nothing is assigned to ``study.status`` here, so no value this transaction
+    read early can be flushed back over the committed row; the caller re-reads the
+    study afterwards. A cancellation is a request, not a kill: an execution that
+    is still in progress is not proven stopped.
+    """
+    if (
+        db.query(RobustnessStudy)
+        .filter(
+            RobustnessStudy.id == study.id,
+            RobustnessStudy.status != "cancelled",
+        )
+        .update({"status": final_status}, synchronize_session=False)
+        == 0
+    ):
+        study.cancelled_at = study.cancelled_at or utcnow()
+        return "cancelled"
+    return final_status
 
 
 def execute_study(
@@ -1072,7 +1109,11 @@ def execute_study(
     else:
         final_status = "partial"
 
-    study.status = final_status
+    # The write is conditional for the same reason the cancel entry is: this
+    # transaction read the status at the refresh above, and a cancellation
+    # committed since then outranks the outcome computed here.
+    final_status = settle_study_status(db, study, final_status)
+
     study.aggregate = compute_aggregate(study, attempts)
 
     emit_event(

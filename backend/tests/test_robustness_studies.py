@@ -5,6 +5,7 @@ They check behaviour the product promises: the plan is priced before it runs,
 a study never edits the strategy, every attempt is a real research run, and
 resuming fills only the cells that are missing.
 """
+import re
 import uuid
 
 import pytest
@@ -137,6 +138,32 @@ def _research_run_ids() -> set:
     db = TestSession()
     try:
         return {str(r.id) for r in db.query(ResearchRun).all()}
+    finally:
+        db.close()
+
+
+def _study_row(study_id) -> dict:
+    """The stored study row, read on its own session.
+
+    What a refusal or a cancellation did to the row is decided here, not from the
+    response body: a handler that reported a state it did not write, or rewrote a
+    timestamp it should have left alone, is only visible in the stored row.
+    """
+    from app.models.robustness import RobustnessStudy
+
+    db = TestSession()
+    try:
+        row = (
+            db.query(RobustnessStudy)
+            .filter(RobustnessStudy.id == _uid(study_id))
+            .one()
+        )
+        return {
+            "status": row.status,
+            "cancelled_at": row.cancelled_at,
+            "completed_at": row.completed_at,
+            "aggregate": row.aggregate,
+        }
     finally:
         db.close()
 
@@ -882,3 +909,207 @@ class TestQuotaAndOwnership:
             "period_slices",
         )
         assert created.status_code == 403, created.text
+
+
+class TestCancelTransition:
+    """Who is allowed to close a study, and how many times.
+
+    `POST /api/v1/robustness/{id}/cancel` used to read the status and write
+    afterwards, so two requests that both saw `planned` both wrote and both
+    reported a cancellation the other one performed. The same read-first shape sat
+    on the other side: an execution that finished while a cancel was in flight
+    could have its outcome overwritten by a request that had already answered
+    `cancelled`. Both directions are now one conditional UPDATE restricted by the
+    stored status, and the rowcount decides.
+
+    These tests pin that decision rule and where the write is committed. On this
+    lane SQLite serialises the writers, so nothing here is evidence about two real
+    PostgreSQL connections interleaving — that stays NOT RUN.
+    """
+
+    def _planned_study(self, client, auth_headers, kind="period_slices") -> str:
+        _grant_research_runs(100)
+        exp = _create_experiment(client, auth_headers)
+        created = _create_study(
+            client, auth_headers, exp["id"], exp["current_version_id"], kind
+        )
+        assert created.status_code == 201, created.text
+        return created.json()["id"]
+
+    def test_only_the_first_cancel_writes_and_the_second_is_refused(
+        self, client, auth_headers
+    ):
+        study_id = self._planned_study(client, auth_headers)
+
+        first = client.post(
+            f"/api/v1/robustness/{study_id}/cancel", headers=auth_headers
+        )
+        assert first.status_code == 200, first.text
+        assert first.json()["status"] == "cancelled"
+        stamped = _study_row(study_id)["cancelled_at"]
+        assert stamped is not None
+
+        second = client.post(
+            f"/api/v1/robustness/{study_id}/cancel", headers=auth_headers
+        )
+        assert second.status_code == 400, second.text
+        detail = second.json()["detail"]
+        assert detail["error"] == "study_finished"
+        # The refusal reports the stored status rather than its own write, and the
+        # moment the first cancellation happened is left exactly as it was.
+        assert detail["status"] == "cancelled"
+        assert "closes nothing" in detail["message"]
+        assert _study_row(study_id) == {
+            "status": "cancelled",
+            "cancelled_at": stamped,
+            "completed_at": None,
+            "aggregate": None,
+        }
+        assert _quota_used() == 0, "a cancellation is not a unit of work"
+
+    def test_a_cancelled_study_keeps_the_results_it_already_had(
+        self, client, auth_headers
+    ):
+        from app.models.robustness import RobustnessStudy
+
+        study_id = self._planned_study(client, auth_headers)
+        assert _run(client, auth_headers, study_id).status_code == 200
+        before = _study_row(study_id)
+        assert before["status"] == "completed"
+
+        # A study with an outcome cannot be cancelled, which is the promise the
+        # refusal repeats below; to reach the state the product itself produces
+        # when a run is interrupted, the row is moved back to `partial` the way
+        # `TestExecution.test_resuming_a_partial_study` does.
+        db = TestSession()
+        try:
+            db.query(RobustnessStudy).filter(
+                RobustnessStudy.id == _uid(study_id)
+            ).update({"status": "partial"}, synchronize_session=False)
+            db.commit()
+        finally:
+            db.close()
+
+        cancelled = client.post(
+            f"/api/v1/robustness/{study_id}/cancel", headers=auth_headers
+        )
+        assert cancelled.status_code == 200, cancelled.text
+        payload = cancelled.json()
+        assert payload["status"] == "cancelled"
+        # "completed attempts and results are kept" is measured, not asserted in
+        # prose: the aggregate and every attempt row survive the cancellation.
+        assert _study_row(study_id)["aggregate"] == before["aggregate"]
+        assert [a["status"] for a in payload["attempts"]] == ["completed"] * len(
+            payload["attempts"]
+        )
+        assert len(payload["attempts"]) > 0
+
+        refusal = client.post(
+            f"/api/v1/robustness/{study_id}/cancel", headers=auth_headers
+        )
+        assert refusal.status_code == 400
+        assert "results are kept" in refusal.json()["detail"]["message"]
+
+    def test_a_foreign_or_missing_study_is_a_404_that_writes_nothing(
+        self, client, auth_headers
+    ):
+        study_id = self._planned_study(client, auth_headers)
+        other = _register_second_user(client)
+
+        foreign = client.post(
+            f"/api/v1/robustness/{study_id}/cancel", headers=other
+        )
+        assert foreign.status_code == 404, foreign.text
+        # Ownership is answered before the transition, so the refusal cannot be an
+        # oracle for another account's statuses and writes nothing on the way out.
+        assert _study_row(study_id)["status"] == "planned"
+        assert _study_row(study_id)["cancelled_at"] is None
+
+        missing = client.post(
+            f"/api/v1/robustness/{uuid.uuid4()}/cancel", headers=auth_headers
+        )
+        assert missing.status_code == 404
+
+    def test_the_executor_writes_a_status_it_did_not_read_early(self):
+        """The two ends of the cancellation vocabulary are one vocabulary.
+
+        The cancel entry refuses by a list of finished statuses; the executor is
+        what writes them. A new terminal status added there without a mention here
+        would silently become cancellable, which is a record the user can undo by
+        clicking — so both lists are read out of the source and compared.
+        """
+        from pathlib import Path
+
+        from app.api.robustness import FINISHED_STUDY_STATUSES
+        from app.services import robustness as service
+
+        source = Path(service.__file__).read_text()
+        terminal = source.split("def execute_study(")[1].split("def study_authorization(")[0]
+
+        written = set(re.findall(r'final_status = "(\w+)"', terminal))
+        assert written == {"cancelled", "completed", "failed", "partial"}, written
+        # The only ORM status assignment left in the executor is the start; every
+        # terminal write goes through the conditional update.
+        assert re.findall(r'study\.status = "(\w+)"', terminal) == ["running"]
+        assert re.search(
+            r'settle_study_status\(db, study, final_status\)', terminal
+        ), "the terminal write no longer goes through the guarded helper"
+
+        assert set(FINISHED_STUDY_STATUSES) == written - {"partial"}
+        assert "partial" not in FINISHED_STUDY_STATUSES, (
+            "a study with cells still missing has no outcome yet; refusing to "
+            "cancel it would strand it"
+        )
+
+    def test_a_cancellation_that_landed_outranks_the_outcome_computed_after_it(
+        self, client, auth_headers
+    ):
+        """The decision rule of `settle_study_status`, called directly.
+
+        This is not an interleaving of two live connections — the lane cannot
+        produce one. It is the rule the executor's terminal write now follows: a
+        row whose stored status is `cancelled` keeps it, whatever the attempts
+        read in the same transaction would have said.
+        """
+        from app.models.robustness import RobustnessStudy
+        from app.services.robustness import settle_study_status
+
+        study_id = self._planned_study(client, auth_headers)
+        assert (
+            client.post(
+                f"/api/v1/robustness/{study_id}/cancel", headers=auth_headers
+            ).status_code
+            == 200
+        )
+        stamped = _study_row(study_id)["cancelled_at"]
+
+        db = TestSession()
+        try:
+            row = db.query(RobustnessStudy).filter(
+                RobustnessStudy.id == _uid(study_id)
+            ).one()
+            settled = settle_study_status(db, row, "completed")
+            db.commit()
+        finally:
+            db.close()
+
+        assert settled == "cancelled"
+        after = _study_row(study_id)
+        assert after["status"] == "cancelled"
+        assert after["cancelled_at"] == stamped, "the cancellation keeps its moment"
+
+        # The other half of the rule: a row that was not cancelled still takes the
+        # outcome its attempts earned.
+        open_id = self._planned_study(client, auth_headers)
+        db = TestSession()
+        try:
+            row = db.query(RobustnessStudy).filter(
+                RobustnessStudy.id == _uid(open_id)
+            ).one()
+            assert row.status == "planned"
+            settled = settle_study_status(db, row, "completed")
+            db.commit()
+        finally:
+            db.close()
+        assert settled == "completed"
+        assert _study_row(open_id)["status"] == "completed"

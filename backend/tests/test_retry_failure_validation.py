@@ -16,6 +16,17 @@ from sqlalchemy import text
 
 from app.database import SessionLocal, engine as db_engine
 from app.services.paper_trading import PaperTradingEngine
+from tests.conftest import TEST_ENGINE
+
+# Every case here drives a real run through create_portfolio() and
+# execute_historical_replay(), and both steps are PostgreSQL-only: the portfolio
+# INSERT binds a Decimal into raw SQL (paper_trading.py:74) and the replay takes
+# a `SELECT ... FOR UPDATE` row lock (paper_trading.py:874). A skip here is a
+# statement about the lane, not a pass.
+pytestmark = pytest.mark.skipif(
+    TEST_ENGINE.dialect.name == "sqlite",
+    reason="retry and rollback semantics are proven over the real replay worker, which needs PostgreSQL",
+)
 
 
 @pytest.fixture
@@ -109,7 +120,7 @@ def seed_retry_trades(test_user_id):
                 ) VALUES (
                     :id, :user_id, 'strategy_research_simulated', 'v1.0', 'TEST/USD', 60,
                     'test_provider', 'simulated', 100, :now, :now,
-                    '{}'::jsonb, '{}'::jsonb, '[]'::jsonb, 2, :now
+                    '{}', '{}', '[]', 2, :now
                 )
             """),
             {"id": study_run_id, "user_id": test_user_id, "now": now},

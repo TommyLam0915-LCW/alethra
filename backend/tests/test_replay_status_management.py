@@ -19,6 +19,17 @@ from sqlalchemy import text
 
 from app.database import SessionLocal, engine as db_engine
 from app.services.paper_trading import PaperTradingEngine
+from tests.conftest import TEST_ENGINE
+
+# These cases drive the real replay worker against a real database, and two
+# steps of that worker only exist in PostgreSQL: the daily-metrics pass takes a
+# row lock with `SELECT ... FOR UPDATE` (paper_trading.py:874), which SQLite has
+# no parser for, and the concurrent-acquisition case needs real MVCC. A skip
+# here is a statement about the lane, not a pass.
+pytestmark = pytest.mark.skipif(
+    TEST_ENGINE.dialect.name == "sqlite",
+    reason="replay row lock and concurrent acquisition require a real PostgreSQL backend",
+)
 
 
 @pytest.fixture

@@ -1,4 +1,5 @@
 from datetime import date, datetime, timezone
+from importlib import import_module
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -17,11 +18,14 @@ from app.models.human_decision import (
     HumanDecisionExecutionStatus,
 )
 from app.api.human_decisions import _derive_server_context
+from app.api.conflicts import PAPER_ORDER_IDEMPOTENCY, expected_unique_violation
 from app.api.schemas import (
     SimulationSessionCreate,
     SimulationSessionResponse,
     SimulationDecisionResponse,
     SimulationAdvanceResponse,
+    DailyServiceRun,
+    DailyServiceStatus,
     ManualDecisionRequest,
     ManualDecisionResponse,
     PaperOrderResponse,
@@ -57,6 +61,7 @@ from app.models.paper_portfolio import (
     decision_actor_type,
 )
 from app.services import emit_event
+from app.services.decision_lineage import validate_linked_inference
 from app.services.order_lifecycle import (
     LifecycleError,
     execute_due_orders,
@@ -80,6 +85,10 @@ from sqlalchemy import distinct, func
 import pandas as pd
 
 router = APIRouter(prefix="/simulations", tags=["simulations"])
+
+# How many of this account's replay-tick rows the daily-service read scans for
+# the session's last outcome. One row per day, so this is roughly a month.
+DAILY_SERVICE_LEDGER_SCAN = 30
 
 
 def _get_version_with_ownership(version_id: UUID, db: Session, current_user: User) -> ExperimentVersion:
@@ -1316,57 +1325,31 @@ def _record_intraday_decision(
     return decision
 
 
-@router.post("/{session_id}/advance", response_model=SimulationAdvanceResponse)
-def advance_simulation(
-    session_id: UUID,
-    request: Request,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Advance the session by exactly one step of its own bound dataset.
+def advance_daily_step(
+    db: Session,
+    *,
+    session: SimulationSession,
+    version: ExperimentVersion,
+    actor_id: UUID,
+    actor_type: str,
+) -> dict:
+    """Step one daily session forward, and say which of the two things happened.
 
-    A daily session moves to the next stored snapshot date — the next trading
-    session present in the bound dataset, not necessarily the next calendar day.
-    An intraday session moves to the next stored bar of its declared timeframe.
-    Each call appends exactly one SimulationDecision and advances the cursor for
-    good; no endpoint steps backward, so "one call = one step" is assertable and
-    a retried call is a second step, not a replay.
+    This is the daily branch of ``POST /{session_id}/advance`` moved out
+    verbatim - same dataset, same cursor rule, same fills, same audit event -
+    so that a background tick and the user's own button cannot drift into two
+    replay implementations. It takes the actor as data instead of reading a
+    ``Request``: a tick has no credential to verify, and the actor type it
+    passes is the claim its caller can actually support.
 
-    Status: `pending` becomes `active` on the first advance. Any status other
-    than `pending` or `active` returns 400 and changes nothing.
-
-    Dataset exhaustion also returns 400, but it is a state change, not a
-    rejection: the session becomes `completed`, an open position is force-exited
-    at the last observed close (daily) and pending manual orders are expired
-    because their only window has passed. Callers must read the detail text to
-    tell that transition from a refused call; the stored decisions and the
-    returned status are the record, not the HTTP code alone.
+    ``outcome`` is ``"advanced"`` when the cursor moved onto a stored bar and
+    ``"completed"`` when the bound dataset ran out - the second is a state the
+    session keeps, not a refusal, so a caller does not have to parse detail
+    text to tell them apart. The refusals that really are refusals still raise,
+    with the codes and wording the HTTP caller has always been given.
+    ``decision`` is the row just written, or ``None`` when exhaustion closed the
+    session with no open position to force-exit.
     """
-    session = _get_session_with_ownership(session_id, db, current_user)
-
-    if session.status not in (SimulationStatus.pending, SimulationStatus.active):
-        raise HTTPException(status_code=400, detail=f"Cannot advance session in '{getattr(session.status, 'value', session.status)}' status")
-
-    version = db.query(ExperimentVersion).filter(
-        ExperimentVersion.id == session.experiment_version_id
-    ).first()
-    if not version:
-        raise HTTPException(status_code=404, detail="Associated version not found")
-
-    # Explicit timeframe branch: an intraday session advances one bar at a time
-    # over its own bound stored dataset. The daily path below advances one calendar
-    # day, also over the session's own stored dataset — a session's stored
-    # timeframe, set at creation, decides which path runs, so "推進一日" is never
-    # silently turned into "推進一根".
-    if _is_intraday_timeframe(session.timeframe):
-        return _advance_intraday(
-            db,
-            session=session,
-            version=version,
-            current_user=current_user,
-            actor_type=request_actor_provenance(request),
-        )
-
     spec = version.strategy_spec
     symbol = spec["asset_ids"][0]
     start_date = spec["start_date"]
@@ -1444,7 +1427,7 @@ def advance_simulation(
                         version=version,
                         result=result,
                         step_number=step_number,
-                        actor_id=current_user.id,
+                        actor_id=actor_id,
                     )
                     if result.warnings:
                         existing = session.warnings or []
@@ -1454,7 +1437,7 @@ def advance_simulation(
         # has lost its only window. Say so on the record rather than leaving it
         # pending forever or filling it at a price the user already watched.
         _expire_session_pending_orders(
-            db, session=session, actor_id=current_user.id, reason="dataset_exhausted"
+            db, session=session, actor_id=actor_id, reason="dataset_exhausted"
         )
 
         session.status = SimulationStatus.completed
@@ -1463,8 +1446,8 @@ def advance_simulation(
         emit_event(
             db,
             entity_type="simulation", entity_id=session.id,
-            event_type="simulation_completed", actor_id=current_user.id,
-            actor_type=request_actor_provenance(request),
+            event_type="simulation_completed", actor_id=actor_id,
+            actor_type=actor_type,
             payload={"total_decisions": session.total_decisions, "observed_days": session.observed_days},
             rules_locked=True,
             data_cutoff_at=session.data_cutoff_at,
@@ -1472,10 +1455,12 @@ def advance_simulation(
 
         db.commit()
         db.refresh(session)
-        raise HTTPException(
-            status_code=400,
-            detail="No more snapshots available — simulation complete",
-        )
+        return {
+            "outcome": "completed",
+            "step_number": session.total_decisions,
+            "snapshot_date": session.current_snapshot_date,
+            "decision": None,
+        }
 
     ohlcv = _frame_upto(stored, next_date, start_date)
     if ohlcv.empty:
@@ -1527,7 +1512,7 @@ def advance_simulation(
         version=version,
         result=result,
         step_number=step_number,
-        actor_id=current_user.id,
+        actor_id=actor_id,
     )
     # The market clock: this bar's open is the first window after any earlier
     # cutoff, so manual orders placed while the user was watching an earlier bar
@@ -1542,7 +1527,7 @@ def advance_simulation(
         observed_open=float(ohlcv.iloc[-1]["open"]),
         close_price=float(ohlcv.iloc[-1]["close"]),
         provider_id=provider_id,
-        actor_id=current_user.id,
+        actor_id=actor_id,
     )
     if result.warnings:
         existing = session.warnings or []
@@ -1552,8 +1537,8 @@ def advance_simulation(
     emit_event(
         db,
         entity_type="simulation", entity_id=session.id,
-        event_type="simulation_advanced", actor_id=current_user.id,
-        actor_type=request_actor_provenance(request),
+        event_type="simulation_advanced", actor_id=actor_id,
+        actor_type=actor_type,
         payload={
             "step_number": step_number,
             "snapshot_date": next_date,
@@ -1568,7 +1553,80 @@ def advance_simulation(
     db.refresh(session)
     db.refresh(decision)
 
-    return SimulationAdvanceResponse(session=session, decision=decision)
+    return {
+        "outcome": "advanced",
+        "step_number": step_number,
+        "snapshot_date": next_date,
+        "decision": decision,
+    }
+
+
+@router.post("/{session_id}/advance", response_model=SimulationAdvanceResponse)
+def advance_simulation(
+    session_id: UUID,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Advance the session by exactly one step of its own bound dataset.
+
+    A daily session moves to the next stored snapshot date — the next trading
+    session present in the bound dataset, not necessarily the next calendar day.
+    An intraday session moves to the next stored bar of its declared timeframe.
+    Each call appends exactly one SimulationDecision and advances the cursor for
+    good; no endpoint steps backward, so "one call = one step" is assertable and
+    a retried call is a second step, not a replay.
+
+    Status: `pending` becomes `active` on the first advance. Any status other
+    than `pending` or `active` returns 400 and changes nothing.
+
+    Dataset exhaustion also returns 400, but it is a state change, not a
+    rejection: the session becomes `completed`, an open position is force-exited
+    at the last observed close (daily) and pending manual orders are expired
+    because their only window has passed. The HTTP layer has to keep reporting
+    that on the code the client already handles, so this endpoint turns the
+    `advance_daily_step` outcome back into a 400; a programmatic caller reads
+    the structured outcome instead of the detail text.
+    """
+    session = _get_session_with_ownership(session_id, db, current_user)
+
+    if session.status not in (SimulationStatus.pending, SimulationStatus.active):
+        raise HTTPException(status_code=400, detail=f"Cannot advance session in '{getattr(session.status, 'value', session.status)}' status")
+
+    version = db.query(ExperimentVersion).filter(
+        ExperimentVersion.id == session.experiment_version_id
+    ).first()
+    if not version:
+        raise HTTPException(status_code=404, detail="Associated version not found")
+
+    # Explicit timeframe branch: an intraday session advances one bar at a time
+    # over its own bound stored dataset. The daily path below advances one calendar
+    # day, also over the session's own stored dataset — a session's stored
+    # timeframe, set at creation, decides which path runs, so "推進一日" is never
+    # silently turned into "推進一根".
+    if _is_intraday_timeframe(session.timeframe):
+        return _advance_intraday(
+            db,
+            session=session,
+            version=version,
+            current_user=current_user,
+            actor_type=request_actor_provenance(request),
+        )
+
+    outcome = advance_daily_step(
+        db,
+        session=session,
+        version=version,
+        actor_id=current_user.id,
+        actor_type=request_actor_provenance(request),
+    )
+    if outcome["outcome"] == "completed":
+        raise HTTPException(
+            status_code=400,
+            detail="No more snapshots available — simulation complete",
+        )
+
+    return SimulationAdvanceResponse(session=session, decision=outcome["decision"])
 
 
 @router.get("/{session_id}/decisions", response_model=List[SimulationDecisionResponse])
@@ -1632,6 +1690,182 @@ def list_session_orders(
             )
         )
     return views
+
+
+@router.get("/{session_id}/daily-service", response_model=DailyServiceStatus)
+def get_daily_service_status(
+    session_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """What the background replay service will do with this session, and what it did last.
+
+    Every field is read from the two places that already decide the behaviour —
+    the session's own row and the ``simulation_daily`` ledger — so this cannot
+    drift from the tick and start promising a service that is not running. The
+    scheduler facts describe *this process* only: an API worker that did not
+    start the interval service reports it honestly rather than implying the
+    deployment has no background runner.
+    """
+    # Imported on call, as the worker imports ``advance_daily_step`` on call:
+    # the scheduler and the app factory both sit above this module, and a
+    # module-level import here would be the cycle the lazy import exists to avoid.
+    from app.models.kill_switch import KillSwitchScope
+    from app.models.learning_job import LearningJob
+    from app.services.kill_switch import is_kill_switch_active
+    from app.workers import learning_scheduler as ls
+
+    served = ls.SIMULATION_SERVED_STATUSES
+
+    session = _get_session_with_ownership(session_id, db, current_user)
+
+    status_value = session.status.value if session.status else None
+    timeframe = session.timeframe or "1d"
+
+    enrolled = True
+    reason = None
+    if status_value is None:
+        enrolled, reason = False, "status_unreadable"
+    elif session.status not in served:
+        enrolled, reason = False, status_value
+    elif timeframe in INTRADAY_TIMEFRAMES:
+        enrolled, reason = False, "intraday_timeframe_needs_a_bar_clock"
+
+    queue_position = None
+    if enrolled:
+        # Counted the way the tick selects: same status filter, same
+        # (created_at, id) order, no timeframe filter — an intraday session
+        # takes a slot in the tick's first 20 and is then skipped, so the
+        # position this reports is the position the worker actually used.
+        ahead = (
+            db.query(func.count(SimulationSession.id))
+            .filter(
+                SimulationSession.owner_id == current_user.id,
+                SimulationSession.status.in_(served),
+                (
+                    (SimulationSession.created_at < session.created_at)
+                    | (
+                        (SimulationSession.created_at == session.created_at)
+                        & (SimulationSession.id < session.id)
+                    )
+                ),
+            )
+        ).scalar()
+        queue_position = int(ahead or 0)
+
+    try:
+        kill_switch = (
+            "active"
+            if is_kill_switch_active(db, KillSwitchScope.execution)
+            else "inactive"
+        )
+    except Exception:
+        kill_switch = "unreadable"
+
+    scheduler = getattr(import_module("app.main"), "_learning_scheduler", None)
+    running = bool(scheduler is not None and getattr(scheduler, "running", False))
+    next_run_at = None
+    if running:
+        job = next(
+            (j for j in scheduler.get_jobs() if j.id == "daily_simulation"), None
+        )
+        if job is not None and job.next_run_time is not None:
+            next_run_at = job.next_run_time.isoformat()
+
+    rows = (
+        db.query(LearningJob)
+        .filter(
+            LearningJob.user_id == current_user.id,
+            LearningJob.job_type == ls.SIMULATION_JOB_TYPE,
+        )
+        .order_by(LearningJob.created_at.desc(), LearningJob.id.desc())
+        .limit(DAILY_SERVICE_LEDGER_SCAN)
+        .all()
+    )
+    wanted = str(session_id)
+    in_flight = any(row.status == "running" for row in rows)
+    last_run = None
+    for row in rows:
+        # A row still ``running`` has no outcome to report yet; the newest row
+        # that names this session wins, and a row that names nothing for it is
+        # not evidence about this replay.
+        if row.result_json is None:
+            continue
+        result = row.result_json
+        entry = next(
+            (
+                r
+                for r in (result.get("results") or [])
+                if r.get("session_id") == wanted
+            ),
+            None,
+        )
+        detail = None
+        if entry is not None:
+            outcome = entry.get("outcome")
+        else:
+            skipped_entry = next(
+                (
+                    r
+                    for r in (result.get("skipped_detail") or [])
+                    if r.get("session_id") == wanted
+                ),
+                None,
+            )
+            failure = next(
+                (
+                    e
+                    for e in (result.get("errors") or [])
+                    if e.startswith(f"{wanted}: ")
+                ),
+                None,
+            )
+            if skipped_entry is not None:
+                outcome, detail = "skipped", skipped_entry.get("reason")
+            elif failure is not None:
+                outcome, detail = "failed", failure[len(wanted) + 2 :]
+            else:
+                # This tick ran and wrote its counts, but never reached the
+                # session: the row is evidence the service exists, not that it
+                # stepped this replay.
+                continue
+        last_run = DailyServiceRun(
+            job_id=row.id,
+            job_status=row.status,
+            scope=(row.config_json or {}).get("scope"),
+            scheduled_for=(row.config_json or {}).get("scheduled_for"),
+            completed_at=(
+                row.completed_at.isoformat() if row.completed_at else None
+            ),
+            outcome=outcome,
+            step_number=(entry or {}).get("step_number"),
+            snapshot_date=(entry or {}).get("snapshot_date"),
+            detail=detail,
+        )
+        break
+
+    return DailyServiceStatus(
+        session_id=session.id,
+        session_status=status_value,
+        timeframe=timeframe,
+        cadence_hour_utc=ls.SIMULATION_HOUR_UTC,
+        cadence_timezone=ls.SERVICE_TIMEZONE,
+        job_type=ls.SIMULATION_JOB_TYPE,
+        enrolled=enrolled,
+        enrolment_reason=reason,
+        queue_position=queue_position,
+        batch_limit=ls.SIMULATION_SESSIONS_PER_OWNER,
+        in_next_batch=(
+            queue_position is not None
+            and queue_position < ls.SIMULATION_SESSIONS_PER_OWNER
+        ),
+        kill_switch=kill_switch,
+        runs_in_this_process=running,
+        next_run_at=next_run_at,
+        in_flight=in_flight,
+        last_run=last_run,
+        statuses_served=[s.value for s in served],
+    )
 
 
 @router.post("/{session_id}/pause", response_model=SimulationSessionResponse)
@@ -1799,7 +2033,7 @@ def _submit_manual_order(
     ``awaiting_execution_window`` says the intent is queued, not refused.
     """
     try:
-        portfolio = resolve_session_portfolio(db, session)
+        portfolio = resolve_session_portfolio(db, session, owner_id=actor_id)
     except LifecycleError as exc:
         raise HTTPException(status_code=400, detail=exc.message)
 
@@ -1810,6 +2044,29 @@ def _submit_manual_order(
                 f"The bound paper portfolio is '{portfolio.status.value}' and cannot "
                 "accept new orders. Bind a portfolio that is still active."
             ),
+        )
+
+    # The lineage the caller claims is verified before anything is read or
+    # written: an inference that is not this owner's, not a personal-model
+    # prediction, or not generated for this account cannot be recorded as the
+    # origin of this order's decision. Same refusals as the paper desk's
+    # ``POST /{portfolio_id}/decisions``, from one function.
+    #
+    # The version this door compares against is the session's own
+    # ``experiment_version_id`` — the same identity written into the decision row
+    # below as ``linked_experiment_version_id`` and into the order as
+    # ``model_or_strategy_version_id``. It is never the model version, the
+    # account's current selection, an alias or anything the request declares,
+    # because those are all quantities that can move while the replay is running,
+    # and a lineage stamped from a moving value would not describe the strategy
+    # the user was actually watching.
+    if payload.linked_inference_id is not None:
+        validate_linked_inference(
+            db,
+            owner_id=actor_id,
+            inference_id=payload.linked_inference_id,
+            portfolio_id=portfolio.id,
+            strategy_version_id=version.id,
         )
 
     commission_rate = float(spec.get("commission_rate", 0.0))
@@ -1965,6 +2222,7 @@ def _submit_manual_order(
         decision_type=PaperDecisionType.entry if side is OrderSide.BUY else PaperDecisionType.exit,
         data_cutoff_at=cutoff,
         linked_experiment_version_id=version.id,
+        linked_inference_id=payload.linked_inference_id,
         rationale=payload.rationale,
         self_reported_confidence=ConfidenceLevel.not_provided,
         outcome_status=OutcomeStatus.pending,
@@ -1992,14 +2250,18 @@ def _submit_manual_order(
     )
     try:
         submit_pending(db, portfolio=portfolio, decision=decision, order=order, data_cutoff_at=cutoff)
-    except IntegrityError:
+    except IntegrityError as exc:
         # The key check above is a read, not a lock: two concurrent submissions
         # can both pass it, and the unique index on (portfolio_id,
         # idempotency_key) is what actually stops the second order — here, at
-        # flush time, earlier than the commit guard in ``manual_decision``. Rolled
-        # back and answered as the same conflict, so a duplicate is never an
-        # unhandled 500 whichever statement the index rejected.
+        # flush time, earlier than the commit guard in ``manual_decision``.
+        # Rolled back and answered as the same conflict only when that index is
+        # the one that fired; any other integrity failure keeps its own shape,
+        # because telling a caller their retry collided is a claim about the
+        # caller, not a place to park a broken foreign key.
         db.rollback()
+        if expected_unique_violation(exc) != PAPER_ORDER_IDEMPOTENCY:
+            raise
         raise HTTPException(
             status_code=409,
             detail=(
@@ -2093,6 +2355,13 @@ def manual_decision(
                 or (existing_detail.get('fill') or {}).get('quantity')
             )
         existing_rationale = existing_detail.get('rationale')
+        # The claimed inference is part of the payload: the same key replayed
+        # against a different origin is a conflict, not a quiet return of the
+        # row written under the first one.
+        existing_inference = existing_detail.get('linked_inference_id')
+        requested_inference = (
+            str(payload.linked_inference_id) if payload.linked_inference_id else None
+        )
 
         def normalize(val):
             return val if val not in (None, '') else None
@@ -2100,7 +2369,8 @@ def manual_decision(
         payload_matches = (
             normalize(existing_action) == normalize(payload.action) and
             normalize(existing_quantity) == normalize(payload.quantity) and
-            normalize(existing_rationale) == normalize(payload.rationale)
+            normalize(existing_rationale) == normalize(payload.rationale) and
+            normalize(existing_inference) == normalize(requested_inference)
         )
 
         if not payload_matches:
@@ -2214,6 +2484,11 @@ def manual_decision(
         'symbol': symbol,
         'snapshot_date': cutoff,
         'booked_at_submit': False,
+        # Text, like every other identity in this payload blob: the replay of the
+        # same key compares these values, and a UUID never equals its own string.
+        'linked_inference_id': (
+            str(payload.linked_inference_id) if payload.linked_inference_id else None
+        ),
     }
     warnings: List[str] = []
     order_info: Optional[Dict[str, Any]] = None
@@ -2221,6 +2496,23 @@ def manual_decision(
     rejection_info: Optional[Dict[str, Any]] = None
 
     if action == 'hold':
+        if payload.linked_inference_id is not None:
+            # A hold here writes a replay decision row only — no paper decision
+            # row exists to carry the inference column. Storing the identity in a
+            # side blob instead would make two sources claim to own one lineage,
+            # so the request is refused and pointed at the route that can record it.
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "reason": "inference_needs_decision_row",
+                    "message": (
+                        "A hold on this route records no paper decision, so it cannot "
+                        "carry linked_inference_id. Record the held decision with its "
+                        "inference through POST /api/v1/paper-portfolio/{portfolio_id}/decisions "
+                        "instead."
+                    ),
+                },
+            )
         decision_type = DecisionType.no_action
     else:
         decision_type, rejection_info, order_info, execution_info, warnings = _submit_manual_order(
@@ -2320,32 +2612,42 @@ def manual_decision(
             metadata_json=event_metadata,
             supersedes_event_id=None,
             actor_type=actor_type,
+            # The same identity the decision row of this very request carries,
+            # on the column this table added for it (d4e5f6g7h8i9). Not in
+            # ``event_metadata``: two places claiming one lineage is how they
+            # start disagreeing.
+            linked_inference_id=payload.linked_inference_id,
         )
         db.add(human_event)
 
-    emit_event(
-        db,
-        entity_type="simulation", entity_id=session.id,
-        event_type="manual_decision", actor_id=current_user.id,
-        actor_type=actor_type,
-        payload={
-            "step_number": step_number,
-            "action": action,
-            "snapshot_date": cutoff,
-            "decision_type": decision_type.value,
-            "paper_equity": book_equity,
-            "book_changed": False,
-            "has_order": order_info is not None,
-            "order_id": order_info["order_id"] if order_info else None,
-            "order_status": order_info["status"] if order_info else None,
-            "has_rejection": rejection_info is not None,
-            "rejection_reason": rejection_info.get("reason") if rejection_info else None,
-        },
-        rules_locked=True,
-        data_cutoff_at=session.data_cutoff_at,
-    )
-
+    # The guard below starts *before* the audit write, not before the commit.
+    # ``emit_event`` flushes (``app/services/__init__.py:64``), so that call is
+    # the first statement that drains this request's decision, ledger event and
+    # order; a collision detected there used to escape the door entirely and
+    # surface as an unhandled 500, which made the 409 contract documented in the
+    # ``except`` below a claim about a branch the request rarely reached.
     try:
+        emit_event(
+            db,
+            entity_type="simulation", entity_id=session.id,
+            event_type="manual_decision", actor_id=current_user.id,
+            actor_type=actor_type,
+            payload={
+                "step_number": step_number,
+                "action": action,
+                "snapshot_date": cutoff,
+                "decision_type": decision_type.value,
+                "paper_equity": book_equity,
+                "book_changed": False,
+                "has_order": order_info is not None,
+                "order_id": order_info["order_id"] if order_info else None,
+                "order_status": order_info["status"] if order_info else None,
+                "has_rejection": rejection_info is not None,
+                "rejection_reason": rejection_info.get("reason") if rejection_info else None,
+            },
+            rules_locked=True,
+            data_cutoff_at=session.data_cutoff_at,
+        )
         db.flush()
         if human_event is not None:
             emit_event(
@@ -2366,12 +2668,17 @@ def manual_decision(
                 data_cutoff_at=session.data_cutoff_at,
             )
         db.commit()
-    except IntegrityError:
+    except IntegrityError as exc:
         # Two requests carrying one idempotency key can both clear the read-side
-        # checks; the unique constraints are what actually stop the second order,
-        # so a duplicate is rolled back whole and answered as a conflict instead
-        # of surfacing as an unhandled 500.
+        # checks; the unique index is what actually stops the second order, so a
+        # duplicate is rolled back whole and answered as a conflict instead of
+        # surfacing as an unhandled 500. Only that index: this block writes a
+        # decision, an audit row, an order and its fills, and a foreign key or a
+        # NOT NULL failing inside it is the platform's bug, not the caller's
+        # repeated click.
         db.rollback()
+        if expected_unique_violation(exc) != PAPER_ORDER_IDEMPOTENCY:
+            raise
         raise HTTPException(
             status_code=409,
             detail=(

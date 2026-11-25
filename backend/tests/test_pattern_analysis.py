@@ -161,8 +161,10 @@ class TestAnalyzeSkillPatterns:
 
     def test_generates_recommendations_for_poor_sharpe(self):
         user_id = _make_user("rec-poor@alethra.io")
-        # Create trades with low win rate to trigger negative Sharpe recommendation
-        _make_run_with_trades(user_id, trade_count=10, win_rate=0.2)
+        # The gate in app/services/pattern_analysis.py:279 is a sample-size gate:
+        # below 30 trades the only recommendation is "insufficient_evidence", so
+        # a poor-Sharpe proposal needs at least 30 trades to exist at all.
+        _make_run_with_trades(user_id, trade_count=40, win_rate=0.2)
 
         db = TestSession()
         try:
@@ -203,7 +205,9 @@ class TestProposeParameterAdjustment:
         result = propose_parameter_adjustment(
             current_exit=exit_config,
             performance_data={
-                "trade_count": 10,
+                # >= 30 trades: propose_parameter_adjustment:333 returns None
+                # below that, whatever the other metrics say.
+                "trade_count": 40,
                 "win_rate": 0.6,
                 "avg_pnl": -5.0,
                 "sharpe": -0.3,
@@ -226,7 +230,7 @@ class TestProposeParameterAdjustment:
         result = propose_parameter_adjustment(
             current_exit=exit_config,
             performance_data={
-                "trade_count": 10,
+                "trade_count": 40,
                 "win_rate": 0.3,
                 "avg_pnl": -10.0,
                 "sharpe": -0.8,

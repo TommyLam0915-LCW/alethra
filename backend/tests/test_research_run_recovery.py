@@ -23,9 +23,11 @@ candidates and changes nothing, and the function that used to release units for
 runs a caller named is gone rather than guarded — a caller-supplied list of run
 ids is a claim about a transaction, and the previous revision of this file
 released a unit for a run its own test had never closed. Ownership of a unit is
-now held by one act only: the conditional terminal write inside
-``execute_backtest_run``, which is why the tests below read a refusal as "the
-formal lane still settles what it owns" and never as "a sweep can free it".
+held by one act, taken two ways: the conditional terminal write, by the writer
+publishing an outcome inside ``execute_backtest_run`` or by
+``cancel_research_run`` closing the row on a decision. That is why the tests
+below read a refusal as "the formal lane still settles what it owns, and an
+explicit cancellation can end it" and never as "a sweep can free it".
 ``_seed_attempt`` writes both ledger shapes: the default is an unattributed pair
 (``research_run_id`` NULL), and ``link=True`` stamps the run the way
 ``_admit_research_run`` does. The state a real interrupted attempt leaves — a
@@ -40,6 +42,7 @@ independent PostgreSQL connection). A real process kill, a PostgreSQL run and a
 browser are separate evidence levels and are not claimed.
 """
 
+import re
 from datetime import date, timedelta
 from uuid import UUID
 
@@ -994,14 +997,32 @@ def test_no_formal_path_calls_the_recovery_pass_and_it_cannot_write():
         and getattr(obj, "__module__", None) == research_run_service.__name__
     ]
     assert own_definitions, "an empty scan would pass every claim below it"
-    for act in ("settle_reservation(", "release_reservation("):
+    # Billing an allowance is the act of the writer that produced a result, so it
+    # stays with one owner. Handing a unit back has two: the failure write-off
+    # and the cancellation, each of which acquires the row before touching the
+    # ledger. Anything else that appears here is a sweep.
+    for act, allowed in (
+        ("settle_reservation(", ("execute_backtest_run",)),
+        ("release_reservation(", ("cancel_research_run", "execute_backtest_run")),
+    ):
         owners = sorted(
             {obj.__name__ for obj in own_definitions if act in inspect.getsource(obj)}
         )
-        assert owners == ["execute_backtest_run"], (
-            f"{act} is called by {owners}; only the writer that won the "
-            "terminal transition for the run a unit names may bill or free it"
+        assert owners == sorted(allowed), (
+            f"{act} is called by {owners}; only a writer that won the terminal "
+            "transition for the run a unit names may bill or free it"
         )
+
+    # The list above is only reassuring if every function on it really acquires
+    # the row first — that is what separates the two owners from the deleted
+    # sweep — so the predicate is checked on their source rather than trusted
+    # because their names are known.
+    for name in ("cancel_research_run", "execute_backtest_run"):
+        source = inspect.getsource(getattr(research_run_service, name))
+        assert "ResearchRun.status.in_(NON_TERMINAL_RUN_STATUSES)" in source, (
+            f"{name} touches a quota unit without winning the terminal write"
+        )
+        assert ".update(" in source, f"{name} claims the row without a write"
 
 
 def test_a_study_claimed_reservation_is_out_of_reach_of_this_lane(
@@ -1069,3 +1090,357 @@ def test_a_study_claimed_reservation_is_out_of_reach_of_this_lane(
     assert abandoned_reservation.status == "reserved"
     assert _run_status(db, abandoned.id) == RunStatus.running
     assert _get_reserved(db, user_id, _QUOTA) == 2
+
+
+# ── the decision entry the refusal points at ────────────────────────────────
+class _ProcessDied(BaseException):
+    """Not an ``Exception``: the lane's own failure handler never runs."""
+
+
+def _interrupted_attempt(
+    client, auth_headers, db, monkeypatch, version_id, *, charge_quota=True
+):
+    """A real admitted run whose process stops, then the cancel entry on it.
+
+    Built through ``execute_backtest_run`` rather than seeded, because the state
+    a cancellation acts on is the one the formal path leaves: a committed
+    ``running`` row naming one still-reserved unit. The stand-in for the death is
+    a ``BaseException`` out of the engine — no handler in the lane catches it, so
+    the transaction opened by the admission is the last thing that wrote.
+    """
+    version = db.query(ExperimentVersion).filter(
+        ExperimentVersion.id == version_id
+    ).one()
+    experiment = db.query(Experiment).filter(
+        Experiment.id == version.experiment_id
+    ).one()
+
+    def _die(*args, **kwargs):
+        raise _ProcessDied()
+
+    monkeypatch.setattr(research_run_service, "run_backtest", _die)
+    with pytest.raises(_ProcessDied):
+        execute_backtest_run(
+            db,
+            user=db.query(User).filter(User.id == _user_id()).one(),
+            version=version,
+            experiment=experiment,
+            data_source="stored",
+            provider_id=_PROVIDER,
+            charge_quota=charge_quota,
+        )
+    db.rollback()
+    rows = _runs_for(db, version_id)
+    assert len(rows) == 1 and rows[0].status == RunStatus.running
+    return rows[0]
+
+
+def _events(db, run_id):
+    return [
+        row[0]
+        for row in db.query(AuditEvent.event_type)
+        .filter(AuditEvent.entity_type == "run", AuditEvent.entity_id == str(run_id))
+        .order_by(AuditEvent.created_at, AuditEvent.id)
+        .all()
+    ]
+
+
+def test_cancelling_an_interrupted_attempt_closes_it_and_hands_the_unit_back(
+    db, client, auth_headers, stored_dataset, monkeypatch
+):
+    """The remedy recovery refuses to guess: a decision, with its ledger."""
+    version_id = _create_experiment(client, auth_headers)
+    user_id = _user_id()
+    run = _interrupted_attempt(client, auth_headers, db, monkeypatch, version_id)
+    assert _get_reserved(db, user_id, _QUOTA) == 1
+
+    resp = client.post(
+        f"/api/v1/runs/{run.id}/cancel",
+        params={"reason": "period was wrong"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["outcome"] == "cancelled"
+    assert body["status_before"] == "running"
+    assert body["status_after"] == "cancelled"
+    assert body["quota"] == "released"
+
+    db.expire_all()
+    row = db.query(ResearchRun).filter(ResearchRun.id == run.id).one()
+    assert row.status == RunStatus.cancelled
+    assert row.completed_at is not None
+    assert row.result_json is None, "a cancellation publishes no outcome"
+    assert row.error_details is None, "giving up is not a computation failure"
+
+    # The unit the admission attributed to this run comes back, and it is not
+    # billed: availability, not consumption.
+    assert _get_reserved(db, user_id, _QUOTA) == 0
+    assert get_quota_used(db, user_id, _QUOTA) == 0
+    units = (
+        db.query(QuotaReservation)
+        .filter(QuotaReservation.research_run_id == run.id)
+        .all()
+    )
+    assert [u.status for u in units] == ["released"]
+
+    assert _events(db, run.id) == ["research_run_started", "research_run_cancelled"]
+    event = (
+        db.query(AuditEvent)
+        .filter(AuditEvent.event_type == "research_run_cancelled")
+        .one()
+    )
+    assert event.payload_json["quota"] == "released"
+    assert event.payload_json["reason"] == "period was wrong"
+    assert event.payload_json["process_stopped"] is None
+
+
+def test_a_cancellation_never_claims_the_process_stopped(
+    db, client, auth_headers, stored_dataset, monkeypatch
+):
+    """``process_stopped`` is null even for a cancellation that worked.
+
+    The platform closes rows; it cannot see the request that is computing. What
+    voids that request's result is this row being terminal, which is a different
+    claim from a stopped worker, and the response may not blur them.
+    """
+    version_id = _create_experiment(client, auth_headers)
+    run = _interrupted_attempt(client, auth_headers, db, monkeypatch, version_id)
+
+    resp = client.post(f"/api/v1/runs/{run.id}/cancel", headers=auth_headers)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["process_stopped"] is None
+    assert "not confirmed stopped" in resp.json()["note"]
+
+
+def test_a_cancelled_version_admits_again_and_bills_only_the_new_run(
+    db, client, auth_headers, stored_dataset, monkeypatch
+):
+    """The blocked version is the point, so unblocking it is measurable."""
+    version_id = _create_experiment(client, auth_headers)
+    user_id = _user_id()
+    run = _interrupted_attempt(client, auth_headers, db, monkeypatch, version_id)
+
+    blocked = _start_run(client, auth_headers, version_id)
+    assert blocked.status_code == 409, blocked.text
+    assert f"POST /api/v1/runs/{run.id}/cancel" in blocked.json()["detail"], (
+        "the refusal names the entry that can actually end the wait"
+    )
+
+    assert client.post(
+        f"/api/v1/runs/{run.id}/cancel", headers=auth_headers
+    ).status_code == 200
+    assert find_live_research_run(db, version_id=version_id) is None
+
+    # The next request is a live process: the engine is only dead for the
+    # attempt that was interrupted, and undoing the patch is how this file says
+    # so without pretending the cancelled attempt came back.
+    monkeypatch.undo()
+    again = _start_run(client, auth_headers, version_id)
+    assert again.status_code == 201, again.text
+    assert _get_reserved(db, user_id, _QUOTA) == 0
+    assert get_quota_used(db, user_id, _QUOTA) == 1, (
+        "the cancelled attempt is not billed; the finished one is"
+    )
+    # Column reads, both of them: the first run's ORM object is in this
+    # session's identity map from before another session cancelled it, and a
+    # stale attribute must not be allowed to answer for that commit.
+    rows = (
+        db.query(ResearchRun.id, ResearchRun.status)
+        .filter(ResearchRun.experiment_version_id == version_id)
+        .all()
+    )
+    assert len(rows) == 2, "the cancelled attempt stays as a row; a retry adds one"
+    assert {row[1] for row in rows} == {RunStatus.cancelled, RunStatus.completed}
+
+
+def test_a_late_result_cannot_publish_over_a_cancellation(
+    db, client, auth_headers, stored_dataset, monkeypatch
+):
+    """The write the still-computing engine will attempt matches no row.
+
+    Taken in the shape the success path takes it — the same conditional
+    statement, with the outcome columns — so this is the race that matters, not
+    an arbitrary UPDATE: if it matched, a cancelled run would end as completed
+    with a unit already released, and the ledger would be billed by nobody.
+    """
+    version_id = _create_experiment(client, auth_headers)
+    user_id = _user_id()
+    run = _interrupted_attempt(client, auth_headers, db, monkeypatch, version_id)
+    assert client.post(
+        f"/api/v1/runs/{run.id}/cancel", headers=auth_headers
+    ).status_code == 200
+
+    published = (
+        db.query(ResearchRun)
+        .filter(
+            ResearchRun.id == run.id,
+            ResearchRun.status.in_(research_run_service.NON_TERMINAL_RUN_STATUSES),
+        )
+        .update(
+            {
+                "status": RunStatus.completed,
+                "metrics": {"total_return_pct": 12.5},
+                "result_json": {"transactions": []},
+            },
+            synchronize_session=False,
+        )
+    )
+    assert published == 0, "a cancelled row is not an active row"
+    db.rollback()
+
+    db.expire_all()
+    row = db.query(ResearchRun).filter(ResearchRun.id == run.id).one()
+    assert row.status == RunStatus.cancelled
+    assert row.metrics is None and row.result_json is None
+    assert _get_reserved(db, user_id, _QUOTA) == 0
+    assert get_quota_used(db, user_id, _QUOTA) == 0
+    assert _events(db, run.id) == ["research_run_started", "research_run_cancelled"]
+
+
+def test_cancelling_a_finished_run_is_refused_and_moves_no_ledger(
+    db, client, auth_headers, stored_dataset
+):
+    """Two outcomes already on record: the second writer changes nothing.
+
+    A cancelled request must not walk a settled unit back to ``released``, which
+    is the exact failure the acquisition-right rule exists to prevent, so the
+    assertion that matters is on the ledger, not on the status code.
+    """
+    version_id = _create_experiment(client, auth_headers)
+    user_id = _user_id()
+    started = _start_run(client, auth_headers, version_id)
+    assert started.status_code == 201, started.text
+    run_id = UUID(started.json()["id"])
+    before = (
+        db.query(ResearchRun).filter(ResearchRun.id == run_id).one()
+    )
+    completed_at = before.completed_at
+    assert get_quota_used(db, user_id, _QUOTA) == 1
+
+    resp = client.post(f"/api/v1/runs/{run_id}/cancel", headers=auth_headers)
+    assert resp.status_code == 409, resp.text
+    detail = resp.json()["detail"]
+    assert detail["error"] == "run_finished"
+    assert detail["status"] == "completed"
+    assert "already" in detail["message"]
+
+    db.expire_all()
+    row = db.query(ResearchRun).filter(ResearchRun.id == run_id).one()
+    assert row.status == RunStatus.completed
+    assert row.completed_at == completed_at, "the refusal rewrites nothing"
+    assert get_quota_used(db, user_id, _QUOTA) == 1
+    assert _get_reserved(db, user_id, _QUOTA) == 0
+    events = _events(db, run_id)
+    assert events[0] == "research_run_started"
+    assert "research_run_completed" in events
+    assert "research_run_cancelled" not in events, (
+        "the refusal wrote no outcome of its own"
+    )
+
+
+def test_a_second_cancellation_releases_the_unit_once(
+    db, client, auth_headers, stored_dataset, monkeypatch
+):
+    """Idempotency by refusal: the second request finds a terminal row."""
+    version_id = _create_experiment(client, auth_headers)
+    user_id = _user_id()
+    run = _interrupted_attempt(client, auth_headers, db, monkeypatch, version_id)
+
+    first = client.post(f"/api/v1/runs/{run.id}/cancel", headers=auth_headers)
+    second = client.post(f"/api/v1/runs/{run.id}/cancel", headers=auth_headers)
+    assert first.status_code == 200, first.text
+    assert second.status_code == 409, second.text
+
+    units = (
+        db.query(QuotaReservation)
+        .filter(QuotaReservation.research_run_id == run.id)
+        .all()
+    )
+    assert len(units) == 1 and units[0].status == "released"
+    assert _get_reserved(db, user_id, _QUOTA) == 0
+    assert get_quota_used(db, user_id, _QUOTA) == 0
+    assert _events(db, run.id).count("research_run_cancelled") == 1
+
+
+def test_another_account_cannot_cancel_a_run_or_learn_that_it_exists(
+    db, client, auth_headers, stored_dataset, monkeypatch
+):
+    """404 for both "not yours" and "not there", with the row left running."""
+    version_id = _create_experiment(client, auth_headers)
+    user_id = _user_id()
+    run = _interrupted_attempt(client, auth_headers, db, monkeypatch, version_id)
+    other = _headers(client, "cancel-stranger@alethra.io")
+
+    resp = client.post(f"/api/v1/runs/{run.id}/cancel", headers=other)
+    assert resp.status_code == 404, resp.text
+    missing = client.post(
+        f"/api/v1/runs/{UUID(int=0)}/cancel", headers=other
+    )
+    assert missing.status_code == 404, missing.text
+    assert missing.json() == resp.json(), "a run id is not an oracle"
+
+    db.expire_all()
+    assert _run_status(db, run.id) == RunStatus.running
+    assert _get_reserved(db, user_id, _QUOTA) == 1
+
+
+def test_an_unbilled_run_frees_nothing_and_says_so(
+    db, client, auth_headers, stored_dataset, monkeypatch
+):
+    """A run admitted without a unit has no unit to hand back.
+
+    This is the shape a robustness study cell leaves: the study carries the
+    authorization and the cell carries no linkage, so a cancellation that
+    "released" something here would be reaching into another lane's billing.
+    """
+    version_id = _create_experiment(client, auth_headers)
+    user_id = _user_id()
+    run = _interrupted_attempt(
+        client, auth_headers, db, monkeypatch, version_id, charge_quota=False
+    )
+    assert research_run_service._linked_reservation(db, run_id=run.id) is None
+    assert _get_reserved(db, user_id, _QUOTA) == 0
+
+    resp = client.post(f"/api/v1/runs/{run.id}/cancel", headers=auth_headers)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["quota"] == "not_billed"
+    assert _get_reserved(db, user_id, _QUOTA) == 0
+    assert get_quota_used(db, user_id, _QUOTA) == 0
+
+
+def test_the_refusal_points_at_an_entry_that_exists():
+    """A remedy named in prose has to be a route the app actually serves.
+
+    ``RECOVERY_REFUSAL_REASON`` and the admission 409 both tell the reader to
+    cancel, so this checks the sentence against the router instead of trusting
+    the wording: a path that drifts from the registered route would leave the
+    refusal pointing at nothing, which is the failure mode the old text had.
+    """
+    from app.api import runs as runs_api
+    from app.services.research_runs import active_run_conflict_detail
+
+    example = UUID(int=7)
+    registered = {r.path for r in runs_api.router.routes}
+    assert "/runs/{run_id}/cancel" in registered, sorted(registered)
+
+    for text in (
+        research_run_service.RECOVERY_REFUSAL_REASON,
+        active_run_conflict_detail(example),
+    ):
+        assert "/api/v1/runs/" in text and "cancel" in text
+    assert f"POST /api/v1/runs/{example}/cancel" in active_run_conflict_detail(example)
+
+    # The UI turns this sentence into a link by reading the first uuid in it
+    # (frontend/src/lib/runStatus.ts :: activeRunIdFromRefusal, whose fixture is
+    # this same text). The id appears more than once here — the row it names,
+    # then the same id inside the remedy path — so what is pinned is that there
+    # is at least one and that every one of them is the blocking run's: a second
+    # id added to this sentence, a version or a user, would point the link at
+    # the wrong row, and nothing else in either lane would notice.
+    ids = re.findall(
+        r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+        r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+        active_run_conflict_detail(example),
+    )
+    assert ids and set(ids) == {str(example)}, ids

@@ -20,6 +20,17 @@ from sqlalchemy import text
 
 from app.database import SessionLocal
 from app.services.paper_trading import PaperTradingEngine
+from tests.conftest import TEST_ENGINE
+
+# Only the replay case is lane-bound: its seed binds Decimal('1000.0') into raw
+# SQL, which only psycopg2 adapts, and the worker then reaches a
+# `SELECT ... FOR UPDATE` row lock (paper_trading.py:874). The exposure-limit
+# cases below stay on SQLite, so marking the module would drop coverage that
+# actually runs here.
+postgres_only = pytest.mark.skipif(
+    TEST_ENGINE.dialect.name == "sqlite",
+    reason="NUMERIC exactness and the replay row lock require a PostgreSQL backend",
+)
 
 
 @pytest.fixture
@@ -65,7 +76,7 @@ def precision_5_trades(precision_test_user):
                 ) VALUES (
                     :id, :user_id, 'strategy_research_simulated', 'v1.0', 'CRYPTO:KRAKEN:TEST/USD', 60,
                     'test_provider', 'simulated', 100, :now, :now,
-                    '{}'::jsonb, '{}'::jsonb, '[]'::jsonb, 5, :now
+                    '{}', '{}', '[]', 5, :now
                 )
             """),
             {"id": study_run_id, "user_id": precision_test_user, "now": now},
@@ -120,6 +131,7 @@ def precision_5_trades(precision_test_user):
         db.close()
 
 
+@postgres_only
 class TestDecimalPrecisionRegression:
     """Regression test for Decimal precision bug (dede76f)."""
 

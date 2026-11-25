@@ -14,7 +14,6 @@ calls ``submit_manual_order``. Two connections contend for one portfolio row:
    refuse the other, leaving the shared ledger consistent.
 """
 
-import os
 import threading
 from datetime import datetime
 from decimal import Decimal
@@ -22,9 +21,17 @@ from uuid import uuid4
 
 import pytest
 
-if not os.environ.get("ALETHRA_TEST_DB", "").startswith("postgresql"):
+from tests.postgresql_only import postgresql_available, skip_reason
+
+if not postgresql_available():
+    # Whole-module: every node here is a two-connection contention claim, and
+    # the shared helper writes the prerequisite, the NOT RUN verdict and the
+    # command that would produce a result.
     pytest.skip(
-        "PostgreSQL not configured (run via scripts/run_tests.sh pg)",
+        skip_reason(
+            "two connections contend for one portfolio row under "
+            "with_for_update, and SQLite has no row-level lock to take"
+        ),
         allow_module_level=True,
     )
 

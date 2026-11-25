@@ -1,0 +1,40 @@
+{
+  "collected": 3811,
+  "live_stack": 18,
+  "other": 2,
+  "pg_only": 159,
+  "provenance": {
+    "artifacts": {
+      "collect.txt": "23ac1e512877775e9df82a8223bd40f134583ff6c001b801e6d6191de1f4eff5",
+      "exit-code.txt": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+      "identity.txt": "aec7899dc88fda91aa849f3df84712827cff300c16ab501a77c42fc2af150acb",
+      "junit.xml": "17b15ce17898b86513860c340838efc0e6e27eeee3b9ab49704a64b9b09a6cb7",
+      "pytest.log": "8559a8cfade18d53288c2e6cfd75441e25f651309e16e152b26be80ae0773746"
+    },
+    "collected_items": 3811,
+    "exit_code": "1",
+    "generated_by": "backend/scripts/run_evidence.py <run dir> pin",
+    "identity": {
+      "collected-node-ids": "3811",
+      "command": "./scripts/run_tests.sh sqlite",
+      "cwd": "/Users/tommylam0915/Documents/Qoder/2026-11-03/ac51e592/alethra/backend",
+      "exit-code": "1",
+      "git": "5a34e3fed0f2d43a4e87dfeb714acd5c9f79197a (working tree dirty: run 'git status --porcelain' for the diff identity')",
+      "interpreter": "/Users/tommylam0915/Documents/Qoder/2026-11-03/ac51e592/alethra/backend/.venv/bin/python",
+      "lane fingerprint": "python 3.12.16 | pytest 8.3.3 | sqlalchemy 2.0.36",
+      "layer": "sqlite",
+      "porcelain": "206 path(s) sha256 da75ac96e2d69e8a027aca082e6bb2883b5f5ea88c5b8911f141b75660e9d627",
+      "provider": "DATA_PROVIDER=demo",
+      "selection on this tree": "3811 tests collected in 3.95s",
+      "selection-kind": "whole-suite",
+      "target": "sqlite /var/folders/tk/4hk5dllx6gjdk9ksk7f5v8900000gn/T//alethra-sqlite-test-80770.db",
+      "tree-digest-after": "501306060850a60126ee9f881e4c8f4f88d29bb7183ef1a44fa19e9a19728cf7",
+      "tree-digest-before": "501306060850a60126ee9f881e4c8f4f88d29bb7183ef1a44fa19e9a19728cf7"
+    },
+    "note": "ceiling, not a target; regenerated only from a run dir whose ledger closes, and only after reading the selection diff",
+    "run_dir": "/var/folders/tk/4hk5dllx6gjdk9ksk7f5v8900000gn/T/alethra-runs/sqlite-20261119T051257Z-80770",
+    "source_log": "/var/folders/tk/4hk5dllx6gjdk9ksk7f5v8900000gn/T/alethra-runs/sqlite-20261119T051257Z-80770/pytest.log",
+    "source_log_sha256": "8559a8cfade18d53288c2e6cfd75441e25f651309e16e152b26be80ae0773746"
+  },
+  "total": 179
+}

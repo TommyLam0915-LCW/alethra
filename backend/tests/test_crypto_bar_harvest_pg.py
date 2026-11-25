@@ -7,14 +7,22 @@ exercise it. The module runs only against a disposable PostgreSQL database::
         tests/test_crypto_bar_harvest_pg.py
 """
 
-import os
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
-if not os.environ.get("ALETHRA_TEST_DB", "").startswith("postgresql"):
+from tests.postgresql_only import postgresql_available, skip_reason
+
+if not postgresql_available():
+    # Whole-module, and honestly so: every node here drives the same upsert. The
+    # reason is written by the shared helper so this unit carries its
+    # prerequisite, the NOT RUN verdict and the command that would produce it,
+    # like every other PostgreSQL-only node.
     pytest.skip(
-        "PostgreSQL not configured (run via scripts/run_tests.sh pg)",
+        skip_reason(
+            "the bar warehouse writes with PostgreSQL's ON CONFLICT DO NOTHING, "
+            "which SQLite has no clause to execute"
+        ),
         allow_module_level=True,
     )
 

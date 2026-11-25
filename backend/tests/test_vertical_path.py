@@ -11,9 +11,22 @@ import os
 import pytest
 from sqlalchemy import text
 
+from tests.postgresql_only import requires_postgresql
+
 
 def test_safety_gate_enforced(test_db_session):
-    """Prove safety gate was called and passed."""
+    """Prove safety gate was called and passed.
+
+    PostgreSQL-only: the evidence is ``current_database()`` and
+    ``current_user`` from the server, plus a DDL statement refused by role
+    permissions, none of which SQLite offers. The rest of this file --
+    ``test_simple_query`` -- still runs on the SQLite lane, so the gate below
+    is on this node rather than on the module.
+    """
+    requires_postgresql(
+        "asks the server for current_database()/current_user and expects a "
+        "CREATE TABLE to be refused by role permissions"
+    )
     # If we reach here, safety gate passed during conftest initialization
     # Verify we're using the test database
     result = test_db_session.execute(text("SELECT current_database(), current_user"))

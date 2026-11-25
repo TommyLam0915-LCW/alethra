@@ -8,8 +8,31 @@ Cleanup errors propagate:
 - Test body fails, cleanup fails → both errors visible
 """
 from contextlib import contextmanager
-from sqlalchemy import text
-from tests.conftest import TestSession
+from uuid import UUID as _UUID
+
+from sqlalchemy import bindparam, text
+from sqlalchemy.dialects.postgresql import UUID as _UUIDType
+from tests.conftest import SecretHeaders, TestSession
+
+
+def _uuid_sql(sql: str, *bind_names: str):
+    """A `text()` whose named binds are compared as UUIDs, not as strings.
+
+    Raw SQL carries no type information, so a bind is sent to the driver
+    verbatim. The `UUID(as_uuid=True)` columns here are non-native on SQLite and
+    store the 32-hex form (`5d16ecee37b8…`, measured), while `str(uuid4())` is
+    the dashed 36-char form — so every `WHERE id = :id` below silently matched
+    nothing, `_cleanup_user_data` concluded the user was already gone and
+    returned without deleting, and the "cleaned up" assertions in
+    test_api_fixture_lifecycle.py / test_fixture_failure_injection.py passed or
+    failed for the shape of the string rather than the state of the row.
+    Declaring the bind type lets each dialect adapt it, which is the same thing
+    the ORM does on the way in.
+    """
+    stmt = text(sql)
+    for name in bind_names:
+        stmt = stmt.bindparams(bindparam(name, type_=_UUIDType(as_uuid=True)))
+    return stmt
 
 
 @contextmanager
@@ -67,7 +90,7 @@ def api_test_fixtures(email: str):
             db.commit()
             db.refresh(user)
             token = create_access_token(data={"sub": str(user_id)})  # JWT needs string
-            auth_headers = {"Authorization": f"Bearer {token}"}
+            auth_headers = SecretHeaders({"Authorization": f"Bearer {token}"})
         finally:
             db.close()
         
@@ -79,7 +102,8 @@ def api_test_fixtures(email: str):
             now = datetime.now(timezone.utc)
             
             db.execute(
-                text("""
+                _uuid_sql(
+                    """
                     INSERT INTO strategy_study_runs (
                         id, user_id, lane, research_version, instrument_id, interval_minutes,
                         provider_id, data_nature, bar_count, first_open_time, last_open_time,
@@ -87,10 +111,13 @@ def api_test_fixtures(email: str):
                     ) VALUES (
                         :id, :user_id, 'strategy_research_simulated', 'v1.0', 'TEST/USD', 60,
                         'test_provider', 'simulated', 100, :now, :now,
-                        '{}'::jsonb, '{}'::jsonb, '[]'::jsonb, 2, :now
+                        '{}', '{}', '[]', 2, :now
                     )
-                """),
-                {"id": str(study_run_id), "user_id": str(user_id), "now": now},
+                """,
+                    "id",
+                    "user_id",
+                ),
+                {"id": study_run_id, "user_id": user_id, "now": now},
             )
             db.commit()
         finally:
@@ -104,11 +131,12 @@ def api_test_fixtures(email: str):
             now = datetime.now(timezone.utc)
             
             # Trade 1: Buy @ $100, sell @ $110 → profitable
-            trade1_id = str(uuid4())
+            trade1_id = uuid4()
             entry_time_1 = now - timedelta(days=5)
             exit_time_1 = now - timedelta(days=5) + timedelta(hours=1)
             db.execute(
-                text("""
+                _uuid_sql(
+                    """
                     INSERT INTO strategy_study_trades (
                         id, run_id, trade_index, rule_id, rule_label_zh, exit_id, exit_label_zh,
                         direction, exit_reason, outcome, signal_time, entry_time, exit_time,
@@ -120,19 +148,23 @@ def api_test_fixtures(email: str):
                         100.0, 110.0, 100.0, 1000.0, 0.10, 0.05, 0.15, 999.85, 100999.85, 1,
                         'Profit', 'Profit', :now
                     )
-                """),
+                """,
+                    "id",
+                    "run_id",
+                ),
                 {
-                    "id": trade1_id, "run_id": str(study_run_id),
+                    "id": trade1_id, "run_id": study_run_id,
                     "entry_time": entry_time_1, "exit_time": exit_time_1, "now": now,
                 },
             )
             
             # Trade 2: Buy @ $100, sell @ $90 → loss
-            trade2_id = str(uuid4())
+            trade2_id = uuid4()
             entry_time_2 = now - timedelta(days=3)
             exit_time_2 = now - timedelta(days=3) + timedelta(hours=1)
             db.execute(
-                text("""
+                _uuid_sql(
+                    """
                     INSERT INTO strategy_study_trades (
                         id, run_id, trade_index, rule_id, rule_label_zh, exit_id, exit_label_zh,
                         direction, exit_reason, outcome, signal_time, entry_time, exit_time,
@@ -144,9 +176,12 @@ def api_test_fixtures(email: str):
                         100.0, 90.0, 100.0, -1000.0, 0.10, 0.05, 0.15, -1000.15, 99999.70, 1,
                         'Loss', 'Loss', :now
                     )
-                """),
+                """,
+                    "id",
+                    "run_id",
+                ),
                 {
-                    "id": trade2_id, "run_id": str(study_run_id),
+                    "id": trade2_id, "run_id": study_run_id,
                     "entry_time": entry_time_2, "exit_time": exit_time_2, "now": now,
                 },
             )
@@ -174,12 +209,15 @@ def api_test_fixtures(email: str):
                     db = TestSession()
                     try:
                         db.execute(
-                            text("DELETE FROM strategy_study_trades WHERE run_id = :run_id"),
-                            {"run_id": str(resource_id)},
+                            _uuid_sql(
+                                "DELETE FROM strategy_study_trades WHERE run_id = :run_id",
+                                "run_id",
+                            ),
+                            {"run_id": resource_id},
                         )
                         db.execute(
-                            text("DELETE FROM strategy_study_runs WHERE id = :id"),
-                            {"id": str(resource_id)},
+                            _uuid_sql("DELETE FROM strategy_study_runs WHERE id = :id", "id"),
+                            {"id": resource_id},
                         )
                         db.commit()
                     finally:
@@ -219,6 +257,11 @@ def api_test_fixtures(email: str):
             raise test_body_exception
 
 
+def _uid_sql(sql: str):
+    """A statement that binds `:user_id` as a UUID rather than as a string."""
+    return _uuid_sql(sql, "user_id")
+
+
 def _cleanup_user_data(user_id: str):
     """Remove all paper trading data for a user in FK-safe order.
     
@@ -228,12 +271,17 @@ def _cleanup_user_data(user_id: str):
     3. Delete in FK-safe order using collected ID sets
     4. Verify per-table zero residuals with independent new connection
     """
+    # Everything below binds :user_id into a UUID column, so the value has to
+    # arrive as a UUID object; callers pass the str() form (it is also the id
+    # handed to the test body).
+    user_id = _UUID(str(user_id))
+
     # Phase 1: Collect all IDs with ownership verification
     db = TestSession()
     try:
         # Verify user exists
         user_check = db.execute(
-            text("SELECT id FROM users WHERE id = :user_id"),
+            _uid_sql("SELECT id FROM users WHERE id = :user_id"),
             {"user_id": user_id}
         ).fetchone()
         if not user_check:
@@ -241,14 +289,14 @@ def _cleanup_user_data(user_id: str):
         
         # Collect portfolio IDs
         portfolio_ids = [row[0] for row in db.execute(
-            text("SELECT id FROM paper_portfolios WHERE owner_id = :user_id"),
+            _uid_sql("SELECT id FROM paper_portfolios WHERE owner_id = :user_id"),
             {"user_id": user_id}
         ).fetchall()]
         
         # Verify all portfolios belong to this user
         if portfolio_ids:
             stray = db.execute(
-                text(f"SELECT COUNT(*) FROM paper_portfolios WHERE id IN ({','.join([':p' + str(i) for i in range(len(portfolio_ids))])}) AND owner_id != :user_id"),
+                _uid_sql(f"SELECT COUNT(*) FROM paper_portfolios WHERE id IN ({','.join([':p' + str(i) for i in range(len(portfolio_ids))])}) AND owner_id != :user_id"),
                 {f'p{i}': pid for i, pid in enumerate(portfolio_ids)} | {"user_id": user_id}
             ).scalar()
             if stray > 0:
@@ -256,20 +304,20 @@ def _cleanup_user_data(user_id: str):
         
         # Collect paper_trading_run IDs
         run_ids = [row[0] for row in db.execute(
-            text("SELECT id FROM paper_trading_runs WHERE portfolio_id IN "
+            _uid_sql("SELECT id FROM paper_trading_runs WHERE portfolio_id IN "
                  "(SELECT id FROM paper_portfolios WHERE owner_id = :user_id)"),
             {"user_id": user_id}
         ).fetchall()] if portfolio_ids else []
         
         # Collect paper_order IDs (both portfolio-based and decision-based)
         order_ids_by_portfolio = [row[0] for row in db.execute(
-            text("SELECT id FROM paper_orders WHERE portfolio_id IN "
+            _uid_sql("SELECT id FROM paper_orders WHERE portfolio_id IN "
                  "(SELECT id FROM paper_portfolios WHERE owner_id = :user_id)"),
             {"user_id": user_id}
         ).fetchall()] if portfolio_ids else []
         
         order_ids_by_decision = [row[0] for row in db.execute(
-            text("SELECT id FROM paper_orders WHERE decision_id IN "
+            _uid_sql("SELECT id FROM paper_orders WHERE decision_id IN "
                  "(SELECT id FROM decision_records WHERE paper_portfolio_id IN "
                  "(SELECT id FROM paper_portfolios WHERE owner_id = :user_id))"),
             {"user_id": user_id}
@@ -279,7 +327,7 @@ def _cleanup_user_data(user_id: str):
         
         # Collect paper_fill IDs
         fill_ids = [row[0] for row in db.execute(
-            text("SELECT id FROM paper_fills WHERE paper_order_id IN "
+            _uid_sql("SELECT id FROM paper_fills WHERE paper_order_id IN "
                  "(SELECT id FROM paper_orders WHERE portfolio_id IN "
                  "(SELECT id FROM paper_portfolios WHERE owner_id = :user_id))"),
             {"user_id": user_id}
@@ -287,21 +335,21 @@ def _cleanup_user_data(user_id: str):
         
         # Collect decision IDs
         decision_ids = [row[0] for row in db.execute(
-            text("SELECT id FROM decision_records WHERE paper_portfolio_id IN "
+            _uid_sql("SELECT id FROM decision_records WHERE paper_portfolio_id IN "
                  "(SELECT id FROM paper_portfolios WHERE owner_id = :user_id)"),
             {"user_id": user_id}
         ).fetchall()] if portfolio_ids else []
         
         # Collect position IDs
         position_ids = [row[0] for row in db.execute(
-            text("SELECT id FROM paper_positions WHERE portfolio_id IN "
+            _uid_sql("SELECT id FROM paper_positions WHERE portfolio_id IN "
                  "(SELECT id FROM paper_portfolios WHERE owner_id = :user_id)"),
             {"user_id": user_id}
         ).fetchall()] if portfolio_ids else []
         
         # Collect metric IDs
         metric_ids = [row[0] for row in db.execute(
-            text("SELECT id FROM paper_trading_daily_metrics WHERE run_id IN "
+            _uid_sql("SELECT id FROM paper_trading_daily_metrics WHERE run_id IN "
                  "(SELECT id FROM paper_trading_runs WHERE portfolio_id IN "
                  "(SELECT id FROM paper_portfolios WHERE owner_id = :user_id))"),
             {"user_id": user_id}
@@ -309,7 +357,7 @@ def _cleanup_user_data(user_id: str):
         
         # Collect strategy_study IDs
         study_run_ids = [row[0] for row in db.execute(
-            text("SELECT id FROM strategy_study_runs WHERE user_id = :user_id"),
+            _uid_sql("SELECT id FROM strategy_study_runs WHERE user_id = :user_id"),
             {"user_id": user_id}
         ).fetchall()]
         
@@ -391,7 +439,7 @@ def _cleanup_user_data(user_id: str):
         
         # Delete user (last)
         db.execute(
-            text("DELETE FROM users WHERE id = :user_id"),
+            _uid_sql("DELETE FROM users WHERE id = :user_id"),
             {"user_id": user_id}
         )
         
@@ -404,7 +452,7 @@ def _cleanup_user_data(user_id: str):
     try:
         # Verify user deleted
         user_count = verify_db.execute(
-            text("SELECT COUNT(*) FROM users WHERE id = :user_id"),
+            _uid_sql("SELECT COUNT(*) FROM users WHERE id = :user_id"),
             {"user_id": user_id}
         ).scalar()
         if user_count != 0:

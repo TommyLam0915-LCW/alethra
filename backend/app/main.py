@@ -44,7 +44,6 @@ app.include_router(api_router, prefix="/api")
 # -- Auto-learning scheduler ------------------------------------------------
 
 _learning_scheduler = None
-_auto_collection_scheduler = None
 
 
 @app.on_event("startup")
@@ -61,18 +60,12 @@ def start_learning_scheduler():
 
 @app.on_event("startup")
 def start_auto_collection_scheduler():
-    global _auto_collection_scheduler
-    if settings.auto_collection_enabled:
-        from app.services.auto_collection import init_scheduler
+    # No gate here: the service reads its own opt-in, so the process cannot
+    # start what the configuration declined and the log cannot claim a start
+    # that did not happen.
+    from app.services.auto_collection import init_scheduler
 
-        database_url = settings.database_url
-        init_scheduler(
-            database_url=database_url,
-            enabled=True,
-            interval_hours=settings.auto_collection_interval_hours,
-        )
-        import logging
-        logging.getLogger(__name__).info(f"Auto-collection scheduler started (every {settings.auto_collection_interval_hours} hours)")
+    init_scheduler()
 
 
 @app.on_event("shutdown")
@@ -86,9 +79,8 @@ def stop_learning_scheduler():
 @app.on_event("shutdown")
 def stop_auto_collection_scheduler():
     from app.services.auto_collection import stop_scheduler
+
     stop_scheduler()
-    import logging
-    logging.getLogger(__name__).info("Auto-collection scheduler stopped")
 
 
 @app.get("/")

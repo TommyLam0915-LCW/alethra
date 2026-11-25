@@ -13,7 +13,20 @@ import threading
 from datetime import datetime, timezone, timedelta
 from sqlalchemy import text
 import pytest
-from test_target_guard import get_test_db_url
+# Package-qualified: the bare `test_target_guard` name only resolves when some
+# earlier module has inserted tests/ into sys.path, which made this file's
+# collection depend on which other files pytest was asked to run.
+from tests.test_target_guard import get_test_db_url
+from tests.conftest import TEST_ENGINE
+
+# Every case in this file takes session_factory, which fail-closes without
+# ALETHRA_PG_TEST_URL and verifies the target database before writing. That is a
+# PostgreSQL contract, so on the SQLite lane these skip with a reason instead of
+# erroring at the guard. A skip here is a statement about the lane, not a pass.
+pytestmark = pytest.mark.skipif(
+    TEST_ENGINE.dialect.name == "sqlite",
+    reason="commit/hook contracts run against a verified PostgreSQL test target",
+)
 
 
 @pytest.fixture
@@ -24,7 +37,7 @@ def session_factory():
     FAIL CLOSED: No fallback URL. If ALETHRA_PG_TEST_URL not set, test fails.
     TARGET GUARD: Verifies actual DB/role/server before any write.
     """
-    from test_target_guard import create_verified_session_factory
+    from tests.test_target_guard import create_verified_session_factory
     
     db_url = get_test_db_url()
     guarded_factory, engine = create_verified_session_factory(db_url)
@@ -298,7 +311,7 @@ class TestSourceQuerySelectsFixture:
                                                bars_json, trade_count, created_at)
                 VALUES (:id, :user_id, 'strategy_research_simulated', 'v1.0', 'BTC-USD', 60,
                         'kraken', 'historical', 100, :first_time, :last_time,
-                        '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, 1, CURRENT_TIMESTAMP)
+                        '{}', '{}', '{}', 1, CURRENT_TIMESTAMP)
             """), {
                 "id": study_run_id,
                 "user_id": user_id,

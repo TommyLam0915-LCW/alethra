@@ -25,6 +25,7 @@ EVENTS_BEFORE_OUTCOME = {
 EVENTS_AFTER_OUTCOME = {
     "research_run_completed",
     "research_run_failed",
+    "research_run_cancelled",
     "warning_generated",
     "export_generated",
     "simulation_completed",

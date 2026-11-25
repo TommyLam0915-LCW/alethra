@@ -1,6 +1,3 @@
-import os
-os.environ["DATABASE_URL"] = "sqlite:///./test.db"
-
 import hashlib
 import time
 from datetime import datetime, timedelta

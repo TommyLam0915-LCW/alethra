@@ -17,9 +17,13 @@ import pytest
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 REPO_ROOT = BACKEND_DIR.parent
+# `scripts/` is not a package, so the import below needs it on the path — but
+# only for the duration of this import. Leaving a directory at sys.path[0] for
+# the rest of the session makes every later plain `import X` resolve there
+# first, which is process-global state this file has no business changing.
 sys.path.insert(0, str(BACKEND_DIR / "scripts"))
-
 import candidate_identity as ci  # noqa: E402
+sys.path.remove(str(BACKEND_DIR / "scripts"))
 
 START = REPO_ROOT / "start_candidate_stack.sh"
 STOP = REPO_ROOT / "stop_candidate_stack.sh"

@@ -18,7 +18,23 @@ from uuid import uuid4
 from sqlalchemy import text
 
 from app.database import SessionLocal
-from tests.conftest import TestSession
+from tests.conftest import TestSession, TEST_ENGINE
+
+# The chain's first hop is POST /api/v1/paper-trading/create, whose money binds
+# now carry their column types (paper_trading.py:136-137, :161), so the Decimal
+# capital that used to make that route answer 500 creation_failed offline is no
+# longer an obstacle -- test_paper_create_engine_consistency.py runs that hop on
+# this lane. The hop after it is not lane-executable: the replay's final commit
+# protection takes a `SELECT ... FOR UPDATE` row lock in raw SQL
+# (paper_trading.py:956-964), which sqlite3 has no syntax for. A skip here is a
+# statement about the lane, not a pass.
+pytestmark = pytest.mark.skipif(
+    TEST_ENGINE.dialect.name == "sqlite",
+    reason=(
+        "the chain's replay hop locks its run row with SELECT ... FOR UPDATE "
+        "(paper_trading.py:956-964), which needs PostgreSQL"
+    ),
+)
 
 
 def _make_user(client, email: str):
@@ -68,7 +84,7 @@ def _seed_fixed_trades(user_id: str):
                 ) VALUES (
                     :id, :user_id, 'strategy_research_simulated', 'v1.0', 'TEST/USD', 60,
                     'test_provider', 'simulated', 100, :now, :now,
-                    '{}'::jsonb, '{}'::jsonb, '[]'::jsonb, 2, :now
+                    '{}', '{}', '[]', 2, :now
                 )
             """),
             {"id": study_run_id, "user_id": user_id, "now": now},

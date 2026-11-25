@@ -8,6 +8,7 @@ for the configured synthetic account.
 """
 import asyncio
 import secrets
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -37,7 +38,10 @@ def _settings(**overrides) -> Settings:
         candidate_passwordless_session_minutes=15,
     )
     values.update(overrides)
-    return Settings(**values)
+    # See tests/test_trial_passwordless.py: without `_env_file=None` a developer
+    # `backend/.env` is merged into every Settings built here, so "disabled by
+    # default" is not the default at all.
+    return Settings(_env_file=None, **values)
 
 
 _LOOP = None
@@ -48,6 +52,22 @@ def _loop():
     if _LOOP is None:
         _LOOP = asyncio.new_event_loop()
     return _LOOP
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _close_shared_loop():
+    """The loop above outlives every test unless someone closes it.
+
+    It is created once on purpose (see the comment in `_call`), which makes it
+    process state; leaving it open hands a live loop to every later test in the
+    session, and a test that then calls `asyncio.run()` gets
+    "cannot be called from a running event loop".
+    """
+    yield
+    global _LOOP
+    if _LOOP is not None:
+        _LOOP.close()
+        _LOOP = None
 
 
 def _call(app, method: str, path: str, *, peer="127.0.0.1", json=None, token=None):
@@ -65,13 +85,24 @@ def _call(app, method: str, path: str, *, peer="127.0.0.1", json=None, token=Non
     return _loop().run_until_complete(run())
 
 
-@pytest.fixture()
-def candidate_app(client):
+@contextmanager
+def _app_with(settings: Settings):
+    """Run the real app against one Settings, restored on the way out."""
     from app.main import app
 
-    app.dependency_overrides[get_settings] = lambda: _settings()
-    yield app
-    app.dependency_overrides.pop(get_settings, None)
+    saved_overrides = dict(app.dependency_overrides)
+    app.dependency_overrides[get_settings] = lambda: settings
+    try:
+        yield app
+    finally:
+        app.dependency_overrides.clear()
+        app.dependency_overrides.update(saved_overrides)
+
+
+@pytest.fixture()
+def candidate_app(client):
+    with _app_with(_settings()) as app:
+        yield app
 
 
 def _register(client, email: str, password: str = PASSWORD):
@@ -112,16 +143,48 @@ def _experiment_payload(title: str) -> dict:
 
 
 class TestDisabledByDefault:
-    def test_status_is_disabled_with_real_settings(self, client):
-        resp = client.get("/api/auth/candidate-session")
+    """What "off" has to mean, measured against the flag rather than the peer.
+
+    These two cases used to go through `client`, whose ASGI peer is
+    "testclient" — an address every loopback guard already refuses. Through it
+    `enabled is False` and the missing session are returned by the *address*
+    check, so the configuration was never the thing under test. Measured on a
+    machine whose `backend/.env` sets CANDIDATE_PASSWORDLESS_MODE=TRUE, the POST
+    then answered 403 (peer) instead of the 404 (not offered) the case names:
+    the suite was green on the capability contract only by coincidence of where
+    the developer kept their config.
+    """
+
+    def _closed(self) -> Settings:
+        return _settings(
+            candidate_passwordless_mode=False,
+            candidate_passwordless_accounts="",
+        )
+
+    def test_the_shipped_default_is_closed(self):
+        settings = Settings(_env_file=None)
+        assert settings.candidate_passwordless_mode is False
+        assert settings.candidate_passwordless_accounts == ""
+
+    def test_status_is_disabled_for_a_loopback_peer(self):
+        with _app_with(self._closed()) as app:
+            resp = _call(app, "GET", "/api/auth/candidate-session")
         assert resp.status_code == 200
         body = resp.json()
         assert body["enabled"] is False
         assert body["accounts"] == []
 
-    def test_session_is_not_offered(self, client):
-        resp = client.post("/api/auth/candidate-session", json={"role": "owner"})
+    def test_session_is_not_offered(self):
+        with _app_with(self._closed()) as app:
+            resp = _call(app, "POST", "/api/auth/candidate-session", json={"role": "owner"})
         assert resp.status_code == 404
+
+    def test_a_non_loopback_peer_with_the_mode_on_is_refused_by_address(self):
+        # The pair to the case above: 403 is the address answer and only
+        # appears when the allowlist itself is populated.
+        with _app_with(_settings()) as app:
+            resp = _call(app, "POST", "/api/auth/candidate-session", json={"role": "owner"}, peer="203.0.113.9")
+        assert resp.status_code == 403
 
 
 class TestStatusSurface:

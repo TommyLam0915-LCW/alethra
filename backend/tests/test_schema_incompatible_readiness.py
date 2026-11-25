@@ -145,10 +145,16 @@ def raw_client():
     from app.database import get_db as orig_get_db
     from tests.conftest import override_get_db
 
+    # Same as tests/test_error_correlation.py: restore the prior dict in
+    # finally instead of clearing the shared one after a successful yield.
+    saved_overrides = dict(app.dependency_overrides)
     app.dependency_overrides[orig_get_db] = override_get_db
-    with TestClient(app, raise_server_exceptions=False) as c:
-        yield c
-    app.dependency_overrides.clear()
+    try:
+        with TestClient(app, raise_server_exceptions=False) as c:
+            yield c
+    finally:
+        app.dependency_overrides.clear()
+        app.dependency_overrides.update(saved_overrides)
 
 
 def _failing_db(exc):

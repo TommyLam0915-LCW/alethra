@@ -28,10 +28,13 @@ What the suite pins down:
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
 from tests.conftest import TestSession
+from app.lib.timeutil import utcnow
+from app.ml.personal_trainer import PERSONAL_TASK_TYPE
 from app.models.agent_strategy import (
     AgentDatasetSnapshot,
     AgentModelActivationApproval,
@@ -40,8 +43,16 @@ from app.models.agent_strategy import (
 )
 from app.models.experiment import Experiment, ExperimentStatus, ResearchType
 from app.models.experiment_version import ExperimentVersion
+from app.models.model_research import ModelResearchRecord, ModelType, ModelVersion
+from app.models.personal_model_selection import (
+    PersonalModelSelection,
+    PersonalModelSelectionAction,
+)
+from app.models.training import TrainingJob, TrainingJobStatus
 from app.models.user import User
 from app.services import model_activation
+from app.services.model_activation import check_model_version_inference_authorization
+from app.services.personal_training import PERSONAL_TRAINING_TYPE
 from app.services.agent_strategy import (
     CONSENT_ACCEPTANCE_TEXT_VERSION,
     CONSENT_VERSION,
@@ -878,3 +889,557 @@ def _http_seeded_job(client, headers, monkeypatch):
             "job_id": str(job.id),
             "artifact_checksum": job.artifact_checksum,
         }, consent["consent_id"]
+
+
+# ---------------------------------------------------------------------------
+# Unified skill model: skill_unit_id scoping
+# ---------------------------------------------------------------------------
+
+
+class TestSkillUnitScoping:
+    """Activation approvals are scoped to a specific skill unit (portfolio).
+
+    An approval with NULL skill_unit_id does NOT authorize all skill units — it
+    only covers the artifact in isolation. An approval with a specific
+    skill_unit_id covers only that skill unit. This prevents old NULL-scope
+    approvals from being misinterpreted as "all skills" authorization.
+    """
+
+    def test_approval_with_skill_unit_id_covers_that_skill_unit(self, harness):
+        skill_unit_id = uuid.uuid4()
+
+        result = model_activation.record_activation_approval(
+            harness.db,
+            harness.owner_id,
+            job_id=harness.job.id,
+            artifact_checksum=harness.job.artifact_checksum,
+            policy_version=model_activation.ACTIVATION_POLICY_VERSION,
+            acknowledgement_text_version=model_activation.ACTIVATION_ACK_TEXT_VERSION,
+            acknowledgement=model_activation.ACTIVATION_ACK_TEXT_ZH,
+            skill_unit_id=skill_unit_id,
+        )
+
+        assert result["activation_status"] == model_activation.ACTIVATED
+        assert result["skill_unit_id"] == str(skill_unit_id)
+        assert result["skill_unit_scope"] == "specific"
+
+        # Verify the approval covers this skill unit.
+        approval = model_activation.live_approval(harness.db, harness.job.id)
+        assert model_activation.approval_covers_skill_unit(approval, skill_unit_id)
+        # But not a different skill unit.
+        other_skill_unit = uuid.uuid4()
+        assert not model_activation.approval_covers_skill_unit(approval, other_skill_unit)
+
+    def test_approval_without_skill_unit_id_does_not_cover_any_skill_unit(self, harness):
+        result = model_activation.record_activation_approval(
+            harness.db,
+            harness.owner_id,
+            job_id=harness.job.id,
+            artifact_checksum=harness.job.artifact_checksum,
+            policy_version=model_activation.ACTIVATION_POLICY_VERSION,
+            acknowledgement_text_version=model_activation.ACTIVATION_ACK_TEXT_VERSION,
+            acknowledgement=model_activation.ACTIVATION_ACK_TEXT_ZH,
+            skill_unit_id=None,
+        )
+
+        assert result["activation_status"] == model_activation.ACTIVATED
+        assert result["skill_unit_id"] is None
+        assert result["skill_unit_scope"] == "none"
+
+        # Verify the approval does NOT cover any skill unit.
+        approval = model_activation.live_approval(harness.db, harness.job.id)
+        some_skill_unit = uuid.uuid4()
+        assert not model_activation.approval_covers_skill_unit(approval, some_skill_unit)
+        # It only covers NULL (artifact in isolation).
+        assert model_activation.approval_covers_skill_unit(approval, None)
+
+    def test_inference_time_check_verifies_skill_unit_match(self, harness):
+        skill_unit_id = uuid.uuid4()
+
+        model_activation.record_activation_approval(
+            harness.db,
+            harness.owner_id,
+            job_id=harness.job.id,
+            artifact_checksum=harness.job.artifact_checksum,
+            policy_version=model_activation.ACTIVATION_POLICY_VERSION,
+            acknowledgement_text_version=model_activation.ACTIVATION_ACK_TEXT_VERSION,
+            acknowledgement=model_activation.ACTIVATION_ACK_TEXT_ZH,
+            skill_unit_id=skill_unit_id,
+        )
+
+        # Inference for the same skill unit: authorized.
+        check = model_activation.check_skill_unit_activation(
+            harness.db, harness.owner_id, harness.job.id, skill_unit_id
+        )
+        assert check["authorized"] is True
+        assert check["skill_unit_match"] is True
+        assert check["approval_skill_unit_id"] == str(skill_unit_id)
+
+        # Inference for a different skill unit: refused.
+        other_skill_unit = uuid.uuid4()
+        check = model_activation.check_skill_unit_activation(
+            harness.db, harness.owner_id, harness.job.id, other_skill_unit
+        )
+        assert check["authorized"] is False
+        assert check["reason_code"] == "skill_unit_mismatch"
+        assert check["requested_skill_unit_id"] == str(other_skill_unit)
+
+        # Inference with NULL skill unit: refused (approval is scoped).
+        check = model_activation.check_skill_unit_activation(
+            harness.db, harness.owner_id, harness.job.id, None
+        )
+        assert check["authorized"] is False
+        assert check["reason_code"] == "skill_unit_mismatch"
+
+    def test_inference_with_unscoped_approval_is_refused(self, harness):
+        model_activation.record_activation_approval(
+            harness.db,
+            harness.owner_id,
+            job_id=harness.job.id,
+            artifact_checksum=harness.job.artifact_checksum,
+            policy_version=model_activation.ACTIVATION_POLICY_VERSION,
+            acknowledgement_text_version=model_activation.ACTIVATION_ACK_TEXT_VERSION,
+            acknowledgement=model_activation.ACTIVATION_ACK_TEXT_ZH,
+            skill_unit_id=None,
+        )
+
+        # Inference for any skill unit: refused (approval has no skill-unit scope).
+        some_skill_unit = uuid.uuid4()
+        check = model_activation.check_skill_unit_activation(
+            harness.db, harness.owner_id, harness.job.id, some_skill_unit
+        )
+        assert check["authorized"] is False
+        assert check["reason_code"] == "skill_unit_mismatch"
+
+    def test_list_activations_by_skill_unit_filters_correctly(self, harness):
+        skill_unit_a = uuid.uuid4()
+        skill_unit_b = uuid.uuid4()
+
+        # Create two jobs and approve each for a different skill unit.
+        job_a = _job(harness.db, harness.owner_id, artifact=_checksum("job-a"))
+        job_b = _job(harness.db, harness.owner_id, artifact=_checksum("job-b"))
+
+        model_activation.record_activation_approval(
+            harness.db, harness.owner_id, job_id=job_a.id,
+            artifact_checksum=job_a.artifact_checksum,
+            policy_version=model_activation.ACTIVATION_POLICY_VERSION,
+            acknowledgement_text_version=model_activation.ACTIVATION_ACK_TEXT_VERSION,
+            acknowledgement=model_activation.ACTIVATION_ACK_TEXT_ZH,
+            skill_unit_id=skill_unit_a,
+        )
+        model_activation.record_activation_approval(
+            harness.db, harness.owner_id, job_id=job_b.id,
+            artifact_checksum=job_b.artifact_checksum,
+            policy_version=model_activation.ACTIVATION_POLICY_VERSION,
+            acknowledgement_text_version=model_activation.ACTIVATION_ACK_TEXT_VERSION,
+            acknowledgement=model_activation.ACTIVATION_ACK_TEXT_ZH,
+            skill_unit_id=skill_unit_b,
+        )
+
+        # Query for skill_unit_a: only job_a's approval.
+        approvals_a = model_activation.list_activations_by_skill_unit(
+            harness.db, harness.owner_id, skill_unit_a
+        )
+        assert len(approvals_a) == 1
+        assert approvals_a[0]["skill_unit_id"] == str(skill_unit_a)
+
+        # Query for skill_unit_b: only job_b's approval.
+        approvals_b = model_activation.list_activations_by_skill_unit(
+            harness.db, harness.owner_id, skill_unit_b
+        )
+        assert len(approvals_b) == 1
+        assert approvals_b[0]["skill_unit_id"] == str(skill_unit_b)
+
+        # Query for a third skill unit: no approvals.
+        approvals_c = model_activation.list_activations_by_skill_unit(
+            harness.db, harness.owner_id, uuid.uuid4()
+        )
+        assert len(approvals_c) == 0
+
+    def test_revoke_by_skill_unit_only_affects_that_scope(self, harness):
+        skill_unit_a = uuid.uuid4()
+        skill_unit_b = uuid.uuid4()
+
+        job_a = _job(harness.db, harness.owner_id, artifact=_checksum("job-a"))
+        job_b = _job(harness.db, harness.owner_id, artifact=_checksum("job-b"))
+
+        model_activation.record_activation_approval(
+            harness.db, harness.owner_id, job_id=job_a.id,
+            artifact_checksum=job_a.artifact_checksum,
+            policy_version=model_activation.ACTIVATION_POLICY_VERSION,
+            acknowledgement_text_version=model_activation.ACTIVATION_ACK_TEXT_VERSION,
+            acknowledgement=model_activation.ACTIVATION_ACK_TEXT_ZH,
+            skill_unit_id=skill_unit_a,
+        )
+        model_activation.record_activation_approval(
+            harness.db, harness.owner_id, job_id=job_b.id,
+            artifact_checksum=job_b.artifact_checksum,
+            policy_version=model_activation.ACTIVATION_POLICY_VERSION,
+            acknowledgement_text_version=model_activation.ACTIVATION_ACK_TEXT_VERSION,
+            acknowledgement=model_activation.ACTIVATION_ACK_TEXT_ZH,
+            skill_unit_id=skill_unit_b,
+        )
+
+        # Revoke all approvals for skill_unit_a.
+        result = model_activation.revoke_activations_for_skill_unit(
+            harness.db, harness.owner_id, skill_unit_a, reason="testing"
+        )
+        assert result["revoked"] is True
+        assert result["revoked_count"] == 1
+        assert result["skill_unit_id"] == str(skill_unit_a)
+
+        # Verify job_a's approval is revoked.
+        check_a = model_activation.check_skill_unit_activation(
+            harness.db, harness.owner_id, job_a.id, skill_unit_a
+        )
+        assert check_a["authorized"] is False
+        assert check_a["reason_code"] == "no_approval"
+
+        # Verify job_b's approval is still active (different skill unit).
+        check_b = model_activation.check_skill_unit_activation(
+            harness.db, harness.owner_id, job_b.id, skill_unit_b
+        )
+        assert check_b["authorized"] is True
+        assert check_b["skill_unit_match"] is True
+
+    def test_old_null_scope_approvals_are_not_all_skills(self, harness):
+        """An approval recorded before skill_unit_id existed does NOT authorize
+        all skill units — it only covers the artifact in isolation.
+
+        This is the critical backward-compatibility test: old approvals with
+        NULL skill_unit_id must not be misinterpreted as "all skills"
+        authorization.
+        """
+        # Simulate an old approval by inserting a row directly with NULL skill_unit_id.
+        _approval(harness.db, harness.job, harness.owner_id)
+
+        # Verify the approval exists and has NULL skill_unit_id.
+        approval = model_activation.live_approval(harness.db, harness.job.id)
+        assert approval is not None
+        assert approval.skill_unit_id is None
+
+        # Verify it does NOT cover any skill unit.
+        some_skill_unit = uuid.uuid4()
+        assert not model_activation.approval_covers_skill_unit(approval, some_skill_unit)
+
+        # Verify inference-time check refuses for any skill unit.
+        check = model_activation.check_skill_unit_activation(
+            harness.db, harness.owner_id, harness.job.id, some_skill_unit
+        )
+        assert check["authorized"] is False
+        assert check["reason_code"] == "skill_unit_mismatch"
+
+        # It only covers NULL (artifact in isolation).
+        assert model_activation.approval_covers_skill_unit(approval, None)
+
+    def test_activation_state_reports_skill_unit_scope(self, harness):
+        skill_unit_id = uuid.uuid4()
+
+        model_activation.record_activation_approval(
+            harness.db,
+            harness.owner_id,
+            job_id=harness.job.id,
+            artifact_checksum=harness.job.artifact_checksum,
+            policy_version=model_activation.ACTIVATION_POLICY_VERSION,
+            acknowledgement_text_version=model_activation.ACTIVATION_ACK_TEXT_VERSION,
+            acknowledgement=model_activation.ACTIVATION_ACK_TEXT_ZH,
+            skill_unit_id=skill_unit_id,
+        )
+
+        state = model_activation.activation_state(harness.db, harness.job)
+        assert state["activation_status"] == model_activation.ACTIVATED
+        assert state["skill_unit_id"] == str(skill_unit_id)
+        assert state["skill_unit_scope"] == "specific"
+
+    def test_approval_without_skill_unit_reports_none_scope(self, harness):
+        model_activation.record_activation_approval(
+            harness.db,
+            harness.owner_id,
+            job_id=harness.job.id,
+            artifact_checksum=harness.job.artifact_checksum,
+            policy_version=model_activation.ACTIVATION_POLICY_VERSION,
+            acknowledgement_text_version=model_activation.ACTIVATION_ACK_TEXT_VERSION,
+            acknowledgement=model_activation.ACTIVATION_ACK_TEXT_ZH,
+            skill_unit_id=None,
+        )
+
+        state = model_activation.activation_state(harness.db, harness.job)
+        assert state["activation_status"] == model_activation.ACTIVATED
+        assert state["skill_unit_id"] is None
+        assert state["skill_unit_scope"] == "none"
+
+
+class TestModelVersionInferenceAuthorization:
+    """Personal-model inference gate: selection + the personal training job.
+
+    The personal family is served by ``training_jobs`` (written by
+    ``app.services.personal_training``) and ``personal_model_selections``. It is
+    *not* served by ``agent_strategy_training_jobs`` or
+    ``AgentModelActivationApproval``: those belong to the agent-strategy
+    screening model, which has its own trainer, its own job table, its own
+    artifact type and its own consent scope. An earlier version of this gate
+    demanded an agent approval for a personal version, which refused legitimate
+    personal inference and, worse, would have honored an approval recorded for a
+    different model family.
+
+    These tests therefore hold two things at once: the personal gate still
+    refuses every way of not having earned inference, and it refuses to read the
+    agent table either way.
+    """
+
+    CHECKSUM = "a" * 64
+
+    def _personal_job(self, harness, *, status=TrainingJobStatus.completed,
+                      checksum=None, owner_id=None):
+        job = TrainingJob(
+            id=uuid.uuid4(),
+            user_id=owner_id or harness.owner_id,
+            status=status,
+            parameter_grid={"training_type": PERSONAL_TRAINING_TYPE},
+            results={"artifact_sha256": checksum or self.CHECKSUM},
+            completed_at=utcnow(),
+        )
+        harness.db.add(job)
+        harness.db.commit()
+        return job
+
+    def _version(self, harness, spec):
+        record = ModelResearchRecord(
+            owner_id=harness.owner_id,
+            title="Personal record",
+            purpose="personal_decision",
+        )
+        harness.db.add(record)
+        harness.db.flush()
+        version = ModelVersion(
+            model_research_record_id=record.id,
+            version_number=1,
+            model_type=ModelType.personal_decision_model,
+            model_specification_json=spec,
+        )
+        harness.db.add(version)
+        harness.db.flush()
+        return record, version
+
+    def _select(self, harness, record, version, skill_unit_id):
+        harness.db.add(
+            PersonalModelSelection(
+                owner_id=harness.owner_id,
+                skill_unit_id=skill_unit_id,
+                record_id=record.id,
+                version_id=version.id,
+                action=PersonalModelSelectionAction.select,
+                rationale="Test selection",
+            )
+        )
+        harness.db.commit()
+
+    def _spec(self, job, checksum=None):
+        return {
+            "task_type": PERSONAL_TASK_TYPE,
+            "artifact_id": "personal-artifact",
+            "artifact_sha256": checksum or self.CHECKSUM,
+            "training_job_id": str(job.id),
+        }
+
+    def test_inference_refused_when_no_training_job_in_spec(self, harness):
+        """A version that names no training job has no provable source."""
+        record, version = self._version(
+            harness,
+            {
+                "task_type": PERSONAL_TASK_TYPE,
+                "artifact_id": "test-artifact",
+                "artifact_sha256": self.CHECKSUM,
+            },
+        )
+        harness.db.commit()
+
+        result = check_model_version_inference_authorization(
+            harness.db, harness.owner_id, version.id,
+            version.model_specification_json, uuid.uuid4(),
+        )
+        assert result["authorized"] is False
+        assert result["reason_code"] == "no_training_job"
+
+    def test_inference_refused_when_training_job_id_malformed(self, harness):
+        """A non-UUID job reference is refused, not coerced or ignored."""
+        record, version = self._version(
+            harness, self._spec(SimpleNamespace(id="not-a-uuid"))
+        )
+        harness.db.commit()
+
+        result = check_model_version_inference_authorization(
+            harness.db, harness.owner_id, version.id,
+            version.model_specification_json, uuid.uuid4(),
+        )
+        assert result["authorized"] is False
+        assert result["reason_code"] == "invalid_training_job_id"
+
+    def test_inference_refused_when_no_skill_unit_selection(self, harness):
+        """A completed job without a selection for THIS skill unit is refused."""
+        job = self._personal_job(harness)
+        record, version = self._version(harness, self._spec(job))
+        harness.db.commit()
+
+        result = check_model_version_inference_authorization(
+            harness.db, harness.owner_id, version.id,
+            version.model_specification_json, uuid.uuid4(),
+        )
+        assert result["authorized"] is False
+        assert result["reason_code"] == "no_skill_unit_selection"
+
+    def test_inference_refused_when_job_belongs_to_another_owner(self, harness):
+        """A personal job is not a shared credential."""
+        stranger = _new_user(harness.db)
+        job = self._personal_job(harness, owner_id=stranger)
+        record, version = self._version(harness, self._spec(job))
+        skill_unit_id = uuid.uuid4()
+        self._select(harness, record, version, skill_unit_id)
+
+        result = check_model_version_inference_authorization(
+            harness.db, harness.owner_id, version.id,
+            version.model_specification_json, skill_unit_id,
+        )
+        assert result["authorized"] is False
+        assert result["reason_code"] == "training_job_not_found"
+
+    def test_inference_refused_when_job_not_completed(self, harness):
+        """A running job has produced nothing that may be served."""
+        job = self._personal_job(harness, status=TrainingJobStatus.running)
+        record, version = self._version(harness, self._spec(job))
+        skill_unit_id = uuid.uuid4()
+        self._select(harness, record, version, skill_unit_id)
+
+        result = check_model_version_inference_authorization(
+            harness.db, harness.owner_id, version.id,
+            version.model_specification_json, skill_unit_id,
+        )
+        assert result["authorized"] is False
+        assert result["reason_code"] == "training_job_not_completed"
+        assert result["job_status"] == "running"
+
+    def test_inference_refused_on_artifact_checksum_mismatch(self, harness):
+        """The version must carry the artifact the job actually recorded."""
+        job = self._personal_job(harness)
+        record, version = self._version(harness, self._spec(job, checksum="f" * 64))
+        skill_unit_id = uuid.uuid4()
+        self._select(harness, record, version, skill_unit_id)
+
+        result = check_model_version_inference_authorization(
+            harness.db, harness.owner_id, version.id,
+            version.model_specification_json, skill_unit_id,
+        )
+        assert result["authorized"] is False
+        assert result["reason_code"] == "artifact_mismatch"
+
+    def test_inference_refused_for_a_different_skill_unit(self, harness):
+        """A selection for skill A never authorizes skill B."""
+        job = self._personal_job(harness)
+        record, version = self._version(harness, self._spec(job))
+        skill_unit_a = uuid.uuid4()
+        skill_unit_b = uuid.uuid4()
+        self._select(harness, record, version, skill_unit_a)
+
+        result = check_model_version_inference_authorization(
+            harness.db, harness.owner_id, version.id,
+            version.model_specification_json, skill_unit_b,
+        )
+        assert result["authorized"] is False
+        assert result["reason_code"] == "no_skill_unit_selection"
+        assert result["skill_unit_id"] == str(skill_unit_b)
+
+    def test_inference_allowed_for_the_selected_skill_unit(self, harness):
+        """Selection plus a completed, owned, checksum-matching job is enough."""
+        job = self._personal_job(harness)
+        record, version = self._version(harness, self._spec(job))
+        skill_unit_id = uuid.uuid4()
+        self._select(harness, record, version, skill_unit_id)
+
+        result = check_model_version_inference_authorization(
+            harness.db, harness.owner_id, version.id,
+            version.model_specification_json, skill_unit_id,
+        )
+        assert result["authorized"] is True, result
+        assert result["reason_code"] is None
+        assert result["training_job_id"] == str(job.id)
+        assert result["skill_unit_id"] == str(skill_unit_id)
+        # No agent approval was recorded anywhere on this path.
+        assert harness.db.query(AgentModelActivationApproval).count() == 0
+
+    def test_agent_activation_row_does_not_authorize_personal_inference(self, harness):
+        """Cross-family isolation, positive direction.
+
+        An owner-UI approval for an *agent-strategy* job says nothing about a
+        personal version. Even with a selection present and the agent job fully
+        approved, the personal gate must refuse, because the job id it is handed
+        names no personal training job.
+        """
+        harness.approve_through_owner_ui()
+        record, version = self._version(
+            harness, self._spec(harness.job)  # agent job id inside a personal spec
+        )
+        skill_unit_id = uuid.uuid4()
+        self._select(harness, record, version, skill_unit_id)
+
+        assert harness.db.query(AgentModelActivationApproval).count() == 1
+
+        result = check_model_version_inference_authorization(
+            harness.db, harness.owner_id, version.id,
+            version.model_specification_json, skill_unit_id,
+        )
+        assert result["authorized"] is False
+        assert result["reason_code"] == "training_job_not_found"
+
+    def test_missing_agent_approval_does_not_block_personal_inference(self, harness):
+        """Cross-family isolation, negative direction — the regression.
+
+        Before the fix this scenario returned ``no_approval``: a legitimate
+        personal version was refused because the agent-strategy table had no
+        row for it. The personal gate must not consult that table at all.
+        """
+        job = self._personal_job(harness)
+        record, version = self._version(harness, self._spec(job))
+        skill_unit_id = uuid.uuid4()
+        self._select(harness, record, version, skill_unit_id)
+
+        assert model_activation.live_approval(harness.db, job.id) is None
+
+        result = check_model_version_inference_authorization(
+            harness.db, harness.owner_id, version.id,
+            version.model_specification_json, skill_unit_id,
+        )
+        assert result["authorized"] is True, result
+        assert "approval_id" not in result
+
+
+# ---------------------------------------------------------------------------
+# The agent-strategy family keeps its own gate
+# ---------------------------------------------------------------------------
+
+
+class TestAgentFamilyGateStillEnforced:
+    """The personal fix must not have softened the agent path it belongs to."""
+
+    def test_agent_activation_still_requires_recorded_approval(self, harness):
+        state = model_activation.activation_state(harness.db, harness.job)
+        assert state["activation_status"] == model_activation.NOT_APPROVED
+        assert state["reason_code"] == "no_recorded_approval"
+
+    def test_agent_activation_still_binds_artifact_dataset_and_contract(self, harness):
+        _approval(harness.db, harness.job, harness.owner_id, artifact="b" * 64)
+        state = model_activation.activation_state(harness.db, harness.job)
+        assert state["activation_status"] == model_activation.NOT_APPROVED
+        assert state["reason_code"] == "approval_artifact_mismatch"
+
+    def test_agent_skill_unit_scope_still_refuses_a_borrowed_skill(self, harness):
+        approval = harness.approve_through_owner_ui()["approval_id"]
+        row = harness.db.get(AgentModelActivationApproval, uuid.UUID(approval))
+        row.skill_unit_id = uuid.uuid4()
+        harness.db.commit()
+
+        other_skill = uuid.uuid4()
+        assert model_activation.approval_covers_skill_unit(row, other_skill) is False
+        # A NULL scope is "no skill unit", never "every skill unit".
+        row.skill_unit_id = None
+        harness.db.commit()
+        assert model_activation.approval_covers_skill_unit(row, other_skill) is False

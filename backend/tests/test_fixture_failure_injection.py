@@ -10,9 +10,9 @@ Each test uses unique email/marker to avoid conflicts.
 """
 import pytest
 from unittest.mock import patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 from sqlalchemy import text
-from tests.api_test_fixtures import api_test_fixtures
+from tests.api_test_fixtures import _uuid_sql, api_test_fixtures
 from app.database import SessionLocal
 
 
@@ -21,8 +21,8 @@ def _count_user(user_id: str) -> int:
     db = SessionLocal()
     try:
         result = db.execute(
-            text("SELECT COUNT(*) FROM users WHERE id = :id"),
-            {"id": user_id}
+            _uuid_sql("SELECT COUNT(*) FROM users WHERE id = :id", "id"),
+            {"id": UUID(user_id)}
         )
         return result.scalar()
     finally:
@@ -34,8 +34,8 @@ def _count_run(run_id: str) -> int:
     db = SessionLocal()
     try:
         result = db.execute(
-            text("SELECT COUNT(*) FROM strategy_study_runs WHERE id = :id"),
-            {"id": run_id}
+            _uuid_sql("SELECT COUNT(*) FROM strategy_study_runs WHERE id = :id", "id"),
+            {"id": UUID(run_id)}
         )
         return result.scalar()
     finally:
@@ -112,7 +112,10 @@ def test_cleanup_delete_fails_test_fails():
         # Manual cleanup for this test
         db = SessionLocal()
         try:
-            db.execute(text("DELETE FROM users WHERE id = :id"), {"id": captured_user_id})
+            db.execute(
+                _uuid_sql("DELETE FROM users WHERE id = :id", "id"),
+                {"id": UUID(captured_user_id)},
+            )
             db.commit()
         finally:
             db.close()

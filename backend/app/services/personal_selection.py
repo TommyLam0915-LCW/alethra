@@ -6,10 +6,19 @@ id is evidence, never an authorisation, so an old comparison cannot revive a
 revoked version, a missing artifact or a strategy outside the current consent
 scope.
 
-The record row is locked for the whole decision, and the caller states which
-active version it believes is current. A mismatch is refused instead of
-silently overwriting a change another operation already made. The alias change
-and the append-only selection history are written in the caller's transaction.
+The row the switch acts on is locked for its whole decision, and the caller
+states which version it believes is current *for that scope* — the record-wide
+alias for an unswitch switch, the skill's own selection for a skill-scoped one.
+A mismatch is refused instead of silently overwriting a change another
+operation already made. The alias change and the append-only selection history
+are written in the caller's transaction.
+
+A selection may name one skill unit (the owner's own portfolio). Skill-scoped
+rows are that skill's history and are what inference is gated on; rows without
+one are the record-wide alias history. Neither stands in for the other, so a
+NULL skill unit never means "every skill" — and a skill switching its model
+never rewrites the record's alias, which is what another skill's status line
+reads.
 """
 
 import uuid
@@ -91,14 +100,103 @@ def _peek_version(db: Session, version_id: uuid.UUID) -> ModelVersion:
     return version
 
 
-def _assert_expected_active(
-    record: ModelResearchRecord,
+def _owned_skill_unit(
+    db: Session, owner_id: uuid.UUID, skill_unit_id: uuid.UUID
+) -> uuid.UUID:
+    """A skill unit is one of the owner's own portfolios.
+
+    Selection is the act that binds a model version to a skill, so the skill has
+    to exist and belong to the caller before a row is written. A foreign id is
+    answered exactly like a missing one.
+
+    Both columns are matched in either UUID spelling because the account an
+    owner opens with ``POST /api/v1/paper-trading/create`` — the entry point that
+    also gives the account its run — is written with raw SQL and stores the
+    dashed form. An identity-key comparison would answer ``skill_unit_not_found``
+    for an account that exists and is the caller's own, which on this lane is
+    how a selection for a real skill account used to fail.
+    """
+    from app.lib.uuid_spelling import stored_as
+    from app.models.paper_portfolio import PaperPortfolio
+
+    portfolio = (
+        db.query(PaperPortfolio)
+        .filter(
+            stored_as(PaperPortfolio.id, skill_unit_id),
+            stored_as(PaperPortfolio.owner_id, owner_id),
+        )
+        .first()
+    )
+    if portfolio is None:
+        raise SelectionRefused(
+            "skill_unit_not_found",
+            "找不到屬於你的技能帳號，未記錄任何版本選擇。",
+            {"skill_unit_id": str(skill_unit_id)},
+            not_found=True,
+        )
+    return portfolio.id
+
+
+def latest_skill_selection(
+    db: Session,
+    owner_id: uuid.UUID,
+    record_id: uuid.UUID,
+    skill_unit_id: uuid.UUID,
+) -> Optional[PersonalModelSelection]:
+    """The row that says which version this skill unit uses right now."""
+    return (
+        db.query(PersonalModelSelection)
+        .filter(
+            PersonalModelSelection.owner_id == owner_id,
+            PersonalModelSelection.record_id == record_id,
+            PersonalModelSelection.skill_unit_id == skill_unit_id,
+        )
+        .order_by(
+            PersonalModelSelection.created_at.desc(),
+            PersonalModelSelection.id.desc(),
+        )
+        .first()
+    )
+
+
+def latest_alias_selection(
+    db: Session, owner_id: uuid.UUID, record_id: uuid.UUID
+) -> Optional[PersonalModelSelection]:
+    """The last record-wide switch, which is the alias's own history.
+
+    ``skill_unit_id IS NULL`` is the alias scope, not a wildcard: reading the
+    newest row of *either* scope would let one skill's switch decide what a
+    record-wide rollback calls "the previous version".
+    """
+    return (
+        db.query(PersonalModelSelection)
+        .filter(
+            PersonalModelSelection.owner_id == owner_id,
+            PersonalModelSelection.record_id == record_id,
+            PersonalModelSelection.skill_unit_id.is_(None),
+        )
+        .order_by(
+            PersonalModelSelection.created_at.desc(),
+            PersonalModelSelection.id.desc(),
+        )
+        .first()
+    )
+
+
+def _assert_expected_in_use(
+    current: Optional[uuid.UUID],
     expected: Optional[uuid.UUID],
     enforce: bool,
 ) -> None:
+    """Refuse a switch that would overwrite a change the caller never saw.
+
+    ``current`` is the version the scope being switched uses right now: the
+    record-wide alias for an unscoped switch, this skill unit's own selection
+    for a skill-scoped one. Checking the other one would either refuse a switch
+    the owner is entitled to make or let a lost update through.
+    """
     if not enforce:
         return
-    current = record.active_version_id
     if current == expected:
         return
     raise SelectionRefused(
@@ -252,19 +350,39 @@ def select_version(
     comparison_run_id: Optional[uuid.UUID],
     expected_active_version_id: Optional[uuid.UUID],
     enforce_expected: bool = True,
+    skill_unit_id: Optional[uuid.UUID] = None,
 ) -> Dict[str, Any]:
     peek = _peek_version(db, version_id)
     # Lock order is always record then version, so select and rollback cannot
     # deadlock each other on the same record.
     record = _locked_record(db, owner_id, peek.model_research_record_id)
     version = _locked_version(db, owner_id, version_id)
-    _assert_expected_active(record, expected_active_version_id, enforce_expected)
+    if skill_unit_id is not None:
+        _owned_skill_unit(db, owner_id, skill_unit_id)
+
+    alias_previous = record.active_version_id
+
+    # A skill-scoped selection answers to its own history: "what did this skill
+    # use before" is the last row carrying this skill unit, not wherever the
+    # record-wide alias happens to point. Skill rows and alias rows never stand
+    # in for each other, so a NULL skill unit never means "every skill".
+    skill_previous: Optional[uuid.UUID] = None
+    if skill_unit_id is not None:
+        current = latest_skill_selection(db, owner_id, record.id, skill_unit_id)
+        skill_previous = current.version_id if current else None
+
+    _assert_expected_in_use(
+        skill_previous if skill_unit_id is not None else alias_previous,
+        expected_active_version_id,
+        enforce_expected,
+    )
     _assert_eligible(db, owner_id, record, version)
     run = _assert_comparison_context(
         db, owner_id, record, version, comparison_run_id
     )
 
-    if record.active_version_id == version.id:
+    in_use_previous = skill_previous if skill_unit_id is not None else alias_previous
+    if version.id == in_use_previous:
         return {
             "already_active": True,
             "record": record,
@@ -274,13 +392,18 @@ def select_version(
             "comparison_evidence": _comparison_evidence(run),
         }
 
-    previous = record.active_version_id
-    record.active_version_id = version.id
+    # The record-wide alias is the record's own status line. A skill switching
+    # its model must not rewrite it, or one skill's switch would report a
+    # version the other skills are not using; it moves only when the switch is
+    # made for the record itself.
+    if skill_unit_id is None and version.id != alias_previous:
+        record.active_version_id = version.id
     selection = PersonalModelSelection(
         owner_id=owner_id,
+        skill_unit_id=skill_unit_id,
         record_id=record.id,
         version_id=version.id,
-        previous_version_id=previous,
+        previous_version_id=in_use_previous,
         comparison_run_id=comparison_run_id,
         action=PersonalModelSelectionAction.select,
         rationale=rationale,
@@ -292,7 +415,7 @@ def select_version(
         "record": record,
         "version": version,
         "selection": selection,
-        "previous_version_id": previous,
+        "previous_version_id": selection.previous_version_id,
         "comparison_evidence": _comparison_evidence(run),
     }
 
@@ -304,13 +427,25 @@ def rollback(
     record_id: uuid.UUID,
     rationale: Optional[str],
     expected_active_version_id: Optional[uuid.UUID],
+    skill_unit_id: Optional[uuid.UUID] = None,
 ) -> Dict[str, Any]:
-    from app.services.model_comparison import latest_selection
-
     record = _locked_record(db, owner_id, record_id)
-    _assert_expected_active(record, expected_active_version_id, True)
+    if skill_unit_id is not None:
+        _owned_skill_unit(db, owner_id, skill_unit_id)
 
-    latest = latest_selection(db, owner_id, record.id)
+    if skill_unit_id is not None:
+        latest = latest_skill_selection(db, owner_id, record.id, skill_unit_id)
+    else:
+        latest = latest_alias_selection(db, owner_id, record.id)
+
+    # The same scope rule as a select: a skill-scoped rollback is checked
+    # against what that skill uses now, not against the record-wide alias that
+    # other skills' switches leave untouched.
+    current = record.active_version_id
+    if skill_unit_id is not None:
+        current = latest.version_id if latest else None
+    _assert_expected_in_use(current, expected_active_version_id, True)
+
     if latest is None or latest.previous_version_id is None:
         raise SelectionRefused(
             "no_previous_version",
@@ -320,15 +455,16 @@ def rollback(
     target = _locked_version(db, owner_id, latest.previous_version_id)
     _assert_eligible(db, owner_id, record, target)
 
-    current = record.active_version_id
     if current == target.id:
         raise SelectionRefused(
             "already_at_previous_version", "目前已在此版本，沒有改動。"
         )
 
-    record.active_version_id = target.id
+    if skill_unit_id is None:
+        record.active_version_id = target.id
     selection = PersonalModelSelection(
         owner_id=owner_id,
+        skill_unit_id=skill_unit_id,
         record_id=record.id,
         version_id=target.id,
         previous_version_id=current,

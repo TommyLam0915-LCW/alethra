@@ -60,9 +60,22 @@ from app.services.agent_strategy import (
     validate_lineage,
 )
 from app.services import model_activation
+from app.services.agent_paper_execution import (
+    execute_paper_decision,
+    list_paper_executions,
+)
 
 router = APIRouter(
     prefix="/agent-strategy", tags=["agent-strategy-screening"]
+)
+
+# Absence, not refusal: a job or skill account belonging to another owner is
+# reported as not found, the way the neighbouring reads report it.
+_PAPER_EXECUTION_ABSENT_CODES = frozenset(
+    {
+        "paper_execution_job_not_found",
+        "paper_execution_skill_unit_not_found",
+    }
 )
 
 
@@ -123,6 +136,17 @@ class ActivationApprovalRequest(BaseModel):
         min_length=1,
         description="The full activation text, echoed back by the owner.",
     )
+    # Unified skill model: which portfolio this activation targets.
+    # Optional for backward compatibility with approvals recorded before the
+    # skill-unit concept existed, but new approvals should always specify it.
+    # An approval with NULL skill_unit_id does NOT authorize all skills — it
+    # only covers the artifact in isolation, without any skill-unit scope.
+    skill_unit_id: Optional[uuid.UUID] = Field(
+        default=None,
+        description="The portfolio (skill unit) this activation serves. "
+        "When provided, the approval is scoped to that skill unit and cannot "
+        "be used to authorize inference for other skill units.",
+    )
 
 
 class ActivationRevokeRequest(BaseModel):
@@ -132,6 +156,15 @@ class ActivationRevokeRequest(BaseModel):
 class InferenceRequest(BaseModel):
     features: Dict[str, float] = Field(
         description="Feature values for one candidate, keyed by feature name."
+    )
+
+
+class PaperExecutionRequest(BaseModel):
+    skill_unit_id: uuid.UUID = Field(
+        description="The owner's own skill account (paper portfolio) this "
+        "execution trades. Nothing else in the body is trusted as "
+        "authorization: the job, artifact, approval, dataset and strategy "
+        "version are re-read from the server's own rows."
     )
 
 
@@ -302,6 +335,12 @@ def put_job_activation(
     # The owner's own click is the only identity this records: ``current_user``
     # is the sole subject, the channel is fixed by this route, and the artifact
     # checksum has to be presented so the approval binds one model and no other.
+    # ``POST .../inference`` consumes that record as a yes/no on the artifact: an
+    # approval for this exact checksum must be live before the model is loaded,
+    # and that request carries only features, so the *scope* narrows nothing
+    # there. ``POST .../paper-execution`` consumes the scope: the ``skill_unit_id``
+    # recorded here is what lets that one skill account run this artifact, and
+    # NULL still means "no skill-unit scope" — never "every skill account".
     try:
         return model_activation.record_activation_approval(
             db,
@@ -311,6 +350,7 @@ def put_job_activation(
             policy_version=body.policy_version,
             acknowledgement_text_version=body.acknowledgement_text_version,
             acknowledgement=body.acknowledgement,
+            skill_unit_id=body.skill_unit_id,
         )
     except AgentStrategyRefused as exc:
         raise _refusal_http(exc)
@@ -398,6 +438,68 @@ def post_training_inference(
                 detail={"code": exc.code, "message_zh": exc.message_zh},
             )
         raise _refusal_http(exc)
+
+
+@router.post(
+    "/training/jobs/{job_id}/paper-execution",
+    dependencies=[Depends(require_screening_enabled)],
+)
+def post_training_paper_execution(
+    job_id: uuid.UUID,
+    body: PaperExecutionRequest,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope("write")),
+    db: Session = Depends(get_db),
+):
+    """Consult this job's approved artifact and book one paper trade.
+
+    ``skill_unit_id`` in the body is the only thing the caller names: which of
+    its own skill accounts the trade belongs to. The owner, job, strategy
+    version, snapshot, candidate, artifact and the live approval are re-read from
+    the rows that hold them, so a body claim about a checksum or an approval is
+    not trusted — the scope leg refuses a job-only approval by name rather than
+    treating it as permission for this account. Paper rows only; this route
+    reaches no broker and no live daemon.
+    """
+    try:
+        return execute_paper_decision(
+            db,
+            current_user.id,
+            job_id=job_id,
+            skill_unit_id=body.skill_unit_id,
+            actor_type=request_actor_provenance(request),
+        )
+    except AgentStrategyRefused as exc:
+        if exc.code in _PAPER_EXECUTION_ABSENT_CODES:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"code": exc.code, "message_zh": exc.message_zh,
+                        "details": exc.details},
+            )
+        raise _refusal_http(exc)
+
+
+@router.get("/training/jobs/{job_id}/paper-executions")
+def get_training_paper_executions(
+    job_id: uuid.UUID,
+    skill_unit_id: Optional[uuid.UUID] = None,
+    current_user: User = Depends(get_current_user),
+    _scope_check=Depends(check_api_key_scope("read")),
+    db: Session = Depends(get_db),
+):
+    """What this job's artifacts actually decided, read back from the ledger."""
+    try:
+        model_activation.owned_job(db, current_user.id, job_id)
+    except AgentStrategyRefused as exc:
+        # Another owner's job is reported as absent, as the neighbouring reads do.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": exc.code, "message_zh": exc.message_zh},
+        )
+    return list_paper_executions(
+        db, current_user.id, job_id=job_id, skill_unit_id=skill_unit_id
+    )
 
 
 @router.post(

@@ -310,6 +310,9 @@ class AgentModelActivationApproval(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     owner_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    # Unified skill model: which portfolio this activation targets.
+    # Nullable because existing approvals predate the concept and cannot be backfilled.
+    skill_unit_id = Column(UUID(as_uuid=True), nullable=True)
     approved_by_user_id = Column(
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
     )
@@ -352,4 +355,5 @@ class AgentModelActivationApproval(Base):
         ),
         Index("ix_agent_activation_approval_owner", "owner_id"),
         Index("ix_agent_activation_approval_job", "job_id"),
+        Index("ix_agent_activation_approval_skill_unit", "skill_unit_id"),
     )

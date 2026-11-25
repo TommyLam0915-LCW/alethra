@@ -1,6 +1,13 @@
 import os
 from urllib.parse import urlparse
 
+from tests.postgresql_only import is_postgresql_url
+
+# Importing the hook is how it is registered: pytest collects hook
+# implementations from this module's namespace. It keeps a failing test's
+# report free of the tokens its fixtures are holding (see that module).
+from tests.failure_output_hygiene import pytest_runtest_makereport  # noqa: F401
+
 def _safe_db_diagnostic(url: str) -> str:
     """Extract password-free diagnostic info from database URL."""
     try:
@@ -12,8 +19,10 @@ def _safe_db_diagnostic(url: str) -> str:
         return "<unparseable URL>"
 
 # === 一、對齊執行基線：unify env vars ===
-# ALETHRA_TEST_DB and ALETHRA_PG_TEST_URL are aliases for the same PG test URL.
-# If both are set and differ, refuse to proceed before any connection.
+# ALETHRA_TEST_DB and ALETHRA_PG_TEST_URL name the same PostgreSQL test URL, so
+# if both are set and differ there is no single target to run against: refuse
+# before any connection. Only a PostgreSQL URL may populate the PostgreSQL-only
+# name; see the guard on the alias below.
 _env_a = os.environ.get("ALETHRA_TEST_DB")
 _env_b = os.environ.get("ALETHRA_PG_TEST_URL")
 if _env_a and _env_b and _env_a != _env_b:
@@ -23,13 +32,82 @@ if _env_a and _env_b and _env_a != _env_b:
         f"  ALETHRA_PG_TEST_URL = {_safe_db_diagnostic(_env_b)}\n"
         f"Unify to a single value before running tests."
     )
-if _env_a and not _env_b:
+if _env_a and not _env_b and is_postgresql_url(_env_a):
+    # Aliased only when the value really is a PostgreSQL URL. Copying
+    # ALETHRA_TEST_DB over unconditionally handed the SQLite lane's file path
+    # to ALETHRA_PG_TEST_URL, and every reader that asked that name "is
+    # PostgreSQL configured?" was told yes -- including the tests that then ran
+    # SELECT current_database() against SQLite, and get_test_db_url(), whose
+    # whole job is to refuse when no PostgreSQL target was named.
     os.environ["ALETHRA_PG_TEST_URL"] = _env_a
 elif _env_b and not _env_a:
     os.environ["ALETHRA_TEST_DB"] = _env_b
 
-_TEST_DB_PATH = os.environ.get("ALETHRA_TEST_DB", "sqlite:///./test.db")
+def _sqlite_default_test_db_url(env, pid):
+    """The database for a run that never named one.
+
+    The default was ``sqlite:///./test.db``, which is relative to the current
+    directory -- so every pytest started outside ``scripts/run_tests.sh`` wrote
+    into one file inside the shared checkout (measured: ``backend/test.db``,
+    3,043,328 bytes at 2026-11-20 03:07:34Z). The replacement is the runner's own
+    convention, ``${TMPDIR:-/tmp}/alethra-sqlite-test-<pid>.db``, one file per
+    process. A database named by the caller is returned unchanged: this removes
+    a silent default, it does not override a decision.
+    """
+    named = env.get("ALETHRA_TEST_DB")
+    if named:
+        return named
+    tmp = env.get("TMPDIR") or ""
+    if not tmp.startswith("/"):
+        # A relative TMPDIR would put the file back inside the worktree.
+        tmp = "/tmp"
+    return f"sqlite:///{tmp}/alethra-sqlite-test-{pid}.db"
+
+
+_TEST_DB_PATH = _sqlite_default_test_db_url(os.environ, os.getpid())
 os.environ["DATABASE_URL"] = _TEST_DB_PATH
+# Published rather than kept local: tests/stored_market_data and
+# tests/fb17_dataset_provenance re-read ALETHRA_TEST_DB at import time with the
+# old ``./test.db`` default of their own. conftest is imported before either, so
+# the resolved name becomes the single answer for the whole session.
+os.environ["ALETHRA_TEST_DB"] = _TEST_DB_PATH
+
+# === 二、消除會污染證據的入口：開發者的 `backend/.env` 不再重新配置這個進程 ===
+# `app/config.py:560` declares `env_file=".env"` — a *relative* path, so
+# pydantic-settings resolves it against the process cwd, and both entry points
+# put the cwd inside `backend/`: `scripts/run_tests.sh` cds there before pytest,
+# and a bare `pytest` under `backend/` starts there too. Measured 2026-11-20 on
+# this checkout with only the gitignored local file present:
+#
+#     Settings()               -> data_provider='twelvedata',
+#                                 live_trading_enabled=True,
+#                                 research_auth_bypass_enabled=True
+#     Settings(_env_file=None) -> 'demo', False, False
+#
+# The database target is not the exposure (the lane exports `DATABASE_URL`, and
+# an environment variable outranks a dotenv value). The exposure is every key
+# the lane does *not* export: `app/main.py:13` snapshots `get_settings()` at
+# import time and `app/main.py:52` starts the learning scheduler from that
+# snapshot during the `client` fixture's startup, so a file nobody reviews could
+# arm the cron lanes for a test run — and `DATA_PROVIDER` is what decides
+# whether a test may reach a market-data API at all. The dotenv source is
+# therefore removed for this process; environment variables keep configuring the
+# app exactly as they do in production.
+from app import config as _config_module
+
+_DOTENV_WOULD_LOAD = _config_module.Settings.model_config.get("env_file")
+_config_module.Settings.model_config["env_file"] = None
+# A snapshot cached before the patch would outrank it, so the cache is dropped.
+_config_module.get_settings.cache_clear()
+
+
+def pytest_report_header():
+    """Say in the lane's own log which source was removed, not that it is clean."""
+    return (
+        "developer dotenv: neutralised (env_file "
+        f"{_DOTENV_WOULD_LOAD!r} -> None; environment variables still apply)"
+    )
+
 
 import gc
 import pytest
@@ -328,6 +406,28 @@ def client():
         app.dependency_overrides.update(saved_overrides)
 
 
+class SecretHeaders(dict):
+    """A header mapping whose ``repr`` cannot hand out the credential inside it.
+
+    pytest prints the value of every fixture in a failing test's header block, and
+    the suite writes those failures into ``<run dir>/pytest.log``. A plain dict
+    here therefore put a live ``Bearer`` token into the lane's own log on every
+    assertion failure anywhere in the suite — which is how a credential outlives
+    the run that issued it, and why this file cannot be shared as evidence.
+
+    The mapping is still the headers: ``client.get(url, headers=h)``,
+    ``h["Authorization"]``, ``{**h, "X": "y"}`` and ``dict(h)`` all behave as
+    before. Only the repr is withheld.
+    """
+
+    def __repr__(self):
+        return "<SecretHeaders keys=%s token-value-redacted>" % (
+            ",".join(sorted(self)) or "-",
+        )
+
+    __str__ = __repr__
+
+
 @pytest.fixture()
 def auth_headers(client):
     resp = client.post("/api/auth/register", json={
@@ -344,7 +444,7 @@ def auth_headers(client):
         "password": "testpass123",
     })
     token = login.json()["access_token"]
-    return {"Authorization": f"Bearer {token}"}
+    return SecretHeaders({"Authorization": f"Bearer {token}"})
 
 
 @pytest.fixture()
@@ -371,4 +471,4 @@ def admin_headers(client):
         token = create_access_token(data={"sub": str(admin.id)})
     finally:
         db.close()
-    return {"Authorization": f"Bearer {token}"}
+    return SecretHeaders({"Authorization": f"Bearer {token}"})

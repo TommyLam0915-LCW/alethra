@@ -20,6 +20,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
+# `scripts/` is not a package, so the import below needs it on the path — but
+# only for the duration of this import. Leaving a directory at sys.path[0] for
+# the rest of the session makes every later plain `import X` resolve there
+# first, which is process-global state this file has no business changing.
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 import app.models  # noqa: F401  registers every model, as the seed does
@@ -30,6 +34,7 @@ from e2e_shared_metadata import (
     stored_span,
     upsert_shared_metadata,
 )
+sys.path.remove(str(SCRIPTS_DIR))
 
 INSTRUMENT = "DEMO-ALPHA"
 PROVIDER = "demo"

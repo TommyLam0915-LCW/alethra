@@ -36,6 +36,14 @@ from app.services.robustness import (
 
 router = APIRouter(tags=["robustness"])
 
+# A study whose outcome is already recorded: cancelling cannot close it again, and
+# the cancel entry's conditional UPDATE is restricted to rows outside this list.
+# `partial` is deliberately absent — it has no outcome yet, which is why it can
+# still be run on or cancelled. `app/services/robustness.py` is what writes these
+# four statuses, and backend/tests/test_robustness_studies.py pins the two lists
+# so a new terminal status there cannot silently become cancellable here.
+FINISHED_STUDY_STATUSES = ("completed", "failed", "cancelled")
+
 
 def _owned_experiment(db: Session, experiment_id: UUID, user: User) -> Experiment:
     experiment = (
@@ -426,17 +434,63 @@ def cancel_robustness_study(
     current_user: User = Depends(get_current_user),
     _scope_check=Depends(check_api_key_scope("write")),
 ):
-    study = _owned_study(db, study_id, current_user)
-    if study.status in ("completed", "failed", "cancelled"):
+    """Close a study by decision, exactly once.
+
+    The transition is a conditional UPDATE restricted by the status stored in the
+    row, and the rowcount decides who cancelled. Reading the status first and
+    writing afterwards would let two simultaneous cancels both see `planned`, both
+    write, and both report a cancellation the other one performed — and a cancel
+    racing the execution's own terminal write would decide nothing about which of
+    the two the record shows.
+
+    What the cancellation does not claim: an execution in progress is not
+    confirmed stopped. ``execute_study`` re-reads this row between attempts and
+    breaks when it says cancelled, which is cooperation, not a kill — so a running
+    study may still produce attempts after this response.
+    """
+    # Ownership is answered before the transition, by the same filter the update
+    # carries, so a row that is not the caller's is a 404 whether or not it is
+    # finished and whatever its status.
+    _owned_study(db, study_id, current_user)
+
+    flipped = (
+        db.query(RobustnessStudy)
+        .filter(
+            RobustnessStudy.id == study_id,
+            RobustnessStudy.user_id == current_user.id,
+            RobustnessStudy.status.notin_(FINISHED_STUDY_STATUSES),
+        )
+        .update(
+            {"status": "cancelled", "cancelled_at": utcnow()},
+            synchronize_session=False,
+        )
+    )
+
+    if flipped != 1:
+        # The row was closed by someone else — the execution's terminal write, or
+        # the other click of a double cancel. Their state is the record, so the
+        # zero-row UPDATE is rolled back and the committed status is reported
+        # rather than this request's own write.
+        db.rollback()
+        current = (
+            db.query(RobustnessStudy.status)
+            .filter(RobustnessStudy.id == study_id)
+            .scalar()
+        )
+        if current is None:
+            raise HTTPException(status_code=404, detail="Study not found")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
                 "error": "study_finished",
-                "message": "This study has finished and cannot be cancelled; completed attempts and results are kept.",
+                "status": current,
+                "message": (
+                    f"This study is already {current}, so cancelling it closes "
+                    "nothing; completed attempts and results are kept."
+                ),
             },
         )
-    study.status = "cancelled"
-    study.cancelled_at = utcnow()
+
     db.commit()
-    db.refresh(study)
+    study = _owned_study(db, study_id, current_user)
     return study_payload(study, _attempts(db, study))

@@ -10,11 +10,26 @@ Single self-contained test that:
 7. Entire test passes (no failed test left in suite)
 
 This proves cleanup relies on explicit DELETE, not outer transaction rollback.
+
+Both nodes need ``_test_sacrificial_``, a table the migrations create on the
+PostgreSQL test database; the SQLite lane has neither the table nor the
+migration that creates it, so offline they fail on "no such table" without
+ever exercising commit visibility or the finally-block cleanup.
 """
 import pytest
 from sqlalchemy import create_engine, text
 from uuid import uuid4
 import os
+
+from tests.postgresql_only import requires_postgresql
+
+
+@pytest.fixture(autouse=True)
+def _postgres_required():
+    requires_postgresql(
+        "commits to and reads back the migration-created _test_sacrificial_ "
+        "table over independent connections"
+    )
 
 
 def test_explicit_cleanup_after_commit_and_failure():
@@ -116,9 +131,10 @@ def test_explicit_cleanup_after_commit_and_failure():
 def test_cleanup_on_assertion_failure():
     """Prove cleanup works even when test assertion fails.
     
-    This test deliberately fails an assertion, then verifies cleanup still
-    happens in the finally block. The test itself is marked as xfail to
-    indicate the assertion failure is expected.
+    This test deliberately fails an assertion, catches it the way a finally
+    block would have to survive one, and checks that cleanup still ran. The
+    node itself passes: the injected failure is part of the mechanism, not a
+    reported result.
     """
     # Get database URL from environment
     db_url = os.environ.get('DATABASE_URL')

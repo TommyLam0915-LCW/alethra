@@ -63,6 +63,15 @@ class HumanDecisionEvent(Base):
         UUID(as_uuid=True), ForeignKey("human_decision_events.id"), nullable=True
     )
 
+    # The inference the owner said they were reacting to, by reference rather
+    # than by schema foreign key — the same contract as
+    # decision_records.linked_inference_id (c3d4e5f6g7h8): ``usage_records`` is
+    # in the billing schema and may be retained differently, so the existence
+    # and ownership of the link is checked by
+    # app/services/decision_lineage.py, not by the database. NULL on rows
+    # written before the column existed and on a decision that named no source.
+    linked_inference_id = Column(UUID(as_uuid=True), nullable=True, index=True)
+
     metadata_json = Column(JSONB, nullable=True)
 
     created_at = Column(DateTime, default=utcnow, nullable=False)

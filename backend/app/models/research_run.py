@@ -1,6 +1,15 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Text, DateTime, ForeignKey, Enum as SAEnum
+from sqlalchemy import (
+    Column,
+    Enum as SAEnum,
+    DateTime,
+    ForeignKey,
+    Index,
+    String,
+    Text,
+    text,
+)
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
 from app.database import Base
@@ -12,6 +21,10 @@ class RunStatus(str, enum.Enum):
     running = "running"
     completed = "completed"
     failed = "failed"
+    # Closed by an explicit decision at POST /api/v1/runs/{id}/cancel, never by a
+    # timeout: the platform sees rows, not processes, so "aged" cannot be
+    # published as "failed" without writing an outcome nobody observed.
+    cancelled = "cancelled"
 
 
 class ResearchRun(Base):
@@ -31,6 +44,26 @@ class ResearchRun(Base):
     error_details = Column(Text, nullable=True)
     started_at = Column(DateTime, nullable=True)
     completed_at = Column(DateTime, nullable=True)
+
+    # Persistent request de-duplication for POST /versions/{id}/runs. A key is
+    # scoped to the version, because that is the URL the caller retries and
+    # because the version already belongs to exactly one owner: a table-wide
+    # unique key would let one account's key collide with another's.
+    idempotency_key = Column(String(128), nullable=True)
+    # What the admitted request actually was, so a key reused for a different
+    # request is a conflict rather than a silently ignored second body.
+    idempotency_request_hash = Column(String(64), nullable=True)
+
+    __table_args__ = (
+        Index(
+            "uq_research_run_version_idempotency",
+            "experiment_version_id",
+            "idempotency_key",
+            unique=True,
+            postgresql_where=text("idempotency_key IS NOT NULL"),
+            sqlite_where=text("idempotency_key IS NOT NULL"),
+        ),
+    )
 
     experiment_version = relationship("ExperimentVersion", back_populates="runs")
     dataset_snapshot = relationship("DatasetSnapshot")

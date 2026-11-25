@@ -5,8 +5,9 @@ all fixtures are cleaned up properly.
 """
 import pytest
 from sqlalchemy import text
+from uuid import UUID
 from app.database import SessionLocal
-from tests.api_test_fixtures import api_test_fixtures
+from tests.api_test_fixtures import _uuid_sql, api_test_fixtures
 
 
 def test_api_fixtures_cleanup_on_success():
@@ -23,7 +24,7 @@ def test_api_fixtures_cleanup_on_success():
         # Verify user exists
         db = SessionLocal()
         try:
-            result = db.execute(text("SELECT id FROM users WHERE id = :id"), {"id": user_id})
+            result = db.execute(_uuid_sql("SELECT id FROM users WHERE id = :id", "id"), {"id": UUID(user_id)})
             assert result.fetchone() is not None, "User should exist during test"
         finally:
             db.close()
@@ -31,10 +32,10 @@ def test_api_fixtures_cleanup_on_success():
     # After context exit, verify cleanup happened
     db = SessionLocal()
     try:
-        result = db.execute(text("SELECT id FROM users WHERE id = :id"), {"id": user_id})
+        result = db.execute(_uuid_sql("SELECT id FROM users WHERE id = :id", "id"), {"id": UUID(user_id)})
         assert result.fetchone() is None, f"User {user_id} should be cleaned up after context exit"
         
-        result = db.execute(text("SELECT id FROM strategy_study_runs WHERE id = :id"), {"id": run_id})
+        result = db.execute(_uuid_sql("SELECT id FROM strategy_study_runs WHERE id = :id", "id"), {"id": UUID(run_id)})
         assert result.fetchone() is None, f"Run {run_id} should be cleaned up after context exit"
     finally:
         db.close()
@@ -57,10 +58,10 @@ def test_api_fixtures_cleanup_on_failure():
     # After exception, verify cleanup still happened
     db = SessionLocal()
     try:
-        result = db.execute(text("SELECT id FROM users WHERE id = :id"), {"id": user_id})
+        result = db.execute(_uuid_sql("SELECT id FROM users WHERE id = :id", "id"), {"id": UUID(user_id)})
         assert result.fetchone() is None, f"User {user_id} should be cleaned up even after test failure"
         
-        result = db.execute(text("SELECT id FROM strategy_study_runs WHERE id = :id"), {"id": run_id})
+        result = db.execute(_uuid_sql("SELECT id FROM strategy_study_runs WHERE id = :id", "id"), {"id": UUID(run_id)})
         assert result.fetchone() is None, f"Run {run_id} should be cleaned up even after test failure"
     finally:
         db.close()
@@ -83,7 +84,7 @@ def test_api_fixtures_cleanup_on_partial_creation_failure():
     # Verify cleanup
     db = SessionLocal()
     try:
-        result = db.execute(text("SELECT id FROM users WHERE id = :id"), {"id": user_id})
+        result = db.execute(_uuid_sql("SELECT id FROM users WHERE id = :id", "id"), {"id": UUID(user_id)})
         assert result.fetchone() is None
     finally:
         db.close()
@@ -97,12 +98,12 @@ def test_api_fixtures_non_zero_costs():
         db = SessionLocal()
         try:
             # Verify trades have non-zero commission and slippage
-            result = db.execute(text("""
+            result = db.execute(_uuid_sql("""
                 SELECT commission, slippage_cost, total_cost, net_pnl
                 FROM strategy_study_trades
                 WHERE run_id = :run_id
                 ORDER BY trade_index
-            """), {"run_id": run_id})
+            """, "run_id"), {"run_id": UUID(run_id)})
             
             trades = result.fetchall()
             assert len(trades) == 2, f"Expected 2 trades, got {len(trades)}"

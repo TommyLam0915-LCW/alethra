@@ -234,15 +234,162 @@ def _advance(client, headers, session_id):
 
 
 def _submit(client, headers, session_id, *, action, quantity=None, key=None,
-            rationale="a stated thesis"):
+            rationale="a stated thesis", linked_inference_id=None):
+    body = {
+        "action": action,
+        "quantity": quantity,
+        "rationale": rationale,
+        "idempotency_key": key or f"sub-{uuid.uuid4()}",
+    }
+    if linked_inference_id is not None:
+        body["linked_inference_id"] = linked_inference_id
     return client.post(
-        f"/api/v1/simulations/{session_id}/manual-decision", headers=headers,
-        json={
-            "action": action,
-            "quantity": quantity,
-            "rationale": rationale,
-            "idempotency_key": key or f"sub-{uuid.uuid4()}",
-        },
+        f"/api/v1/simulations/{session_id}/manual-decision", headers=headers, json=body
+    )
+
+
+def _record_inference(portfolio_id, strategy_version_id):
+    """The usage row a model execution leaves behind, for the account given.
+
+    Written directly because no formal route manufactures one on demand here; the
+    owner and the skill attribution are taken from the portfolio under test, so
+    the lineage this file claims really was generated for the account that
+    records it.
+
+    ``strategy_version_id`` is required, and every caller passes the version the
+    account's own session runs: what this helper stands for is a fresh estimate
+    from the model behind the strategy under test. Both doors now compare the two
+    halves of the lineage, so an origin that cannot say which version it came
+    from is no longer a detail this fixture may leave out — and the row that
+    *should* look like that legacy shape is built by
+    ``_record_lineage_row`` instead, where the absence is the point of the case.
+    """
+    from app.models.billing import UsageRecord
+    from app.models.paper_portfolio import PaperPortfolio
+
+    db = TestSession()
+    try:
+        portfolio = db.query(PaperPortfolio).filter(
+            PaperPortfolio.id == uuid.UUID(portfolio_id)
+        ).first()
+        record = UsageRecord(
+            user_id=portfolio.owner_id,
+            subscription_id=None,
+            endpoint="/api/v1/ml/personal/models/{version_id}/predict",
+            model=None,
+            tokens_used=0,
+            cost=0,
+            metadata_json={
+                "prediction_type": "personal_decision",
+                "skill_unit_id": str(portfolio.id),
+                "strategy_version_id": str(strategy_version_id),
+                "instrument_id": SYMBOL,
+                "as_of_date": B1,
+            },
+        )
+        db.add(record)
+        db.commit()
+        return str(record.id)
+    finally:
+        db.close()
+
+
+def _record_lineage_row(portfolio_id, metadata):
+    """A usage row carrying exactly the metadata one refusal case needs.
+
+    The inference is written with the owner of the account given, so the only
+    thing that varies between the cases below is the metadata the shared
+    validator reads.
+    """
+    from app.models.billing import UsageRecord
+    from app.models.paper_portfolio import PaperPortfolio
+
+    db = TestSession()
+    try:
+        portfolio = db.query(PaperPortfolio).filter(
+            PaperPortfolio.id == uuid.UUID(portfolio_id)
+        ).first()
+        row = UsageRecord(
+            user_id=portfolio.owner_id,
+            subscription_id=None,
+            endpoint="/api/v1/ml/personal/models/{version_id}/predict",
+            model=None,
+            tokens_used=0,
+            cost=0,
+            metadata_json=metadata,
+        )
+        db.add(row)
+        db.commit()
+        return str(row.id)
+    finally:
+        db.close()
+
+
+def _replay_events(session_id):
+    """Every ``human_decision_events`` row this replay holds, as stored.
+
+    Read out of the table rather than through a route on purpose: the storage
+    contract is what this helper checks, and a response could invent a value the
+    row never held. The door that renders the column is checked by its own node.
+    """
+    from app.models.human_decision import HumanDecisionEvent
+
+    db = TestSession()
+    try:
+        rows = (
+            db.query(HumanDecisionEvent)
+            .filter(HumanDecisionEvent.simulation_session_id == uuid.UUID(session_id))
+            .all()
+        )
+        return [
+            {
+                "id": str(row.id),
+                "action": row.action.value if row.action is not None else None,
+                "linked_inference_id": (
+                    str(row.linked_inference_id)
+                    if row.linked_inference_id is not None
+                    else None
+                ),
+                # The version this row says the decision was made under. The press
+                # derives it from its own session rather than from the request, so
+                # it is the second half of the lineage read-back: an origin accepted
+                # by one store and contradicted by the other is the failure the
+                # version leg exists to make impossible.
+                "server_strategy_version_id": (
+                    str(row.server_strategy_version_id)
+                    if row.server_strategy_version_id is not None
+                    else None
+                ),
+                "metadata_json": row.metadata_json,
+            }
+            for row in rows
+        ]
+    finally:
+        db.close()
+
+
+def _paper_decision(client, headers, portfolio_id, inference_id, version_id=None):
+    """The other formal door: the paper desk records a decision, no order.
+
+    ``version_id`` stays out of the body unless a case is specifically about a
+    claimed version; with it omitted the desk has nothing to compare until the
+    origin is read, which is the path those cases are about.
+    """
+    body = {
+        "decision_type": "entry",
+        "actor_type": "human",
+        "rationale": "the same stated thesis",
+        "expected_outcome": "test outcome",
+        "expected_timeframe_days": 7,
+        "self_reported_confidence": "medium",
+        "linked_inference_id": inference_id,
+    }
+    if version_id is not None:
+        body["linked_experiment_version_id"] = version_id
+    return client.post(
+        f"/api/v1/paper-portfolio/{portfolio_id}/decisions",
+        headers=headers,
+        json=body,
     )
 
 
@@ -343,6 +490,28 @@ def journal_csv_rows(client, headers, portfolio_id):
     return parsed
 
 
+def decision_history_json(client, headers, portfolio_id):
+    resp = client.get(
+        f"/api/v1/paper-portfolio/{portfolio_id}/decision-history?format=json",
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()
+
+
+def decision_history_csv_rows(client, headers, portfolio_id):
+    from app.api.paper_portfolio import DECISION_HISTORY_COLUMNS
+
+    resp = client.get(
+        f"/api/v1/paper-portfolio/{portfolio_id}/decision-history?format=csv",
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    parsed = list(csv.DictReader(io.StringIO(resp.text)))
+    assert parsed and list(parsed[0].keys()) == DECISION_HISTORY_COLUMNS, parsed[0].keys()
+    return parsed
+
+
 def events_for(event_type, entity_id=None):
     from app.models.audit_event import AuditEvent
 
@@ -362,6 +531,28 @@ def db_counts(**models):
         return {name: db.query(model).count() for name, model in models.items()}
     finally:
         db.close()
+
+
+def _book_counts(db, portfolio_id):
+    """One node's own order and fill rows, counted on the account it opened.
+
+    ``paper_fills`` has no portfolio column, so the fills' range is the order ids
+    this portfolio owns (``app/models/paper_portfolio.py:185``). Counting the two
+    tables instead asks this node to share a verdict with every other node whose
+    rows survive in the same database — which is what the isolated PostgreSQL run
+    measured on the concurrency class below.
+    """
+    from app.models.paper_portfolio import PaperFill, PaperOrder
+
+    own_orders = db.query(PaperOrder.id).filter(
+        PaperOrder.portfolio_id == uuid.UUID(str(portfolio_id))
+    )
+    return {
+        "orders": own_orders.count(),
+        "fills": db.query(PaperFill).filter(
+            PaperFill.paper_order_id.in_(own_orders)
+        ).count(),
+    }
 
 
 def cash_moved_by(legs):
@@ -1402,6 +1593,75 @@ class TestBindingAndProvenance:
             assert account(client, auth_headers, portfolio_id)["current_virtual_cash"] == \
                 pytest.approx(INITIAL_CASH, abs=1e-9)
 
+    def test_a_binding_to_another_owners_account_is_refused_as_a_forged_link(
+        self, client, auth_headers
+    ):
+        """A session pointing at an account is not the same as owning that account.
+
+        ``paper_portfolios.simulation_session_id`` is one column pointing at one
+        row, and a column can be written by anything that reaches the table. Both
+        doors that create this pair check that the session belongs to the caller
+        (``require_session_for_owner`` in the portfolio create route and the
+        decisions door), so no route produces a mismatched pair today — this node
+        writes the state the routes refuse and asks what the submit door does with
+        it. The answer has to be a refusal: an order that settled here would put
+        one owner's trade into another owner's ledger, and the balance the first
+        owner reads back would not be their own.
+        """
+        from app.models.paper_portfolio import (
+            DecisionRecord,
+            PaperFill,
+            PaperOrder,
+            PaperPortfolio,
+        )
+
+        version_id = _locked_version(client, auth_headers)
+        session_id = _start_session(client, auth_headers, version_id)
+        assert _advance(client, auth_headers, session_id).status_code == 200
+
+        client.post("/api/auth/register", json={
+            "risk_acknowledged": True,
+            "email": "other-ledger@alethra.io", "password": "otherpass123",
+            "display_name": "Other Ledger", "user_type": "individual",
+        })
+        token = client.post("/api/auth/login", json={
+            "email": "other-ledger@alethra.io", "password": "otherpass123",
+        }).json()["access_token"]
+        other = {"Authorization": f"Bearer {token}"}
+        foreign_portfolio = client.post("/api/v1/paper-portfolio", headers=other, json={
+            "initial_virtual_cash": INITIAL_CASH, "currency": "USD",
+        })
+        assert foreign_portfolio.status_code == 201, foreign_portfolio.text
+        foreign_id = foreign_portfolio.json()["id"]
+
+        # The forged half: someone else's account now names this session. Only a
+        # write under the application reaches this, which is exactly why the
+        # submit door cannot treat the binding as an authorisation.
+        db = TestSession()
+        try:
+            row = db.query(PaperPortfolio).filter(
+                PaperPortfolio.id == uuid.UUID(foreign_id)
+            ).one()
+            row.simulation_session_id = uuid.UUID(session_id)
+            db.commit()
+        finally:
+            db.close()
+
+        resp = _submit(client, auth_headers, session_id, action="buy", quantity=20)
+        assert resp.status_code == 400, resp.text
+        detail = resp.json()["detail"]
+        assert "whose owner is" in detail, detail
+        assert foreign_id in detail, detail
+
+        assert db_counts(orders=PaperOrder, fills=PaperFill, journal=DecisionRecord) == {
+            "orders": 0, "fills": 0, "journal": 0
+        }
+        assert _replay_events(session_id) == []
+        assert session_orders(client, auth_headers, session_id) == []
+        assert account_orders(client, other, foreign_id) == []
+        assert account(client, other, foreign_id)["current_virtual_cash"] == \
+            pytest.approx(INITIAL_CASH, abs=1e-9)
+
     def test_a_human_submits_and_the_market_clock_executes(self, client, auth_headers):
         """Provenance separates the intent from the fill.
 
@@ -1625,6 +1885,957 @@ class TestJournalAndCsvTellTheLifecycle:
         assert csv_row["net_cash_change"] == ""
 
 
+class TestLineageTravelsFromSubmitToExport:
+    """The inference a submission names is the inference the export shows.
+
+    Lineage is only worth recording if one identity survives the whole chain: the
+    value sent, the row stored, the value the decisions route reads back and the
+    cell the export writes are the same id — and a value that fails the checks is
+    refused on every route that accepts it, not recorded by some of them.
+
+    The press writes two decision stores, and both now hold it: ``decision_records``
+    for the account's paper rows and ``human_decision_events`` for the replay's own
+    history, which also keeps holds and withdrawn intents and is therefore the only
+    place a model-driven decision that never became an order is still attributable.
+    """
+
+    @staticmethod
+    def decisions(client, headers, portfolio_id):
+        resp = client.get(
+            f"/api/v1/paper-portfolio/{portfolio_id}/decisions", headers=headers
+        )
+        assert resp.status_code == 200, resp.text
+        return resp.json()
+
+    def test_the_linked_inference_reads_back_from_every_door(
+        self, client, auth_headers
+    ):
+        ctx = _open_account(client, auth_headers, observed=1)
+        session_id, portfolio_id = ctx["session_id"], ctx["portfolio_id"]
+        inference_id = _record_inference(portfolio_id, ctx["version_id"])
+
+        resp = _submit(client, auth_headers, session_id, action="buy", quantity=20,
+                       linked_inference_id=inference_id)
+        assert resp.status_code == 200, resp.text
+        order_id = resp.json()["order"]["order_id"]
+
+        # A pending intent already carries its origin. Recording lineage only once
+        # a fill exists would lose the inference behind orders that expire, get
+        # cancelled or are never executed.
+        rows = journal_json(client, auth_headers, portfolio_id)["records"]
+        assert len(rows) == 1
+        assert rows[0]["record_type"] == "order"
+        assert rows[0]["linked_inference_id"] == inference_id
+        assert rows[0]["linked_experiment_version_id"] == ctx["version_id"]
+
+        decisions = self.decisions(client, auth_headers, portfolio_id)
+        assert len(decisions) == 1
+        assert decisions[0]["id"] == resp.json()["order"]["decision_id"]
+        assert decisions[0]["linked_inference_id"] == inference_id
+        assert decisions[0]["linked_experiment_version_id"] == ctx["version_id"]
+
+        # The same order after the market has answered it: the lineage travels
+        # with the row, it does not belong to one lifecycle stage.
+        assert _advance(client, auth_headers, session_id).status_code == 200
+        rows = journal_json(client, auth_headers, portfolio_id)["records"]
+        assert len(rows) == 1, rows
+        assert rows[0]["record_type"] == "fill"
+        assert rows[0]["linked_inference_id"] == inference_id
+        assert rows[0]["linked_experiment_version_id"] == ctx["version_id"]
+
+        csv_row = [r for r in journal_csv_rows(client, auth_headers, portfolio_id)
+                   if r["order_id"] == order_id][0]
+        assert csv_row["linked_inference_id"] == inference_id
+        assert csv_row["linked_experiment_version_id"] == ctx["version_id"]
+
+    def test_the_simulation_press_reads_back_from_the_decision_history_file(
+        self, client, auth_headers
+    ):
+        """The customer's second export, fed by this page's own press.
+
+        ``journal`` is built from orders, so it cannot answer for a decision that
+        never carried one; ``decision-history`` is the file that can, and both read
+        the same ``decision_records`` row this submission writes. If lineage reached
+        only the first file, the two exports would disagree about which model
+        execution a decision was made on — so the lineage column, the source state
+        the export copies off the usage row, and the session attribution are all
+        read here rather than inferred from the payload the press sent.
+        """
+        ctx = _open_account(client, auth_headers, observed=1)
+        inference_id = _record_inference(ctx["portfolio_id"], ctx["version_id"])
+
+        resp = _submit(client, auth_headers, ctx["session_id"], action="buy",
+                       quantity=20, linked_inference_id=inference_id)
+        assert resp.status_code == 200, resp.text
+        decision_id = resp.json()["order"]["decision_id"]
+
+        rows = decision_history_json(
+            client, auth_headers, ctx["portfolio_id"]
+        )["records"]
+        assert len(rows) == 1, rows
+        row = rows[0]
+        assert row["record_type"] == "decision"
+        assert row["decision_id"] == decision_id
+        assert row["decision_scope"] == "this_portfolio"
+        assert row["linked_inference_id"] == inference_id
+        assert row["linked_experiment_version_id"] == ctx["version_id"]
+        assert row["inference_source_state"] == "present"
+        assert row["simulation_session_id"] == ctx["session_id"]
+
+        csv_row = [
+            r for r in decision_history_csv_rows(
+                client, auth_headers, ctx["portfolio_id"]
+            )
+            if r["decision_id"] == decision_id
+        ][0]
+        assert csv_row["linked_inference_id"] == inference_id
+        assert csv_row["inference_source_state"] == "present"
+        assert csv_row["simulation_session_id"] == ctx["session_id"]
+
+    def test_a_human_decision_with_no_inference_exports_empty_lineage(
+        self, client, auth_headers
+    ):
+        """Blank in the export means "no model execution", not "unknown".
+
+        The same submission without a claimed inference is the ordinary human
+        trade this suite books thousands of; it must not pick up a value.
+        """
+        ctx = _open_account(client, auth_headers, observed=1)
+        resp = _submit(client, auth_headers, ctx["session_id"], action="buy", quantity=20)
+        assert resp.status_code == 200, resp.text
+
+        row = journal_json(client, auth_headers, ctx["portfolio_id"])["records"][0]
+        assert row["linked_inference_id"] is None
+        assert row["linked_experiment_version_id"] == ctx["version_id"]
+
+        csv_row = journal_csv_rows(client, auth_headers, ctx["portfolio_id"])[0]
+        assert csv_row["linked_inference_id"] == ""
+        assert csv_row["decision_id"] == row["decision_id"]
+
+    def test_an_origin_that_records_no_version_is_admitted_and_stays_silent(
+        self, client, auth_headers
+    ):
+        """The compatibility path: absence on both sides is recorded as absence.
+
+        A usage row written before the predict route began recording
+        ``strategy_version_id`` cannot say which strategy it came from, and a desk
+        call that names no version has nothing to compare it against. Refusing
+        that pair would make every pre-existing decision unbookable, so the door
+        admits it — what it must not do is let the admitted row read back as
+        though a version had been confirmed. Every version cell here is empty,
+        and the export's own column description has to say so.
+        """
+        ctx = _open_account(client, auth_headers, observed=1)
+        unnamed = _record_lineage_row(ctx["portfolio_id"], {
+            "prediction_type": "personal_decision",
+            "skill_unit_id": ctx["portfolio_id"],
+            "instrument_id": SYMBOL,
+            "as_of_date": B1,
+        })
+
+        created = _paper_decision(client, auth_headers, ctx["portfolio_id"], unnamed)
+        assert created.status_code == 201, created.text
+        body = created.json()
+        assert body["linked_inference_id"] == unnamed
+        assert body["linked_experiment_version_id"] is None
+
+        rows = decision_history_json(client, auth_headers, ctx["portfolio_id"])
+        row = [r for r in rows["records"] if r["decision_id"] == body["id"]][0]
+        assert row["inference_source_state"] == "present", row
+        assert row["linked_experiment_version_id"] is None
+        assert row["inference_strategy_version_id"] is None
+        assert row["inference_model_version_id"] is None
+
+        # The same row in the file the customer opens in a spreadsheet.
+        as_csv = [
+            r
+            for r in decision_history_csv_rows(client, auth_headers, ctx["portfolio_id"])
+            if r["decision_id"] == body["id"]
+        ][0]
+        assert as_csv["linked_inference_id"] == unnamed
+        assert as_csv["linked_experiment_version_id"] == ""
+        assert as_csv["inference_strategy_version_id"] == ""
+
+        # The gate on the narration, not just the cells: the document a customer
+        # reads alongside an empty version column may not let them fill it in.
+        semantics = rows["column_semantics"]["linked_experiment_version_id"]
+        assert "not a verified absence" in semantics, semantics
+        assert "never means the version was confirmed" in semantics, semantics
+
+    def test_an_inference_generated_for_another_account_is_refused(
+        self, client, auth_headers
+    ):
+        """The replay route refuses what the paper desk refuses — same reason.
+
+        Two entry points, one contract: an order submitted against account B must
+        not be able to claim an inference the model produced for account A just
+        because the submission went through the replay.
+        """
+        mine = _open_account(client, auth_headers, observed=1)
+        theirs = _open_account(client, auth_headers, observed=1)
+        foreign_inference = _record_inference(theirs["portfolio_id"], theirs["version_id"])
+
+        resp = _submit(client, auth_headers, mine["session_id"], action="buy",
+                       quantity=20, linked_inference_id=foreign_inference)
+        assert resp.status_code == 400, resp.text
+        detail = resp.json()["detail"]
+        assert isinstance(detail, dict), f"refusal names no reason: {detail!r}"
+        assert detail.get("reason") == "inference_skill_mismatch", resp.text
+        assert detail["portfolio_id"] == mine["portfolio_id"]
+
+        # Refused means nothing was submitted, not an order with the lineage
+        # quietly dropped — a trade recorded as human that was claimed as model-
+        # driven is the failure this whole chain exists to prevent.
+        assert account_orders(client, auth_headers, mine["portfolio_id"]) == []
+        assert self.decisions(client, auth_headers, mine["portfolio_id"]) == []
+        assert journal_json(client, auth_headers, mine["portfolio_id"])["records"] == []
+
+    def test_a_hold_has_no_decision_row_to_carry_an_inference(
+        self, client, auth_headers
+    ):
+        ctx = _open_account(client, auth_headers, observed=1)
+        inference_id = _record_inference(ctx["portfolio_id"], ctx["version_id"])
+
+        resp = _submit(client, auth_headers, ctx["session_id"], action="hold",
+                       linked_inference_id=inference_id)
+        assert resp.status_code == 400, resp.text
+        detail = resp.json()["detail"]
+        assert isinstance(detail, dict), f"refusal names no reason: {detail!r}"
+        assert detail.get("reason") == "inference_needs_decision_row", resp.text
+
+        # A hold is still a recordable decision — it is the lineage it has no row
+        # to store that is refused.
+        ok = _submit(client, auth_headers, ctx["session_id"], action="hold")
+        assert ok.status_code == 200, ok.text
+        assert self.decisions(client, auth_headers, ctx["portfolio_id"]) == []
+
+    def test_one_key_cannot_be_replayed_under_a_different_inference(
+        self, client, auth_headers
+    ):
+        """The two replay branches, taken separately, on a lineage-carrying press.
+
+        An already-committed key short-circuits at the decision row and returns the
+        original order: the lineage is not re-adjudicated, because the request is
+        the same one that was adjudicated the first time. The ledger event is the
+        second branch, and it has its own conflict rule below the decision lookup,
+        so this node reads both stores back rather than treating one response as
+        proof about the other.
+        """
+        ctx = _open_account(client, auth_headers, observed=1)
+        session_id, portfolio_id = ctx["session_id"], ctx["portfolio_id"]
+        first = _record_inference(portfolio_id, ctx["version_id"])
+        second = _record_inference(portfolio_id, ctx["version_id"])
+        key = f"lineage-{uuid.uuid4()}"
+
+        resp = _submit(client, auth_headers, session_id, action="buy", quantity=20,
+                       key=key, linked_inference_id=first)
+        assert resp.status_code == 200, resp.text
+
+        replay = _submit(client, auth_headers, session_id, action="buy", quantity=20,
+                         key=key, linked_inference_id=first)
+        assert replay.status_code == 200, replay.text
+        assert replay.json()["order"]["order_id"] == resp.json()["order"]["order_id"]
+
+        # Decision branch: one replayed press is one decision, still attributed to
+        # the origin the first press named.
+        decisions = self.decisions(client, auth_headers, portfolio_id)
+        assert [d["linked_inference_id"] for d in decisions] == [first]
+
+        # Human-event branch: the replay never reaches the event write, so the
+        # ledger holds the single row the accepted press created — with both halves
+        # of its lineage intact.
+        events = _replay_events(session_id)
+        assert [e["linked_inference_id"] for e in events] == [first], events
+        assert events[0]["server_strategy_version_id"] == ctx["version_id"]
+
+        swapped = _submit(client, auth_headers, session_id, action="buy", quantity=20,
+                          key=key, linked_inference_id=second)
+        assert swapped.status_code == 409, swapped.text
+
+        orders = account_orders(client, auth_headers, portfolio_id)
+        assert len(orders) == 1
+        decisions = self.decisions(client, auth_headers, portfolio_id)
+        assert [d["linked_inference_id"] for d in decisions] == [first]
+        # A request refused on the key changes neither store: no second event, and
+        # the first one still names the inference it was accepted with.
+        assert [e["linked_inference_id"] for e in _replay_events(session_id)] == [first]
+
+    def test_both_formal_doors_answer_one_lineage_corpus_identically(
+        self, client, auth_headers
+    ):
+        """Parity is measured at the two entries, not at the shared helper.
+
+        ``validate_linked_inference`` is one function, so testing it once proves
+        the rules; it does not prove either door reaches them. A door that
+        stopped passing ``linked_inference_id`` through would keep the helper
+        green and start accepting, on one route only, a lineage the other
+        refuses. Both doors are driven with the same row, in the same test.
+
+        The desk is driven with the version the replay's own session runs, which
+        is the only claim the two doors can hold in common: the replay derives
+        its version from the session and cannot be told otherwise, so without a
+        stated version on the desk the two are not comparing the same decision
+        against the same strategy. The desk's derived path — the request names an
+        origin and no version — is the other door-local behavior and gets its own
+        nodes in ``test_trained_inference_lineage_chain.py``.
+
+        The last two rows are the version leg. ``origin-names-no-version`` is the
+        legacy usage row, written before the prediction recorded which frozen
+        strategy it came from, and it stays in the corpus as the countercontrol:
+        an origin that cannot answer must not be read as agreeing with whatever
+        version the decision happens to name.
+        """
+        ctx = _open_account(client, auth_headers, observed=1)
+        session_id, portfolio_id = ctx["session_id"], ctx["portfolio_id"]
+        version_id = ctx["version_id"]
+        mine = _record_inference(portfolio_id, version_id)
+
+        corpus = [
+            ("absent", str(uuid.uuid4())),
+            ("metadata-is-a-list", _record_lineage_row(portfolio_id, ["not", "a", "dict"])),
+            ("not-a-model-execution", _record_lineage_row(
+                portfolio_id,
+                {"prediction_type": "market_direction", "skill_unit_id": portfolio_id},
+            )),
+            ("generated-for-another-skill", _record_lineage_row(
+                portfolio_id,
+                {"prediction_type": "personal_decision",
+                 "skill_unit_id": str(uuid.uuid4())},
+            )),
+            ("origin-names-no-version", _record_lineage_row(
+                portfolio_id,
+                {"prediction_type": "personal_decision", "skill_unit_id": portfolio_id},
+            )),
+            ("origin-names-another-version", _record_lineage_row(
+                portfolio_id,
+                {"prediction_type": "personal_decision", "skill_unit_id": portfolio_id,
+                 "strategy_version_id": str(uuid.uuid4())},
+            )),
+            ("admitted", mine),
+        ]
+
+        for name, inference_id in corpus:
+            replay = _submit(client, auth_headers, session_id, action="buy",
+                             quantity=20, linked_inference_id=inference_id)
+            desk = _paper_decision(client, auth_headers, portfolio_id, inference_id,
+                                   version_id)
+
+            def answered(resp):
+                # Success is not comparable across the doors: the desk creates a
+                # row (201) and the replay answers with the order it queued (200).
+                # What must be identical is which lineages each refuses, and why.
+                if resp.status_code < 400:
+                    return ("accepted", None)
+                detail = resp.json()["detail"]
+                reason = detail.get("reason") if isinstance(detail, dict) else detail
+                return (resp.status_code, reason)
+
+            assert answered(replay) == answered(desk), (
+                f"{name}: the two doors answered differently — "
+                f"replay={answered(replay)} desk={answered(desk)}"
+            )
+            if name == "admitted":
+                assert answered(replay) == ("accepted", None), replay.text
+            else:
+                assert answered(replay)[1] is not None, f"{name} refused without a reason"
+
+            # Refused on both doors means nothing written on either: the row this
+            # corpus rejects may not survive as a decision, an order, a ledger
+            # event or an audit entry on the door whose check ran second.
+            if name != "admitted":
+                assert account_orders(client, auth_headers, portfolio_id) == [], name
+                assert _replay_events(session_id) == [], name
+                assert journal_json(client, auth_headers, portfolio_id)["records"] == []
+
+    def test_a_lineage_refusal_leaves_no_record_behind_on_either_door(
+        self, client, auth_headers
+    ):
+        ctx = _open_account(client, auth_headers, observed=1)
+        session_id, portfolio_id = ctx["session_id"], ctx["portfolio_id"]
+        foreign = _record_lineage_row(
+            portfolio_id,
+            {"prediction_type": "personal_decision", "skill_unit_id": str(uuid.uuid4())},
+        )
+
+        assert _submit(client, auth_headers, session_id, action="buy", quantity=20,
+                       linked_inference_id=foreign).status_code == 400
+        assert _paper_decision(client, auth_headers, portfolio_id, foreign).status_code == 400
+
+        assert account_orders(client, auth_headers, portfolio_id) == []
+        assert self.decisions(client, auth_headers, portfolio_id) == []
+        assert journal_json(client, auth_headers, portfolio_id)["records"] == []
+        # The replay's own ledger stays empty as well: a press refused for its
+        # lineage must not survive as an event whose claim was quietly dropped,
+        # which is the same trade recorded as human that was offered as model-made.
+        assert _replay_events(session_id) == []
+
+    def test_the_lineage_gate_says_nothing_about_which_instrument_the_origin_named(
+        self, client, auth_headers
+    ):
+        """Recorded product behavior, not coverage: the instrument is not checked.
+
+        The lineage compares owner, prediction type, skill account and now the
+        strategy version. It does not compare the instrument the estimate was made
+        on with the one the account trades, so an origin about AAPL can stand
+        behind a decision on this file's symbol, and the journal then shows the
+        pair. Both sides of the inequality are named, because an empty cell would
+        satisfy a bare ``!=`` and prove nothing. If the owner rules that a lineage
+        must be instrument-scoped, this is the node that changes.
+        """
+        ctx = _open_account(client, auth_headers, observed=1)
+        inference_id = _record_lineage_row(
+            ctx["portfolio_id"],
+            {"prediction_type": "personal_decision",
+             "skill_unit_id": ctx["portfolio_id"],
+             "strategy_version_id": ctx["version_id"],
+             "instrument_id": "US:AAPL",
+             "as_of_date": B1},
+        )
+
+        resp = _submit(client, auth_headers, ctx["session_id"], action="buy",
+                       quantity=20, linked_inference_id=inference_id)
+        assert resp.status_code == 200, resp.text
+
+        rows = journal_json(client, auth_headers, ctx["portfolio_id"])["records"]
+        assert [r["linked_inference_id"] for r in rows] == [inference_id]
+        assert rows[0]["asset_id"] == SYMBOL != "US:AAPL"
+        history = decision_history_json(
+            client, auth_headers, ctx["portfolio_id"]
+        )["records"]
+        assert history[0]["inference_skill_unit_id"] == ctx["portfolio_id"]
+        assert history[0]["inference_strategy_version_id"] == ctx["version_id"]
+
+    def test_the_replay_ledger_row_holds_the_inference_the_request_named(
+        self, client, auth_headers
+    ):
+        """``human_decision_events`` carries the lineage too, in its own column.
+
+        The submission validated an inference and wrote it to the paper row only.
+        The event the same request created for the replay's decision history had
+        no column to hold it, so that history — the one store that keeps holds,
+        cancelled intents and fills alike — could not tell a model-driven call
+        from a human one. ``d4e5f6g7h8i9`` adds the column and the route fills it
+        with the value it had already accepted.
+        """
+        ctx = _open_account(client, auth_headers, observed=1)
+        inference_id = _record_inference(ctx["portfolio_id"], ctx["version_id"])
+
+        resp = _submit(client, auth_headers, ctx["session_id"], action="buy",
+                       quantity=20, linked_inference_id=inference_id)
+        assert resp.status_code == 200, resp.text
+
+        events = _replay_events(ctx["session_id"])
+        assert [e["action"] for e in events] == ["buy"], events
+        assert events[0]["linked_inference_id"] == inference_id
+        # One identity, one place. ``metadata_json`` is where a second copy would
+        # go, and a second copy is how the two start disagreeing.
+        assert "linked_inference_id" not in events[0]["metadata_json"]
+        assert events[0]["metadata_json"]["source"] == "manual_decision"
+        # The paper row of the same request says the same thing, because it is the
+        # same value on both writes rather than two values that happen to match.
+        assert [d["linked_inference_id"] for d in
+                self.decisions(client, auth_headers, ctx["portfolio_id"])] == [inference_id]
+        # Both stores also agree on the *version* half of the lineage. The event
+        # derives it from its own session, the decision row from the version the
+        # door compared the origin against, and the door only accepted the claim
+        # because those are the same id — so reading one of them back and not the
+        # other would leave the disagreement this leg exists to prevent unobserved.
+        assert events[0]["server_strategy_version_id"] == ctx["version_id"]
+        assert self.decisions(
+            client, auth_headers, ctx["portfolio_id"]
+        )[0]["linked_experiment_version_id"] == ctx["version_id"]
+        # …and so does the replay's own step readback, which is what the page
+        # renders. Three stores named for one press; a node that only checked the
+        # door's response would not see the ledger and the step drift apart.
+        steps = replay_decisions(client, auth_headers, ctx["session_id"])
+        claimed = [detail["linked_inference_id"]
+                   for detail in (s["decision_detail"] or {} for s in steps)
+                   if detail.get("linked_inference_id")]
+        assert claimed == [inference_id]
+
+    def test_a_press_that_named_no_inference_records_one_in_the_ledger_as_null(
+        self, client, auth_headers
+    ):
+        """The column holds nothing, not the account's most recent estimate.
+
+        An ordinary human press is the common case in this suite. A write that
+        helped itself to a nearby inference would make every human decision in the
+        replay history read as model-driven.
+        """
+        ctx = _open_account(client, auth_headers, observed=1)
+        _record_inference(ctx["portfolio_id"], ctx["version_id"])
+
+        resp = _submit(client, auth_headers, ctx["session_id"], action="buy", quantity=20)
+        assert resp.status_code == 200, resp.text
+
+        events = _replay_events(ctx["session_id"])
+        assert [e["linked_inference_id"] for e in events] == [None]
+        assert "linked_inference_id" not in events[0]["metadata_json"]
+        # The readback stays empty too: a door that filled in the account's latest
+        # estimate would be indistinguishable, at the UI, from one the user chose.
+        steps = replay_decisions(client, auth_headers, ctx["session_id"])
+        blank = [detail.get("linked_inference_id")
+                 for detail in (s["decision_detail"] or {} for s in steps)
+                 if "linked_inference_id" in detail]
+        assert blank == [None]
+
+    def test_the_ledger_keeps_the_lineage_through_the_market_and_the_cancel(
+        self, client, auth_headers
+    ):
+        """The event is written at the press, so it outlives every later state.
+
+        The row is created before the market answers, and nothing later rewrites
+        its lineage: an order that fills and an order the owner withdraws both
+        stay attributed to the inference the decision named, because the event is
+        the record of the decision rather than of the execution.
+        """
+        filled = _open_account(client, auth_headers, observed=1)
+        inference_id = _record_inference(filled["portfolio_id"], filled["version_id"])
+        resp = _submit(client, auth_headers, filled["session_id"], action="buy",
+                       quantity=20, linked_inference_id=inference_id)
+        assert resp.status_code == 200, resp.text
+        order_id = resp.json()["order"]["order_id"]
+
+        withdrawn = _open_account(client, auth_headers, observed=1)
+        other = _record_inference(withdrawn["portfolio_id"], withdrawn["version_id"])
+        cancelled = _submit(client, auth_headers, withdrawn["session_id"],
+                            action="buy", quantity=20, linked_inference_id=other)
+        assert cancelled.status_code == 200, cancelled.text
+        assert client.post(
+            f"/api/v1/paper-portfolio/{withdrawn['portfolio_id']}/orders/"
+            f"{cancelled.json()['order']['order_id']}/cancel",
+            headers=auth_headers,
+        ).status_code == 200
+
+        assert _advance(client, auth_headers, filled["session_id"]).status_code == 200
+
+        assert [e["linked_inference_id"] for e in _replay_events(filled["session_id"])] == \
+            [inference_id]
+        assert [e["linked_inference_id"] for e in _replay_events(withdrawn["session_id"])] == \
+            [other]
+
+    def test_the_events_own_door_shows_the_lineage_and_a_correction_keeps_it(
+        self, client, auth_headers
+    ):
+        """The ledger is readable without the database, and re-narrating keeps origin.
+
+        ``GET /api/v1/human-decisions/{id}`` rendered this row while leaving the
+        ``linked_inference_id`` column out of its response: the press stored the
+        inference, the door omitted it, so the one book that still holds a hold or
+        a withdrawn intent could not tell a model-driven decision from a human one
+        to anyone without a DB session. The correction path had the mirror hole —
+        it deliberately reuses the original's server context and as-of instant but
+        wrote a blank lineage, which reads as "no model execution" for a decision
+        that named one. Neither fix accepts an inference: both read the value an
+        earlier write validated and stored.
+        """
+        ctx = _open_account(client, auth_headers, observed=1)
+        inference_id = _record_inference(ctx["portfolio_id"], ctx["version_id"])
+        resp = _submit(client, auth_headers, ctx["session_id"], action="buy",
+                       quantity=20, linked_inference_id=inference_id)
+        assert resp.status_code == 200, resp.text
+        event_id = _replay_events(ctx["session_id"])[0]["id"]
+
+        read = client.get(
+            f"/api/v1/human-decisions/{event_id}", headers=auth_headers
+        )
+        assert read.status_code == 200, read.text
+        assert read.json()["linked_inference_id"] == inference_id
+
+        corrected = client.post(
+            f"/api/v1/human-decisions/{event_id}/correct",
+            headers=auth_headers,
+            json={"action": "hold", "rationale": "同一個決定，改寫理由。",
+                  "correction_reason": "理由寫錯了，血緣不變。"},
+        )
+        assert corrected.status_code == 201, corrected.text
+        assert corrected.json()["linked_inference_id"] == inference_id
+        assert corrected.json()["supersedes_event_id"] == event_id
+
+        # A correction is another row, not a rewrite: both readings now name the
+        # inference the press accepted, and neither one invented it later.
+        assert [e["linked_inference_id"] for e in _replay_events(ctx["session_id"])] == \
+            [inference_id, inference_id]
+        listed = client.get(
+            f"/api/v1/human-decisions?simulation_session_id={ctx['session_id']}",
+            headers=auth_headers,
+        )
+        assert listed.status_code == 200, listed.text
+        assert [entry["linked_inference_id"] for entry in listed.json()] == \
+            [inference_id, inference_id]
+
+
+class TestLineageFromAServedPrediction:
+    """The head of the chain is a prediction this application actually ran.
+
+    Every other lineage node in this file takes its id from ``_record_inference``,
+    which inserts a usage row directly. That is the right tool for a refusal
+    corpus — the metadata can be shaped exactly wrong — but it cannot answer the
+    two questions the owner asked about the real path: whether the id the predict
+    route hands back is the id the decision doors accept, and what happens to an
+    origin whose version the owner has since taken back. Here the model, the
+    artifact, the selection, the billing row and the id all come from the routes.
+
+    What the answers are, since the version leg closed: this fixture's prediction
+    was trained from the personal-learning experiment's own version, which is
+    never frozen and is not the version the replay session runs. Both doors now
+    compare the two halves of a lineage, so on this fixture they refuse, and the
+    nodes below say which refusal each door reaches and prove nothing was written.
+    The accepted path — a served origin whose version and decision version are one
+    frozen id, read back from the decision, the ledger and the export — is
+    ``tests/test_trained_inference_lineage_chain.py``, whose fixture freezes the
+    version it trains from and replays that same version. Leaving this fixture
+    mismatched is deliberate: making the two agree here would delete the only case
+    in the suite where a real prediction names research the decision does not.
+
+    Still synthetic data: fixture bars, a fixture artifact, a test owner. The
+    layer proved is the wiring between entry points, not whether any model is
+    useful, and no browser is involved — the two screens that press this route
+    are checked in ``frontend/tests/dailyEstimate.test.mjs``.
+    """
+
+    @pytest.fixture()
+    def served(self, client, auth_headers, tmp_path, monkeypatch):
+        """One model execution served to the very account the replay submits into."""
+        from tests.test_personal_model_comparison import _model_for_job, _start_training
+        from tests.test_personal_strategy_learning import (
+            BARS,
+            INSTRUMENT,
+            _build_snapshot,
+            _create_experiment,
+            _grant_consent,
+            _personal_artifacts,
+            _seed_bars,
+            _seed_confirmed_decisions,
+            _select_for_skill,
+            _user_id,
+        )
+
+        db = TestSession()
+        try:
+            _seed_bars(db)
+            db.commit()
+        finally:
+            db.close()
+
+        owner_id = _user_id()
+        learning_experiment_id, strategy_version_id = _create_experiment(
+            client, auth_headers, title="Lineage from a served prediction"
+        )
+        _seed_confirmed_decisions(owner_id, uuid.UUID(strategy_version_id))
+        _grant_consent(client, auth_headers, strategy_version_id)
+        snapshot = _build_snapshot(client, auth_headers, strategy_version_id)
+        _personal_artifacts(tmp_path, monkeypatch)
+        job = _start_training(
+            client, auth_headers, snapshot["snapshot_id"], "logistic_regression"
+        )
+        model = _model_for_job(client, auth_headers, job, strategy_version_id)
+
+        # The skill account is not a freshly opened portfolio: it is the account
+        # this session is bound to, because that is the id the doors verify the
+        # inference against.
+        account = _open_account(client, auth_headers, observed=1)
+        _select_for_skill(
+            client, auth_headers, model["model_version_id"], account["portfolio_id"]
+        )
+        predicted = client.post(
+            f"/api/v1/ml/personal/models/{model['model_version_id']}/predict",
+            headers=auth_headers,
+            json={
+                "instrument_id": INSTRUMENT,
+                "as_of_date": BARS[80].isoformat(),
+                "skill_unit_id": account["portfolio_id"],
+            },
+        )
+        assert predicted.status_code == 200, predicted.text
+        return {
+            **account,
+            "owner_id": str(owner_id),
+            # The version this model was trained from, named separately from
+            # ``account["version_id"]`` because they are different ids: the replay
+            # runs a frozen strategy, the prediction came out of an unfrozen
+            # learning experiment. Which one a decision records is what the doors
+            # now compare, so the fixture has to say both.
+            "learning_version_id": strategy_version_id,
+            "learning_experiment_id": learning_experiment_id,
+            "instrument": INSTRUMENT,
+            "as_of": BARS[80].isoformat(),
+            "model_version_id": model["model_version_id"],
+            "record_id": model["record_id"],
+            "inference_id": predicted.json()["inference_id"],
+            "predicted": predicted.json(),
+        }
+
+    @staticmethod
+    def paper_decisions(client, headers, portfolio_id):
+        resp = client.get(
+            f"/api/v1/paper-portfolio/{portfolio_id}/decisions", headers=headers
+        )
+        assert resp.status_code == 200, resp.text
+        return resp.json()
+
+    def test_a_served_prediction_names_the_version_it_was_trained_from(
+        self, client, auth_headers, served
+    ):
+        """A real prediction, and the two doors' answer to a version it cannot share.
+
+        The id here comes out of ``POST /ml/personal/models/{id}/predict``, the
+        artifact and the selection behind it out of the training worker, so this
+        is the shape the customer's own estimate arrives in. What it is *not* is an
+        origin of this replay: the prediction was trained from the personal-learning
+        experiment's version, while the replay runs a different, frozen one. The
+        version leg answers that with a refusal on both doors rather than recording
+        a lineage whose two halves name different research.
+        """
+        from app.models.billing import UsageRecord
+
+        inference_id = served["inference_id"]
+
+        db = TestSession()
+        try:
+            usage = (
+                db.query(UsageRecord)
+                .filter(UsageRecord.id == uuid.UUID(inference_id))
+                .one()
+            )
+            assert str(usage.user_id) == served["owner_id"]
+            assert usage.endpoint == "/api/v1/ml/personal/models/{version_id}/predict"
+            assert usage.metadata_json["prediction_type"] == "personal_decision"
+            assert usage.metadata_json["skill_unit_id"] == served["portfolio_id"]
+            assert usage.metadata_json["model_version_id"] == served["model_version_id"]
+            assert usage.metadata_json["instrument_id"] == served["instrument"]
+            # The version leg reads this value, so the mismatch below is a fact
+            # about the product's own row and not about a column this fixture owns.
+            assert usage.metadata_json["strategy_version_id"] == \
+                served["learning_version_id"]
+        finally:
+            db.close()
+
+        assert served["learning_version_id"] != served["version_id"]
+
+        # Replay door: the session's version is the claim, and it is not the
+        # origin's. Both halves are named back so the screen can say which two
+        # ids disagreed.
+        replay = _submit(client, auth_headers, served["session_id"], action="buy",
+                         quantity=20, linked_inference_id=inference_id)
+        assert replay.status_code == 400, replay.text
+        detail = replay.json()["detail"]
+        assert detail["reason"] == "inference_version_mismatch", detail
+        assert detail["inference_strategy_version_id"] == served["learning_version_id"]
+        assert detail["decision_version"] == served["version_id"]
+        assert len(detail["message"]) > 20
+
+        # Desk door, same row, claiming the same version the replay holds: one
+        # rule, one answer.
+        desk_claimed = _paper_decision(
+            client, auth_headers, served["portfolio_id"], inference_id,
+            served["version_id"],
+        )
+        assert desk_claimed.status_code == 400, desk_claimed.text
+        assert desk_claimed.json()["detail"]["reason"] == "inference_version_mismatch"
+
+        # Desk door, version omitted: the origin's own version is what gets used,
+        # and it is held to the same eligibility check a stated version is. The
+        # request named no version at all, so the unfrozen version this refusal is
+        # about can only have come from the inference.
+        desk_derived = _paper_decision(
+            client, auth_headers, served["portfolio_id"], inference_id
+        )
+        assert desk_derived.status_code == 400, desk_derived.text
+        derived = desk_derived.json()["detail"]
+        assert derived["reason"] == "version_not_usable", derived
+        assert derived["state"] == "unlocked"
+
+        # Nothing was written by any of the three refusals, on either door.
+        assert account_orders(client, auth_headers, served["portfolio_id"]) == []
+        assert self.paper_decisions(
+            client, auth_headers, served["portfolio_id"]
+        ) == []
+        assert journal_json(client, auth_headers, served["portfolio_id"])["records"] == []
+        assert decision_history_json(
+            client, auth_headers, served["portfolio_id"]
+        )["records"] == []
+        assert _replay_events(served["session_id"]) == []
+
+        # The refusal is about the version, and only about the version: freeze that
+        # same learning version through its own formal entry, change nothing else
+        # about the prediction, and the desk now takes the identical request and
+        # records the version it derived from the origin.
+        frozen = client.post(
+            f"/api/v1/experiments/{served['learning_experiment_id']}/versions/"
+            f"{served['learning_version_id']}/lock",
+            headers=auth_headers,
+            json={"confirm": True, "reason": "測試：凍結後該推論才能成為決策的來源"},
+        )
+        assert frozen.status_code == 200, frozen.text
+
+        accepted = _paper_decision(
+            client, auth_headers, served["portfolio_id"], inference_id
+        )
+        assert accepted.status_code == 201, accepted.text
+        recorded = self.paper_decisions(
+            client, auth_headers, served["portfolio_id"]
+        )
+        assert [d["id"] for d in recorded] == [accepted.json()["id"]]
+        assert recorded[0]["linked_inference_id"] == inference_id
+        assert recorded[0]["linked_experiment_version_id"] == served["learning_version_id"]
+
+        row = decision_history_json(
+            client, auth_headers, served["portfolio_id"]
+        )["records"][0]
+        assert row["linked_experiment_version_id"] == served["learning_version_id"]
+        assert row["inference_strategy_version_id"] == served["learning_version_id"]
+        assert row["inference_source_state"] == "present"
+
+        # The audit says which of the two paths this was. The row itself cannot
+        # tell a version the user named from one the door read out of the origin,
+        # and those are different claims about who decided what.
+        audit = events_for("decision_recorded", accepted.json()["id"])
+        assert len(audit) == 1, audit
+        assert audit[0].payload_json["version_source"] == "inference_origin"
+
+        # The replay still refuses the same origin after the freeze: its session
+        # runs a different version, and a version becoming eligible does not make
+        # it the session's.
+        still = _submit(client, auth_headers, served["session_id"], action="buy",
+                        quantity=20, linked_inference_id=inference_id)
+        assert still.status_code == 400, still.text
+        assert still.json()["detail"]["reason"] == "inference_version_mismatch"
+        assert _replay_events(served["session_id"]) == []
+
+    def test_an_origin_whose_version_was_taken_back_answers_the_same_refusal(
+        self, client, auth_headers, served
+    ):
+        """Withdrawal closes the inference door; it does not move the version leg.
+
+        ``revoke`` sets ``revoked_at``, clears the record alias and stops that
+        version serving new predictions. It rewrites no usage row, so the lineage a
+        decision claims is still a statement about which execution the owner acted
+        on. What that statement is *worth* at a door is decided by the two halves
+        agreeing, and on this fixture they never did: so the withdrawal changes the
+        answer about new predictions and changes nothing about the refusal.
+
+        That an accepted origin keeps originating its decision after its model
+        version is withdrawn — the claim this node carried before the version leg
+        was wired, when nothing compared the two versions — needs a lane where the
+        decision and the origin name one frozen version. It is asserted there:
+        ``tests/test_trained_inference_lineage_chain.py``.
+        """
+        revoked = client.post(
+            f"/api/v1/model-research/{served['record_id']}/versions/"
+            f"{served['model_version_id']}/revoke",
+            headers=auth_headers,
+            params={"reason": "customer_withdrawal"},
+        )
+        assert revoked.status_code == 200, revoked.text
+
+        # The same version now refuses a fresh prediction…
+        again = client.post(
+            f"/api/v1/ml/personal/models/{served['model_version_id']}/predict",
+            headers=auth_headers,
+            json={
+                "instrument_id": served["instrument"],
+                "as_of_date": served["as_of"],
+                "skill_unit_id": served["portfolio_id"],
+            },
+        )
+        assert again.status_code == 409, again.text
+        assert again.json()["detail"]["code"] == "model_version_revoked", again.text
+
+        # …and the execution it already served is refused for the reason it was
+        # refused before: the version it names is not the version this replay runs.
+        replay = _submit(client, auth_headers, served["session_id"], action="buy",
+                         quantity=20, linked_inference_id=served["inference_id"])
+        assert replay.status_code == 400, replay.text
+        assert replay.json()["detail"]["reason"] == "inference_version_mismatch"
+        desk = _paper_decision(
+            client, auth_headers, served["portfolio_id"], served["inference_id"]
+        )
+        assert desk.status_code == 400, desk.text
+        assert desk.json()["detail"]["reason"] == "version_not_usable"
+
+        assert account_orders(client, auth_headers, served["portfolio_id"]) == []
+        assert self.paper_decisions(
+            client, auth_headers, served["portfolio_id"]
+        ) == []
+        assert decision_history_json(
+            client, auth_headers, served["portfolio_id"]
+        )["records"] == []
+        assert _replay_events(served["session_id"]) == []
+
+    def test_every_lineage_refusal_arrives_as_a_code_and_a_sentence_with_no_write(
+        self, client, auth_headers, served
+    ):
+        """Seven refusals, one shape each: formal code, readable message, nothing stored.
+
+        ``reason`` is what the screen branches on and what the tests name; it is
+        not free text. The message is what the owner reads. A refusal that answers
+        500, or that carries only a prose string, or that leaves the order behind
+        with the lineage quietly dropped, fails this node.
+
+        The last two rows are the version leg. Each is measured at the desk against
+        the same version the replay holds, because that is the only claim the two
+        doors can compare; what the desk does when the request names no version is
+        its own contract, and ``test_a_served_prediction_names_the_version_it_was_
+        trained_from`` answers for it on a real prediction.
+        """
+        portfolio_id, session_id = served["portfolio_id"], served["session_id"]
+        corpus = [
+            # reason, status, origin, action, version the desk is driven with
+            ("inference_not_found", 404, str(uuid.uuid4()), "buy", None),
+            ("inference_metadata_unreadable", 400, _record_lineage_row(
+                portfolio_id, ["not", "a", "dict"]), "buy", None),
+            ("inference_not_model_execution", 400, _record_lineage_row(
+                portfolio_id,
+                {"prediction_type": "market_direction", "skill_unit_id": portfolio_id},
+            ), "buy", None),
+            ("inference_skill_mismatch", 400, _record_lineage_row(
+                portfolio_id,
+                {"prediction_type": "personal_decision",
+                 "skill_unit_id": str(uuid.uuid4())},
+            ), "buy", None),
+            ("inference_version_unnamed", 400, _record_lineage_row(
+                portfolio_id,
+                {"prediction_type": "personal_decision", "skill_unit_id": portfolio_id},
+            ), "buy", served["version_id"]),
+            ("inference_version_mismatch", 400, served["inference_id"], "buy",
+             served["version_id"]),
+            # The same valid inference, on the one action this door cannot carry a
+            # lineage for: refused for the row, not for the origin.
+            ("inference_needs_decision_row", 400, served["inference_id"], "hold", None),
+        ]
+
+        for reason, status, inference_id, action, desk_version in corpus:
+            resp = _submit(client, auth_headers, session_id, action=action,
+                           quantity=20 if action == "buy" else None,
+                           linked_inference_id=inference_id)
+            assert resp.status_code == status, f"{reason}: {resp.status_code} {resp.text}"
+            assert resp.status_code < 500, f"{reason} surfaced as a server error"
+            detail = resp.json()["detail"]
+            assert isinstance(detail, dict), f"{reason}: no structured refusal: {detail!r}"
+            assert detail["reason"] == reason, detail
+            message = detail.get("message")
+            assert isinstance(message, str) and len(message) > 20, (
+                f"{reason}: refused without a sentence the owner can read: {detail!r}"
+            )
+
+            # The desk door answers the same refusal for the same row, except for
+            # the hold case, which is this door's own shape (the desk creates the
+            # row a hold has here).
+            if reason != "inference_needs_decision_row":
+                desk = _paper_decision(client, auth_headers, portfolio_id, inference_id,
+                                       desk_version)
+                assert desk.status_code == status, f"{reason} desk={desk.status_code}: {desk.text}"
+                assert desk.json()["detail"]["reason"] == reason, desk.text
+
+        # Refused means nothing was written, on either door, for any of the seven.
+        assert account_orders(client, auth_headers, portfolio_id) == []
+        assert self.paper_decisions(client, auth_headers, portfolio_id) == []
+        assert journal_json(client, auth_headers, portfolio_id)["records"] == []
+        assert decision_history_json(client, auth_headers, portfolio_id)["records"] == []
+        assert _replay_events(session_id) == []
+
+
 class TestOwnership:
     def test_another_user_cannot_drive_this_replay_or_read_this_book(
         self, client, auth_headers
@@ -1683,8 +2894,6 @@ class TestConcurrentLifecycle:
         the proof is that the duplicate is refused whole — one order, one cash
         movement, no unhandled 500.
         """
-        from app.models.paper_portfolio import PaperOrder
-
         ctx = _open_account(client, auth_headers, observed=1)
         session_id, portfolio_id = ctx["session_id"], ctx["portfolio_id"]
         payload = {"action": "buy", "quantity": 20, "rationale": "racy",
@@ -1716,7 +2925,9 @@ class TestConcurrentLifecycle:
 
         db = TestSession()
         try:
-            assert db.query(PaperOrder).count() == 1
+            assert _book_counts(db, portfolio_id)["orders"] == 1, (
+                f"one key booked more than one order in this account: {codes}"
+            )
         finally:
             db.close()
 
@@ -1731,7 +2942,7 @@ class TestConcurrentLifecycle:
         publishes the balance it read before the first committed, one trade
         vanishes from the money while its rows stay behind.
         """
-        from app.models.paper_portfolio import OrderStatus, PaperFill, PaperOrder, PaperPortfolio
+        from app.models.paper_portfolio import OrderStatus, PaperOrder, PaperPortfolio
         from app.services.order_lifecycle import execute_due_orders
 
         ctx = _open_account(client, auth_headers, observed=1)
@@ -1780,8 +2991,10 @@ class TestConcurrentLifecycle:
 
         db = TestSession()
         try:
-            assert db.query(PaperOrder).count() == 1
-            assert db.query(PaperFill).count() == 2
+            book = _book_counts(db, portfolio_id)
+            assert book == {"orders": 1, "fills": 2}, (
+                f"this account did not end with one order and two fills: {book}"
+            )
         finally:
             db.close()
 
@@ -1794,7 +3007,7 @@ class TestConcurrentLifecycle:
         order with two fills, and the published balance equal to the sum of the
         fills the account itself carries.
         """
-        from app.models.paper_portfolio import OrderStatus, PaperFill, PaperOrder
+        from app.models.paper_portfolio import OrderStatus, PaperOrder
 
         ctx = _open_account(client, auth_headers, observed=1)
         session_id, portfolio_id = ctx["session_id"], ctx["portfolio_id"]
@@ -1838,6 +3051,8 @@ class TestConcurrentLifecycle:
                 f"account cash does not reconcile with its own fills: "
                 f"{balance} != {expected} ({results})"
             )
-            assert db.query(PaperFill).count() == len(filled)
+            assert _book_counts(db, portfolio_id)["fills"] == len(filled), (
+                f"fills exist outside the orders that earned them: {results}"
+            )
         finally:
             db.close()

@@ -1,32 +1,43 @@
 """Focused test for provider read isolation."""
-import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-# Mock sklearn to avoid import errors
-sys.modules['sklearn'] = type(sys)('sklearn')
-sys.modules['sklearn.linear_model'] = type(sys)('sklearn.linear_model')
-sys.modules['sklearn.ensemble'] = type(sys)('sklearn.ensemble')
-sys.modules['sklearn.preprocessing'] = type(sys)('sklearn.preprocessing')
-sys.modules['sklearn.model_selection'] = type(sys)('sklearn.model_selection')
-sys.modules['sklearn.metrics'] = type(sys)('sklearn.metrics')
-sys.modules['sklearn.base'] = type(sys)('sklearn.base')
-
+from contextlib import contextmanager
 from datetime import date
+
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+
 from app.database import Base
 from app.models.market_data import MarketDataBar
 from app.api.simulations import _load_stored_ohlcv, _get_stored_trade_dates
 
-# Create in-memory test database
-engine = create_engine('sqlite:///:memory:')
-Base.metadata.create_all(engine)
-Session = sessionmaker(bind=engine)
 
-def test_provider_isolation():
+@contextmanager
+def _fresh_session():
+    """One in-memory database per use, disposed on exit.
+
+    This file used to build its engine at module import and to install empty
+    `sklearn.*` modules into `sys.modules` at the same time; both stayed in
+    effect for the rest of the pytest session, so a later module that really
+    needs scikit-learn imported the stub instead.
+    """
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    try:
+        yield db
+    finally:
+        db.close()
+        engine.dispose()
+
+
+@pytest.fixture
+def db_session():
+    with _fresh_session() as db:
+        yield db
+
+def test_provider_isolation(db_session):
     """Test that provider_id filtering works correctly."""
-    db = Session()
+    db = db_session
     
     # Insert test data: same date, two providers
     test_date = date(2024, 1, 30)
@@ -104,8 +115,8 @@ def test_provider_isolation():
     assert '2024-01-31' not in dates_td_filtered, "Demo-only date should not appear in twelvedata filter"
     print("✓ Test 5 passed: demo-only date does not extend twelvedata replay")
     
-    db.close()
     print("\n✅ All provider isolation tests passed!")
 
 if __name__ == '__main__':
-    test_provider_isolation()
+    with _fresh_session() as _db:
+        test_provider_isolation(_db)

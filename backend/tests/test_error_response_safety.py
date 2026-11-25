@@ -1,7 +1,11 @@
 """User-facing error text must not carry paths, DSNs or credentials.
 
 Provider failures are returned in an HTTP 503 body and job/run failures are
-rendered verbatim by the UI, so a raw ``str(exc)`` reaches a person.
+rendered verbatim by the UI, so a raw ``str(exc)`` reaches a person. Scrubbing
+covers those. A third channel takes the opposite remedy: the paper-trading
+routes' catch-all 500 handlers report an *unexpected* failure, for which no
+scrubbed exception text is safe to show at all, so they answer a fixed sentence
+and leave the traceback in the log.
 """
 
 import pytest
@@ -253,3 +257,174 @@ class TestExecutionAgentRejectionReason:
         assert "<redacted-url>" in detail
         assert "abc123" not in detail
         assert "hunter2" not in detail
+
+
+class TestPaperTradingUnexpectedFailure:
+    """The six paper-trading 500 handlers say what failed, never how.
+
+    Every route in ``app/api/paper_trading.py`` ends in an ``except Exception``
+    that used to put ``str(exc)`` in ``detail.message``. §12.5 measured what that
+    means in practice: the status read crashed on an untyped SQLite column, and
+    the caller's 500 body carried the Python AttributeError --
+    ``'str' object has no attribute 'isoformat'`` -- as its explanation. Each
+    handler now logs the traceback and answers one fixed sentence with a
+    machine-readable reason code.
+
+    The check is that the body does not track the exception, which a copy of the
+    product's message constant here could never show: the same endpoint is driven
+    twice with two different internal failures and must answer identically, once
+    with a payload carrying a path, a credential and a DSN, and once with the
+    exact text this lane really leaked.
+    """
+
+    INTERNAL_FAILURES = (
+        "cannot read /Users/owner/private/artifacts/model.joblib "
+        "api_key=abc123 "
+        "postgresql+psycopg2://postgres:hunter2@db:5432/alethra",
+        "'str' object has no attribute 'isoformat'",
+    )
+    LEAK_MARKERS = (
+        "/Users/", "model.joblib", "artifacts", "abc123", "hunter2",
+        "isoformat", "postgresql+psycopg2", "<redacted",
+    )
+
+    # (reason token, http method, path template, request body)
+    ENGINE_ENDPOINTS = [
+        pytest.param(
+            "creation_failed", "post", "/api/v1/paper-trading/create",
+            {"skill": "momentum", "instrument_id": "CRYPTO:KRAKEN:BTC-USD",
+             "interval_minutes": 60, "exit_config": "exit_1",
+             "initial_capital": 100000.0},
+            id="creation_failed",
+        ),
+        pytest.param(
+            "status_failed", "get",
+            "/api/v1/paper-trading/status/{run_id}", None, id="status_failed",
+        ),
+        pytest.param(
+            "report_failed", "get",
+            "/api/v1/paper-trading/daily-report/{run_id}", None, id="report_failed",
+        ),
+        pytest.param(
+            "replay_failed", "post", "/api/v1/paper-trading/replay/{run_id}",
+            {"days_back": 30}, id="replay_failed",
+        ),
+        pytest.param(
+            "stop_failed", "post", "/api/v1/paper-trading/stop/{run_id}",
+            None, id="stop_failed",
+        ),
+    ]
+
+    @pytest.fixture
+    def ownership_granted(self, monkeypatch):
+        """Ownership is proved elsewhere; here the request must reach the engine."""
+        monkeypatch.setattr(
+            "app.api.paper_trading._verify_run_ownership",
+            lambda *args, **kwargs: None,
+        )
+
+    def _drive(self, client, auth_headers, monkeypatch, reason, method, path, body):
+        import uuid as _uuid
+
+        from app.services.paper_trading import PaperTradingEngine
+
+        failures = []
+
+        for internal in self.INTERNAL_FAILURES:
+            def leaky(*args, payload=internal, **kwargs):
+                raise RuntimeError(payload)
+
+            for name in (
+                "create_portfolio", "get_status", "generate_daily_report",
+                "execute_historical_replay", "cancel_run",
+            ):
+                monkeypatch.setattr(PaperTradingEngine, name, leaky)
+
+            resp = getattr(client, method)(
+                path.format(run_id=str(_uuid.uuid4())),
+                headers=auth_headers,
+                **({} if body is None else {"json": body}),
+            )
+            assert resp.status_code == 500, (
+                f"{reason}: expected the injected engine failure to answer 500, "
+                f"got {resp.status_code}: {resp.text[:200]}"
+            )
+            detail = resp.json()["detail"]
+            assert detail["reason"] == reason, detail
+            for marker in self.LEAK_MARKERS:
+                assert marker not in resp.text, (
+                    f"{reason}: {marker!r} from the internal failure reached the "
+                    f"response body: {resp.text[:200]}"
+                )
+            failures.append(detail["message"])
+
+        assert failures[0] == failures[1], (
+            "the 500 body tracks the exception text, which is the leak: "
+            f"{failures!r}"
+        )
+        return failures[0]
+
+    @pytest.mark.parametrize("reason,method,path,body", ENGINE_ENDPOINTS)
+    def test_engine_failure_body_is_generic(
+        self, client, auth_headers, ownership_granted, monkeypatch,
+        reason, method, path, body,
+    ):
+        message = self._drive(
+            client, auth_headers, monkeypatch, reason, method, path, body
+        )
+        assert message.strip(), "an empty message is not a usable error either"
+
+    def test_history_route_failure_body_is_generic(self, client, auth_headers):
+        """/history has no engine call, so its 500 comes from the session.
+
+        Driving it through ``get_db`` keeps the injection at the boundary the route
+        actually uses instead of patching the handler, and this is the route where
+        the untyped-column crash of §12.5 lived inside the API layer itself. The
+        fake has to be the real session with one statement made to fail, because
+        the auth dependency shares the same override -- a stand-in object broke the
+        token lookup before the route ever ran.
+        """
+        import tests.conftest as conftest
+        from app.main import app
+
+        internal = self.INTERNAL_FAILURES[0]
+
+        class LeakingHistoryQuery:
+            def __init__(self, inner):
+                self._inner = inner
+
+            def execute(self, statement, *args, **kwargs):
+                # r.run_type appears only in the history SELECT, so a discriminator
+                # this narrow means the 500 below can only come from that route.
+                if "r.run_type" in str(statement):
+                    raise RuntimeError(internal)
+                return self._inner.execute(statement, *args, **kwargs)
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+        def leaky_db():
+            for session in conftest.override_get_db():
+                yield LeakingHistoryQuery(session)
+
+        saved = app.dependency_overrides.get(conftest._ORIGINAL_GET_DB)
+        app.dependency_overrides[conftest._ORIGINAL_GET_DB] = leaky_db
+        try:
+            resp = client.get("/api/v1/paper-trading/history", headers=auth_headers)
+            assert resp.status_code == 500, (
+                f"expected the injected session failure to answer 500, got "
+                f"{resp.status_code}: {resp.text[:200]}"
+            )
+            detail = resp.json()["detail"]
+            assert detail["reason"] == "history_failed", detail
+            for marker in self.LEAK_MARKERS:
+                assert marker not in resp.text, (
+                    f"{marker!r} from the internal failure reached the body: "
+                    f"{resp.text[:200]}"
+                )
+        finally:
+            if saved is None:
+                app.dependency_overrides.pop(conftest._ORIGINAL_GET_DB, None)
+            else:
+                app.dependency_overrides[conftest._ORIGINAL_GET_DB] = saved
+

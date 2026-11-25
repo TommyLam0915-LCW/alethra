@@ -15,9 +15,11 @@ credential kind the product can present:
 
 The matrix also pins the two properties that are easy to lose while adding
 scopes: a refusal must not consume an ``ai_usage`` unit, create a training
-job, create a model version, or write an artifact; and an active-alias
-prediction must report the immutable version it actually resolved to, before
-and after the active version is switched.
+job, create a model version, or write an artifact; and a prediction must
+report the immutable version it actually resolved to, before and after the
+version in use by that skill account is switched. Serving one skill account
+never depends on a credential detail, so the bodies here are always complete
+and name a skill unit that the requesting owner really owns.
 
 All market data and decisions here are SYNTHETIC FIXTURES built by the seeded
 personal-learning helpers. They prove access control and side-effect
@@ -41,8 +43,10 @@ from tests.test_personal_strategy_learning import (
     _create_experiment,
     _grant_consent,
     _personal_artifacts,
+    _open_skill_unit,
     _run_worker_job,
     _seed_confirmed_decisions,
+    _select_for_skill,
     _synthetic_market,
     _user_id,
 )
@@ -135,7 +139,11 @@ def _artifact_count(path):
 
 
 def _predict_bodies(stack):
-    predict = {"instrument_id": INSTRUMENT, "as_of_date": AS_OF}
+    predict = {
+        "instrument_id": INSTRUMENT,
+        "as_of_date": AS_OF,
+        "skill_unit_id": stack["skill_unit_id"],
+    }
     return (
         f"/api/v1/ml/personal/models/{stack['model']['model_version_id']}/predict",
         f"/api/v1/ml/personal/records/{stack['model']['record_id']}/predict",
@@ -168,12 +176,18 @@ def stack(client, auth_headers, tmp_path, monkeypatch, _synthetic_market):
         headers=auth_headers,
     )
     assert activated.status_code == 200, activated.text
+    # The record-wide alias above authorizes nobody. One skill account is
+    # switched onto this version, and that is what the predictions below ask
+    # about.
+    skill_unit_id = _open_skill_unit(client, auth_headers)
+    _select_for_skill(client, auth_headers, model["model_version_id"], skill_unit_id)
     return {
         "owner_id": owner_id,
         "jwt": auth_headers,
         "version_id": version_id,
         "snapshot_id": snapshot["snapshot_id"],
         "model": model,
+        "skill_unit_id": skill_unit_id,
         "artifacts": artifacts,
     }
 
@@ -270,7 +284,11 @@ def test_inference_scope_reads_and_predicts_but_never_trains(client, stack):
 
     model_version_id = stack["model"]["model_version_id"]
     record_id = stack["model"]["record_id"]
-    body = {"instrument_id": INSTRUMENT, "as_of_date": AS_OF}
+    body = {
+        "instrument_id": INSTRUMENT,
+        "as_of_date": AS_OF,
+        "skill_unit_id": stack["skill_unit_id"],
+    }
     version_predict = client.post(
         f"/api/v1/ml/personal/models/{model_version_id}/predict",
         headers=headers,
@@ -283,6 +301,9 @@ def test_inference_scope_reads_and_predicts_but_never_trains(client, stack):
         json=body,
     )
     assert record_predict.status_code == 200, record_predict.text
+    # The answer is stated for one skill account, whichever route served it.
+    for response in (version_predict, record_predict):
+        assert response.json()["skill_unit_id"] == stack["skill_unit_id"]
 
     writes = [
         ("/api/v1/ml/personal/snapshots/preview", {"strategy_version_id": stack["version_id"]}),
@@ -315,6 +336,7 @@ def test_inference_scope_reads_and_predicts_but_never_trains(client, stack):
         )
         assert latest.metadata_json["via"] == "api_key"
         assert latest.metadata_json["model_version_id"] == model_version_id
+        assert latest.metadata_json["skill_unit_id"] == stack["skill_unit_id"]
     finally:
         db.close()
 
@@ -394,7 +416,11 @@ def test_write_scope_reaches_every_mutation_but_not_reads(client, stack):
     raw_key, _ = _make_key(client, stack["jwt"], ["write"], "write-matrix")
     headers = _key_headers(raw_key)
     model_version_id = stack["model"]["model_version_id"]
-    body = {"instrument_id": INSTRUMENT, "as_of_date": AS_OF}
+    body = {
+        "instrument_id": INSTRUMENT,
+        "as_of_date": AS_OF,
+        "skill_unit_id": stack["skill_unit_id"],
+    }
     before = _snapshot_state(stack["owner_id"])
 
     for url in ("/api/v1/ml/personal/snapshots", "/api/v1/ml/personal/models"):
@@ -528,7 +554,14 @@ def test_refusals_consume_no_usage_and_create_nothing(client, stack):
     before = _snapshot_state(stack["owner_id"])
     artifacts_before = _artifact_count(stack["artifacts"])
     model_version_id = stack["model"]["model_version_id"]
-    body = {"instrument_id": INSTRUMENT, "as_of_date": AS_OF}
+    # A well-formed, properly-scoped body: every refusal below must come from
+    # the credential or the ownership, never from a missing field the fixture
+    # could have forgotten to send.
+    body = {
+        "instrument_id": INSTRUMENT,
+        "as_of_date": AS_OF,
+        "skill_unit_id": stack["skill_unit_id"],
+    }
 
     read_raw, _ = _make_key(client, stack["jwt"], ["read"], "refusal-read")
     training_raw, _ = _make_key(client, stack["jwt"], ["training"], "refusal-training")
@@ -622,20 +655,41 @@ def test_other_owner_sees_empty_lists_and_cannot_predict(client, stack):
         ).status_code
         == 404
     )
+    # The body is complete and names a skill unit the OTHER owner genuinely
+    # owns, so the 404 can only be the record they were never given.
+    other_skill_unit = _open_skill_unit(client, other)
     assert (
         client.post(
             "/api/v1/ml/personal/records/{}/predict".format(stack["model"]["record_id"]),
             headers=other,
-            json={"instrument_id": INSTRUMENT, "as_of_date": AS_OF},
+            json={
+                "instrument_id": INSTRUMENT,
+                "as_of_date": AS_OF,
+                "skill_unit_id": other_skill_unit,
+            },
+        ).status_code
+        == 404
+    )
+    assert (
+        client.post(
+            "/api/v1/ml/personal/models/{}/predict".format(
+                stack["model"]["model_version_id"]
+            ),
+            headers=other,
+            json={
+                "instrument_id": INSTRUMENT,
+                "as_of_date": AS_OF,
+                "skill_unit_id": other_skill_unit,
+            },
         ).status_code
         == 404
     )
 
 
-# ── 4. Active alias resolves an immutable version, before and after ───
+# ── 4. The version a skill is served is immutable and traceable ───────
 
 
-def test_active_alias_is_traceable_across_a_version_switch(client, stack):
+def test_served_version_is_traceable_across_a_skill_switch(client, stack):
     jwt_headers = stack["jwt"]
     owner_id = stack["owner_id"]
     write_raw, _ = _make_key(client, jwt_headers, ["write"], "alias-write")
@@ -643,15 +697,13 @@ def test_active_alias_is_traceable_across_a_version_switch(client, stack):
 
     first = stack["model"]
     record_id = first["record_id"]
-    body = {"instrument_id": INSTRUMENT, "as_of_date": AS_OF}
+    skill_unit_id = stack["skill_unit_id"]
+    body = {
+        "instrument_id": INSTRUMENT,
+        "as_of_date": AS_OF,
+        "skill_unit_id": skill_unit_id,
+    }
 
-    assert (
-        client.post(
-            f"/api/v1/ml/personal/models/{first['model_version_id']}/activate",
-            headers=jwt_headers,
-        ).status_code
-        == 200
-    )
     served_before = client.post(
         f"/api/v1/ml/personal/records/{record_id}/predict", headers=headers, json=body
     )
@@ -659,7 +711,7 @@ def test_active_alias_is_traceable_across_a_version_switch(client, stack):
     resolved_before = served_before.json()["resolved_version"]
     assert resolved_before["model_version_id"] == first["model_version_id"]
     assert resolved_before["version_number"] == first["version_number"]
-    assert resolved_before["resolved_from_active_alias"] is True
+    assert resolved_before["resolved_from"] == "skill_unit_selection"
     assert served_before.json()["artifact_sha256"] == first["artifact_sha256"]
 
     # Second version: one label excluded, new snapshot, new training job.
@@ -691,12 +743,32 @@ def test_active_alias_is_traceable_across_a_version_switch(client, stack):
     second = next(
         item for item in models if item["model_version_id"] != first["model_version_id"]
     )
+
+    # Moving the record-wide alias does not move this skill account: the version
+    # it is served stays the one its own selection names.
     assert (
         client.post(
             f"/api/v1/ml/personal/models/{second['model_version_id']}/activate",
             headers=headers,
         ).status_code
         == 200
+    )
+    unchanged = client.post(
+        f"/api/v1/ml/personal/records/{record_id}/predict", headers=headers, json=body
+    )
+    assert unchanged.status_code == 200, unchanged.text
+    assert (
+        unchanged.json()["resolved_version"]["model_version_id"]
+        == first["model_version_id"]
+    )
+
+    # The switch that changes what this account is served is its own.
+    _select_for_skill(
+        client,
+        headers,
+        second["model_version_id"],
+        skill_unit_id,
+        expected=first["model_version_id"],
     )
     served_after = client.post(
         f"/api/v1/ml/personal/records/{record_id}/predict", headers=headers, json=body
@@ -705,7 +777,7 @@ def test_active_alias_is_traceable_across_a_version_switch(client, stack):
     resolved_after = served_after.json()["resolved_version"]
     assert resolved_after["model_version_id"] == second["model_version_id"]
     assert resolved_after["version_number"] == second["version_number"]
-    assert resolved_after["resolved_from_active_alias"] is True
+    assert resolved_after["resolved_from"] == "skill_unit_selection"
     assert served_after.json()["snapshot"]["snapshot_id"] == second_snapshot["snapshot_id"]
     assert served_after.json()["artifact_sha256"] == second["artifact_sha256"]
 
@@ -720,5 +792,6 @@ def test_active_alias_is_traceable_across_a_version_switch(client, stack):
         assert latest.metadata_json["model_version_id"] == second["model_version_id"]
         assert latest.metadata_json["snapshot_id"] == second_snapshot["snapshot_id"]
         assert latest.metadata_json["training_job_id"] == second_job.json()["job_id"]
+        assert latest.metadata_json["skill_unit_id"] == skill_unit_id
     finally:
         db.close()

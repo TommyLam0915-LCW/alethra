@@ -17,6 +17,8 @@ from sqlalchemy.orm import Session
 
 from app.auth.jwt import get_current_user
 from app.database import get_db
+from app.lib.timeutil import iso_from_stored
+from app.lib.uuid_bind import as_id_text, to_uuid, uuid_binds
 from app.models.user import User
 from app.services import journal_service as svc
 from app.services import skill_attribution as skill_svc
@@ -532,7 +534,7 @@ def journal_unified(
             WHERE r.user_id = :user_id
         '''
         
-        params = {'user_id': str(current_user.id)}
+        params = {'user_id': to_uuid(current_user.id)}
         conditions = []
         
         if instrument_id:
@@ -566,18 +568,24 @@ def journal_unified(
         params['limit'] = limit
         params['offset'] = offset
         
-        research_result = db.execute(text(research_query), params).fetchall()
+        # ``strategy_study_runs.user_id`` is a mapped UUID column and these rows
+        # are written through the ORM, so this half of the route names them with
+        # the bind type the writer used -- free text here matches nothing on the
+        # lane where the column is text.
+        research_result = db.execute(
+            text(research_query).bindparams(*uuid_binds("user_id")), params
+        ).fetchall()
         
         for row in research_result:
             unified_trades.append({
                 'source': row[0],
-                'id': str(row[1]),
-                'run_id': str(row[2]),
+                'id': as_id_text(row[1]),
+                'run_id': as_id_text(row[2]),
                 'instrument_id': row[3],
                 'rule_id': row[4],
                 'exit_id': row[5],
-                'entry_time': row[6].isoformat() if row[6] else None,
-                'exit_time': row[7].isoformat() if row[7] else None,
+                'entry_time': iso_from_stored(row[6]),
+                'exit_time': iso_from_stored(row[7]),
                 'entry_price': float(row[8]) if row[8] else None,
                 'exit_price': float(row[9]) if row[9] else None,
                 'net_pnl': float(row[10]) if row[10] else None,
@@ -608,7 +616,7 @@ def journal_unified(
             WHERE p.owner_id = :user_id
         '''
         
-        params = {'user_id': str(current_user.id)}
+        params = {'user_id': to_uuid(current_user.id)}
         conditions = []
         
         if instrument_id:
@@ -630,20 +638,30 @@ def journal_unified(
         params['limit'] = limit
         params['offset'] = offset
         
-        paper_result = db.execute(text(paper_query), params).fetchall()
+        # ``paper_portfolios.owner_id`` is a mapped UUID column, so the key is
+        # bound with that type -- the same contract both create lanes now write
+        # under -- instead of as free text.
+        paper_result = db.execute(
+            text(paper_query).bindparams(*uuid_binds("user_id")), params
+        ).fetchall()
         
         for row in paper_result:
+            # This read names no column types, so on the text-UUID lane the two
+            # timestamp columns arrive as TEXT and ``.isoformat()`` on one of
+            # them is an AttributeError -> 500 for a journey that works on
+            # PostgreSQL. Both spellings come from one helper, and the ids carry
+            # the one caller-facing form.
             unified_trades.append({
                 'source': row[0],
-                'id': str(row[1]),
-                'order_id': str(row[2]),
+                'id': as_id_text(row[1]),
+                'order_id': as_id_text(row[2]),
                 'instrument_id': row[3],
-                'entry_time': row[4].isoformat() if row[4] else None,
+                'entry_time': iso_from_stored(row[4]),
                 'entry_price': float(row[5]) if row[5] else None,
                 'quantity': float(row[6]) if row[6] else None,
                 'side': row[7],
                 'order_type': row[8],
-                'created_at': row[9].isoformat() if row[9] else None,
+                'created_at': iso_from_stored(row[9]),
                 'net_pnl': None,  # Paper fills don't have PnL directly
             })
     

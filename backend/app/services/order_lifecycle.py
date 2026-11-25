@@ -35,6 +35,7 @@ The lifecycle this module owns:
 
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
+from uuid import UUID
 
 from sqlalchemy.orm import Session
 
@@ -79,14 +80,22 @@ def _stamp(now: Optional[datetime]) -> datetime:
 
 
 def resolve_session_portfolio(
-    db: Session, session: SimulationSession
+    db: Session, session: SimulationSession, *, owner_id: UUID
 ) -> PaperPortfolio:
-    """The one account a session's trades settle into.
+    """The one account a session's trades settle into, when this owner holds it.
 
     A session with no linked portfolio has no account of record, and a session
     with two could settle into either one. Both are refused by name instead of
     picking the first row, because a silently chosen account is a wrong balance
     the user cannot see.
+
+    The owner is part of the question rather than an assumption carried in from
+    the session: a binding is a row pointing at another row, and
+    ``paper_portfolios.simulation_session_id`` proves only that somebody wrote
+    it. Opening an account through the formal route does check that the session
+    is the caller's, so no route-produced pair disagrees today — but a trade
+    settled into someone else's ledger is not a failure this door should depend
+    on another route's past behavior to prevent.
     """
     portfolios = (
         db.query(PaperPortfolio)
@@ -106,7 +115,16 @@ def resolve_session_portfolio(
             f"({', '.join(sorted(str(p.id) for p in portfolios))}). The system will not choose one "
             "to settle against; keep a single binding.",
         )
-    return portfolios[0]
+    portfolio = portfolios[0]
+    if portfolio.owner_id != owner_id:
+        raise LifecycleError(
+            "portfolio_owner_mismatch",
+            f"Replay session {session.id} is bound to paper portfolio {portfolio.id}, "
+            f"whose owner is {portfolio.owner_id}. An order settles into the submitting "
+            "owner's own account, so this binding is refused rather than used to reach "
+            "another account's ledger.",
+        )
+    return portfolio
 
 
 def next_execution_window(

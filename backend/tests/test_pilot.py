@@ -1,6 +1,3 @@
-import os
-os.environ["DATABASE_URL"] = "sqlite:///./test.db"
-
 import pytest
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4

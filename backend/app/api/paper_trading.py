@@ -18,6 +18,8 @@ from sqlalchemy.orm import Session
 from app.auth.jwt import get_current_user, require_admin
 from app.config import get_settings
 from app.database import get_db
+from app.lib.timeutil import iso_from_stored
+from app.lib.uuid_bind import as_id_text, to_uuid, uuid_binds
 from app.models.user import User
 from app.services.paper_trading import get_engine
 from app.services.paper_trading_exceptions import (
@@ -25,9 +27,22 @@ from app.services.paper_trading_exceptions import (
     InvalidStateError,
     ResourceNotFoundError,
 )
+from app.services.skill_units import SkillUnitLimitReached, assert_slot_available
+from app.services.strategy_versions import validate_strategy_version
 
 router = APIRouter(prefix="/paper-trading", tags=["paper-trading"])
 logger = logging.getLogger(__name__)
+
+# An unexpected exception is not a diagnostic for the person making the request.
+# Its ``str()`` names the attribute, module or file that broke -- the 500 this
+# lane produced for a status read carried a Python AttributeError -- while
+# ``logger.exception`` in each handler already records the full traceback
+# server-side. The response therefore says which operation failed and nothing
+# about how it failed internally.
+_INTERNAL_ERROR_MESSAGE = (
+    "Internal error while processing this request. "
+    "The failure has been logged; please retry or contact support."
+)
 
 
 def _verify_run_ownership(db: Session, run_id: str, user_id: str) -> None:
@@ -38,13 +53,18 @@ def _verify_run_ownership(db: Session, run_id: str, user_id: str) -> None:
     """
     from sqlalchemy import text
 
+    # ``paper_trading_runs.id``, ``.portfolio_id`` and ``paper_portfolios.id``/
+    # ``.owner_id`` are mapped ``UUID(as_uuid=True)``. Binding these keys with
+    # the column's own type and a parsed value is what lets one predicate find
+    # an account whichever create route opened it; an untyped string here only
+    # ever matched one spelling on the text-UUID lane.
     result = db.execute(
         text("""
             SELECT 1 FROM paper_trading_runs r
             JOIN paper_portfolios p ON r.portfolio_id = p.id
             WHERE r.id = :run_id AND p.owner_id = :user_id
-        """),
-        {"run_id": run_id, "user_id": user_id},
+        """).bindparams(*uuid_binds("run_id", "user_id")),
+        {"run_id": to_uuid(run_id), "user_id": to_uuid(user_id)},
     ).fetchone()
     if not result:
         raise ValueError("not_found")
@@ -57,6 +77,11 @@ class CreatePortfolioRequest(BaseModel):
     interval_minutes: int
     exit_config: str
     initial_capital: Optional[float] = 100000.0
+    # Unified skill model: optional lineage fields for tracing which strategy
+    # version and dataset this run uses. When provided, they are validated for
+    # existence, ownership, frozen state, and compatibility.
+    strategy_version_id: Optional[str] = None
+    dataset_id: Optional[str] = None
 
 
 class PortfolioResponse(BaseModel):
@@ -116,9 +141,86 @@ class ReplayResponse(BaseModel):
 @router.post("/create", response_model=PortfolioResponse)
 def create_portfolio(
     request: CreatePortfolioRequest,
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Create a new paper trading portfolio."""
+    # The same ceiling as POST /paper-portfolio, because this lane writes the
+    # same paper_portfolios row: a cap enforced at one entry point and not the
+    # other just moves the door. Checked before the engine opens anything, and
+    # outside the catch-all below so a full account is not reported as a 500.
+    try:
+        assert_slot_available(db, current_user.id)
+    except SkillUnitLimitReached as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.detail())
+
+    # Validate strategy_version_id and dataset_id if provided — not just
+    # existence, but ownership, frozen state, and compatibility.
+    validated_strategy_version_id = None
+    validated_dataset_id = None
+    if request.strategy_version_id is not None:
+        from uuid import UUID
+        try:
+            version_uuid = UUID(request.strategy_version_id)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "reason": "invalid_uuid",
+                    "message": f"strategy_version_id must be a valid UUID, got: {request.strategy_version_id}",
+                },
+            )
+        # Ownership lives on the parent experiment and usability on the freeze
+        # stamp: the version row has neither an owner nor a status column, so a
+        # check that reads one raises instead of answering. These are the same
+        # refusals a decision naming this version gets, from one function.
+        version = validate_strategy_version(
+            db, version_id=version_uuid, owner_id=current_user.id
+        )
+        validated_strategy_version_id = version_uuid
+        # If dataset_id is also provided, verify compatibility
+        if request.dataset_id is not None:
+            try:
+                dataset_uuid = UUID(request.dataset_id)
+            except ValueError:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "reason": "invalid_uuid",
+                        "message": f"dataset_id must be a valid UUID, got: {request.dataset_id}",
+                    },
+                )
+            if version.dataset_id != dataset_uuid:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "reason": "dataset_mismatch",
+                        "version_dataset": str(version.dataset_id) if version.dataset_id else None,
+                        "request_dataset": request.dataset_id,
+                        "message": "The provided dataset_id does not match the experiment version's dataset.",
+                    },
+                )
+            validated_dataset_id = dataset_uuid
+        else:
+            # Use the version's dataset if not explicitly provided
+            validated_dataset_id = version.dataset_id
+    elif request.dataset_id is not None:
+        # dataset_id provided without strategy_version_id — validate existence
+        from uuid import UUID
+        try:
+            validated_dataset_id = UUID(request.dataset_id)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "reason": "invalid_uuid",
+                    "message": f"dataset_id must be a valid UUID, got: {request.dataset_id}",
+                },
+            )
+        # Note: we don't validate dataset existence here because datasets table
+        # may not exist or may not have ownership checks. The engine will handle
+        # the actual data loading and fail if the dataset is invalid.
+
     database_url = get_settings().database_url
     engine = get_engine(database_url)
 
@@ -130,13 +232,20 @@ def create_portfolio(
             interval_minutes=request.interval_minutes,
             exit_config=request.exit_config,
             initial_capital=Decimal(str(request.initial_capital)),
+            session=db,
+            strategy_version_id=validated_strategy_version_id,
+            dataset_id=validated_dataset_id,
         )
+        db.commit()
         return result
-    except Exception as exc:
+    except Exception:
         logger.exception("Failed to create portfolio")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={"reason": "creation_failed", "message": str(exc)},
+            detail={
+                "reason": "creation_failed",
+                "message": _INTERNAL_ERROR_MESSAGE,
+            },
         )
 
 
@@ -174,11 +283,14 @@ def get_status(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"reason": "not_found", "message": str(exc)},
         )
-    except Exception as exc:
+    except Exception:
         logger.exception("Failed to get status")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={"reason": "status_failed", "message": str(exc)},
+            detail={
+                "reason": "status_failed",
+                "message": _INTERNAL_ERROR_MESSAGE,
+            },
         )
 
 
@@ -221,11 +333,14 @@ def get_daily_report(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"reason": "not_found", "message": str(exc)},
         )
-    except Exception as exc:
+    except Exception:
         logger.exception("Failed to generate report")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={"reason": "report_failed", "message": str(exc)},
+            detail={
+                "reason": "report_failed",
+                "message": _INTERNAL_ERROR_MESSAGE,
+            },
         )
 
 
@@ -271,11 +386,14 @@ def execute_replay(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"reason": "not_found", "message": str(exc)},
         )
-    except Exception as exc:
+    except Exception:
         logger.exception("Replay failed")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={"reason": "replay_failed", "message": str(exc)},
+            detail={
+                "reason": "replay_failed",
+                "message": _INTERNAL_ERROR_MESSAGE,
+            },
         )
 
 
@@ -313,12 +431,15 @@ def stop_run(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"reason": "not_found", "message": "Run not found"},
         )
-    except Exception as exc:
+    except Exception:
         db.rollback()
         logger.exception("Failed to stop run")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={"reason": "stop_failed", "message": str(exc)},
+            detail={
+                "reason": "stop_failed",
+                "message": _INTERNAL_ERROR_MESSAGE,
+            },
         )
 
 
@@ -353,13 +474,13 @@ def get_history(
             WHERE p.owner_id = :user_id
             ORDER BY r.start_date DESC
             LIMIT :limit
-        """),
-            {"user_id": str(current_user.id), "limit": limit},
+        """).bindparams(*uuid_binds("user_id")),
+            {"user_id": to_uuid(current_user.id), "limit": limit},
         ).fetchall()
 
         return [
             {
-                "run_id": str(r.id),
+                "run_id": as_id_text(r.id),
                 "skill": r.skill,
                 "instrument_id": r.instrument_id,
                 "interval_minutes": r.interval_minutes,
@@ -369,17 +490,20 @@ def get_history(
                 "total_pnl": float(r.total_pnl) if r.total_pnl else 0,
                 "total_trades": r.total_trades,
                 "win_rate": float(r.win_rate) if r.win_rate else 0,
-                "start_date": r.start_date.isoformat() if r.start_date else None,
-                "end_date": r.end_date.isoformat() if r.end_date else None,
+                "start_date": iso_from_stored(r.start_date),
+                "end_date": iso_from_stored(r.end_date),
                 "run_type": r.run_type,
             }
             for r in results
         ]
-    except Exception as exc:
+    except Exception:
         logger.exception("Failed to get history")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={"reason": "history_failed", "message": str(exc)},
+            detail={
+                "reason": "history_failed",
+                "message": _INTERNAL_ERROR_MESSAGE,
+            },
         )
 
 

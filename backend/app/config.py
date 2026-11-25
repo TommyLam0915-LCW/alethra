@@ -31,6 +31,33 @@ _KNOWN_DATA_PROVIDERS = {"demo", "lseg", "twelvedata"}
 _KNOWN_AI_PROVIDERS = {"mock", "openai_compatible"}
 _INTRADAY_INTERVAL_LABELS = {"1min", "5min", "15min", "30min"}
 
+# The ticks one learning process knows how to schedule, in clock order. Named
+# here rather than in the worker so a host that asks for a lane this build does
+# not have fails while the settings are read — before a job is registered,
+# before a thread exists, and before anything could fire.
+LEARNING_SCHEDULER_LANES = (
+    "daily_research",
+    "daily_simulation",
+    "weekly_analysis",
+    "daily_model_estimate",
+)
+
+# What a host registers when it turns the shared scheduler on but names no lane.
+# The three ticks this switch has always meant — deliberately not
+# ``LEARNING_SCHEDULER_LANES``, which is the registry and grows on upgrades. A
+# deployment that switched the shared scheduler on before a lane existed must
+# not acquire that lane from an upgrade alone, because the two acts are not the
+# same approval: one says "run the learning service", the other says "run this
+# one too, and bill owners for it". ``daily_model_estimate`` is the current case
+# and sits at 05:00 UTC deducting quota, so it is named here as off-by-default
+# for anyone who did not ask. The rule is general: a lane added to the registry
+# later stays unregistered until an operator names it.
+DEFAULT_LEARNING_SCHEDULER_LANES = (
+    "daily_research",
+    "daily_simulation",
+    "weekly_analysis",
+)
+
 
 class Settings(BaseSettings):
     database_url: str = "postgresql://user:pass@localhost:5432/dbname"  # Must be overridden via DATABASE_URL env var
@@ -111,6 +138,19 @@ class Settings(BaseSettings):
     # Auto-learning scheduler: runs daily research and weekly pattern analysis.
     # Off by default; requires explicit opt-in to consume provider quota.
     enable_learning_scheduler: bool = False
+    # Which lanes the one switch above is allowed to register. Empty (the
+    # default) means ``DEFAULT_LEARNING_SCHEDULER_LANES`` — the lanes this
+    # switch has always meant, not every lane this build happens to know — so
+    # an upgrade that adds a lane cannot add it to a running deployment.
+    # Setting it is a narrowing or an explicit grant: naming a lane here cannot
+    # start a lane whose own opt-in or kill switch declines it, and leaving the
+    # shared switch off still registers nothing at all.
+    learning_scheduler_jobs: str = ""
+    # How many accounts one scheduler tick may serve, newest-bound by owner id.
+    # Each served account runs the whole instrument x interval grid against the
+    # venue, so an unbounded fan-out turns one opt-in flag into a quota incident
+    # for every account on the host.
+    learning_scheduler_max_owners: int = 25
     # Auto-collection scheduler: periodically fetches new market data and runs backtests.
     # Off by default; requires explicit opt-in to consume provider quota.
     auto_collection_enabled: bool = False
@@ -121,6 +161,12 @@ class Settings(BaseSettings):
     # quota unit until an outcome is written. Lowering this number changes only
     # what the refusal names, not what it does.
     research_run_stale_after_seconds: int = 900
+    # Skill-unit ceiling: how many paper portfolios one main account may hold
+    # open at once. Enforced by the backend at every entry point that writes a
+    # portfolio row (app/services/skill_units.py), not by the UI. Retiring an
+    # account releases its slot, so reaching the ceiling always leaves an
+    # actionable way out.
+    paper_skill_unit_max_per_user: int = 10
     # Live trading daemon: real-time paper trading via Kraken WebSocket.
     # Off by default; requires explicit opt-in.
     live_trading_enabled: bool = False
@@ -150,6 +196,21 @@ class Settings(BaseSettings):
         return [origin.strip() for origin in self.cors_origins.split(",")]
 
     @property
+    def learning_scheduler_job_list(self) -> list[str]:
+        """The lanes this process registers; empty means the default set.
+
+        A pure parse, so a value of only separators stays empty here and is
+        refused by the validator rather than quietly becoming the default —
+        someone who wrote ``","`` meant to name something.
+        """
+        return [lane.strip() for lane in self.learning_scheduler_jobs.split(",") if lane.strip()]
+
+    @property
+    def registered_learning_lanes(self) -> list[str]:
+        """``learning_scheduler_job_list``, or the default set when nothing was named."""
+        return self.learning_scheduler_job_list or list(DEFAULT_LEARNING_SCHEDULER_LANES)
+
+    @property
     def is_production_like(self) -> bool:
         return self.app_env in ("production", "staging")
 
@@ -164,6 +225,10 @@ class Settings(BaseSettings):
         self._validate_research_auth_bypass()
         self._validate_intraday_bounds()
         self._validate_crypto_budget_bounds()
+        self._validate_paper_skill_unit_limit()
+        self._validate_learning_scheduler_fanout()
+        self._validate_learning_scheduler_jobs()
+        self._validate_auto_collection_interval()
 
         if not self.is_production_like:
             return self
@@ -231,6 +296,73 @@ class Settings(BaseSettings):
         if self.crypto_verify_max_requests > 0 and not self.crypto_verify_run_id.strip():
             raise ValueError(
                 "CRYPTO_VERIFY_RUN_ID is required when CRYPTO_VERIFY_MAX_REQUESTS > 0."
+            )
+
+    def _validate_paper_skill_unit_limit(self) -> None:
+        if self.paper_skill_unit_max_per_user < 1:
+            raise ValueError(
+                "PAPER_SKILL_UNIT_MAX_PER_USER must be at least 1 (got "
+                f"{self.paper_skill_unit_max_per_user}). A ceiling of 0 would "
+                "refuse every account's first skill unit, and no product entry "
+                "point exists to open one without it."
+            )
+
+    def _validate_learning_scheduler_fanout(self) -> None:
+        if self.learning_scheduler_max_owners < 1:
+            raise ValueError(
+                "LEARNING_SCHEDULER_MAX_OWNERS must be at least 1 (got "
+                f"{self.learning_scheduler_max_owners}). A tick that serves "
+                "nobody is indistinguishable in the ledger from a host with no "
+                "accounts, so the misconfiguration would read as idle instead "
+                "of broken."
+            )
+
+    def _validate_learning_scheduler_jobs(self) -> None:
+        unrunnable = [
+            lane
+            for lane in DEFAULT_LEARNING_SCHEDULER_LANES
+            if lane not in LEARNING_SCHEDULER_LANES
+        ]
+        if unrunnable:
+            raise ValueError(
+                "DEFAULT_LEARNING_SCHEDULER_LANES names lanes this build cannot "
+                f"schedule: {sorted(set(unrunnable))}. Every host that leaves "
+                "LEARNING_SCHEDULER_JOBS unset would then fail while reading its "
+                "settings, so the pair is checked rather than trusted."
+            )
+        if not self.learning_scheduler_jobs.strip():
+            return
+        if not self.learning_scheduler_job_list:
+            raise ValueError(
+                "LEARNING_SCHEDULER_JOBS is set but names no lane "
+                f"({self.learning_scheduler_jobs!r}). Separators alone would "
+                "register an empty schedule, and a host with an empty schedule "
+                "reads in the ledger like a host that was never asked to run."
+            )
+        unknown = [
+            lane
+            for lane in self.learning_scheduler_job_list
+            if lane not in LEARNING_SCHEDULER_LANES
+        ]
+        if unknown:
+            raise ValueError(
+                f"LEARNING_SCHEDULER_JOBS names unknown lanes: {sorted(set(unknown))}. "
+                f"Known lanes: {list(LEARNING_SCHEDULER_LANES)}. A name this "
+                "build cannot map is refused rather than skipped, so that "
+                "silently losing the lane it was meant to isolate cannot read "
+                "as a narrowed schedule."
+            )
+
+    def _validate_auto_collection_interval(self) -> None:
+        if self.auto_collection_interval_hours < 1:
+            raise ValueError(
+                "AUTO_COLLECTION_INTERVAL_HOURS must be at least 1 (got "
+                f"{self.auto_collection_interval_hours}). It is both the "
+                "scheduler's wait and the size of the dedup window a tick "
+                "files under; 0 would ask APScheduler for a zero-length "
+                "interval and make the window key change on every call, so "
+                "the service would re-study without ever recording that it "
+                "was configured to deduplicate."
             )
 
     def _validate_agent_strategy_screening(self) -> None:

@@ -1654,39 +1654,32 @@ def record_selection(
     return selection
 
 
-def latest_selection(
-    db: Session, owner_id: uuid.UUID, record_id: uuid.UUID
-) -> Optional[PersonalModelSelection]:
-    return (
-        db.query(PersonalModelSelection)
-        .filter(
-            PersonalModelSelection.owner_id == owner_id,
-            PersonalModelSelection.record_id == record_id,
-        )
-        .order_by(
-            PersonalModelSelection.created_at.desc(),
-            PersonalModelSelection.id.desc(),
-        )
-        .first()
-    )
-
-
 def list_selections(
-    db: Session, owner_id: uuid.UUID, record_id: uuid.UUID, limit: int = 25
+    db: Session,
+    owner_id: uuid.UUID,
+    record_id: uuid.UUID,
+    limit: int = 25,
+    skill_unit_id: Optional[uuid.UUID] = None,
 ) -> List[dict]:
-    rows = (
-        db.query(PersonalModelSelection)
-        .filter(
-            PersonalModelSelection.owner_id == owner_id,
-            PersonalModelSelection.record_id == record_id,
-        )
-        .order_by(
-            PersonalModelSelection.created_at.desc(),
-            PersonalModelSelection.id.desc(),
-        )
-        .limit(limit)
-        .all()
+    """The switch history of a record, each row labelled with its own scope.
+
+    ``skill_unit_id`` narrows the list to one skill account's history; without
+    it the list is the whole log, alias rows and skill rows together, because
+    hiding the skill rows by default would read as "nothing was ever switched".
+    Every row carries ``skill_unit_id``, so a caller can tell a record-wide
+    alias switch (null) from one skill's own choice — the two never merge into
+    one answer.
+    """
+    query = db.query(PersonalModelSelection).filter(
+        PersonalModelSelection.owner_id == owner_id,
+        PersonalModelSelection.record_id == record_id,
     )
+    if skill_unit_id is not None:
+        query = query.filter(PersonalModelSelection.skill_unit_id == skill_unit_id)
+    rows = query.order_by(
+        PersonalModelSelection.created_at.desc(),
+        PersonalModelSelection.id.desc(),
+    ).limit(limit).all()
     versions = {
         version.id: version
         for version in db.query(ModelVersion)
@@ -1702,6 +1695,7 @@ def list_selections(
         {
             "selection_id": str(row.id),
             "action": row.action.value,
+            "skill_unit_id": str(row.skill_unit_id) if row.skill_unit_id else None,
             "version_id": str(row.version_id),
             "version_number": _number(row.version_id),
             "previous_version_id": (

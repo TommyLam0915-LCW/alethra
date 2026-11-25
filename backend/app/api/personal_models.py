@@ -4,9 +4,11 @@ Chain: reviewed decisions → dataset snapshot → training job → model versio
 → immutable-version or resolved-active-alias prediction.
 
 Guards: ownership is checked on every read and write; API-key scopes and the
-per-key rate limit apply; inference consumes one ai_usage unit reserved before
-the call (released on failure); error bodies never include artifact paths or
-another owner's data.
+per-key rate limit apply; a prediction first meets the ``inference`` kill switch
+(also on for ``global``, refused when unreadable) in the shared runner that both
+the routes and the daily estimate worker pass through; inference consumes one
+ai_usage unit reserved before the call (released on failure); error bodies never
+include artifact paths or another owner's data.
 """
 
 import uuid
@@ -34,6 +36,7 @@ from app.ml.personal_trainer import (
     PersonalTrainingRefused,
     predict_personal,
 )
+from app.models.kill_switch import KillSwitchScope
 from app.models.model_research import ModelResearchRecord, ModelType, ModelVersion
 from app.models.personal_dataset import PersonalizationDatasetSnapshot
 from app.models.personal_model_selection import (
@@ -53,6 +56,8 @@ from app.services.model_comparison import (
 )
 from app.services.personal_selection import (
     SelectionRefused,
+    _owned_skill_unit,
+    latest_skill_selection,
     rollback as rollback_selection,
     select_version,
 )
@@ -69,6 +74,10 @@ from app.services.job_control import (
     lock_user_for_idempotency,
     request_fingerprint,
     stamp_idempotency,
+)
+from app.services.kill_switch import is_kill_switch_active
+from app.services.model_activation import (
+    check_model_version_inference_authorization,
 )
 from app.services.personal_journey import JourneyRefused, build_journey
 from app.services.personal_training import (
@@ -109,6 +118,16 @@ class TrainingJobRequest(BaseModel):
 class PredictRequest(BaseModel):
     instrument_id: str = Field(min_length=1)
     as_of_date: str = Field(min_length=10, max_length=10)
+    # Unified skill model: which portfolio this inference serves. Required
+    # because the selection that authorizes a version is per skill unit, and a
+    # missing id would silently mean "any skill unit" — which is not a thing
+    # any owner ever selected.
+    skill_unit_id: uuid.UUID = Field(
+        description="The portfolio (skill unit) this inference serves. "
+        "Authorization verifies this version is selected for this skill unit "
+        "and was produced by the owner's own completed personal training job "
+        "whose recorded artifact checksum matches the version's."
+    )
 
 
 def _via(request: Request) -> str:
@@ -148,6 +167,33 @@ def _owned_version(
     if record is None or record.owner_id != user.id:
         raise HTTPException(status_code=404, detail="Model version not found")
     return version, record
+
+
+def _require_inference_authorization(authz: dict) -> None:
+    """Turn a personal-model authorization verdict into the customer-facing refusal.
+
+    The whole verdict is echoed under ``context`` so an owner blocked at the gate
+    can see which condition failed (for example a job that is still running)
+    without reading server logs.
+    """
+    if authz.get("authorized"):
+        return
+    raise HTTPException(
+        status_code=403,
+        detail={
+            "code": "inference_not_authorized",
+            "reason_code": authz["reason_code"],
+            "message_zh": "此技能單元未通過授權檢查，無法執行推論。",
+            "training_job_id": authz.get("training_job_id"),
+            "skill_unit_id": authz.get("skill_unit_id"),
+            "context": {
+                key: value
+                for key, value in authz.items()
+                if key
+                not in {"authorized", "reason_code", "training_job_id", "skill_unit_id"}
+            },
+        },
+    )
 
 
 def _assert_personal_version(version: ModelVersion) -> dict:
@@ -456,6 +502,11 @@ def list_personal_models(
 
 class ActivateRequest(BaseModel):
     expected_active_version_id: Optional[uuid.UUID] = None
+    # When set, the activation binds this version to that skill unit (portfolio)
+    # instead of only moving the record-wide alias. Inference is gated on the
+    # skill unit, so a customer who wants a skill served by this version has to
+    # name it here.
+    skill_unit_id: Optional[uuid.UUID] = None
 
 
 @router.post("/models/{version_id}/activate")
@@ -468,7 +519,9 @@ def activate_personal_model(
     db: Session = Depends(get_db),
 ):
     """Legacy alias setter — same eligibility gate as an explicit selection."""
-    enforce_expected = bool(body is not None and body.model_fields_set)
+    enforce_expected = bool(
+        body is not None and "expected_active_version_id" in body.model_fields_set
+    )
     try:
         outcome = select_version(
             db,
@@ -480,6 +533,7 @@ def activate_personal_model(
                 body.expected_active_version_id if body is not None else None
             ),
             enforce_expected=enforce_expected,
+            skill_unit_id=body.skill_unit_id if body is not None else None,
         )
     except SelectionRefused as exc:
         db.rollback()
@@ -504,6 +558,7 @@ def activate_personal_model(
             "from_version_id": str(previous) if previous else None,
             "to_version_id": str(version.id),
             "to_version_number": version.version_number,
+            "skill_unit_id": str(body.skill_unit_id) if body and body.skill_unit_id else None,
         },
     )
     db.commit()
@@ -512,17 +567,60 @@ def activate_personal_model(
     return _version_payload(db, version, record)
 
 
+def _refuse_when_switched_off(db: Session) -> None:
+    """Stop an inference the owner or operator switched off, before anything is spent.
+
+    ``inference`` answers True for the ``global`` row too, and a switch that
+    cannot be read is treated as on. The check sits in the shared runner rather
+    than on each route because the daily estimate worker calls this runner
+    directly, where no HTTP dependency runs at all.
+    """
+    try:
+        active = is_kill_switch_active(db, KillSwitchScope.inference)
+        code = "kill_switch_active"
+    except Exception:
+        active, code = True, "kill_switch_unreadable"
+    if active:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": code,
+                "message_zh": "推論緊急開關已開啟或無法讀取：未執行推論，也未動用額度。",
+            },
+        )
+
+
 def _run_personal_prediction(
     db: Session,
     *,
     version: ModelVersion,
     record: ModelResearchRecord,
     body: PredictRequest,
-    request: Request,
+    via: str,
     current_user: User,
-    alias_used: bool,
+    resolved_from: str,
 ) -> dict:
+    """Run one personal-model inference behind the formal gate.
+
+    ``via`` is the caller's credential class ("jwt"/"api_key"), passed in
+    instead of read from a ``Request`` so a caller with no HTTP request — a
+    scheduled service run — reaches the identical gate. Routes derive it with
+    ``_via(request)``; nothing here infers an identity.
+    """
+    _refuse_when_switched_off(db)
+
     spec = _assert_personal_version(version)
+
+    # One door for every caller: this version must be the one the named skill
+    # account is currently using, and the personal training job that produced it
+    # must be this owner's own, completed, and checksum-matching. The gate is
+    # here, not in each route, so a caller that arrives without HTTP — a
+    # scheduled service run — cannot reach a prediction by skipping it.
+    _require_inference_authorization(
+        check_model_version_inference_authorization(
+            db, current_user.id, version.id, spec, body.skill_unit_id
+        )
+    )
 
     artifact_id = spec.get("artifact_id")
     if not artifact_id:
@@ -591,7 +689,7 @@ def _run_personal_prediction(
 
     from app.services.billing import record_api_call_no_commit
 
-    record_api_call_no_commit(
+    usage_record = record_api_call_no_commit(
         db,
         user_id=current_user.id,
         endpoint="/api/v1/ml/personal/models/{version_id}/predict",
@@ -600,7 +698,7 @@ def _run_personal_prediction(
         cost=0,
         metadata={
             "prediction_type": "personal_decision",
-            "via": _via(request),
+            "via": via,
             "model_version_id": str(version.id),
             "record_id": str(record.id),
             "artifact_id": artifact_id,
@@ -608,8 +706,21 @@ def _run_personal_prediction(
             "snapshot_id": spec.get("snapshot_id"),
             "snapshot_checksum": spec.get("snapshot_checksum"),
             "training_job_id": spec.get("training_job_id"),
+            # Which frozen strategy this model was trained from. ``model_version_id``
+            # alone cannot answer that, and a decision naming a strategy version has
+            # to be checked against the version the inference actually came from.
+            # A version row written before this key existed answers None, which the
+            # lineage gate refuses rather than reads as agreement.
+            "strategy_version_id": spec.get("strategy_version_id"),
+            "skill_unit_id": str(body.skill_unit_id),
             "instrument_id": body.instrument_id,
             "as_of_date": body.as_of_date,
+            # The data time point the features were actually cut at, which is
+            # not the date the caller asked for. A reader that only had
+            # ``as_of_date`` could not tell an estimate made on yesterday's bar
+            # from one made on a bar three weeks old, and the daily estimate
+            # panel has to show the difference.
+            "feature_bar_date": feature_bar_date,
         },
     )
 
@@ -618,11 +729,15 @@ def _run_personal_prediction(
 
     db.commit()
     return {
+        "inference_id": str(usage_record.id),
         "resolved_version": {
             "model_version_id": str(version.id),
             "record_id": str(record.id),
             "version_number": version.version_number,
-            "resolved_from_active_alias": alias_used,
+            # Which pointer named this version. A skill account with no selection
+            # of its own is refused at the gate, so a served prediction always
+            # names "skill_unit_selection" or the version the caller passed.
+            "resolved_from": resolved_from,
         },
         "model_estimate_zh": PERSONAL_WORDING_ZH,
         "predicted_action": result["predicted_action"],
@@ -639,6 +754,13 @@ def _run_personal_prediction(
         },
         "artifact_sha256": spec.get("artifact_sha256"),
         "training_job_id": spec.get("training_job_id"),
+        # Named in the answer as well as the ledger: a caller that let the skill
+        # account's own selection resolve the version still has to know which
+        # strategy version to write on the decision, or it cannot pass the gate.
+        "strategy_version_id": spec.get("strategy_version_id"),
+        # The verdict is answered for one skill account and says so, so it
+        # cannot be quoted back as another account's estimate.
+        "skill_unit_id": str(body.skill_unit_id),
         "consent_currently_active": (
             consent is not None
             and str(spec.get("strategy_version_id")) in consent_scope
@@ -663,19 +785,20 @@ def predict_with_version(
     db: Session = Depends(get_db),
 ):
     version, record = _owned_version(db, version_id, current_user)
+
     return _run_personal_prediction(
         db,
         version=version,
         record=record,
         body=body,
-        request=request,
+        via=_via(request),
         current_user=current_user,
-        alias_used=False,
+        resolved_from="explicit_version_id",
     )
 
 
 @router.post("/records/{record_id}/predict")
-def predict_with_record_alias(
+def predict_with_version_in_use(
     record_id: uuid.UUID,
     body: PredictRequest,
     request: Request,
@@ -685,8 +808,22 @@ def predict_with_record_alias(
     db: Session = Depends(get_db),
 ):
     record = _owned_record(db, record_id, current_user)
-    alias_used = version_id is None
-    target_id = version_id or record.active_version_id
+    target_id = version_id
+    resolved_from = "explicit_version_id"
+    if target_id is None:
+        # An unnamed request is answered by the version this skill account is
+        # using. The record-wide alias is only consulted for an account that has
+        # never been given a selection, and the gate below refuses that account
+        # instead of serving it whatever the alias happens to point at.
+        skill_current = latest_skill_selection(
+            db, current_user.id, record.id, body.skill_unit_id
+        )
+        if skill_current:
+            target_id = skill_current.version_id
+            resolved_from = "skill_unit_selection"
+        else:
+            target_id = record.active_version_id
+            resolved_from = "record_active_alias"
     if target_id is None:
         raise HTTPException(
             status_code=409,
@@ -708,9 +845,9 @@ def predict_with_record_alias(
         version=version,
         record=record,
         body=body,
-        request=request,
+        via=_via(request),
         current_user=current_user,
-        alias_used=alias_used,
+        resolved_from=resolved_from,
     )
 
 
@@ -732,11 +869,15 @@ class SelectionRequest(BaseModel):
     # value is compared under the record lock, so a concurrent switch is
     # refused instead of silently overwritten.
     expected_active_version_id: Optional[uuid.UUID]
+    # Which skill unit (portfolio) this version is being chosen for. Without it
+    # only the record-wide alias moves, and no skill becomes servable.
+    skill_unit_id: Optional[uuid.UUID] = None
 
 
 class RollbackRequest(BaseModel):
     rationale: Optional[str] = Field(default=None, max_length=1000)
     expected_active_version_id: Optional[uuid.UUID]
+    skill_unit_id: Optional[uuid.UUID] = None
 
 
 def _comparison_refused(exc: ComparisonRefused) -> HTTPException:
@@ -772,6 +913,7 @@ def _selection_payload(
         "selection_id": str(selection.id),
         "action": selection.action.value,
         "record_id": str(selection.record_id),
+        "skill_unit_id": str(selection.skill_unit_id) if selection.skill_unit_id else None,
         "version_id": str(selection.version_id),
         "version_number": _number(selection.version_id),
         "previous_version_id": (
@@ -998,7 +1140,12 @@ def select_personal_model(
     _scope_check=Depends(check_api_key_scope(*WRITE_SCOPES)),
     db: Session = Depends(get_db),
 ):
-    """Select an active version, re-checking every rule at this moment."""
+    """Select an active version, re-checking every rule at this moment.
+
+    With ``skill_unit_id`` the switch belongs to that one skill account and
+    authorizes its inference; without it only the record-wide alias moves and no
+    skill account becomes servable.
+    """
     try:
         outcome = select_version(
             db,
@@ -1007,6 +1154,7 @@ def select_personal_model(
             rationale=body.rationale,
             comparison_run_id=body.comparison_run_id,
             expected_active_version_id=body.expected_active_version_id,
+            skill_unit_id=body.skill_unit_id,
         )
     except SelectionRefused as exc:
         db.rollback()
@@ -1015,15 +1163,21 @@ def select_personal_model(
     record = outcome["record"]
     version = outcome["version"]
     previous = outcome["previous_version_id"]
+    scope_skill = str(body.skill_unit_id) if body.skill_unit_id else None
 
     if outcome["already_active"]:
         db.commit()
         return {
             "already_active": True,
+            "skill_unit_id": scope_skill,
             "selection": None,
             "active_version": _version_payload(db, version, record),
             "comparison_evidence": outcome["comparison_evidence"],
-            "message_zh": "此版本已是使用中版本，沒有改動。",
+            "message_zh": (
+                "此技能帳號已在使用此版本，沒有改動。"
+                if scope_skill
+                else "此版本已是使用中版本，沒有改動。"
+            ),
         }
 
     selection = outcome["selection"]
@@ -1043,6 +1197,7 @@ def select_personal_model(
                 if body.comparison_run_id
                 else None
             ),
+            "skill_unit_id": str(body.skill_unit_id) if body.skill_unit_id else None,
             "rationale_saved": True,
         },
     )
@@ -1061,10 +1216,16 @@ def select_personal_model(
 
     return {
         "already_active": False,
+        "skill_unit_id": scope_skill,
         "selection": _selection_payload(selection, versions),
         "active_version": _version_payload(db, version, record),
         "comparison_evidence": outcome["comparison_evidence"],
-        "message_zh": "已切換使用中版本；舊版本的 artifact、評估與歷史推論保持不變。",
+        "message_zh": (
+            "已為此技能帳號切換使用中版本；其他技能帳號與記錄別名均未改變，"
+            "舊版本的 artifact、評估與歷史推論保持不變。"
+            if scope_skill
+            else "已切換使用中版本；舊版本的 artifact、評估與歷史推論保持不變。"
+        ),
     }
 
 
@@ -1077,7 +1238,12 @@ def rollback_personal_model(
     _scope_check=Depends(check_api_key_scope(*WRITE_SCOPES)),
     db: Session = Depends(get_db),
 ):
-    """Return to the version active before the latest switch."""
+    """Return one scope to the version it used before its latest switch.
+
+    ``skill_unit_id`` names the skill account whose history is rolled back, and
+    the ``expected_active_version_id`` is checked against that skill's own
+    current version — not against another skill's choice or the record alias.
+    """
     try:
         outcome = rollback_selection(
             db,
@@ -1085,6 +1251,7 @@ def rollback_personal_model(
             record_id=record_id,
             rationale=body.rationale,
             expected_active_version_id=body.expected_active_version_id,
+            skill_unit_id=body.skill_unit_id,
         )
     except SelectionRefused as exc:
         db.rollback()
@@ -1106,6 +1273,7 @@ def rollback_personal_model(
             "from_version_id": str(current) if current else None,
             "to_version_id": str(target.id),
             "to_version_number": target.version_number,
+            "skill_unit_id": str(body.skill_unit_id) if body.skill_unit_id else None,
         },
     )
     db.commit()
@@ -1121,25 +1289,57 @@ def rollback_personal_model(
         if current_version:
             versions[current_version.id] = current_version
 
+    scope_skill = str(body.skill_unit_id) if body.skill_unit_id else None
     return {
+        "skill_unit_id": scope_skill,
         "selection": _selection_payload(selection, versions),
         "active_version": _version_payload(db, target, record),
-        "message_zh": "已回退到上一個版本；沒有刪除任何版本、artifact 或歷史推論。",
+        "message_zh": (
+            "已為此技能帳號回退版本；其他技能帳號未受影響，"
+            "且沒有刪除任何版本、artifact 或歷史推論。"
+            if scope_skill
+            else "已回退到上一個版本；沒有刪除任何版本、artifact 或歷史推論。"
+        ),
     }
 
 
 @router.get("/records/{record_id}/selections")
 def get_personal_selections(
     record_id: uuid.UUID,
+    skill_unit_id: Optional[uuid.UUID] = None,
     current_user: User = Depends(get_current_user),
     _scope_check=Depends(check_api_key_scope(*READ_SCOPES)),
     db: Session = Depends(get_db),
 ):
+    """The record's switch history, each row labelled with the scope it acted on.
+
+    With ``skill_unit_id`` the list narrows to that skill account and the answer
+    also names the version it uses right now — the fact the inference gate
+    reads. Without it nothing is hidden: alias rows and skill rows are all
+    listed, and a null ``skill_unit_id`` on a row means that switch was made for
+    the record alias, not for every skill.
+    """
     record = _owned_record(db, record_id, current_user)
-    return {
+    payload = {
         "record_id": str(record.id),
         "active_version_id": (
             str(record.active_version_id) if record.active_version_id else None
         ),
         "selections": list_selections(db, current_user.id, record.id),
     }
+    if skill_unit_id is not None:
+        try:
+            _owned_skill_unit(db, current_user.id, skill_unit_id)
+        except SelectionRefused as exc:
+            raise _selection_refused(exc)
+        current = latest_skill_selection(
+            db, current_user.id, record.id, skill_unit_id
+        )
+        payload["skill_unit_id"] = str(skill_unit_id)
+        payload["skill_active_version_id"] = (
+            str(current.version_id) if current else None
+        )
+        payload["selections"] = list_selections(
+            db, current_user.id, record.id, skill_unit_id=skill_unit_id
+        )
+    return payload

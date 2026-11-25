@@ -11,15 +11,22 @@ only against PostgreSQL and pins the zone for its own session, so the hazard is
 reproduced deterministically wherever the suite happens to run.
 """
 
-import os
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
 
-if not os.environ.get("ALETHRA_TEST_DB", "").startswith("postgresql"):
+from tests.postgresql_only import postgresql_available, skip_reason
+
+if not postgresql_available():
+    # Whole-module: the hazard is a server-side session TimeZone, which SQLite
+    # has no notion of, so no node here can be run offline. The shared helper
+    # writes the prerequisite, the NOT RUN verdict and the command.
     pytest.skip(
-        "PostgreSQL not configured (run via scripts/run_tests.sh pg)",
+        skip_reason(
+            "a naive datetime is stamped with the server session TimeZone, and "
+            "SQLite has no session TimeZone to reproduce the eight-hour split with"
+        ),
         allow_module_level=True,
     )
 

@@ -37,10 +37,13 @@ class LearningJob(Base):
         index=True,
     )
     status = Column(String(16), nullable=False, default="pending")
-    # pending | running | completed | failed | cancelled
+    # pending | running | completed | partial | failed | cancelled
+    # ``partial`` means the tick both succeeded and failed somewhere: the count
+    # split is in result_json, the per-combo text in error_details.
 
     job_type = Column(String(32), nullable=False)
-    # "scheduled_study" | "pattern_analysis" | "parameter_proposal" | "validation_backtest"
+    # "scheduled_study" | "pattern_analysis" | "parameter_proposal" |
+    # "validation_backtest" | "auto_collection" (the interval service's tick)
 
     config_json = Column(JSONB, nullable=False)
     # { instruments: [...], intervals: [...], skills: [...] }

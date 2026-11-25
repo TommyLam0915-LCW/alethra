@@ -7,6 +7,17 @@ This test proves that:
 4. All connections target ai_investment_lab_test database
 
 This ensures no connection path accidentally uses postgres or targets production.
+
+Every node is PostgreSQL-only: the assertion is about which *role* a
+connection carries, and ``SELECT current_user, current_database()`` has no
+SQLite equivalent -- offline it fails as an unknown column, which says nothing
+about the role a production connection uses.
+
+The expected role ``alethra_test_runtime`` and database
+``ai_investment_lab_test`` are hard-coded here and in
+``test_privilege_enforcement.py`` rather than read from the target guard's
+approved target, so this file only goes green against that exact identity.
+Nothing here has been executed.
 """
 import pytest
 from sqlalchemy import text
@@ -15,6 +26,15 @@ from fastapi.testclient import TestClient
 from app.database import SessionLocal, get_db
 from app.main import app
 from tests.conftest import TestSession
+from tests.postgresql_only import requires_postgresql
+
+
+@pytest.fixture(autouse=True)
+def _postgres_required():
+    requires_postgresql(
+        "asks the server which role and database the connection landed on, "
+        "which SQLite is not able to answer"
+    )
 
 
 def test_testsession_uses_runtime_role():

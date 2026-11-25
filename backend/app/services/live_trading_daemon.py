@@ -19,8 +19,10 @@ from typing import Optional
 from sqlalchemy import text
 
 from app.database import SessionLocal
+from app.lib.uuid_bind import to_uuid, uuid_binds
 from app.services.kraken_websocket import KrakenBar, KrakenWebSocketClient
 from app.services.signal_generator import SignalGenerator, SignalType, TradingSignal
+from app.services.skill_units import SkillUnitLimitReached, assert_slot_available
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +54,16 @@ class LivePaperTradingDaemon:
         self.signal_generators: dict[str, SignalGenerator] = {}
         self.portfolio_ids: dict[str, str] = {}
         self.run_ids: dict[str, str] = {}
+        # Skills not started because the account already holds the skill-unit
+        # ceiling. Kept apart from validation rejections so a full account is
+        # never reported as an unknown strategy.
+        self.ceiling_refusals: list[str] = []
+        # The skill whose DB write raised, and the skills never attempted after
+        # it. A mid-loop failure is not a validation rejection and not a ceiling
+        # refusal, and the earlier iterations' rows are already committed, so the
+        # start-up path has to be able to say which of the three happened.
+        self.creation_failure: str = ""
+        self.unattempted_skills: list[str] = []
 
         # Performance tracking
         self.total_trades = 0
@@ -91,7 +103,12 @@ class LivePaperTradingDaemon:
                 logger.error(f"No run/portfolio found for {key}")
                 return
 
-            # Create decision record
+            # Create decision record. ``decision_records.id``/``owner_id``/
+            # ``paper_portfolio_id`` are mapped ``UUID(as_uuid=True)``, so this
+            # write goes through the same typed-bind contract as
+            # ``PaperTradingEngine.create_portfolio``: a dashed string bound
+            # without a type lands in the text column as 36 characters and is
+            # then invisible to every ORM/UUID-typed read of the same value.
             decision_id = str(uuid.uuid4())
             db.execute(
                 text("""
@@ -103,14 +120,16 @@ class LivePaperTradingDaemon:
                     :id, :owner_id, 'live_trading', :decision_type, :time,
                     :rationale, :portfolio_id
                 )
-            """),
+            """).bindparams(
+                    *uuid_binds("id", "owner_id", "portfolio_id")
+                ),
                 {
-                    "id": decision_id,
-                    "owner_id": skill_config["user_id"],
+                    "id": to_uuid(decision_id),
+                    "owner_id": to_uuid(skill_config["user_id"]),
                     "decision_type": sig.signal_type.value,
                     "time": sig.timestamp,
                     "rationale": sig.reason,
-                    "portfolio_id": portfolio_id,
+                    "portfolio_id": to_uuid(portfolio_id),
                 },
             )
 
@@ -129,11 +148,11 @@ class LivePaperTradingDaemon:
                     :id, :portfolio_id, :decision_id, :asset_id, :side, :quantity,
                     'market', :time, 'filled', 'live_trading'
                 )
-            """),
+            """).bindparams(*uuid_binds("id", "portfolio_id", "decision_id")),
                 {
-                    "id": order_id,
-                    "portfolio_id": portfolio_id,
-                    "decision_id": decision_id,
+                    "id": to_uuid(order_id),
+                    "portfolio_id": to_uuid(portfolio_id),
+                    "decision_id": to_uuid(decision_id),
                     "asset_id": skill_config["instrument_id"],
                     "side": side,
                     "quantity": quantity,
@@ -158,10 +177,10 @@ class LivePaperTradingDaemon:
                     :exec_price, :slippage, 0,
                     :quantity, :gross, :net, 'live_signal', :timestamp
                 )
-            """),
+            """).bindparams(*uuid_binds("id", "order_id")),
                 {
-                    "id": fill_id,
-                    "order_id": order_id,
+                    "id": to_uuid(fill_id),
+                    "order_id": to_uuid(order_id),
                     "exec_date": sig.timestamp.strftime("%Y-%m-%d"),
                     "obs_price": sig.price,
                     "exec_price": exec_price,
@@ -181,8 +200,8 @@ class LivePaperTradingDaemon:
                 SET total_trades = total_trades + 1,
                     updated_at = NOW()
                 WHERE id = :id
-            """),
-                {"id": run_id},
+            """).bindparams(*uuid_binds("id")),
+                {"id": to_uuid(run_id)},
             )
 
             db.commit()
@@ -240,6 +259,8 @@ class LivePaperTradingDaemon:
         # Phase 2: Create DB records only for validated skills
         db = SessionLocal()
         created_count = 0
+        expected_keys = [f"{cfg['skill']}_{sym}" for cfg, sym, _ in validated_skills]
+        current_key = ""
         try:
             for skill_config, symbol, gen in validated_skills:
                 skill = skill_config["skill"]
@@ -247,8 +268,27 @@ class LivePaperTradingDaemon:
                 interval_minutes = skill_config["interval_minutes"]
                 exit_config = skill_config["exit_config"]
                 user_id = skill_config["user_id"]
-                
-                # Create portfolio
+                key = f"{skill}_{symbol}"
+                current_key = key
+
+                # Same ceiling as the HTTP entry points: this lane writes the
+                # same paper_portfolios rows, so skipping the check here would
+                # leave a way to open more accounts than the product allows.
+                try:
+                    assert_slot_available(db, user_id)
+                except SkillUnitLimitReached as exc:
+                    self.ceiling_refusals.append(key)
+                    logger.error(
+                        f"⛔ Skill-unit ceiling reached ({exc}). Not starting "
+                        f"{key}. Retire an open account and restart to admit it."
+                    )
+                    continue
+
+                # Create portfolio. Same typed-UUID write contract as
+                # ``PaperTradingEngine.create_portfolio`` — this is the second
+                # create lane, and the dashed-text binds it used to send made
+                # the rows it opened invisible to the ORM and to every typed
+                # read of ``owner_id``.
                 portfolio_id = str(uuid.uuid4())
                 db.execute(
                     text("""
@@ -259,10 +299,10 @@ class LivePaperTradingDaemon:
                     VALUES (
                         :id, :owner_id, 'USD', :initial, :current, 'active', NOW()
                     )
-                """),
+                """).bindparams(*uuid_binds("id", "owner_id")),
                     {
-                        "id": portfolio_id,
-                        "owner_id": user_id,
+                        "id": to_uuid(portfolio_id),
+                        "owner_id": to_uuid(user_id),
                         "initial": self.initial_capital,
                         "current": self.initial_capital,
                     },
@@ -281,10 +321,10 @@ class LivePaperTradingDaemon:
                         :id, :portfolio_id, 'live_trading', :skill, :instrument,
                         :interval, :exit_config, NOW(), 'running', :initial, 0, 0
                     )
-                """),
+                """).bindparams(*uuid_binds("id", "portfolio_id")),
                     {
-                        "id": run_id,
-                        "portfolio_id": portfolio_id,
+                        "id": to_uuid(run_id),
+                        "portfolio_id": to_uuid(portfolio_id),
                         "skill": skill,
                         "instrument": instrument_id,
                         "interval": interval_minutes,
@@ -296,7 +336,6 @@ class LivePaperTradingDaemon:
                 db.commit()
 
                 # Store IDs
-                key = f"{skill}_{symbol}"
                 self.portfolio_ids[key] = portfolio_id
                 self.run_ids[key] = run_id
                 self.signal_generators[key] = gen
@@ -307,7 +346,20 @@ class LivePaperTradingDaemon:
         except Exception as exc:
             db.rollback()
             logger.exception(f"Failed to create portfolios: {exc}")
-            return 0
+            # Each successful iteration committed its own rows, so this rollback
+            # undoes only the failing skill's partial write. Reporting 0 here
+            # told the operator that nothing had been opened -- and that every
+            # skill had failed validation -- while the account rows it had just
+            # created sat in the database with status 'running'.
+            self.creation_failure = current_key
+            refused = set(self.ceiling_refusals)
+            self.unattempted_skills = [
+                key
+                for key in expected_keys
+                if key not in self.portfolio_ids and key not in refused
+                and key != current_key
+            ]
+            return created_count
         finally:
             db.close()
         
@@ -332,15 +384,41 @@ class LivePaperTradingDaemon:
         # Fail closed: if no portfolios created, don't start WebSocket
         if created_count == 0:
             logger.error("=" * 80)
-            logger.error("❌ DAEMON STARTUP ABORTED: No valid portfolios created")
+            logger.error("❌ DAEMON STARTUP ABORTED: No skill unit opened")
             logger.error("=" * 80)
-            logger.error("All requested skills were rejected during validation.")
+            if self.creation_failure:
+                logger.error(
+                    f"The database write for {self.creation_failure} failed. This is "
+                    "not a strategy-validation rejection: the skills that passed "
+                    "validation were accepted, and the write refused one of them."
+                )
+            elif self.ceiling_refusals:
+                logger.error(
+                    "Skills not started because the account already holds every "
+                    f"skill-unit slot: {', '.join(sorted(self.ceiling_refusals))}. "
+                    "Retire an open account and restart to admit them."
+                )
+            else:
+                logger.error("All requested skills were rejected during validation.")
             logger.error("Cannot start WebSocket without active portfolios.")
             self.running = False
             return
         
         logger.info(f"✅ Successfully created {created_count} portfolio(s)")
         logger.info(f"📊 Active skill set: {', '.join(sorted(self.portfolio_ids.keys()))}")
+        if self.creation_failure:
+            logger.error(
+                f"⚠️ Stopped while opening {self.creation_failure}: that skill is not "
+                f"running, and {len(self.unattempted_skills)} more were never "
+                f"attempted"
+                + (
+                    f" ({', '.join(self.unattempted_skills)})"
+                    if self.unattempted_skills
+                    else ""
+                )
+                + ". The skills above are open and will be served; restart to retry "
+                "the rest."
+            )
         logger.info("")
 
         # Start WebSocket client
@@ -378,8 +456,8 @@ class LivePaperTradingDaemon:
                         end_date = NOW(),
                         updated_at = NOW()
                     WHERE id = :id
-                """),
-                    {"id": run_id},
+                """).bindparams(*uuid_binds("id")),
+                    {"id": to_uuid(run_id)},
                 )
             db.commit()
         finally:

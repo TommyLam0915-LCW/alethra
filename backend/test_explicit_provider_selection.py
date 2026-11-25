@@ -1,16 +1,14 @@
 """Test explicit provider selection for stored-data sessions."""
 import sys
-import os
+from contextlib import contextmanager
+from datetime import date, datetime
+from uuid import UUID
 
 import pytest
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
-from datetime import date, datetime
-from uuid import UUID
 
 from app.database import Base, get_db
 from app.main import app
@@ -25,35 +23,63 @@ from app.models.market_data import MarketDataBar
 from app.models.simulation import SimulationSession
 from app.auth.jwt import create_access_token
 
-# Create test database. A plain in-memory SQLite URL gives every connection its
-# own empty database, so requests served on TestClient's thread would not see
-# the tables; StaticPool keeps one shared connection for the whole process.
-engine = create_engine(
-    'sqlite:///:memory:',
-    connect_args={'check_same_thread': False},
-    poolclass=StaticPool,
-)
-Base.metadata.create_all(engine)
-TestSession = sessionmaker(bind=engine)
-
-def override_get_db():
-    db = TestSession()
-    try:
-        yield db
-    finally:
-        db.close()
-
 # The seeded fixture rows above are addressed by these ids; auth now
 # resolves the token subject as a real user.
 TEST_USER_ID = UUID('00000000-0000-0000-0000-000000000001')
 TEST_VERSION_ID = UUID('00000000-0000-0000-0000-000000000003')
 
-app.dependency_overrides[get_db] = override_get_db
-client = TestClient(app)
 
-def setup_test_data():
+def _override_for(test_session):
+    def override_get_db():
+        db = test_session()
+        try:
+            yield db
+        finally:
+            db.close()
+    return override_get_db
+
+
+@contextmanager
+def _provider_selection_stack():
+    """Seeded in-memory database plus the get_db override, both torn down here.
+
+    The engine, `app.dependency_overrides[get_db]` and the TestClient used to be
+    built at module import and never removed. Because this file sorts first in
+    the lane's collection order, every later `TestClient(app)` in the same
+    process resolved `get_db` against this module's in-memory database instead
+    of the lane database - which is how 18 tests in tests/test_ml_pipeline.py
+    came to fail only in full-suite order.
+
+    A plain in-memory SQLite URL gives every connection its own empty database,
+    so requests served on TestClient's thread would not see the tables;
+    StaticPool keeps one shared connection for the whole stack.
+    """
+    engine = create_engine(
+        'sqlite:///:memory:',
+        connect_args={'check_same_thread': False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    test_session = sessionmaker(bind=engine)
+    setup_test_data(test_session)
+    saved_overrides = dict(app.dependency_overrides)
+    app.dependency_overrides[get_db] = _override_for(test_session)
+    try:
+        yield TestClient(app), test_session
+    finally:
+        app.dependency_overrides.clear()
+        app.dependency_overrides.update(saved_overrides)
+        engine.dispose()
+
+
+@pytest.fixture(scope='module')
+def client():
+    with _provider_selection_stack() as (_client, _session):
+        yield _client
+
+def setup_test_data(test_session):
     """Set up test data with multiple providers."""
-    db = TestSession()
+    db = test_session()
     
     # Create user
     user = User(
@@ -137,14 +163,7 @@ def setup_test_data():
     db.commit()
     db.close()
 
-@pytest.fixture(scope='module', autouse=True)
-def _seeded_fixture_rows():
-    # The rows were only seeded under __main__ before, so pytest ran against
-    # an empty in-memory database and every request failed authentication.
-    setup_test_data()
-    yield
-
-def test_available_providers():
+def test_available_providers(client):
     """Test GET /available-providers endpoint."""
     print("\n=== Test 1: Get available providers ===")
     
@@ -174,7 +193,7 @@ def test_available_providers():
     print(f"  - twelvedata: {providers['twelvedata']['bar_count']} bars")
     print(f"  - demo: {providers['demo']['bar_count']} bars")
 
-def test_create_session_with_explicit_provider():
+def test_create_session_with_explicit_provider(client):
     """Test POST /versions/{version_id} with explicit provider_id."""
     print("\n=== Test 2: Create session with explicit provider ===")
     
@@ -198,7 +217,7 @@ def test_create_session_with_explicit_provider():
     
     print(f"✓ Session created with provider_id={data['provider_id']}")
 
-def test_create_session_without_provider_multiple_available():
+def test_create_session_without_provider_multiple_available(client):
     """Test that creating session without provider_id fails when multiple providers available."""
     print("\n=== Test 3: Create session without provider (should fail) ===")
     
@@ -220,7 +239,7 @@ def test_create_session_without_provider_multiple_available():
     
     print(f"✓ Correctly rejected: {data['detail']}")
 
-def test_create_session_with_invalid_provider():
+def test_create_session_with_invalid_provider(client):
     """Test that creating session with invalid provider_id fails."""
     print("\n=== Test 4: Create session with invalid provider (should fail) ===")
     
@@ -243,7 +262,7 @@ def test_create_session_with_invalid_provider():
     
     print(f"✓ Correctly rejected: {data['detail']}")
 
-def test_create_session_with_demo_provider():
+def test_create_session_with_demo_provider(client):
     """Test creating session with demo provider."""
     print("\n=== Test 5: Create session with demo provider ===")
     
@@ -266,9 +285,9 @@ def test_create_session_with_demo_provider():
     
     print(f"✓ Session created with provider_id={data['provider_id']}")
 
-def cleanup():
+def cleanup(test_session):
     """Clean up test database."""
-    db = TestSession()
+    db = test_session()
     db.query(SimulationSession).delete()
     db.query(MarketDataBar).delete()
     db.query(ExperimentVersion).delete()
@@ -278,18 +297,18 @@ def cleanup():
     db.close()
 
 if __name__ == '__main__':
-    try:
-        setup_test_data()
-        test_available_providers()
-        test_create_session_with_explicit_provider()
-        test_create_session_without_provider_multiple_available()
-        test_create_session_with_invalid_provider()
-        test_create_session_with_demo_provider()
-        print("\n✅ All provider selection tests passed!")
-    except Exception as e:
-        print(f"\n❌ Test failed: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
-    finally:
-        cleanup()
+    with _provider_selection_stack() as (client, test_session):
+        try:
+            test_available_providers(client)
+            test_create_session_with_explicit_provider(client)
+            test_create_session_without_provider_multiple_available(client)
+            test_create_session_with_invalid_provider(client)
+            test_create_session_with_demo_provider(client)
+            print("\n✅ All provider selection tests passed!")
+        except Exception as e:
+            print(f"\n❌ Test failed: {e}")
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
+        finally:
+            cleanup(test_session)
