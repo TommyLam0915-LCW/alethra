@@ -17,6 +17,8 @@ from app.services.market_data_storage import (
     DAILY_INTERVAL_MINUTES,
     GrainConflictError,
     MarketDataStorage,
+    SyntheticCacheWriteError,
+    refuse_synthetic_cache_write,
 )
 from app.services.price_view import (
     bar_view,
@@ -452,6 +454,11 @@ def get_instrument_bars(
         if bars:
             quality = provider.get_data_quality(instrument_id)
             try:
+                refuse_synthetic_cache_write(
+                    quality.get("data_nature"),
+                    instrument_id=instrument_id,
+                    provider_id=provider.provider_id,
+                )
                 storage.store_bars(
                     instrument_id=instrument_id,
                     provider_id=provider.provider_id,
@@ -464,12 +471,15 @@ def get_instrument_bars(
                     provider_note_zh=quality.get("note_zh"),
                     interval_minutes=DAILY_INTERVAL_MINUTES,
                 )
-            except GrainConflictError as exc:
+            except (GrainConflictError, SyntheticCacheWriteError) as exc:
                 # Caching is not the service this route provides, so a refused
                 # cache write must not become a provider outage. Re-stamping the
                 # unlabelled row that already owns this key would also relabel
                 # it — a seeded five-minute series would come back declared as
                 # daily — so the write is dropped and the response says so.
+                # The same holds for a synthetic series: serving the chart was
+                # the request, and writing it is what this route must no longer
+                # do on its own initiative.
                 persist_refused = str(exc)
     except ProviderNotConfiguredError as exc:
         # A normal unconfigured state must not be recorded as a provider

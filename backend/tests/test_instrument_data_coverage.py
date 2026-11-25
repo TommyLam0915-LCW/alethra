@@ -8,8 +8,28 @@ tests pin the contract that lets a client pick a period that actually has bars.
 from datetime import datetime, timedelta, timezone
 
 from app.data import real_synthetic_data
+from app.models.market_data import MarketDataBar, MarketDataMetadata
 from app.providers.data_provider import DataProvider
 from app.providers.demo_provider import DemoDataProvider
+from tests.conftest import TestSession
+
+
+def _clear_cached_bars():
+    """Start this case from an instrument with no stored rows and no metadata.
+
+    Both halves matter: the coverage read model reports the series from
+    ``market_data_metadata``, and a leftover bar row from another case would
+    make a zero read meaningless.
+    """
+    db = TestSession()
+    try:
+        for model in (MarketDataBar, MarketDataMetadata):
+            db.query(model).filter(
+                model.instrument_id == "US:AAPL"
+            ).delete(synchronize_session=False)
+        db.commit()
+    finally:
+        db.close()
 
 
 def test_provider_base_declares_no_range_by_default():
@@ -92,14 +112,45 @@ class TestInstrumentDetailCoverage:
         cov = client.get("/api/v1/instruments/US:AAPL").json()["data_coverage"]
         assert cov["available_end"] < today.isoformat()
 
-    def test_stored_coverage_tracks_what_has_been_cached(self, client):
-        client.get(
-            "/api/v1/instruments/US:AAPL/bars?start_date=2024-01-02&end_date=2024-03-28"
+    def test_stored_coverage_tracks_what_has_been_cached(self, client, admin_headers):
+        """Coverage reports the cached series — and caching is an operator's call.
+
+        Serving a synthetic series no longer writes it, so this seeds storage
+        the way an operator does and asks the coverage read model what it sees.
+        """
+        _clear_cached_bars()
+        resp = client.post(
+            "/api/v1/instruments/US:AAPL/bars/refresh"
+            "?start_date=2024-01-02&end_date=2024-03-28",
+            headers=admin_headers,
         )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["bars_stored"] > 0
+
         cov = client.get("/api/v1/instruments/US:AAPL").json()["data_coverage"]
         assert cov["stored_bars"] > 0
         assert cov["stored_start"] <= cov["stored_end"]
         assert cov["stored_end"] <= cov["available_end"]
+
+    def test_a_served_synthetic_series_leaves_nothing_cached(self, client):
+        """The read model must not claim history that only a chart load saw.
+
+        ``stored_bars`` is what a client reads as *this is on the server*, and
+        26 demo rows once made that true of data nobody asked to keep. The
+        bars still go out; the coverage around them has to say nothing is
+        stored.
+        """
+        _clear_cached_bars()
+        resp = client.get(
+            "/api/v1/instruments/US:AAPL/bars?start_date=2024-01-02&end_date=2024-03-28"
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["bar_count"] > 0, "refusing the cache withheld the series"
+
+        cov = client.get("/api/v1/instruments/US:AAPL").json()["data_coverage"]
+        assert cov["stored_bars"] == 0, cov
+        assert cov["stored_start"] is None and cov["stored_end"] is None, cov
+        assert cov["stored_rows_total"] == 0, cov
 
     def test_unavailable_provider_leaves_availability_unknown(self, client, monkeypatch):
         class NoRangeProvider(DemoDataProvider):

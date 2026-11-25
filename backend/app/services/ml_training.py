@@ -14,7 +14,12 @@ from sqlalchemy.orm import Session
 
 from app.models.training import TrainingJob, TrainingJobStatus
 from app.providers import get_data_provider
-from app.services.market_data_storage import DAILY_INTERVAL_MINUTES, MarketDataStorage
+from app.services.market_data_storage import (
+    DAILY_INTERVAL_MINUTES,
+    MarketDataStorage,
+    SyntheticCacheWriteError,
+    refuse_synthetic_cache_write,
+)
 from app.ml.trainer import train_model, load_model, list_models
 from app.lib.error_safety import safe_error_message
 from app.lib.timeutil import utcnow
@@ -104,6 +109,11 @@ def _get_bars_with_storage(
 
     if bars:
         try:
+            refuse_synthetic_cache_write(
+                nature,
+                instrument_id=instrument_id,
+                provider_id=provider.provider_id,
+            )
             storage.store_bars(
                 instrument_id=instrument_id,
                 provider_id=provider.provider_id,
@@ -114,6 +124,10 @@ def _get_bars_with_storage(
                 provider_note_zh=quality.get("note_zh") if isinstance(quality, dict) else None,
                 interval_minutes=DAILY_INTERVAL_MINUTES,
             )
+        except SyntheticCacheWriteError as exc:
+            # A training run is not a request to fill the history table. The
+            # bars still train the model, and ``nature`` already says synthetic.
+            logger.warning("Refused to cache %s bars for %s: %s", nature, instrument_id, exc)
         except Exception as e:
             logger.warning(f"Failed to store bars for {instrument_id}: {e}")
 

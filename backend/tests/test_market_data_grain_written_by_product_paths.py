@@ -18,6 +18,14 @@ Every case drives the real route or the real service function and reads the
 rows back from the table. The undeclared control write below is what turns the
 ``1440`` readbacks into evidence rather than a tautology: the same storage
 call, instrument and provider, with the grain left undeclared, leaves NULL.
+
+Labelling those rows did not stop them arriving, and the read route caching a
+series its own provider calls synthetic is the reason the 26 did. So the file
+now covers both halves of what a product path may write: the grain it
+declares, and whether it may write at all. ``data_nature`` is the only input
+that separates ``LiveProvider`` from ``FakeProvider`` — same instrument, same
+provider id, same three bars — so a grain case and a refusal case that differ
+in nothing else say which of the two decides the write.
 """
 import pytest
 
@@ -26,6 +34,8 @@ from app.providers.data_provider import OHLCVBar
 from app.services.market_data_storage import (
     DAILY_INTERVAL_MINUTES,
     MarketDataStorage,
+    SyntheticCacheWriteError,
+    refuse_synthetic_cache_write,
 )
 from app.services.ml_training import _get_bars_with_storage
 from tests.conftest import TestSession
@@ -41,12 +51,19 @@ REFRESH_URL = f"/api/v1/instruments/{INSTRUMENT}/bars/refresh?start_date={START}
 
 
 class FakeProvider:
-    """A provider that answers normally, so any refusal seen is the route's own."""
+    """A provider that answers normally, so any refusal seen is the route's own.
+
+    It declares ``synthetic`` because that is what the demo default does, and
+    the shape the 26 rows came in under. The grain cases below use
+    ``LiveProvider`` instead, because a synthetic series is no longer written
+    by these paths at all.
+    """
 
     provider_name = "Demo"
     provider_id = PROVIDER
     feed_mode = "offline"
     is_live = False
+    data_nature = "synthetic"
 
     def get_bars(self, instrument_id, start_date, end_date, timeframe="1d"):
         return [
@@ -63,7 +80,7 @@ class FakeProvider:
 
     def get_data_quality(self, instrument_id):
         return {
-            "data_nature": "synthetic",
+            "data_nature": self.data_nature,
             "adjustment": "not_applicable",
             "note": "Demo data",
             "note_zh": "演示數據",
@@ -74,6 +91,12 @@ class FakeProvider:
 
     def is_available(self):
         return True
+
+
+class LiveProvider(FakeProvider):
+    """The same series, declared real — the only nature these routes still write."""
+
+    data_nature = "live"
 
 
 def _erase():
@@ -148,15 +171,16 @@ def test_an_undeclared_call_is_the_null_grain_the_fix_replaces():
 
 
 def test_the_bars_get_writes_the_daily_grain(client, monkeypatch):
-    """The route that seeded 26 unlabelled demo rows now seeds a labelled one."""
+    """What this route does cache, it caches at a grain — the series is real."""
     _erase()
     monkeypatch.setattr(
-        "app.api.instruments.get_data_provider", FakeProvider
+        "app.api.instruments.get_data_provider", LiveProvider
     )
 
     resp = client.get(BARS_URL)
     assert resp.status_code == 200, resp.text
     assert resp.json()["bar_count"] == len(DAYS)
+    assert "storage_persist_refused" not in resp.json()
 
     grains = _written_grains()
     assert grains == [(day, DAILY_INTERVAL_MINUTES) for day in DAYS], grains
@@ -172,7 +196,7 @@ def test_the_bars_get_serves_history_it_cannot_cache_and_says_so(
     dropped, the bars still go out, and the response names the refusal.
     """
     monkeypatch.setattr(
-        "app.api.instruments.get_data_provider", FakeProvider
+        "app.api.instruments.get_data_provider", LiveProvider
     )
 
     resp = client.get(BARS_URL)
@@ -187,7 +211,12 @@ def test_the_bars_get_serves_history_it_cannot_cache_and_says_so(
 
 
 def test_the_admin_refresh_writes_the_daily_grain(client, monkeypatch, admin_headers):
-    """Here persisting is the service asked for, so the grain is the deliverable."""
+    """Here persisting is the service asked for, so the grain is the deliverable.
+
+    The provider is the synthetic one the read route refuses: an operator
+    naming storage is the difference, and it is the boundary that keeps this
+    guard a scope rule rather than a ban on writing market data.
+    """
     _erase()
     monkeypatch.setattr(
         "app.api.instruments.get_data_provider", FakeProvider
@@ -231,7 +260,7 @@ def test_ml_training_provider_fallback_writes_the_daily_grain():
     db = TestSession()
     try:
         bars, source, _nature = _get_bars_with_storage(
-            db, FakeProvider(), INSTRUMENT, START, END
+            db, LiveProvider(), INSTRUMENT, START, END
         )
     finally:
         db.close()
@@ -250,7 +279,7 @@ def test_ml_training_cache_fill_leaves_a_legacy_series_alone(unlabelled_series):
     """
     db = TestSession()
     try:
-        _get_bars_with_storage(db, FakeProvider(), INSTRUMENT, START, END)
+        _get_bars_with_storage(db, LiveProvider(), INSTRUMENT, START, END)
     finally:
         db.close()
 
@@ -279,8 +308,8 @@ def test_a_labelled_series_is_not_rewritten_as_unlabelled(client, monkeypatch):
         MarketDataStorage(db).store_bars(
             instrument_id=INSTRUMENT,
             provider_id=PROVIDER,
-            bars=FakeProvider().get_bars(INSTRUMENT, START, END),
-            data_nature="synthetic",
+            bars=LiveProvider().get_bars(INSTRUMENT, START, END),
+            data_nature="live",
             interval_minutes=DAILY_INTERVAL_MINUTES,
         )
     finally:
@@ -289,10 +318,92 @@ def test_a_labelled_series_is_not_rewritten_as_unlabelled(client, monkeypatch):
     assert before == [(day, DAILY_INTERVAL_MINUTES) for day in DAYS], before
 
     monkeypatch.setattr(
-        "app.api.instruments.get_data_provider", FakeProvider
+        "app.api.instruments.get_data_provider", LiveProvider
     )
     resp = client.get(BARS_URL)
     assert resp.status_code == 200, resp.text
     assert "storage_persist_refused" not in resp.json()
 
     assert _written_grains() == before, "a re-read of its own series changed the rows"
+
+
+# --- what these paths may write at all -------------------------------------
+#
+# The grain fix made the 26 rows legible. This is the fix that stops them
+# arriving: the read route and the training cache-fill both persist as a side
+# effect of a request that never mentioned storage, and the series they
+# persisted is one their own provider calls synthetic.
+#
+# The positive controls are the cases above, which differ from these only in
+# ``data_nature``: the get and the ml fallback both write through a
+# live-declared provider, so the empty tables below are a verdict on nature and
+# not a route that stopped storing. ``store_bars`` itself still takes a
+# synthetic series, because the operator import scripts call it deliberately,
+# and the admin refresh stores the very series the read route refuses, because
+# an operator asked for it.
+
+def test_the_bars_get_refuses_to_cache_what_its_provider_calls_synthetic(
+    client, monkeypatch
+):
+    """A chart load is not a request to fill the history table.
+
+    This is the route that seeded the 26 rows. The bars still go out — the
+    caller asked to see a series, not to store one — and the refusal is in the
+    response rather than only in a log line.
+    """
+    _erase()
+    monkeypatch.setattr(
+        "app.api.instruments.get_data_provider", FakeProvider
+    )
+
+    resp = client.get(BARS_URL)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["bar_count"] == len(DAYS), "refusing the cache also withheld the chart"
+    refused = body.get("storage_persist_refused")
+    assert refused is not None, "the refusal was swallowed"
+    assert "synthetic" in refused, refused
+
+    assert _written_grains() == [], "synthetic bars were written anyway"
+
+
+def test_ml_training_returns_synthetic_bars_without_caching_them():
+    """Training on the demo feed is allowed; leaving demo history behind is not.
+
+    ``source`` and ``nature`` are what the caller prices its provenance off, so
+    the refusal must not change them into a claim that the run read storage.
+    """
+    _erase()
+    db = TestSession()
+    try:
+        bars, source, nature = _get_bars_with_storage(
+            db, FakeProvider(), INSTRUMENT, START, END
+        )
+    finally:
+        db.close()
+
+    assert len(bars) == len(DAYS)
+    assert (source, nature) == ("provider", "synthetic")
+    assert _written_grains() == []
+
+
+def test_the_rule_reads_declared_nature_and_nothing_else():
+    """Only a declared-synthetic series is refused — live, delayed, undeclared.
+
+    ``unknown`` is the pass-through case worth naming: a provider that declares
+    nothing still caches, and the row keeps ``data_nature="unknown"`` so it is
+    traceable afterwards. That is the difference from the 26 rows, which were
+    written under no grain at all and could not be told apart from real
+    history by anything in the table.
+    """
+    for nature in ("live", "delayed", "unknown", None):
+        refuse_synthetic_cache_write(
+            nature, instrument_id=INSTRUMENT, provider_id=PROVIDER
+        )
+
+    with pytest.raises(SyntheticCacheWriteError) as exc:
+        refuse_synthetic_cache_write(
+            "synthetic", instrument_id=INSTRUMENT, provider_id=PROVIDER
+        )
+    assert "synthetic" in str(exc.value)
+    assert INSTRUMENT in str(exc.value)

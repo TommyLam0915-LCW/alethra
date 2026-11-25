@@ -32,6 +32,49 @@ def _naive_utc(value: datetime) -> datetime:
 
 DAILY_INTERVAL_MINUTES = 1440
 
+SYNTHETIC_DATA_NATURE = "synthetic"
+
+
+class SyntheticCacheWriteError(RuntimeError):
+    """A read or compute path asked to cache bars its own provider declares fake.
+
+    ``market_data_bars`` is the table research and paper replay price off of.
+    The 26 rows that appeared there without anyone asking arrived through
+    ``GET /instruments/{id}/bars`` while ``DATA_PROVIDER`` was still the
+    built-in ``demo`` default: serving a chart wrote a synthetic series into
+    the same key space as the real history. Labelling those rows did not stop
+    them arriving, so the write itself is what is refused here.
+
+    Scoped to the paths that persist as a side effect of doing something else.
+    ``POST /instruments/{id}/bars/refresh`` is an operator saying *store this*,
+    so it still stores, and a route that refuses must not pretend the provider
+    failed — the series is still served to the caller.
+    """
+
+    reason = "synthetic_provider_data_not_cached"
+
+
+def refuse_synthetic_cache_write(
+    data_nature: Optional[str],
+    *,
+    instrument_id: str,
+    provider_id: str,
+) -> None:
+    """Refuse an implicit cache write of provider-declared synthetic bars.
+
+    Raises:
+        SyntheticCacheWriteError: the provider says this series is synthetic.
+    """
+    if data_nature == SYNTHETIC_DATA_NATURE:
+        raise SyntheticCacheWriteError(
+            f"{instrument_id} from provider '{provider_id}' declares its bars "
+            f"{SYNTHETIC_DATA_NATURE}, so they are served but not written to "
+            "market_data_bars: that table is what research and replay price "
+            "off of, and a chart load is not a request to fill it with "
+            f"synthetic history. Configure a real provider, or store the "
+            f"series deliberately with POST /instruments/{instrument_id}/bars/refresh."
+        )
+
 
 class GrainConflictError(RuntimeError):
     """A stored row already occupies this key at a different bar grain.
